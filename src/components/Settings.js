@@ -113,7 +113,7 @@ export function renderSettings({ state, onSettingsAction = {} } = {}) {
               </label>
               <label>
                 <span>Alert Dispatch Time</span>
-                ${renderTimeSelector('lowStockEmailDispatchTime', draft.lowStockEmailDispatchTime || '09:00')}
+                ${renderTimeSelector('lowStockEmailDispatchTime', draft.lowStockEmailDispatchTime || '08:00')}
                 <small class="settingsFieldHint">Send time uses this workspace timezone, defaulting to Africa/Johannesburg.</small>
               </label>
             </div>

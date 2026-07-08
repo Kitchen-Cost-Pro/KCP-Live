@@ -474,6 +474,21 @@ async function handle(request: Request, env: Env): Promise<Response> {
     return json(request, env, { ok: false, error: 'Unknown migrate route' }, 404);
   }
 
+  // Yoco webhook ingress. Yoco POSTs to /webhooks/yoco/:workspaceId (registered URL). This is a
+  // TENANT operation — it reads yoco_connections + depletes stock via processYocoOrder, all tenant
+  // tables — so it MUST run in the workspace DO. Previously it fell through to the central dispatcher
+  // (env.DB = CENTRAL_DB), where the connection lookup returned nothing and it rejected before
+  // depleting (webhook depletion silently never happened; only manual sync worked). Signature
+  // verification runs inside the DO handler using the tenant-stored webhook_secret.
+  const yocoWebhookM = url.pathname.match(/^\/webhooks\/yoco\/([^/]+)$/);
+  if (yocoWebhookM && request.method === 'POST') {
+    const wsId = decodeURIComponent(yocoWebhookM[1]);
+    const response = await forwardToWorkspaceDO(request, env, wsId, 'yoco-webhook', { uid: 'yoco-webhook', email: '' });
+    const headers = new Headers(response.headers);
+    for (const [k, v] of Object.entries(corsHeaders(request, env))) headers.set(k, v);
+    return new Response(response.body, { status: response.status, headers });
+  }
+
   // Central plane — all /api/auth/* + /api/admin/* + security-config etc. run in the front Worker
   // against CENTRAL_DB (via the shared legacy dispatcher).
   const centralResponse = await dispatchCentral(request, env, url);

@@ -315,10 +315,9 @@ function getActiveSectionToast(state = {}) {
       return state.userManagement?.toast;
     case 'custom-roles':
       return state.roleManagement?.toast;
-    case 'settings':
-    case 'settings-business':
-    case 'settings-customization':
-      return state.settings?.toast;
+    // NOTE: settings routes are intentionally NOT handled here. The Settings view renders its own
+    // toast via a body portal (#kcp-settings-toast-portal in Settings.js). Returning the settings
+    // toast here too caused it to render twice (double toast on save).
     default:
       return null;
   }

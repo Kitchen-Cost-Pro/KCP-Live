@@ -1634,6 +1634,21 @@ export async function postAdminSaveOrgGroup(
   }
 
   if (statements.length) await env.DB.batch(statements);
+
+  // Also set the central workspaces.org_id / corp_id scalar columns. These — NOT the tenant DO
+  // settings — are what external-transfer peer discovery reads, so without this the org manager
+  // links sites for the admin badge but transfers still find no peers. Keeps the two stores in sync.
+  const centralColumn = linkType === 'corp' ? 'corp_id' : 'org_id';
+  try {
+    await env.CENTRAL_DB.batch(
+      cleanSiteIds.map((wsId) =>
+        env.CENTRAL_DB.prepare(`UPDATE workspaces SET ${centralColumn} = ?2 WHERE id = ?1`).bind(wsId, linkId)
+      )
+    );
+  } catch (cause) {
+    console.error(`[org-group.save] central column update failed: ${cause instanceof Error ? cause.message : cause}`);
+  }
+
   await writeAdminAuditEvent(env, adminAuditActor(adminSession), 'org_group.save', linkId, {
     siteIds: cleanSiteIds,
     linkType,

@@ -907,6 +907,12 @@ export async function dispatchWorkspaceRoute(
     return postYocoSyncSales(request, env, auth, workspaceId);
   }
 
+  // Yoco webhook forwarded from the front Worker ingress (/webhooks/yoco/:ws). Runs in the tenant DO
+  // so it can verify the signature against the tenant-stored webhook_secret and deplete stock.
+  if (request.method === 'POST' && resource === 'yoco-webhook') {
+    return postYocoWebhook(request, env, workspaceId);
+  }
+
   if (request.method === 'GET' && resource === 'gmail/status') {
     return getGmailStatus(request, env, auth, workspaceId);
   }

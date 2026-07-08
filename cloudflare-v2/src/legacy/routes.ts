@@ -1461,7 +1461,7 @@ export async function patchAdminWorkspaceSettingsDO(request: Request, env: Env, 
 // workspace actions query tenant tables (yoco_connections, products, locations, settings) that live
 // in the DO, not CENTRAL_DB — running them centrally threw the generic "Something went wrong". ---
 export async function adminYocoActionDO(request: Request, env: Env, _auth: AuthContext, workspaceId: string, action: string) {
-  const body = await readJson<Record<string, unknown>>(request).catch(() => ({}));
+  const body = await readJson<Record<string, unknown>>(request).catch(() => ({} as Record<string, unknown>));
   console.log(`[admin-yoco] ${action} ws=${workspaceId}`);
   try {
     if (action === 'connect') {
