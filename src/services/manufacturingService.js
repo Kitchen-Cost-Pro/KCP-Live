@@ -1,7 +1,7 @@
 import { callCloudflareWorkspaceRoute } from './cloudflareApi.js';
 import { deleteStockItem, fetchStock, normalizeIngredient, upsertStockItem } from './stockService.js';
 import { DEFAULT_SITE_ID, normalizeSites, normalizeStockLocations } from './locationModel.js';
-import { getManufacturingExpectedUnitCost, getManufacturingVarianceQty, getManufacturingWastageValue } from './manufacturingLog.js';
+import { getManufacturingExpectedUnitCost, getManufacturingVarianceQty, getManufacturingWastageValue, normalizeManufacturingLogs as normalizeManufacturingLogCollection } from './manufacturingLog.js';
 import { todayLocal } from '../utils/date.js';
 
 const DEFAULT_UOMS = ['ea', 'kg', 'g', 'l', 'ml', 'pack', 'case', 'bottle', 'bag', 'box', 'tray', 'portion', 'batch'];
@@ -418,41 +418,10 @@ function normalizeCategoryNames(value) {
 }
 
 function normalizeManufacturingLogs(value) {
-  if (!value) return [];
-  const entries = Array.isArray(value)
-    ? value.map((item, index) => [item?.id || String(index), item])
-    : Object.entries(value);
-
-  return entries
-    .filter(([, item]) => item && typeof item === 'object')
-    .map(([id, item]) => ({
-      ...item,
-      id: String(item.id || id || createId('mfg')),
-      itemId: String(item.itemId || item.manufacturedItemId || '').trim(),
-      manufacturedItemId: String(item.manufacturedItemId || item.itemId || '').trim(),
-      itemName: String(item.itemName || item.manufacturedItemName || '').trim(),
-      producedQty: Number(item.producedQty ?? item.actualQty ?? item.qty ?? 0) || 0,
-      expectedQty: Number(item.expectedQty ?? item.expectedOutput ?? 0) || 0,
-      variance: getManufacturingVarianceQty(item),
-      wastageQty: Number(item.wastageQty || Math.max(getManufacturingVarianceQty(item), 0)) || 0,
-      wastageValue: getManufacturingWastageValue(item),
-      expectedUnitCost: getManufacturingExpectedUnitCost(item),
-      actualUnitCost: Number(item.actualUnitCost || item.unitCost || 0) || 0,
-      batchCost: Number(item.batchCost || 0) || 0,
-      unit: String(item.unit || '').trim(),
-      date: String(item.date || '').trim(),
-      timestamp: item.timestamp || '',
-      locationId: String(item.locationId || '').trim(),
-      locationName: String(item.locationName || '').trim(),
-      note: String(item.note || '').trim(),
-      components: (Array.isArray(item.components) ? item.components : Object.values(item.components || {})).map((component = {}) => ({
-        ...component,
-        qty: Number(component.qty ?? component.usage ?? component.quantity ?? 0) || 0,
-        usage: Number(component.usage ?? component.qty ?? component.quantity ?? 0) || 0,
-        cost: Number(component.cost ?? component.unitCost ?? 0) || 0,
-        unitCost: Number(component.unitCost ?? component.cost ?? 0) || 0
-      }))
-    }));
+  return normalizeManufacturingLogCollection(value).map((item) => ({
+    ...item,
+    id: item.id || createId('mfg')
+  }));
 }
 
 function normalizeCloudflareLocation(row = {}) {

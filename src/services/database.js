@@ -1,7 +1,7 @@
 import { callCloudflareWorkspaceRoute } from './cloudflareApi.js';
 import { normalizeSites, normalizeStockLocations } from './locationModel.js';
 import { isWastageAdjustment } from './wastageClassifier.js';
-import { getManufacturingWastageValue } from './manufacturingLog.js';
+import { getManufacturingWastageValue, normalizeManufacturingLogs } from './manufacturingLog.js';
 
 const DASHBOARD_LOG_LIMIT = 2000;
 const DASHBOARD_ENTITY_LIMIT = 200;
@@ -356,7 +356,7 @@ function normalizeDashboardSource(source) {
     logs_adj: toArray(source.logs_adj),
     logs_inventory_audit: toArray(source.logs_inventory_audit),
     logs_transfers: toArray(source.logs_transfers),
-    logs_mfg: toArray(source.logs_mfg),
+    logs_mfg: normalizeManufacturingLogs(source.logs_mfg),
     logs_sales: toArray(source.logs_sales),
     logs_sales_errors: toArray(source.logs_sales_errors),
     sessionOpeningStock: source.sessionOpeningStock || {},

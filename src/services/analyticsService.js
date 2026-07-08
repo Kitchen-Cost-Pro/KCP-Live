@@ -1,7 +1,7 @@
 import { calculateDashboardMetrics, getDashboardSourceOnce, getTradeDateKey, getStockValuationUnitCost, getIngredientUnitCost } from './database.js';
 import { callCloudflareWorkspaceRoute } from './cloudflareApi.js';
 import { isWastageAdjustment as isWastageAdjustmentLog } from './wastageClassifier.js';
-import { getManufacturingComponentTotal, getManufacturingExpectedQty, getManufacturingVarianceQty, getManufacturingWastageValue } from './manufacturingLog.js';
+import { getManufacturingComponentTotal, getManufacturingExpectedQty, getManufacturingShortfallQty, getManufacturingVarianceQty, getManufacturingWastageValue, normalizeManufacturingLogs } from './manufacturingLog.js';
 import { DEFAULT_STOCK_LOCATION_ID, DEFAULT_STOCK_LOCATION_NAME, normalizeStockLocations } from './locationModel.js';
 import { getLocationStock, resolveBalanceKey, sumBalances, normalizeLocationKey } from '../utils/stockBalances.js';
 
@@ -165,7 +165,7 @@ export function normalizeAnalyticsSource(source = {}) {
     logs_adj: filterRowsAfterReset(source.logs_adj, resetAt),
     logs_stocktakes: filterRowsAfterReset(source.logs_stocktakes, resetAt),
     logs_inventory_audit: filterRowsAfterReset(source.logs_inventory_audit, resetAt),
-    logs_mfg: filterRowsAfterReset(source.logs_mfg, resetAt),
+    logs_mfg: normalizeManufacturingLogs(filterRowsAfterReset(source.logs_mfg, resetAt)),
     logs_transfers: filterRowsAfterReset(source.logs_transfers, resetAt),
     logs_sales: filterRowsAfterReset(source.logs_sales, resetAt),
     logs_sales_errors: filterRowsAfterReset(source.logs_sales_errors, resetAt),
@@ -520,6 +520,8 @@ function buildMovementRows(source, context) {
     if (!matchesLocationId(context, logLocationId(log))) return;
     toArray(log.components || log.recipe || log.items).forEach((line) => addMovement(map, line.ingId || line.itemId || line.stockItemId, 'sales', Math.abs(qty(line))));
     addMovement(map, log.itemId || log.stockItemId || log.manufacturedItemId, 'adjustments', Number(log.producedQty || log.actualQty || log.qty || 0));
+    const shortfallQty = getManufacturingShortfallQty(log);
+    if (shortfallQty > 0) addMovement(map, log.itemId || log.stockItemId || log.manufacturedItemId, 'wastage', shortfallQty);
   });
   source.logs_transfers.filter((log) => inDateRange(logDate(log), context)).forEach((log) => {
     const fromId = transferFromId(log);

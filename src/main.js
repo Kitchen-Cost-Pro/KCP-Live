@@ -13761,12 +13761,31 @@ async function saveManufacturingBatch() {
   const draft = appState.manufacturing.batchDraft || createEmptyManufacturingBatchDraft();
   if (!draft.id) draft.id = makeStableSubmitId('mfg');
   const multiplier = Math.max(parseDecimalInputValue(draft.batchMultiplier, 1) || 1, 1);
+  const manufacturedItem = (appState.manufacturing.manufacturedItems || [])
+    .find((item) => String(item.id) === String(draft.manufacturedItemId || ''));
+  const expectedQty = (parseDecimalInputValue(draft.expectedQty, 0) || 0) * multiplier;
+  const producedQty = (parseDecimalInputValue(draft.producedQty, 0) || 0) * multiplier;
+  const impact = manufacturedItem
+    ? getManufacturingProductionImpactForSave(manufacturedItem, multiplier, expectedQty, producedQty, draft.locationId)
+    : null;
   const payload = {
     ...draft,
     id: draft.id,
-    expectedQty: (parseDecimalInputValue(draft.expectedQty, 0) || 0) * multiplier,
-    producedQty: (parseDecimalInputValue(draft.producedQty, 0) || 0) * multiplier,
-    batchMultiplier: multiplier
+    itemId: draft.manufacturedItemId || draft.itemId || '',
+    expectedQty,
+    producedQty,
+    batchMultiplier: multiplier,
+    batchCount: multiplier,
+    unit: manufacturedItem?.unit || draft.unit || 'ea',
+    itemName: manufacturedItem?.name || draft.itemName || '',
+    unitCost: (impact?.expectedUnitCost ?? Number(draft.unitCost || 0)) || 0,
+    expectedUnitCost: (impact?.expectedUnitCost ?? Number(draft.unitCost || 0)) || 0,
+    actualUnitCost: (impact?.actualUnitCost ?? Number(draft.unitCost || 0)) || 0,
+    batchCost: impact?.batchCost ?? 0,
+    variance: impact?.variance ?? (expectedQty - producedQty),
+    wastageQty: impact?.wastageQty ?? Math.max(expectedQty - producedQty, 0),
+    wastageValue: impact?.wastageValue ?? 0,
+    components: impact?.components || []
   };
   appState.manufacturing = {
     ...appState.manufacturing,
@@ -14014,10 +14033,12 @@ function getManufacturingProductionImpactForSave(item = {}, batchCount = 0, expe
   const componentMap = new Map(stockItems.map((entry) => [String(entry.id), entry]));
   const recipe = Array.isArray(item.recipe) ? item.recipe : [];
   const fallbackUnitCost = Number(item.unitCost || item.cost || 0) || 0;
-  const batchCost = (Number(item.batchCost || 0) || (expectedQty * fallbackUnitCost)) * Math.max(batchCount || 0, 0);
-  const expectedUnitCost = expectedQty > 0 ? batchCost / expectedQty : fallbackUnitCost;
+  const standardYield = Math.max(parseDecimalInputValue(item.yieldBatch, 0) || 0, 0);
+  const recipeBatchCost = Number(item.batchCost || 0) || ((standardYield > 0 ? standardYield : expectedQty) * fallbackUnitCost);
+  const batchCost = recipeBatchCost * Math.max(batchCount || 0, 0);
+  const expectedUnitCost = expectedQty > 0 ? batchCost / expectedQty : (standardYield > 0 ? recipeBatchCost / standardYield : fallbackUnitCost);
   const actualUnitCost = producedQty > 0 ? batchCost / producedQty : expectedUnitCost;
-  const yieldBatch = Math.max(parseDecimalInputValue(item.yieldBatch, 0) || 0, 0);
+  const yieldBatch = standardYield;
   const components = recipe.map((line) => {
     const component = componentMap.get(String(line.ingId || line.id || line.stockItemId || ''));
     const componentQty = Math.max(parseDecimalInputValue(line.qty || line.quantity || 0, 0) || 0, 0);

@@ -113,10 +113,12 @@ async function fetchDashboardTiles(workspaceId, { range = '7', siteId = '' } = {
     ? dashboardResponse.movementSeries
     : null;
   const trends = buildMovementTrends(movementSeries, String(range || '7'));
+  const combinedWastageSeries = mergeNumericSeries(movementSeries?.wastage, movementSeries?.manufacturingWastage);
   const deltas = {
     stockValue: seriesDeltaPct(movementSeries?.stockValue),
     costOfSales: seriesDeltaPct(movementSeries?.costOfSales),
-    wastage: seriesDeltaPct(movementSeries?.wastage)
+    wastage: seriesDeltaPct(combinedWastageSeries),
+    manufacturingWastage: seriesDeltaPct(movementSeries?.manufacturingWastage)
   };
   const recipeCount = products.filter((product) => getEffectiveProductRecipe(product).length || Number(product.recipeCount || 0) > 0).length;
   const averageGp = calculateAverageGp(products, stockItems);
@@ -131,11 +133,11 @@ async function fetchDashboardTiles(workspaceId, { range = '7', siteId = '' } = {
     closingStock: serverSummary.closingStock || metricValue(stockValue, 'currency'),
     costOfSales: serverSummary.costOfSales || metricValue(costOfSales, 'currency'),
     countVariance: serverSummary.countVariance || metricValue(countVariance, 'currency'),
-    manualAdjustments: serverSummary.manualAdjustments || serverSummary.adjustments || metricValue(manualAdjustments, 'currency'),
-    wastage: normalizeAbsoluteMetric(serverSummary.wastage, wastage),
+    manualAdjustments: metricValue(manualAdjustments, 'currency'),
+    wastage: metricValue(wastage, 'currency'),
     // Manufacturing wastage is its own tile — surface it explicitly (prefer the server value,
     // fall back to the locally-summarized manufacturing movement total) so the tile isn't blank.
-    manufacturingWastage: normalizeAbsoluteMetric(serverSummary.manufacturingWastage, Math.abs(movementTotals.manufacturingWastage)),
+    manufacturingWastage: metricValue(Math.abs(movementTotals.manufacturingWastage), 'currency'),
     lowStockCount: serverSummary.lowStockCount || metricValue(lowStockItemCount, 'number'),
     gpPercentage: serverSummary.gpPercentage || metricValue(averageGp, 'percent'),
     averageGp: serverSummary.averageGp || metricValue(averageGp, 'percent')
@@ -501,12 +503,20 @@ function buildMovementTrends(series, rangeKey = '7') {
   const labels = series.labels.map((label) => String(label || '').slice(5)); // MM-DD
   const toSeries = (values) => (Array.isArray(values) ? values : [])
     .map((value, index) => ({ value: numberValue(value, 0), label: labels[index] || '' }));
+  const combinedWastageSeries = mergeNumericSeries(series.wastage, series.manufacturingWastage);
   return {
     stockValue: { [rangeKey]: toSeries(series.stockValue) },
     costOfSales: { [rangeKey]: toSeries(series.costOfSales) },
-    wastage: { [rangeKey]: toSeries(series.wastage) },
+    wastage: { [rangeKey]: toSeries(combinedWastageSeries) },
     manufacturingWastage: { [rangeKey]: toSeries(series.manufacturingWastage) }
   };
+}
+
+function mergeNumericSeries(left = [], right = []) {
+  const a = Array.isArray(left) ? left : [];
+  const b = Array.isArray(right) ? right : [];
+  const size = Math.max(a.length, b.length);
+  return Array.from({ length: size }, (_, index) => numberValue(a[index], 0) + numberValue(b[index], 0));
 }
 
 function seriesDeltaPct(values) {
