@@ -48,7 +48,7 @@ export function renderAdjustments({ state, onAdjustmentFilterChange, onAdjustmen
         ${icon('clipboard')} Stock Adjustment
       </button>
       <button type="button" class="adj-tabBtn ${activeTab === 'wastage' ? 'is-active' : ''}" data-adj-tab="wastage">
-        ${icon('flame')} Wastage Adjustment
+        ${icon('flame')} Product Wastage Adjustment
       </button>
     </div>
 
@@ -940,7 +940,7 @@ function renderWastagePickerOverlay(products, filters) {
       <section class="adj-overlayCard adj-overlayCard--picker">
         <header>
           <div>
-            <p>Wastage Adjustment</p>
+            <p>Product Wastage Adjustment</p>
             <h3>Choose menu items to waste</h3>
           </div>
           <button type="button" class="adj-iconButton" data-wastage-picker-close aria-label="Close">${icon('x')}</button>
