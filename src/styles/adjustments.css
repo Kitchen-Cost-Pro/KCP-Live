@@ -1,0 +1,1178 @@
+#view-adjustments {
+  min-height: 100%;
+  padding: 32px;
+  color: var(--text-main);
+  font-family: var(--font-main);
+}
+
+#view-adjustments .adj-frame {
+  background:
+    radial-gradient(1200px 600px at 20% 10%, rgba(59, 130, 246, 0.12), transparent 60%),
+    linear-gradient(180deg, rgba(15, 23, 42, 1), rgba(10, 16, 30, 1));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 2.25rem;
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.35);
+  padding: 28px;
+  display: flex;
+  justify-content: center;
+  min-height: calc(100vh - 128px);
+  align-items: center;
+}
+
+#view-adjustments .adj-layout {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.42fr) minmax(0, 0.58fr);
+  gap: 28px;
+}
+
+#view-adjustments .adj-engineShell {
+  display: grid;
+  gap: 28px;
+  width: min(1180px, 100%);
+  margin: 0 auto;
+  align-content: center;
+}
+
+#view-adjustments .adj-card,
+#view-adjustments .adj-overlayCard {
+  background: linear-gradient(180deg, rgba(30, 41, 59, 0.92), rgba(22, 30, 48, 0.92));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 2rem;
+}
+
+#view-adjustments .adj-sidebar,
+#view-adjustments .adj-draftPanel,
+#view-adjustments .adj-overlayCard {
+  padding: 32px;
+}
+
+#view-adjustments .adj-engineIntro {
+  width: min(900px, 100%);
+  min-height: 320px;
+  margin: 0 auto;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  text-align: center;
+  gap: 20px;
+  padding: 56px 40px 72px;
+}
+
+#view-adjustments .adj-engineIntro--compact {
+  min-height: 360px;
+}
+
+#view-adjustments .adj-engineHead {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+}
+
+#view-adjustments .adj-engineIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #22c1f1;
+}
+
+#view-adjustments .adj-engineIcon svg {
+  width: 24px;
+  height: 24px;
+}
+
+#view-adjustments .adj-helpDot {
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(34, 193, 241, 0.18);
+  color: #22c1f1;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 950;
+}
+
+#view-adjustments .adj-engineLead {
+  max-width: 760px;
+  margin: 0;
+  color: rgba(255, 255, 255, 0.95);
+  font-size: 1.05rem;
+  font-weight: 950;
+  letter-spacing: 0.08em;
+  line-height: 1.55;
+  text-transform: uppercase;
+}
+
+#view-adjustments .adj-engineSubcopy {
+  margin: 0;
+  color: #22c1f1;
+  font-size: 0.8rem;
+  font-weight: 950;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+#view-adjustments .adj-engineActions {
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: center;
+  margin-top: 52px;
+  padding-bottom: 8px;
+}
+
+#view-adjustments .adj-enginePrimary {
+  min-width: 360px;
+}
+
+#view-adjustments .adj-workflowGrid {
+  width: min(720px, 100%);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin-top: 16px;
+}
+
+#view-adjustments .adj-workflowCard {
+  min-height: 180px;
+  border: 1px solid rgba(96, 165, 250, 0.18);
+  border-radius: 1.35rem;
+  padding: 22px;
+  background: rgba(15, 23, 42, 0.62);
+  color: rgba(255, 255, 255, 0.92);
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+#view-adjustments .adj-workflowCard:hover,
+#view-adjustments .adj-workflowCard:focus-visible {
+  border-color: rgba(96, 165, 250, 0.56);
+  background: rgba(37, 99, 235, 0.16);
+  outline: none;
+}
+
+#view-adjustments .adj-workflowCard span {
+  width: 42px;
+  height: 42px;
+  border-radius: 0.9rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(37, 99, 235, 0.18);
+  color: #60a5fa;
+}
+
+#view-adjustments .adj-workflowCard svg {
+  width: 20px;
+  height: 20px;
+}
+
+#view-adjustments .adj-workflowCard strong {
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 1rem;
+  font-weight: 950;
+}
+
+#view-adjustments .adj-workflowCard small {
+  color: rgba(255, 255, 255, 0.58);
+  font-size: 0.78rem;
+  font-weight: 850;
+  line-height: 1.5;
+}
+
+#view-adjustments .adj-title,
+#view-adjustments .adj-panelHead h3,
+#view-adjustments .adj-overlayCard header h3 {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 1.35rem;
+  font-weight: 950;
+}
+
+#view-adjustments .adj-copy,
+#view-adjustments .adj-panelHead span,
+#view-adjustments .adj-impact span,
+#view-adjustments .adj-overlayCard header p,
+#view-adjustments .adj-table thead th,
+#view-adjustments .adj-table td span,
+#view-adjustments label span,
+#view-adjustments .adj-dropdown > span,
+#view-adjustments .adj-field > span {
+  color: rgba(255, 255, 255, 0.46);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+#view-adjustments .adj-stack,
+#view-adjustments .adj-overlayFilters,
+#view-adjustments .adj-detailGrid {
+  display: grid;
+  gap: 14px;
+}
+
+#view-adjustments .adj-stack label,
+#view-adjustments .adj-field {
+  display: grid;
+  gap: 8px;
+}
+
+#view-adjustments input,
+#view-adjustments select,
+#view-adjustments .adj-dropdown > button {
+  width: 100%;
+  min-height: 52px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 1rem;
+  padding: 0 18px;
+  background: rgba(10, 16, 30, 0.92);
+  color: rgba(255, 255, 255, 0.95);
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 880;
+}
+
+#view-adjustments input:focus,
+#view-adjustments select:focus,
+#view-adjustments .adj-dropdown > button:focus {
+  outline: none;
+  border-color: rgba(37, 99, 235, 0.85);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.18);
+}
+
+#view-adjustments .adj-primary,
+#view-adjustments .adj-secondary,
+#view-adjustments .adj-rowActions button,
+#view-adjustments .adj-iconButton,
+#view-adjustments .adj-dropdownMenu button {
+  font: inherit;
+}
+
+#view-adjustments .adj-primary {
+  min-height: 46px;
+  border: 0;
+  border-radius: 999px;
+  padding: 0 20px;
+  background: linear-gradient(135deg, #2563eb, #3b82f6);
+  color: white;
+  font-size: 10px;
+  font-weight: 950;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+#view-adjustments .adj-secondary {
+  min-height: 46px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  padding: 0 20px;
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.88);
+  font-size: 10px;
+  font-weight: 950;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+#view-adjustments .adj-addItemsButton {
+  min-height: 38px;
+  padding: 0 16px;
+  border-color: rgba(96, 165, 250, 0.34);
+  background: rgba(37, 99, 235, 0.14);
+  color: rgba(219, 234, 254, 0.94);
+  white-space: nowrap;
+}
+
+#view-adjustments .adj-secondary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+#view-adjustments .adj-primary--secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+#view-adjustments .adj-primary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+#view-adjustments .adj-dropdown {
+  position: relative;
+  display: grid;
+  gap: 8px;
+}
+
+#view-adjustments .adj-dropdown > button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  text-align: left;
+  cursor: pointer;
+}
+
+#view-adjustments .adj-dropdown > button svg,
+#view-adjustments .adj-primary svg,
+#view-adjustments .adj-iconButton svg {
+  width: 16px;
+  height: 16px;
+}
+
+#view-adjustments .adj-dropdownMenu {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 1.2rem;
+  background: rgba(11, 18, 33, 0.98);
+  box-shadow: 0 22px 55px rgba(0, 0, 0, 0.32);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-6px);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+#view-adjustments .adj-dropdown--open .adj-dropdownMenu {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+#view-adjustments .adj-dropdownMenu button {
+  min-height: 40px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0.95rem;
+  padding: 0 14px;
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(255, 255, 255, 0.92);
+  text-align: left;
+  cursor: pointer;
+}
+
+#view-adjustments .adj-dropdownMenu button:hover,
+#view-adjustments .adj-dropdownMenu button.is-active {
+  border-color: rgba(59, 130, 246, 0.35);
+  background: rgba(37, 99, 235, 0.18);
+}
+
+#view-adjustments .adj-panelHead,
+#view-adjustments .adj-footer,
+#view-adjustments .adj-rowActions,
+#view-adjustments .adj-overlayCard header,
+#view-adjustments .adj-overlayActions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+#view-adjustments .adj-draftScroll {
+  max-height: 54vh;
+  overflow: auto;
+  margin-top: 18px;
+}
+
+#view-adjustments .adj-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+#view-adjustments .adj-table thead th,
+#view-adjustments .adj-table td {
+  padding: 14px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  vertical-align: top;
+}
+
+#view-adjustments .adj-table td strong {
+  display: block;
+  color: rgba(255, 255, 255, 0.94);
+}
+
+#view-adjustments .adj-rowActions button,
+#view-adjustments .adj-iconButton {
+  min-height: 36px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  padding: 0 14px;
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.72);
+  cursor: pointer;
+}
+
+#view-adjustments .adj-iconButton {
+  width: 40px;
+  min-width: 40px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#view-adjustments .adj-impact strong {
+  display: block;
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 1.1rem;
+  font-weight: 950;
+}
+
+#view-adjustments .adj-overlayBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(15, 23, 42, 0.82);
+}
+
+#view-adjustments .adj-overlayCard {
+  width: min(820px, 100%);
+  max-height: 88vh;
+  overflow: auto;
+  background: linear-gradient(180deg, rgba(30, 41, 59, 0.985), rgba(22, 30, 48, 0.985));
+}
+
+#view-adjustments .adj-overlayCard--picker {
+  width: min(1360px, 100%);
+  padding: 40px;
+}
+
+#view-adjustments .adj-overlayCard--detail {
+  width: min(1320px, 100%);
+  padding: 40px;
+}
+
+#view-adjustments .adj-pickerList {
+  display: grid;
+  gap: 0;
+  max-height: 48vh;
+  overflow-y: auto;
+  margin-top: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 1.5rem;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+#view-adjustments .adj-pickerItem {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 18px;
+  min-height: 68px;
+  border: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0;
+  padding: 0 20px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.92);
+}
+
+#view-adjustments .adj-pickerItem input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: #2563eb;
+}
+
+#view-adjustments .adj-pickerItem.is-added {
+  background: rgba(59, 130, 246, 0.08);
+}
+
+#view-adjustments .adj-pickerItem strong {
+  display: block;
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 0.92rem;
+  font-weight: 950;
+  text-transform: uppercase;
+}
+
+#view-adjustments .adj-pickerItem span {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+#view-adjustments .adj-pickerUnit {
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 10px;
+  font-weight: 950;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+#view-adjustments .adj-pickerList .adj-pickerItem:last-child {
+  border-bottom: 0;
+}
+
+#view-adjustments .adj-pickerTable,
+#view-adjustments .adj-detailTable {
+  max-height: 50vh;
+  overflow: auto;
+  margin-top: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 1.35rem;
+  background: rgba(15, 23, 42, 0.26);
+}
+
+#view-adjustments .adj-detailTable {
+  max-height: 46vh;
+}
+
+#view-adjustments .adj-pickerTable .adj-table,
+#view-adjustments .adj-detailTable .adj-table {
+  min-width: 760px;
+}
+
+#view-adjustments .adj-detailTable .adj-table {
+  table-layout: fixed;
+}
+
+#view-adjustments .adj-table--detail th:nth-child(1),
+#view-adjustments .adj-table--detail td:nth-child(1) {
+  width: 28%;
+}
+
+#view-adjustments .adj-table--detail th:nth-child(2),
+#view-adjustments .adj-table--detail td:nth-child(2) {
+  width: 32%;
+}
+
+#view-adjustments .adj-table--detail th:nth-child(3),
+#view-adjustments .adj-table--detail td:nth-child(3) {
+  width: 40%;
+}
+
+#view-adjustments .adj-table--detail thead th {
+  vertical-align: middle;
+  text-align: left;
+}
+
+#view-adjustments .adj-table--picker thead th:first-child,
+#view-adjustments .adj-table--picker td:first-child {
+  width: 52px;
+  text-align: center;
+}
+
+#view-adjustments .adj-table--picker td,
+#view-adjustments .adj-table--detail td {
+  vertical-align: middle;
+}
+
+#view-adjustments .adj-table--picker tbody tr,
+#view-adjustments .adj-table--detail tbody tr {
+  background: rgba(255, 255, 255, 0.015);
+}
+
+#view-adjustments .adj-table--picker tbody tr.is-added {
+  background: rgba(59, 130, 246, 0.09);
+}
+
+#view-adjustments .adj-table--picker input[type='checkbox'] {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: #60a5fa;
+}
+
+#view-adjustments .adj-table--picker td strong,
+#view-adjustments .adj-table--detail td strong {
+  font-size: 0.98rem;
+  text-transform: none;
+}
+
+#view-adjustments .adj-table--picker td span,
+#view-adjustments .adj-table--detail td span {
+  display: block;
+  margin-top: 4px;
+  color: rgba(255, 255, 255, 0.48);
+  font-size: 0.72rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+#view-adjustments .adj-table--detail .adj-detailInputShell {
+  width: 100%;
+  max-width: 360px;
+}
+
+#view-adjustments .adj-table--detail .adj-empty {
+  min-height: 120px;
+}
+
+#view-adjustments .adj-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 14px;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
+#view-adjustments .adj-pagination > div {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+#view-adjustments .adj-pagination button {
+  min-height: 36px;
+  border: 1px solid rgba(96, 165, 250, 0.24);
+  border-radius: 999px;
+  padding: 0 14px;
+  background: rgba(96, 165, 250, 0.09);
+  color: rgba(219, 234, 254, 0.9);
+  font-weight: 900;
+  cursor: pointer;
+}
+
+#view-adjustments .adj-pagination button:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+#view-adjustments .adj-pagination strong {
+  color: rgba(255, 255, 255, 0.78);
+  white-space: nowrap;
+}
+
+#view-adjustments .adj-overlayFilters {
+  grid-template-columns: minmax(0, 1.6fr) minmax(280px, 0.8fr);
+  align-items: end;
+  gap: 18px;
+}
+
+#view-adjustments .adj-overlaySearchLabel,
+#view-adjustments .adj-overlayFilters > label,
+#view-adjustments .adj-detailMetaRow > label,
+#view-adjustments .adj-detailWasteRow > label {
+  display: grid;
+  gap: 10px;
+}
+
+#view-adjustments .adj-overlaySelectionCount {
+  color: rgba(255, 255, 255, 0.52);
+  font-size: 11px;
+  font-weight: 950;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+#view-adjustments .adj-overlayActionRail {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+#view-adjustments .adj-detailMetaRow {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  margin: 16px 0 28px;
+}
+
+#view-adjustments .adj-detailWasteRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  max-width: 360px;
+  margin: -8px 0 24px;
+}
+
+#view-adjustments .adj-overlayCard--detail .adj-overlayActions {
+  justify-content: flex-start;
+  gap: 18px;
+  margin-top: 28px;
+  padding-top: 24px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+#view-adjustments .adj-overlayCard--detail .adj-overlayActions .adj-primary,
+#view-adjustments .adj-overlayCard--detail .adj-overlayActions .adj-secondary {
+  flex: 0 0 auto;
+  min-width: 280px;
+}
+
+#view-adjustments .adj-detailRows {
+  display: grid;
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 1.35rem;
+  background: rgba(15, 23, 42, 0.22);
+}
+
+#view-adjustments .adj-detailRowsHead,
+#view-adjustments .adj-detailRow {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(360px, 420px);
+  align-items: center;
+  gap: 28px;
+}
+
+#view-adjustments .adj-detailRowsHead {
+  min-height: 42px;
+  padding: 0 18px;
+  color: rgba(255, 255, 255, 0.48);
+  font-size: 10px;
+  font-weight: 950;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+#view-adjustments .adj-detailRow {
+  min-height: 112px;
+  padding: 18px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+#view-adjustments .adj-detailInputWrap {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+}
+
+#view-adjustments .adj-detailInputShell {
+  position: relative;
+  min-width: 0;
+}
+
+#view-adjustments .adj-detailInputShell input {
+  width: 100%;
+  padding-left: 34px;
+  padding-right: 56px;
+}
+
+#view-adjustments .adj-detailStockMeta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+#view-adjustments .adj-stockPreviewMetric {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+#view-adjustments .adj-stockPreviewMetric em {
+  color: rgba(255, 255, 255, 0.48);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+#view-adjustments .adj-stockPreviewMetric strong {
+  color: rgba(255, 255, 255, 0.94);
+  font-size: 0.9rem;
+  font-weight: 950;
+}
+
+#view-adjustments .adj-stockPreviewMetric.is-positive {
+  border-color: rgba(74, 222, 128, 0.22);
+}
+
+#view-adjustments .adj-stockPreviewMetric.is-positive strong {
+  color: #4ade80;
+}
+
+#view-adjustments .adj-stockPreviewMetric.is-negative {
+  border-color: rgba(248, 113, 113, 0.22);
+}
+
+#view-adjustments .adj-stockPreviewMetric.is-negative strong {
+  color: #f87171;
+}
+
+#view-adjustments .adj-detailHint,
+#view-adjustments .adj-detailTag {
+  position: absolute;
+  top: 50%;
+  display: inline-flex;
+  align-items: center;
+  margin-top: 0;
+  transform: translateY(-50%);
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 0.8rem;
+  font-weight: 800;
+  pointer-events: none;
+}
+
+#view-adjustments .adj-detailHint {
+  left: 14px;
+}
+
+#view-adjustments .adj-detailTag {
+  right: 14px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  letter-spacing: 0.04em;
+  text-transform: lowercase;
+}
+
+#view-adjustments .adj-detailName strong {
+  display: block;
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 1rem;
+  font-weight: 950;
+  text-transform: uppercase;
+}
+
+#view-adjustments .adj-detailName span {
+  display: block;
+  margin-top: 6px;
+  color: rgba(255, 255, 255, 0.48);
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+#view-adjustments .adj-empty,
+#view-adjustments .adj-notice {
+  display: grid;
+  place-items: center;
+  min-height: 220px;
+  color: rgba(255, 255, 255, 0.34);
+  font-size: 1.2rem;
+  font-weight: 950;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+#view-adjustments .adj-notice--error {
+  min-height: auto;
+  margin-bottom: 16px;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  border-radius: 1rem;
+  padding: 16px;
+  background: rgba(127, 29, 29, 0.18);
+  color: rgba(254, 202, 202, 0.96);
+  font-size: 0.82rem;
+}
+
+#view-adjustments .adj-toast {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 140;
+  min-width: min(360px, calc(100vw - 44px));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid rgba(34, 197, 94, 0.45);
+  border-radius: 16px;
+  padding: 12px 14px;
+  background: rgba(15, 23, 42, 0.96);
+  color: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 18px 45px rgba(0, 0, 0, 0.28);
+}
+
+#view-adjustments .adj-toast--error,
+#view-adjustments .adj-toast--warning {
+  border-color: rgba(239, 68, 68, 0.45);
+}
+
+#view-adjustments .adj-toast--success {
+  border-color: rgba(34, 197, 94, 0.45);
+}
+
+#view-adjustments .adj-toast button {
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 999px;
+  padding: 0;
+  background: rgba(239, 68, 68, 0.12);
+  color: #f87171;
+  cursor: pointer;
+}
+
+#view-adjustments .adj-toast button:hover,
+#view-adjustments .adj-toast button:focus-visible {
+  background: rgba(239, 68, 68, 0.2);
+  color: #fca5a5;
+  outline: none;
+}
+
+#view-adjustments .adj-toast button svg {
+  width: 14px;
+  height: 14px;
+}
+
+@media (max-width: 980px) {
+  #view-adjustments .adj-layout {
+    grid-template-columns: 1fr;
+  }
+
+  #view-adjustments .adj-detailMetaRow {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  #view-adjustments {
+    padding: 16px;
+  }
+
+  #view-adjustments .adj-frame {
+    min-height: auto;
+    padding: 18px;
+    border-radius: 1.4rem;
+  }
+
+  #view-adjustments .adj-engineIntro {
+    min-height: 0;
+    padding: 28px 18px 34px;
+  }
+
+  #view-adjustments .adj-sidebar,
+  #view-adjustments .adj-draftPanel,
+  #view-adjustments .adj-overlayCard {
+    padding: 20px;
+  }
+
+  #view-adjustments .adj-enginePrimary {
+    min-width: 0;
+    width: 100%;
+  }
+
+  #view-adjustments .adj-workflowGrid {
+    grid-template-columns: 1fr;
+  }
+
+  #view-adjustments .adj-overlayFilters {
+    grid-template-columns: 1fr;
+  }
+
+  #view-adjustments .adj-panelHead,
+  #view-adjustments .adj-footer,
+  #view-adjustments .adj-overlayActions,
+  #view-adjustments .adj-pagination {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  #view-adjustments .adj-pagination > div {
+    justify-content: space-between;
+  }
+
+  #view-adjustments .adj-overlayCard--detail .adj-overlayActions .adj-primary,
+  #view-adjustments .adj-overlayCard--detail .adj-overlayActions .adj-secondary {
+    min-width: 0;
+    width: 100%;
+  }
+}
+
+/* ── Tab Strip ── */
+#view-adjustments .adj-tabStrip {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: var(--surface-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  margin-bottom: 24px;
+  width: fit-content;
+}
+
+#view-adjustments .adj-tabBtn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 18px;
+  border-radius: 10px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  font-weight: 560;
+  cursor: pointer;
+  transition: background 120ms, color 120ms;
+  white-space: nowrap;
+}
+
+#view-adjustments .adj-tabBtn svg {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+}
+
+#view-adjustments .adj-tabBtn:hover {
+  background: var(--surface-elevated);
+  color: var(--text-main);
+}
+
+#view-adjustments .adj-tabBtn.is-active {
+  background: var(--accent-blue);
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.35);
+}
+
+/* ── Wastage meta row ── */
+#view-adjustments .adj-wastageMetaRow {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+  padding: 16px 0 0;
+  border-top: 1px solid var(--border-subtle);
+  margin-top: 8px;
+}
+
+#view-adjustments .adj-wastageMetaRow label > span {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 6px;
+}
+
+#view-adjustments .adj-wastageMetaRow input[type="text"] {
+  width: 100%;
+  padding: 8px 11px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-secondary);
+  color: var(--text-main);
+  font-size: 0.82rem;
+  font-family: inherit;
+}
+
+#view-adjustments .adj-wastageMetaRow input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+}
+
+/* ── Wastage inline qty ── */
+#view-adjustments .adj-inlineQty {
+  width: 80px;
+  padding: 5px 8px;
+  border-radius: 7px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-secondary);
+  color: var(--text-main);
+  font-size: 0.82rem;
+  font-family: inherit;
+  text-align: right;
+}
+
+#view-adjustments .adj-inlineQty:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+}
+
+/* ── Wastage remove btn ── */
+#view-adjustments .adj-removeBtn {
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 120ms, color 120ms;
+}
+
+#view-adjustments .adj-removeBtn:hover {
+  background: var(--danger-bg, rgba(239,68,68,0.12));
+  color: var(--accent-red, #ef4444);
+}
+
+#view-adjustments .adj-removeBtn svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* ── Category chips ── */
+#view-adjustments .adj-categoryChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 0;
+}
+
+#view-adjustments .adj-chip {
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-secondary);
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition: border-color 120ms, color 120ms, background 120ms;
+  white-space: nowrap;
+}
+
+#view-adjustments .adj-chip.is-active,
+#view-adjustments .adj-chip:hover {
+  border-color: var(--accent-blue);
+  color: var(--accent-blue);
+  background: color-mix(in srgb, var(--accent-blue) 10%, transparent);
+}
+
+@media (max-width: 640px) {
+  #view-adjustments .adj-wastageMetaRow {
+    grid-template-columns: 1fr;
+  }
+}
+
+.adj-wastageLog {
+  padding: 0 1.5rem 1.5rem;
+}
+.adj-wastageLogTitle {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted, #6b7280);
+  margin: 0 0 0.75rem;
+}
+.adj-table--log td { vertical-align: top; }
+.adj-wastageIngredient {
+  display: block;
+  font-size: 0.78rem;
+  color: var(--text-secondary, #374151);
+}

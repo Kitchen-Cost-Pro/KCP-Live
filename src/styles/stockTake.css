@@ -1,0 +1,1863 @@
+#view-stock-take {
+  min-height: 100%;
+  padding: 32px;
+  color: var(--text-main);
+  font-family: var(--font-main);
+}
+
+#view-stock-take .stockTakeShell {
+  min-height: calc(100vh - 126px);
+  position: relative;
+  display: grid;
+  place-items: center;
+  background:
+    radial-gradient(1200px 520px at 50% 18%, rgba(36, 99, 235, 0.12), transparent 58%),
+    linear-gradient(180deg, rgba(14, 20, 36, 0.98), rgba(10, 16, 29, 1));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 2.3rem;
+  box-shadow: 0 34px 90px rgba(0, 0, 0, 0.32);
+  padding: 48px 32px;
+  overflow: visible;
+}
+
+#view-stock-take .stockTakeShell--session {
+  place-items: start center;
+  padding-top: 96px;
+}
+
+#view-stock-take .stockTakePageActions.stockTakeDropdown {
+  position: absolute;
+  top: 22px;
+  right: 22px;
+  z-index: 90;
+  width: 220px;
+  max-width: calc(100% - 44px);
+}
+
+#view-stock-take .stockTakeDropdown > .stockTakeActionsButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 44px;
+  width: 100%;
+  margin-left: auto;
+  border: 1px solid rgba(96, 165, 250, 0.32);
+  border-radius: 16px;
+  padding: 0 14px;
+  background: rgba(13, 25, 44, 0.96);
+  color: #f8fbff;
+  font: inherit;
+  font-size: 0.84rem;
+  font-weight: 950;
+  letter-spacing: 0;
+  text-transform: none;
+  box-shadow: 0 18px 42px rgba(3, 7, 18, 0.34);
+  cursor: pointer;
+  backdrop-filter: blur(12px);
+}
+
+#view-stock-take .stockTakeDropdown > .stockTakeActionsButton svg {
+  width: 17px;
+  height: 17px;
+  color: #60a5fa;
+  transition: transform 160ms ease;
+}
+
+#view-stock-take .stockTakeDropdown--open > .stockTakeActionsButton {
+  border-color: #60a5fa;
+  background: rgba(37, 99, 235, 0.16);
+}
+
+#view-stock-take .stockTakeDropdown--open > .stockTakeActionsButton svg:last-child {
+  transform: rotate(180deg);
+}
+
+#view-stock-take .stockTakeActionsMenu {
+  top: calc(100% + 10px);
+  left: auto;
+  right: 0;
+  z-index: 100;
+  min-width: 260px;
+  width: min(280px, calc(100vw - 56px));
+  max-height: min(420px, calc(100vh - 118px));
+  overflow-y: auto;
+  padding: 10px;
+  border-color: rgba(96, 165, 250, 0.22);
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(17, 29, 49, 0.99), rgba(11, 18, 33, 0.99));
+  box-shadow: 0 28px 70px rgba(0, 0, 0, 0.42);
+  transform-origin: top right;
+}
+
+#view-stock-take .stockTakeActionsMenu button {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  border-radius: 12px;
+  padding: 0 12px;
+  background: transparent;
+  color: rgba(226, 232, 240, 0.8);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 880;
+  text-align: left;
+}
+
+#view-stock-take .stockTakeActionsMenu button svg {
+  width: 16px;
+  height: 16px;
+  color: rgba(147, 162, 190, 0.88);
+}
+
+#view-stock-take .stockTakeActionsMenu button:hover,
+#view-stock-take .stockTakeActionsMenu button:focus-visible {
+  background: rgba(37, 99, 235, 0.16);
+  color: #60a5fa;
+  outline: none;
+}
+
+#view-stock-take .stockTakeActionsMenu button:hover svg,
+#view-stock-take .stockTakeActionsMenu button:focus-visible svg {
+  color: #60a5fa;
+}
+
+#view-stock-take .stockTakeFileDivider {
+  padding: 4px 4px 0;
+  color: rgba(147, 162, 190, 0.7);
+  font-size: 0.65rem;
+  font-weight: 950;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+#view-stock-take .stockTakeHero {
+  width: min(880px, 100%);
+  display: grid;
+  justify-items: center;
+  text-align: center;
+  gap: 22px;
+}
+
+#view-stock-take .stockTakeHeroIcon {
+  width: 96px;
+  height: 96px;
+  display: grid;
+  place-items: center;
+  border-radius: 28px;
+  background: rgba(17, 113, 167, 0.24);
+  color: #18b6eb;
+}
+
+#view-stock-take .stockTakeHeroIcon svg {
+  width: 34px;
+  height: 34px;
+}
+
+#view-stock-take .stockTakeHero h2,
+#view-stock-take .stockTakeSessionHead h2,
+#view-stock-take .stockTakeOverlayHead h3 {
+  margin: 0;
+  color: #f8fbff;
+  font-size: clamp(2rem, 3vw, 3rem);
+  font-weight: 950;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+#view-stock-take .stockTakeSessionHead h2,
+#view-stock-take .stockTakeOverlayHead h3 {
+  font-size: 1.45rem;
+}
+
+#view-stock-take .stockTakeHero p,
+#view-stock-take .stockTakeSessionHead p,
+#view-stock-take .stockTakeField span,
+#view-stock-take .stockTakeSessionMeta span,
+#view-stock-take .stockTakeSessionImpact span,
+#view-stock-take .stockTakeTable thead th,
+#view-stock-take .stockTakeTable td span,
+#view-stock-take .stockTakeTemplateCard span,
+#view-stock-take .stockTakeNotice {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+#view-stock-take .stockTakeHero p {
+  max-width: 700px;
+  line-height: 1.6;
+}
+
+#view-stock-take .stockTakeHeroActions {
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+#view-stock-take .stockTakeHeroButton,
+#view-stock-take .stockTakePrimary,
+#view-stock-take .stockTakeGhost,
+#view-stock-take .stockTakeSessionExit,
+#view-stock-take .stockTakeMiniButton {
+  font: inherit;
+}
+
+#view-stock-take .stockTakeHeroButton {
+  min-width: 178px;
+  min-height: 72px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 1.1rem;
+  padding: 16px 22px;
+  display: grid;
+  gap: 6px;
+  place-items: center;
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.96);
+  cursor: pointer;
+}
+
+#view-stock-take .stockTakeHeroButton strong {
+  font-size: 1rem;
+  font-weight: 950;
+}
+
+#view-stock-take .stockTakeHeroButton span {
+  color: rgba(255, 255, 255, 0.56);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+#view-stock-take .stockTakeHeroButton.is-primary {
+  border-color: rgba(59, 130, 246, 0.4);
+  background: linear-gradient(135deg, rgba(37, 99, 235, 0.92), rgba(59, 130, 246, 0.92));
+  box-shadow: 0 24px 48px rgba(37, 99, 235, 0.24);
+}
+
+#view-stock-take .stockTakeHeroButton--resume {
+  border-color: rgba(74, 222, 128, 0.24);
+  background: rgba(16, 185, 129, 0.08);
+}
+
+#view-stock-take .stockTakeHeroButton--bulk {
+  border-color: rgba(34, 211, 238, 0.28);
+  background: rgba(14, 165, 233, 0.08);
+}
+
+#view-stock-take .stockTakeSession {
+  width: min(1260px, 100%);
+  height: min(calc(100vh - 190px), 980px);
+  min-height: 620px;
+}
+
+#view-stock-take .stockTakeSessionCard,
+#view-stock-take .stockTakeOverlayCard {
+  background: linear-gradient(180deg, rgba(36, 46, 64, 0.97), rgba(29, 39, 56, 0.97));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 2rem;
+}
+
+#view-stock-take .stockTakeSessionCard {
+  padding: 30px 32px 32px;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+#view-stock-take .stockTakeSessionHead,
+#view-stock-take .stockTakeOverlayHead,
+#view-stock-take .stockTakeOverlayFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+#view-stock-take .stockTakeSessionMeta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+#view-stock-take .stockTakeSessionMeta span {
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+#view-stock-take .stockTakeSessionExit,
+#view-stock-take .stockTakeGhost,
+#view-stock-take .stockTakeMiniButton {
+  min-height: 44px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  padding: 0 18px;
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.88);
+  font-size: 10px;
+  font-weight: 950;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+#view-stock-take .stockTakeSessionExit {
+  border-color: rgba(248, 113, 113, 0.28);
+  color: #fca5a5;
+  background: rgba(127, 29, 29, 0.16);
+}
+
+#view-stock-take .stockTakeGhost--small {
+  min-height: 38px;
+  padding-inline: 14px;
+}
+
+#view-stock-take .stockTakePrimary {
+  min-height: 48px;
+  border: 0;
+  border-radius: 1rem;
+  padding: 0 22px;
+  background: linear-gradient(135deg, #2563eb, #3b82f6);
+  color: white;
+  font-size: 11px;
+  font-weight: 950;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+#view-stock-take .stockTakePrimary--slim {
+  min-height: 52px;
+}
+
+#view-stock-take .stockTakePrimary:disabled,
+#view-stock-take .stockTakeGhost:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+#view-stock-take .stockTakeSessionToolbar,
+#view-stock-take .stockTakeTemplateForm,
+#view-stock-take .stockTakeTemplateToolbar {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin-top: 24px;
+}
+
+#view-stock-take .stockTakeTemplateToolbar {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+#view-stock-take .stockTakeTemplateToolbar--editor {
+  margin-top: 22px;
+}
+
+#view-stock-take .stockTakeInlineActions {
+  display: flex;
+  align-items: end;
+  gap: 10px;
+}
+
+#view-stock-take .stockTakeField {
+  display: grid;
+  gap: 10px;
+}
+
+#view-stock-take .stockTakeField--grow,
+#view-stock-take .stockTakeField--note {
+  grid-column: span 1;
+}
+
+#view-stock-take .stockTakeSearchShell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 52px;
+  gap: 10px;
+}
+
+#view-stock-take .stockTakeField input,
+#view-stock-take .stockTakeDropdown > button {
+  width: 100%;
+  min-height: 52px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 1rem;
+  padding: 0 18px;
+  background: rgba(9, 15, 28, 0.94);
+  color: rgba(255, 255, 255, 0.96);
+  font: inherit;
+  font-size: 0.92rem;
+  font-weight: 900;
+}
+
+#view-stock-take .stockTakeSearchAction {
+  min-height: 52px;
+  min-width: 52px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 1rem;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.82);
+  cursor: pointer;
+}
+
+#view-stock-take .stockTakeSearchAction--accent {
+  border-color: rgba(59, 130, 246, 0.28);
+  background: rgba(37, 99, 235, 0.18);
+  color: #93c5fd;
+}
+
+#view-stock-take .stockTakeSearchAction svg {
+  width: 18px;
+  height: 18px;
+}
+
+#view-stock-take .stockTakeLocationChecklist {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+#view-stock-take .stockTakeLocationOption {
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 1rem;
+  background: rgba(9, 15, 28, 0.94);
+  color: rgba(255, 255, 255, 0.9);
+  font-weight: 900;
+  cursor: pointer;
+}
+
+#view-stock-take .stockTakeLocationOption:has(input:checked) {
+  border-color: rgba(59, 130, 246, 0.85);
+  background: rgba(37, 99, 235, 0.18);
+  box-shadow: inset 0 0 0 1px rgba(96, 165, 250, 0.18);
+}
+
+#view-stock-take .stockTakeLocationOption input {
+  width: 18px;
+  height: 18px;
+  accent-color: #60a5fa;
+}
+
+#view-stock-take .stockTakeField input:focus,
+#view-stock-take .stockTakeDropdown > button:focus,
+#view-stock-take .stockTakeCountInput input:focus {
+  outline: none;
+  border-color: rgba(37, 99, 235, 0.9);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.18);
+}
+
+#view-stock-take .stockTakeSessionTableWrap {
+  margin-top: 24px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 6px;
+}
+
+#view-stock-take .stockTakeTable {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+#view-stock-take .stockTakeTable thead th,
+#view-stock-take .stockTakeTable td {
+  padding: 15px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  vertical-align: top;
+}
+
+#view-stock-take .stockTakeTable td strong {
+  display: block;
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 0.96rem;
+  font-weight: 950;
+}
+
+#view-stock-take .stockTakeCountInput {
+  width: min(220px, 100%);
+  position: relative;
+}
+
+#view-stock-take .stockTakeCountInput input {
+  width: 100%;
+  min-height: 48px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 1rem;
+  padding: 0 52px 0 16px;
+  background: rgba(9, 15, 28, 0.94);
+  color: rgba(255, 255, 255, 0.96);
+  font: inherit;
+  font-size: 1rem;
+  font-weight: 900;
+}
+
+#view-stock-take .stockTakeCountInput em {
+  position: absolute;
+  top: 50%;
+  right: 14px;
+  transform: translateY(-50%);
+  color: rgba(255, 255, 255, 0.44);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+#view-stock-take .stockTakeTable td.is-positive {
+  color: #4ade80;
+}
+
+#view-stock-take .stockTakeTable td.is-negative {
+  color: #f87171;
+}
+
+#view-stock-take .stockTakeTableEmpty {
+  text-align: center;
+  color: rgba(255, 255, 255, 0.4);
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+#view-stock-take .stockTakeSessionFooter {
+  margin-top: 18px;
+  padding-top: 22px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+#view-stock-take .stockTakeSessionImpact {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+}
+
+#view-stock-take .stockTakeSessionImpact strong {
+  display: block;
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 1.08rem;
+  font-weight: 950;
+}
+
+#view-stock-take .stockTakeSessionActions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+#view-stock-take .stockTakeSessionActions .stockTakeGhost {
+  border-color: rgba(251, 146, 60, 0.34);
+  color: #fdba74;
+  background: rgba(124, 45, 18, 0.18);
+}
+
+#view-stock-take .stockTakeOverlayBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(7, 12, 20, 0.82);
+  backdrop-filter: blur(10px);
+}
+
+#view-stock-take .stockTakeOverlayBackdrop--scan {
+  z-index: 130;
+}
+
+#view-stock-take .stockTakeOverlayBackdrop--drawer {
+  place-items: center;
+  padding: 24px;
+  background: rgba(7, 12, 20, 0.74);
+}
+
+#view-stock-take .stockTakeOverlayCard {
+  width: min(1120px, 100%);
+  padding: 28px 32px 28px;
+}
+
+#view-stock-take .stockTakeOverlayCard--scan {
+  width: min(720px, 100%);
+  padding: 26px 30px 28px;
+}
+
+#view-stock-take .stockTakeOverlayCard--camera {
+  width: min(620px, 100%);
+  padding: 0;
+  overflow: hidden;
+}
+
+#view-stock-take .stockTakeOverlayHead--scan {
+  align-items: flex-start;
+  padding: 18px 22px 14px;
+}
+
+#view-stock-take .stockTakeOverlayHead--scan h3 {
+  font-size: 1.9rem;
+  line-height: 1.05;
+  margin: 0;
+}
+
+#view-stock-take .stockTakeScanForm {
+  margin-top: 20px;
+  display: grid;
+  gap: 18px;
+}
+
+#view-stock-take .stockTakeScanBarcodeShell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 52px;
+  gap: 10px;
+}
+
+#view-stock-take .stockTakeScanCountGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(170px, 220px) minmax(180px, 240px);
+  gap: 16px;
+  align-items: end;
+}
+
+#view-stock-take .stockTakeScanMatched,
+#view-stock-take .stockTakeScanUom,
+#view-stock-take .stockTakeScanQty {
+  display: grid;
+  gap: 10px;
+}
+
+#view-stock-take .stockTakeScanMatched label,
+#view-stock-take .stockTakeScanUom label,
+#view-stock-take .stockTakeScanQty label,
+#view-stock-take .stockTakeCameraBar strong {
+  color: rgba(255, 255, 255, 0.56);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+#view-stock-take .stockTakeScanMatchedCard {
+  min-height: 102px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 1.2rem;
+  padding: 18px;
+  background: rgba(9, 15, 28, 0.66);
+  display: grid;
+  align-content: center;
+  gap: 8px;
+}
+
+#view-stock-take .stockTakeScanMatchedCard strong {
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 1rem;
+  font-weight: 950;
+  text-transform: uppercase;
+}
+
+#view-stock-take .stockTakeScanMatchedCard span {
+  color: rgba(255, 255, 255, 0.48);
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+#view-stock-take .stockTakeScanQty input {
+  width: 100%;
+  min-height: 56px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 1rem;
+  padding: 0 18px;
+  background: rgba(9, 15, 28, 0.94);
+  color: rgba(255, 255, 255, 0.96);
+  font: inherit;
+  font-size: 0.95rem;
+  font-weight: 900;
+}
+
+#view-stock-take .stockTakeScanUom select {
+  width: 100%;
+  min-height: 56px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 1rem;
+  padding: 0 34px 0 16px;
+  background: rgba(9, 15, 28, 0.94);
+  color: rgba(255, 255, 255, 0.96);
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 900;
+}
+
+#view-stock-take .stockTakeScanActions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+#view-stock-take .stockTakeScanActions .stockTakePrimary,
+#view-stock-take .stockTakeScanActions .stockTakeGhost {
+  min-width: 160px;
+}
+
+#view-stock-take .stockTakeScanHint {
+  color: rgba(255, 255, 255, 0.48);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+#view-stock-take .stockTakeCameraLayer {
+  position: fixed;
+  inset: 0;
+  z-index: 131;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(7, 12, 20, 0.9);
+  backdrop-filter: blur(12px);
+}
+
+#view-stock-take .stockTakeInlineCamera {
+  display: grid;
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid rgba(96, 165, 250, 0.22);
+  border-radius: 1.25rem;
+  background: rgba(8, 13, 24, 0.92);
+}
+
+#view-stock-take .stockTakeCameraViewport {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  max-height: 300px;
+  background: #050913;
+}
+
+#view-stock-take .stockTakeCameraReader {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+#view-stock-take .stockTakeCameraReader div,
+#view-stock-take .stockTakeCameraReader video,
+#view-stock-take .stockTakeCameraReader canvas {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: cover;
+}
+
+#view-stock-take .stockTakeCameraReader [id$="__dashboard"],
+#view-stock-take .stockTakeCameraReader [id$="__dashboard_section"],
+#view-stock-take .stockTakeCameraReader [id$="__header_message"] {
+  display: none !important;
+}
+
+#view-stock-take .stockTakeCameraReader [id$="__scan_region"] {
+  min-height: 100%;
+  background: #050913 !important;
+}
+
+#view-stock-take .stockTakeCameraReticle {
+  position: absolute;
+  inset: 16% 18%;
+  border: 4px solid rgba(255, 255, 255, 0.88);
+  box-shadow: 0 0 0 999px rgba(7, 12, 20, 0.24) inset;
+  pointer-events: none;
+}
+
+#view-stock-take .stockTakeCameraBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 20px;
+  background: rgba(18, 28, 45, 0.96);
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+#view-stock-take .stockTakeInlineCameraBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 11px 14px;
+  background: rgba(18, 28, 45, 0.96);
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+#view-stock-take .stockTakeInlineCameraBar strong {
+  min-width: 0;
+  color: rgba(203, 213, 225, 0.78);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  line-height: 1.35;
+  text-transform: uppercase;
+}
+
+#view-stock-take .stockTakeCameraClear {
+  border: 0;
+  background: none;
+  color: #f87171;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 950;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+#view-stock-take .stockTakeCameraLive {
+  flex: 0 0 auto;
+  color: #34d399;
+  font-size: 10px;
+  font-weight: 950;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+#view-stock-take .stockTakeCameraList {
+  min-height: 190px;
+  max-height: 280px;
+  overflow: auto;
+  padding: 18px 20px;
+  display: grid;
+  gap: 12px;
+}
+
+#view-stock-take .stockTakeCameraItem {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 14px;
+  align-items: center;
+  padding: 14px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+#view-stock-take .stockTakeCameraItem--uom {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+#view-stock-take .stockTakeCameraItem--uom .stockTakeCameraItemMeta {
+  grid-column: 1 / 2;
+}
+
+#view-stock-take .stockTakeCameraItem--uom > .stockTakeCameraRemove {
+  grid-column: 2 / 3;
+  grid-row: 1 / 3;
+  align-self: center;
+}
+
+#view-stock-take .stockTakeCameraItemMeta strong {
+  display: block;
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 0.94rem;
+  font-weight: 950;
+  text-transform: uppercase;
+}
+
+#view-stock-take .stockTakeCameraItemMeta span {
+  color: rgba(255, 255, 255, 0.52);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+#view-stock-take .stockTakeCameraUomRows {
+  grid-column: 1 / 2;
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+#view-stock-take .stockTakeCameraUomRow {
+  display: grid;
+  grid-template-columns: minmax(90px, 1fr) auto minmax(86px, auto) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 9px 10px;
+  border: 1px solid rgba(96, 165, 250, 0.12);
+  border-radius: 0.85rem;
+  background: rgba(9, 15, 28, 0.54);
+}
+
+#view-stock-take .stockTakeCameraUomRow span,
+#view-stock-take .stockTakeCameraUomRow em {
+  min-width: 0;
+  color: rgba(203, 213, 225, 0.72);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+#view-stock-take .stockTakeCameraUomRow strong {
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 0.95rem;
+  font-weight: 950;
+}
+
+#view-stock-take .stockTakeCameraUomTotal {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(52, 211, 153, 0.2);
+  border-radius: 0.85rem;
+  background: rgba(16, 185, 129, 0.08);
+}
+
+#view-stock-take .stockTakeCameraUomTotal span {
+  color: rgba(167, 243, 208, 0.82);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+#view-stock-take .stockTakeCameraUomTotal strong {
+  color: rgba(255, 255, 255, 0.98);
+  font-size: 0.95rem;
+  font-weight: 950;
+}
+
+#view-stock-take .stockTakeCameraItemControls {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0.9rem;
+  background: rgba(9, 15, 28, 0.9);
+}
+
+#view-stock-take .stockTakeCameraUomRow .stockTakeCameraItemControls {
+  padding: 4px;
+  gap: 6px;
+}
+
+#view-stock-take .stockTakeCameraItemControls button,
+#view-stock-take .stockTakeCameraRemove {
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0.85rem;
+  padding: 0;
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(255, 255, 255, 0.92);
+  font: inherit;
+  font-size: 1rem;
+  font-weight: 950;
+  cursor: pointer;
+}
+
+#view-stock-take .stockTakeCameraRemove {
+  color: rgba(248, 113, 113, 0.94);
+}
+
+#view-stock-take .stockTakeOverlayFooter--camera {
+  padding: 0 20px 20px;
+}
+
+#view-stock-take .stockTakePrimary--wide {
+  width: 100%;
+  min-height: 54px;
+  border-radius: 1rem;
+}
+
+#view-stock-take .stockTakeEmptyState--camera {
+  min-height: 140px;
+}
+
+#view-stock-take .stockTakeOverlayCard--bulkScan {
+  width: min(1180px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 28px 32px 32px;
+}
+
+#view-stock-take .stockTakeBulkScanLayout {
+  min-height: 0;
+  margin-top: 18px;
+  display: grid;
+  grid-template-columns: minmax(420px, 1.18fr) minmax(320px, 0.82fr);
+  gap: 18px;
+}
+
+#view-stock-take .stockTakeInlineCamera--bulk {
+  min-height: 0;
+}
+
+#view-stock-take .stockTakeInlineCamera--bulk .stockTakeCameraViewport {
+  min-height: 360px;
+  max-height: none;
+}
+
+#view-stock-take .stockTakeCameraPaused {
+  height: 100%;
+  min-height: 360px;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 10px;
+  padding: 28px;
+  color: rgba(203, 213, 225, 0.78);
+  text-align: center;
+}
+
+#view-stock-take .stockTakeCameraPaused svg {
+  width: 42px;
+  height: 42px;
+  color: #60a5fa;
+}
+
+#view-stock-take .stockTakeCameraPaused strong {
+  color: rgba(255, 255, 255, 0.94);
+  font-size: 1rem;
+  font-weight: 950;
+  text-transform: uppercase;
+}
+
+#view-stock-take .stockTakeCameraPaused span {
+  max-width: 280px;
+  line-height: 1.45;
+}
+
+#view-stock-take .stockTakeBulkScanPanel {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 10px;
+}
+
+#view-stock-take .stockTakeBulkScanSummary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+#view-stock-take .stockTakeBulkScanSummary div {
+  min-width: 0;
+  padding: 11px 14px;
+  border: 1px solid rgba(96, 165, 250, 0.16);
+  border-radius: 1rem;
+  background: rgba(9, 15, 28, 0.72);
+}
+
+#view-stock-take .stockTakeBulkScanSummary span {
+  display: block;
+  color: rgba(148, 163, 184, 0.9);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+#view-stock-take .stockTakeBulkScanSummary strong {
+  display: block;
+  margin-top: 2px;
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 1.45rem;
+  font-weight: 950;
+}
+
+#view-stock-take .stockTakeCameraList--bulk {
+  min-height: 0;
+  max-height: none;
+  height: 100%;
+  align-content: start;
+  gap: 8px;
+  overflow-y: auto;
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 1.1rem;
+  background: rgba(9, 15, 28, 0.42);
+}
+
+#view-stock-take .stockTakeCameraList--bulk .stockTakeCameraItem {
+  grid-template-columns: minmax(0, 1fr) 34px;
+  gap: 10px;
+  align-items: start;
+  padding: 12px;
+  border-radius: 0.95rem;
+}
+
+#view-stock-take .stockTakeCameraList--bulk .stockTakeCameraItemMeta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+#view-stock-take .stockTakeCameraList--bulk .stockTakeCameraItemMeta strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 0.9rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#view-stock-take .stockTakeCameraList--bulk .stockTakeCameraItemMeta span {
+  flex: 0 0 auto;
+}
+
+#view-stock-take .stockTakeCameraList--bulk .stockTakeCameraUomRows {
+  gap: 6px;
+}
+
+#view-stock-take .stockTakeCameraList--bulk .stockTakeCameraUomRow {
+  grid-template-columns: minmax(76px, 1fr) auto minmax(72px, auto) auto;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: 0.75rem;
+}
+
+#view-stock-take .stockTakeCameraList--bulk .stockTakeCameraUomTotal {
+  padding: 8px 10px;
+  border-radius: 0.75rem;
+}
+
+#view-stock-take .stockTakeCameraList--bulk .stockTakeCameraItemControls {
+  gap: 4px;
+  padding: 3px;
+}
+
+#view-stock-take .stockTakeCameraList--bulk .stockTakeCameraItemControls button,
+#view-stock-take .stockTakeCameraList--bulk .stockTakeCameraRemove {
+  width: 30px;
+  height: 30px;
+  min-width: 30px;
+  border-radius: 0.7rem;
+}
+
+#view-stock-take .stockTakeCameraList--bulk .stockTakeCameraRemove svg {
+  width: 17px;
+  height: 17px;
+}
+
+#view-stock-take .stockTakeBulkScanActions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+#view-stock-take .stockTakeBulkScanActions .stockTakePrimary,
+#view-stock-take .stockTakeBulkScanActions .stockTakeGhost {
+  width: 100%;
+}
+
+#view-stock-take .stockTakeOverlayCard--compact {
+  width: min(520px, 100%);
+}
+
+#view-stock-take .stockTakeOverlayCard--editor {
+  width: min(1040px, 100%);
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+#view-stock-take .stockTakeOverlayCard--templateDrawer {
+  width: min(1280px, calc(100vw - 48px));
+  height: min(900px, calc(100vh - 48px));
+  max-height: calc(100vh - 48px);
+  border-radius: 2rem;
+  padding: 28px 32px;
+  box-shadow: 0 34px 90px rgba(0, 0, 0, 0.42);
+}
+
+@keyframes stockTakeDrawerIn {
+  from {
+    opacity: 0.62;
+    transform: translateX(28px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+#view-stock-take .stockTakeOverlayClose {
+  width: 42px;
+  height: 42px;
+  min-width: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  padding: 0;
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.78);
+  cursor: pointer;
+}
+
+#view-stock-take .stockTakeOverlayClose svg,
+#view-stock-take .stockTakeMiniButton svg,
+#view-stock-take .stockTakeDropdown > button svg {
+  width: 16px;
+  height: 16px;
+}
+
+#view-stock-take .stockTakeOverlayBody {
+  margin-top: 22px;
+}
+
+#view-stock-take .stockTakeOverlayBody--compact {
+  display: grid;
+  gap: 16px;
+}
+
+#view-stock-take .stockTakeOverlayBody--editor {
+  display: grid;
+  gap: 18px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 6px;
+}
+
+#view-stock-take .stockTakeOverlayCard--templateDrawer .stockTakeOverlayBody--editor {
+  margin-top: 18px;
+  padding-right: 0;
+  overflow: hidden;
+}
+
+#view-stock-take .stockTakeOverlayFooter {
+  margin-top: 26px;
+}
+
+#view-stock-take .stockTakeOverlayFooter--drawer {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+#view-stock-take .stockTakeTemplateDrawerLayout {
+  height: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(340px, 0.82fr) minmax(0, 1.18fr);
+  gap: 18px;
+}
+
+#view-stock-take .stockTakeTemplateDrawerPanel {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  gap: 14px;
+  align-content: start;
+  padding: 18px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 1.1rem;
+  background: rgba(9, 15, 28, 0.28);
+}
+
+#view-stock-take .stockTakeTemplateDrawerPanel--scope {
+  min-height: 0;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+}
+
+#view-stock-take .stockTakeTemplateDrawerStep {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+#view-stock-take .stockTakeTemplateDrawerStep > span {
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  border-radius: 999px;
+  background: rgba(37, 99, 235, 0.18);
+  color: #bfdbfe;
+  font-size: 0.88rem;
+  font-weight: 950;
+}
+
+#view-stock-take .stockTakeTemplateDrawerStep strong {
+  display: block;
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 0.98rem;
+  font-weight: 950;
+}
+
+#view-stock-take .stockTakeTemplateDrawerStep small {
+  display: block;
+  margin-top: 2px;
+  color: rgba(203, 213, 225, 0.58);
+  font-size: 0.76rem;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+#view-stock-take .stockTakeOverlayCard--templateDrawer .stockTakeTemplateForm,
+#view-stock-take .stockTakeOverlayCard--templateDrawer .stockTakeTemplateToolbar--editor {
+  grid-template-columns: 1fr;
+  gap: 12px;
+  margin-top: 0;
+}
+
+#view-stock-take .stockTakeOverlayCard--templateDrawer .stockTakeField input,
+#view-stock-take .stockTakeOverlayCard--templateDrawer .stockTakeDropdown > button,
+#view-stock-take .stockTakeOverlayCard--templateDrawer .stockTakeLocationOption {
+  min-height: 48px;
+  border-radius: 0.9rem;
+}
+
+#view-stock-take .stockTakeOverlayCard--templateDrawer .stockTakeLocationChecklist {
+  grid-template-columns: 1fr;
+  max-height: min(42vh, 360px);
+  overflow: auto;
+}
+
+#view-stock-take .stockTakeOverlayCard--templateDrawer .stockTakeScopeSwitch {
+  width: 100%;
+  margin-top: 0;
+}
+
+#view-stock-take .stockTakeOverlayCard--templateDrawer .stockTakeInlineActions {
+  align-items: stretch;
+  justify-content: space-between;
+}
+
+#view-stock-take .stockTakeOverlayCard--templateDrawer .stockTakeInlineActions .stockTakeGhost {
+  flex: 1;
+}
+
+#view-stock-take .stockTakeOverlayCard--templateDrawer .stockTakeTemplateSelectionGrid {
+  max-height: none;
+  min-height: 0;
+  margin-top: 0;
+  gap: 10px;
+  overflow: auto;
+}
+
+#view-stock-take .stockTakeOverlayCard--templateDrawer .stockTakeTemplateSelection {
+  padding: 14px 15px;
+  border-radius: 1rem;
+}
+
+#view-stock-take .stockTakeOverlayCard--templateDrawer .stockTakeEmptyState {
+  min-height: 104px;
+  font-size: 0.82rem;
+}
+
+#view-stock-take .stockTakeTemplateList,
+#view-stock-take .stockTakeTemplateSelectionGrid {
+  max-height: 56vh;
+  overflow: auto;
+  margin-top: 18px;
+  display: grid;
+  gap: 12px;
+}
+
+#view-stock-take .stockTakeTemplateCard,
+#view-stock-take .stockTakeTemplateSelection {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 16px 18px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 1.2rem;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+#view-stock-take .stockTakeTemplateCard--draft {
+  width: 100%;
+  align-items: flex-start;
+}
+
+#view-stock-take .stockTakeTemplateCard strong,
+#view-stock-take .stockTakeTemplateSelection strong {
+  display: block;
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 0.94rem;
+  font-weight: 950;
+  text-transform: uppercase;
+}
+
+#view-stock-take .stockTakeTemplateActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#view-stock-take .stockTakeTemplateActions--draft {
+  margin-left: auto;
+  align-self: center;
+}
+
+#view-stock-take .stockTakeDraftMeta {
+  color: rgba(255, 255, 255, 0.48);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin-right: 8px;
+}
+
+#view-stock-take .stockTakeMiniButton {
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#view-stock-take .stockTakeMiniButton--export {
+  border-color: rgba(56, 189, 248, 0.28);
+  color: #7dd3fc;
+  background: rgba(8, 47, 73, 0.28);
+}
+
+#view-stock-take .stockTakeMiniButton--edit {
+  border-color: rgba(250, 204, 21, 0.26);
+  color: #fde68a;
+  background: rgba(113, 63, 18, 0.2);
+}
+
+#view-stock-take .stockTakeMiniButton--danger {
+  color: rgba(248, 113, 113, 0.94);
+  border-color: rgba(248, 113, 113, 0.24);
+  background: rgba(127, 29, 29, 0.14);
+}
+
+#view-stock-take .stockTakeScopeSwitch {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 6px;
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+#view-stock-take .stockTakeScopeButton {
+  min-height: 44px;
+  border: 0;
+  border-radius: 0.9rem;
+  padding: 0 18px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.62);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+#view-stock-take .stockTakeScopeButton.is-active {
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.96);
+}
+
+#view-stock-take .stockTakeTemplateSelection {
+  justify-content: flex-start;
+}
+
+#view-stock-take .stockTakeTemplateSelection input {
+  width: 18px;
+  height: 18px;
+}
+
+#view-stock-take .stockTakeEmptyState {
+  min-height: 180px;
+  display: grid;
+  place-items: center;
+  color: rgba(255, 255, 255, 0.34);
+  font-size: 1rem;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  text-align: center;
+}
+
+#view-stock-take .stockTakeDropdown {
+  position: relative;
+}
+
+#view-stock-take .stockTakeDropdown > button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  text-align: left;
+  cursor: pointer;
+}
+
+#view-stock-take .stockTakeDropdownMenu {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 1.2rem;
+  background: rgba(11, 18, 33, 0.98);
+  box-shadow: 0 22px 55px rgba(0, 0, 0, 0.32);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-6px);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+#view-stock-take .stockTakeDropdown--open .stockTakeDropdownMenu {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+#view-stock-take .stockTakeDropdownMenu button {
+  min-height: 40px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0.95rem;
+  padding: 0 14px;
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(255, 255, 255, 0.92);
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 850;
+  text-align: left;
+  cursor: pointer;
+}
+
+#view-stock-take .stockTakeDropdownMenu button:hover,
+#view-stock-take .stockTakeDropdownMenu button.is-active {
+  border-color: rgba(59, 130, 246, 0.35);
+  background: rgba(37, 99, 235, 0.18);
+}
+
+#view-stock-take .stockTakeDropdownMenu.stockTakeActionsMenu > button {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  border-radius: 10px;
+  padding: 0 11px;
+  background: transparent;
+  color: rgba(203, 213, 225, 0.72);
+  font-size: 0.78rem;
+  font-weight: 880;
+}
+
+#view-stock-take .stockTakeDropdownMenu.stockTakeActionsMenu > button:hover,
+#view-stock-take .stockTakeDropdownMenu.stockTakeActionsMenu > button:focus-visible {
+  border-color: transparent;
+  background: rgba(37, 99, 235, 0.16);
+  color: #60a5fa;
+}
+
+#view-stock-take .stockTakeDropdownMenu.stockTakeActionsMenu {
+  top: calc(100% + 10px);
+  left: auto;
+  right: 0;
+  z-index: 100;
+  min-width: 260px;
+  width: min(280px, calc(100vw - 56px));
+  max-height: min(420px, calc(100vh - 118px));
+  overflow-y: auto;
+  padding: 10px;
+  border-color: rgba(96, 165, 250, 0.22);
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(17, 29, 49, 0.99), rgba(11, 18, 33, 0.99));
+  box-shadow: 0 28px 70px rgba(0, 0, 0, 0.42);
+  transform-origin: top right;
+}
+
+#view-stock-take .stockTakeDropdownMenu.stockTakeActionsMenu > button {
+  min-height: 42px;
+  gap: 10px;
+  border-radius: 12px;
+  padding: 0 12px;
+  color: rgba(226, 232, 240, 0.8);
+  font-size: 0.8rem;
+}
+
+#view-stock-take .stockTakeNotice {
+  position: fixed;
+  top: 24px;
+  left: 50%;
+  z-index: 160;
+  width: min(760px, calc(100vw - 48px));
+  margin: 0;
+  transform: translateX(-50%);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  border-radius: 1rem;
+  padding: 14px 16px;
+  background: rgba(24, 12, 18, 0.96);
+  color: rgba(254, 202, 202, 0.96);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.38);
+  backdrop-filter: blur(12px);
+}
+
+#view-stock-take .stockTakeToast {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 140;
+  min-width: min(360px, calc(100vw - 44px));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid rgba(34, 197, 94, 0.45);
+  border-radius: 16px;
+  padding: 12px 14px;
+  background: rgba(15, 23, 42, 0.96);
+  color: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 18px 45px rgba(0, 0, 0, 0.28);
+}
+
+#view-stock-take .stockTakeToast--error,
+#view-stock-take .stockTakeToast--warning {
+  border-color: rgba(239, 68, 68, 0.45);
+}
+
+#view-stock-take .stockTakeToast button {
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 999px;
+  padding: 0;
+  background: rgba(239, 68, 68, 0.12);
+  color: rgba(248, 113, 113, 0.95);
+}
+
+@media (max-width: 980px) {
+  #view-stock-take {
+    overflow: hidden;
+  }
+
+  #view-stock-take .stockTakeSession {
+    height: calc(100vh - 176px);
+    min-height: 0;
+  }
+
+  #view-stock-take .stockTakeSessionToolbar,
+  #view-stock-take .stockTakeTemplateForm,
+  #view-stock-take .stockTakeTemplateToolbar {
+    grid-template-columns: 1fr;
+  }
+
+  #view-stock-take .stockTakeInlineActions,
+  #view-stock-take .stockTakeOverlayFooter,
+  #view-stock-take .stockTakeSessionFooter {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  #view-stock-take .stockTakeSessionImpact {
+    justify-content: space-between;
+  }
+
+  #view-stock-take .stockTakeScanCountGrid {
+    grid-template-columns: 1fr;
+  }
+
+  #view-stock-take .stockTakeBulkScanLayout {
+    grid-template-columns: 1fr;
+    overflow: auto;
+    padding-right: 4px;
+  }
+
+  #view-stock-take .stockTakeOverlayCard--bulkScan {
+    width: calc(100vw - 32px);
+    max-height: calc(100vh - 32px);
+  }
+}
+
+@media (max-width: 760px) {
+  #view-stock-take {
+    padding: 18px;
+  }
+
+  #view-stock-take .stockTakeShell {
+    padding: 86px 18px 22px;
+  }
+
+  #view-stock-take .stockTakePageActions.stockTakeDropdown {
+    top: 18px;
+    right: 18px;
+    width: calc(100% - 36px);
+  }
+
+  #view-stock-take .stockTakeDropdown > .stockTakeActionsButton {
+    width: 100%;
+  }
+
+  #view-stock-take .stockTakeSession {
+    height: calc(100vh - 152px);
+  }
+
+  #view-stock-take .stockTakeHeroActions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  #view-stock-take .stockTakeHeroButton,
+  #view-stock-take .stockTakePrimary,
+  #view-stock-take .stockTakeGhost {
+    width: 100%;
+  }
+
+  #view-stock-take .stockTakeOverlayCard {
+    padding: 22px 18px;
+  }
+
+  #view-stock-take .stockTakeOverlayCard--templateDrawer {
+    width: calc(100vw - 32px);
+    height: calc(100vh - 32px);
+    max-height: calc(100vh - 32px);
+    border-radius: 1.4rem;
+    padding: 20px 16px;
+  }
+
+  #view-stock-take .stockTakeTemplateDrawerLayout {
+    grid-template-columns: 1fr;
+    overflow: auto;
+    padding-right: 4px;
+  }
+
+  #view-stock-take .stockTakeTemplateDrawerPanel--scope {
+    min-height: 540px;
+  }
+
+  #view-stock-take .stockTakeOverlayCard--templateDrawer .stockTakeLocationChecklist {
+    max-height: 260px;
+  }
+
+  #view-stock-take .stockTakeOverlayCard--camera {
+    padding: 0;
+  }
+
+  #view-stock-take .stockTakeCameraLayer {
+    padding: 14px;
+  }
+
+  #view-stock-take .stockTakeCameraItem {
+    grid-template-columns: 1fr;
+  }
+
+  #view-stock-take .stockTakeCameraItem--uom > .stockTakeCameraRemove,
+  #view-stock-take .stockTakeCameraItem--uom .stockTakeCameraItemMeta,
+  #view-stock-take .stockTakeCameraUomRows {
+    grid-column: 1;
+  }
+
+  #view-stock-take .stockTakeCameraItem--uom > .stockTakeCameraRemove {
+    grid-row: auto;
+    justify-self: end;
+  }
+
+  #view-stock-take .stockTakeCameraUomRow {
+    grid-template-columns: 1fr auto;
+  }
+
+  #view-stock-take .stockTakeBulkScanSummary,
+  #view-stock-take .stockTakeBulkScanActions {
+    grid-template-columns: 1fr;
+  }
+
+  #view-stock-take .stockTakeScanActions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+@media (max-width: 640px) {
+  #view-stock-take {
+    padding: 14px;
+  }
+
+  #view-stock-take .stockTakeShell {
+    padding: 18px 14px;
+    border-radius: 1.2rem;
+  }
+
+  #view-stock-take .stockTakeSession {
+    height: calc(100vh - 128px);
+  }
+
+  #view-stock-take .stockTakeSessionCard,
+  #view-stock-take .stockTakeOverlayCard {
+    border-radius: 1.25rem;
+  }
+
+  #view-stock-take .stockTakeSessionCard {
+    padding: 18px;
+  }
+
+  #view-stock-take .stockTakeSessionHead,
+  #view-stock-take .stockTakeOverlayHead {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  #view-stock-take .stockTakeSessionActions,
+  #view-stock-take .stockTakeOverlayActions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  #view-stock-take .stockTakeBatchHeader {
+    padding: 14px 18px;
+  }
+}

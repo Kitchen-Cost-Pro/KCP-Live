@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <linearGradient id="bakery" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1c1208"/>
+      <stop offset=".46" stop-color="#92400e"/>
+      <stop offset="1" stop-color="#07111f"/>
+    </linearGradient>
+    <radialGradient id="caseGlow" cx="30%" cy="20%" r="48%">
+      <stop offset="0" stop-color="#fef3c7" stop-opacity=".62"/>
+      <stop offset=".42" stop-color="#f59e0b" stop-opacity=".18"/>
+      <stop offset="1" stop-color="#020617" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1920" height="1080" fill="url(#bakery)"/>
+  <rect width="1920" height="1080" fill="url(#caseGlow)"/>
+  <g opacity=".62">
+    <rect x="110" y="490" width="1700" height="290" rx="46" fill="#111827" opacity=".54"/>
+    <path d="M154 590h1650M154 700h1650" stroke="#fde68a" stroke-opacity=".18" stroke-width="5"/>
+    <ellipse cx="300" cy="644" rx="86" ry="46" fill="#fbbf24" opacity=".28"/>
+    <ellipse cx="500" cy="648" rx="86" ry="46" fill="#fed7aa" opacity=".24"/>
+    <ellipse cx="720" cy="642" rx="86" ry="46" fill="#f59e0b" opacity=".25"/>
+    <ellipse cx="1080" cy="646" rx="86" ry="46" fill="#fef3c7" opacity=".2"/>
+    <ellipse cx="1300" cy="642" rx="86" ry="46" fill="#f97316" opacity=".22"/>
+    <ellipse cx="1520" cy="648" rx="86" ry="46" fill="#fbbf24" opacity=".2"/>
+  </g>
+  <g fill="none" stroke-linecap="round">
+    <path d="M-90 870C220 748 414 852 682 728s452-144 706-36 396 42 600-110" stroke="#fde68a" stroke-opacity=".24" stroke-width="36"/>
+    <path d="M-120 950C260 840 480 926 742 816s436-110 686-28" stroke="#38bdf8" stroke-opacity=".13" stroke-width="26"/>
+  </g>
+</svg>

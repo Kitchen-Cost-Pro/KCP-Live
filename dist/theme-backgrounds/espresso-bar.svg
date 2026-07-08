@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <linearGradient id="coffee" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#21160f"/>
+      <stop offset=".52" stop-color="#6b3f22"/>
+      <stop offset="1" stop-color="#07111f"/>
+    </linearGradient>
+    <radialGradient id="barGlow" cx="30%" cy="18%" r="48%">
+      <stop offset="0" stop-color="#fed7aa" stop-opacity=".55"/>
+      <stop offset=".42" stop-color="#f97316" stop-opacity=".16"/>
+      <stop offset="1" stop-color="#020617" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="beans" width="92" height="72" patternUnits="userSpaceOnUse">
+      <ellipse cx="24" cy="26" rx="12" ry="18" fill="none" stroke="#fed7aa" stroke-opacity=".13" stroke-width="3" transform="rotate(24 24 26)"/>
+      <ellipse cx="66" cy="50" rx="12" ry="18" fill="none" stroke="#fed7aa" stroke-opacity=".11" stroke-width="3" transform="rotate(-28 66 50)"/>
+    </pattern>
+  </defs>
+  <rect width="1920" height="1080" fill="url(#coffee)"/>
+  <rect width="1920" height="1080" fill="url(#barGlow)"/>
+  <rect width="1920" height="1080" fill="url(#beans)" opacity=".9"/>
+  <g opacity=".62">
+    <rect x="0" y="690" width="1920" height="270" fill="#160f0b" opacity=".82"/>
+    <path d="M0 690h1920" stroke="#fed7aa" stroke-opacity=".22" stroke-width="6"/>
+    <rect x="132" y="404" width="390" height="190" rx="30" fill="#0f172a" opacity=".55"/>
+    <rect x="150" y="426" width="354" height="64" rx="18" fill="#e7c39b" opacity=".2"/>
+    <circle cx="650" cy="582" r="62" fill="#f8fafc" opacity=".22"/>
+    <circle cx="810" cy="582" r="62" fill="#f8fafc" opacity=".18"/>
+    <rect x="1140" y="380" width="420" height="220" rx="34" fill="#111827" opacity=".38"/>
+  </g>
+  <g fill="none" stroke-linecap="round">
+    <path d="M130 826C326 756 484 838 690 742s384-122 602-40 352 46 584-98" stroke="#fdba74" stroke-opacity=".22" stroke-width="34"/>
+    <path d="M200 912C430 820 612 896 820 808s346-98 578-24" stroke="#38bdf8" stroke-opacity=".15" stroke-width="24"/>
+  </g>
+</svg>

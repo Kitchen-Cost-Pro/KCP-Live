@@ -1,0 +1,821 @@
+.integrationsView {
+  min-height: 100%;
+  color: var(--text-main);
+}
+
+.integrationsShell {
+  max-width: 1480px;
+  margin: 0 auto;
+  padding: 28px 32px;
+}
+
+.integrationsHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 20px;
+}
+
+.integrationsHeader p,
+.integrationsHeader h1,
+.integrationsHeader span,
+.integrationCard h2,
+.integrationCard p {
+  margin: 0;
+}
+
+.integrationsHeader p {
+  color: var(--accent-blue);
+  font-size: 0.78rem;
+  font-weight: 850;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.integrationsHeader h1 {
+  margin-top: 6px;
+  font-size: clamp(2rem, 1.8vw + 1rem, 2.8rem);
+  line-height: 1;
+}
+
+.integrationsHeader span {
+  display: block;
+  margin-top: 8px;
+  color: var(--text-muted);
+}
+
+.integrationsDocsButton,
+.integrationsTabs button,
+.integrationsDropdown > button,
+.integrationPrimaryAction,
+.integrationGhostAction,
+.integrationIconAction,
+.integrationsPager button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 8px;
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.integrationsDocsButton {
+  min-height: 42px;
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-primary);
+  color: var(--text-main);
+  padding: 0 14px;
+  box-shadow: var(--shadow-soft);
+}
+
+.integrationsDocsButton[data-pulse="true"] {
+  border-color: rgba(96, 165, 250, 0.65);
+  color: var(--accent-blue);
+}
+
+.integrationsDocsButton svg,
+.integrationsSearch svg,
+.integrationsDropdown svg,
+.integrationActions svg,
+.integrationsPager svg {
+  width: 18px;
+  height: 18px;
+}
+
+.integrationsToolbar {
+  margin-top: 26px;
+  border-bottom: 1px solid var(--border-subtle);
+  padding-bottom: 16px;
+}
+
+.integrationsTabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.integrationsTabs button {
+  min-height: 40px;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  padding: 0 12px;
+  position: relative;
+}
+
+.integrationsTabs button.is-active {
+  color: var(--accent-blue);
+}
+
+.integrationsTabs button.is-active::after {
+  content: '';
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: -17px;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--accent-blue);
+}
+
+.integrationsFilters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.integrationsSearch {
+  min-width: min(360px, 100%);
+  flex: 1 1 320px;
+  min-height: 46px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-primary);
+  color: var(--text-muted);
+  padding: 0 14px;
+}
+
+.integrationsSearch input {
+  min-width: 0;
+  width: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text-main);
+  font: inherit;
+}
+
+.integrationsDropdown {
+  position: relative;
+  flex: 0 0 220px;
+}
+
+.integrationsDropdown > button {
+  width: 100%;
+  min-height: 46px;
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-primary);
+  color: var(--text-main);
+  padding: 0 14px;
+  justify-content: space-between;
+}
+
+.integrationsDropdownMenu {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  display: none;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-elevated);
+  box-shadow: var(--shadow-hover);
+  padding: 6px;
+}
+
+.integrationsDropdown.is-open .integrationsDropdownMenu {
+  display: grid;
+  gap: 4px;
+}
+
+.integrationsDropdownMenu button {
+  width: 100%;
+  min-height: 38px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-main);
+  text-align: left;
+  padding: 0 10px;
+  font: inherit;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.integrationsDropdownMenu button:hover,
+.integrationsDropdownMenu button.is-active {
+  background: rgba(37, 99, 235, 0.12);
+  color: var(--accent-blue);
+}
+
+.integrationsGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(260px, 1fr));
+  gap: 16px;
+  margin-top: 22px;
+}
+
+.integrationCard {
+  min-height: 198px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-primary);
+  padding: 18px;
+  box-shadow: var(--shadow-soft);
+}
+
+.integrationCard--featured {
+  border-color: rgba(96, 165, 250, 0.45);
+}
+
+.integrationCardTop {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+}
+
+.integrationLogo {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  background: #fff;
+  padding: 7px;
+  overflow: hidden;
+}
+
+.integrationLogo img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+}
+
+.integrationLogo svg {
+  width: 22px;
+  height: 22px;
+}
+
+.integrationLogo--red {
+  background: color-mix(in srgb, #ef4444 12%, var(--surface-secondary));
+  color: #f87171;
+}
+
+.integrationCard h2 {
+  color: var(--text-main);
+  font-size: 1rem;
+}
+
+.integrationCardTop span {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.integrationCardTop em {
+  align-self: start;
+  border-radius: 999px;
+  padding: 6px 9px;
+  font-size: 0.72rem;
+  font-style: normal;
+  font-weight: 850;
+}
+
+.integrationCardTop em.is-available {
+  background: rgba(37, 99, 235, 0.12);
+  color: var(--accent-blue);
+}
+
+.integrationCardTop em.is-active {
+  background: color-mix(in srgb, var(--accent-green) 16%, transparent);
+  color: var(--accent-green);
+}
+
+.integrationCardTop em.is-placeholder {
+  background: var(--warning-bg);
+  color: var(--accent-amber);
+}
+
+.integrationCard p {
+  color: var(--text-muted);
+  line-height: 1.45;
+  font-size: 0.92rem;
+}
+
+.integrationMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: auto;
+}
+
+.integrationMeta span {
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  color: var(--text-muted);
+  padding: 5px 9px;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.integrationActions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.integrationPrimaryAction,
+.integrationGhostAction {
+  flex: 1;
+  min-height: 40px;
+  border: 1px solid var(--border-subtle);
+  padding: 0 12px;
+}
+
+.integrationPrimaryAction {
+  background: var(--accent-blue);
+  color: #fff;
+}
+
+.integrationGhostAction {
+  background: var(--surface-secondary);
+  color: var(--text-muted);
+}
+
+.integrationIconAction {
+  width: 40px;
+  height: 40px;
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-secondary);
+  color: var(--text-muted);
+}
+
+.integrationsFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 20px;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+.integrationsPager {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.integrationsPager button,
+.integrationsPager strong {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-primary);
+  color: var(--text-main);
+}
+
+.integrationsPager button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.integrationsPager strong {
+  border-color: rgba(37, 99, 235, 0.5);
+  color: var(--accent-blue);
+}
+
+.integrationsEmpty {
+  margin-top: 24px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-primary);
+  padding: 24px;
+  text-align: center;
+}
+
+.integrationsEmpty strong,
+.integrationsEmpty span {
+  display: block;
+}
+
+.integrationsEmpty span {
+  margin-top: 6px;
+  color: var(--text-muted);
+}
+
+.yocoModalBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 0 24px 32px;
+  background: rgba(2, 6, 23, 0.72);
+  backdrop-filter: blur(12px);
+  overflow-y: auto;
+}
+
+.yocoModalBackdrop[hidden] {
+  display: none;
+}
+
+.yocoModalCard {
+  width: min(1080px, 100%);
+  border: 1px solid var(--border-strong);
+  border-radius: 0 0 18px 18px;
+  background: var(--surface-elevated);
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.42);
+  padding: 20px;
+  animation: yocoDrawerDrop 180ms ease-out;
+}
+
+@keyframes yocoDrawerDrop {
+  from {
+    opacity: 0;
+    transform: translateY(-22px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.yocoModalHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  border-bottom: 1px solid var(--border-subtle);
+  padding-bottom: 16px;
+}
+
+.yocoModalHead p,
+.yocoModalHead h2,
+.yocoModalHead span {
+  margin: 0;
+}
+
+.yocoModalHead p,
+.yocoConnectForm label span,
+.yocoStatusGrid span {
+  color: var(--accent-blue);
+  font-size: 0.72rem;
+  font-weight: 900;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}
+
+.yocoModalHead h2 {
+  margin-top: 5px;
+  font-size: 1.6rem;
+}
+
+.yocoModalHead span {
+  display: block;
+  margin-top: 8px;
+  color: var(--text-muted);
+}
+
+.yocoDrawerBody {
+  display: grid;
+  gap: 16px;
+  padding-top: 18px;
+}
+
+.yocoConnectForm {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  margin-top: 0;
+}
+
+.yocoConnectForm label {
+  display: grid;
+  gap: 8px;
+}
+
+.yocoConnectForm input {
+  min-height: 48px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-primary);
+  color: var(--text-main);
+  padding: 0 14px;
+  font: inherit;
+}
+
+.yocoConnectForm .integrationPrimaryAction {
+  align-self: end;
+  flex: 0 0 auto;
+  min-width: 210px;
+}
+
+.yocoConnectForm .integrationPrimaryAction svg,
+.yocoModalHead .integrationIconAction svg {
+  width: 18px;
+  height: 18px;
+}
+
+.yocoKeyHelper {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  border: 1px solid rgba(14, 165, 233, 0.38);
+  border-radius: 14px;
+  background:
+    linear-gradient(135deg, rgba(14, 165, 233, 0.14), rgba(37, 99, 235, 0.08)),
+    var(--surface-primary);
+  padding: 14px;
+  box-shadow: 0 18px 40px rgba(2, 132, 199, 0.08);
+}
+
+.yocoKeyHelperIcon {
+  width: 42px;
+  height: 42px;
+  border: 1px solid rgba(14, 165, 233, 0.35);
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  background: rgba(14, 165, 233, 0.14);
+  color: #38bdf8;
+}
+
+.yocoKeyHelperIcon svg,
+.yocoKeyHelperButton svg {
+  width: 18px;
+  height: 18px;
+}
+
+.yocoKeyHelper strong,
+.yocoKeyHelper span {
+  display: block;
+}
+
+.yocoKeyHelper strong {
+  color: var(--text-main);
+  font-size: 0.98rem;
+}
+
+.yocoKeyHelper span {
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 0.86rem;
+  font-weight: 800;
+}
+
+.yocoKeyHelperButton {
+  min-height: 42px;
+  border: 1px solid rgba(14, 165, 233, 0.5);
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: linear-gradient(135deg, #0ea5e9, #2563eb);
+  color: #fff;
+  padding: 0 16px;
+  font-size: 0.82rem;
+  font-weight: 900;
+  text-decoration: none;
+  white-space: nowrap;
+  box-shadow: 0 14px 28px rgba(37, 99, 235, 0.18);
+}
+
+.yocoKeyHelperButton:hover {
+  filter: brightness(1.06);
+}
+
+.yocoStatusGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 0;
+}
+
+.yocoStatusGrid article {
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-primary);
+  padding: 14px;
+}
+
+.yocoStatusGrid strong {
+  display: block;
+  margin-top: 8px;
+  color: var(--text-main);
+}
+
+.yocoActionPanel {
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface-primary) 78%, transparent);
+  padding: 14px;
+}
+
+.yocoActionPanelHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.yocoActionPanelHead span {
+  color: var(--accent-blue);
+  font-size: 0.72rem;
+  font-weight: 900;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}
+
+.yocoActionPanelHead strong {
+  color: var(--text-muted);
+  font-size: 0.88rem;
+  font-weight: 800;
+}
+
+.yocoActionRow {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 0;
+}
+
+.yocoActionButton {
+  min-height: 76px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--surface-secondary);
+  color: var(--text-main);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  text-align: left;
+  transition: border-color 0.18s ease, transform 0.18s ease, background 0.18s ease;
+}
+
+.yocoActionButton:hover:not(:disabled) {
+  border-color: rgba(96, 165, 250, 0.55);
+  background: color-mix(in srgb, var(--surface-secondary) 82%, var(--accent-blue));
+  transform: translateY(-1px);
+}
+
+.yocoActionButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  transform: none;
+}
+
+.yocoActionIcon {
+  width: 42px;
+  height: 42px;
+  flex: 0 0 42px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  background: rgba(96, 165, 250, 0.14);
+  color: var(--accent-blue);
+}
+
+.yocoActionIcon svg {
+  width: 20px;
+  height: 20px;
+}
+
+.yocoActionButton > span:last-child {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.yocoActionButton strong,
+.yocoActionButton small {
+  display: block;
+}
+
+.yocoActionButton strong {
+  color: var(--text-main);
+  font-size: 0.94rem;
+}
+
+.yocoActionButton small {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.yocoActionButton--danger .yocoActionIcon {
+  background: rgba(239, 68, 68, 0.12);
+  color: #ef4444;
+}
+
+.yocoActionButton--danger:hover:not(:disabled) {
+  border-color: rgba(239, 68, 68, 0.48);
+  background: rgba(127, 29, 29, 0.18);
+}
+
+.yocoModalNotice {
+  margin-top: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-primary);
+  color: var(--text-muted);
+  padding: 12px 14px;
+  line-height: 1.45;
+}
+
+.yocoModalNotice[data-tone='success'] {
+  border-color: rgba(16, 185, 129, 0.35);
+  color: #10b981;
+}
+
+.yocoModalNotice[data-tone='error'] {
+  border-color: rgba(239, 68, 68, 0.38);
+  color: #ef4444;
+}
+
+.yocoModalNotice[data-tone='busy'] {
+  border-color: rgba(96, 165, 250, 0.45);
+  color: var(--accent-blue);
+}
+
+.yocoResult {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.yocoResult span {
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  padding: 7px 10px;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.yocoResult strong {
+  margin-right: 6px;
+  color: var(--text-main);
+}
+
+@media (max-width: 1180px) {
+  .integrationsGrid {
+    grid-template-columns: repeat(2, minmax(260px, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .integrationsShell {
+    padding: 20px;
+  }
+
+  .integrationsHeader,
+  .integrationsFooter {
+    display: grid;
+  }
+
+  .integrationsDocsButton {
+    justify-self: start;
+  }
+
+  .integrationsGrid,
+  .integrationsFilters {
+    grid-template-columns: 1fr;
+  }
+
+  .integrationsDropdown {
+    flex: 1 1 100%;
+  }
+
+  .yocoConnectForm,
+  .yocoKeyHelper,
+  .yocoStatusGrid,
+  .yocoActionRow {
+    grid-template-columns: 1fr;
+  }
+
+  .yocoConnectForm .integrationPrimaryAction {
+    width: 100%;
+  }
+
+  .yocoKeyHelperButton {
+    width: 100%;
+  }
+
+  .yocoActionPanelHead {
+    display: grid;
+  }
+}

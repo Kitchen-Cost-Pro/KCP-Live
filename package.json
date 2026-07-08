@@ -1,0 +1,23 @@
+{
+  "name": "kcp-live-converted",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host localhost",
+    "test": "node --test \"src/**/*.test.js\"",
+    "build": "vite build && node scripts/copy-admin-route.mjs",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "dependencies": {
+    "chart.js": "^4.5.1",
+    "exceljs": "^4.4.0",
+    "html5-qrcode": "^2.3.8",
+    "jspdf": "^4.2.1",
+    "jspdf-autotable": "^5.0.7",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "vite": "^6.3.2"
+  }
+}

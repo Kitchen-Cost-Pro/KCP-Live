@@ -1,0 +1,1962 @@
+.locationsView {
+  min-height: 100%;
+}
+
+.locationsShell {
+  max-width: 1480px;
+  margin: 0 auto;
+  padding: 32px;
+}
+
+.locationsWorkbench {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.locationsHeader h1,
+.locationsHeader p,
+.locationsHeader span {
+  margin: 0;
+}
+
+.locationsHeader p {
+  color: #79a4ff;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.locationsHeader h1 {
+  margin-top: 8px;
+  color: #f2f6ff;
+  font-size: clamp(2rem, 2vw + 1rem, 2.9rem);
+  line-height: 1;
+}
+
+.locationsHeader span {
+  display: block;
+  margin-top: 10px;
+  color: #93a2be;
+  font-size: 1rem;
+}
+
+.locationsHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.locationsHeaderActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.locationsToolbar {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) minmax(220px, 0.55fr) auto auto;
+  align-items: end;
+  gap: 18px;
+}
+
+.locationsSearch,
+.locationsCreateCard label {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.locationsSearch span,
+.locationsCreateCard span,
+.locationsModalField span {
+  color: #9eacc6;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.locationsSearch input,
+.locationsSearch select,
+.locationsCreateShell input,
+.locationsModalField input,
+.locationsModalField select,
+.locationsModalField textarea {
+  width: 100%;
+  min-height: 58px;
+  border: 1px solid #28415f;
+  border-radius: 18px;
+  background: rgba(10, 20, 38, 0.96);
+  color: #f2f6ff;
+  font: inherit;
+  padding: 0 18px;
+}
+
+.locationsSearch select,
+.locationsModalField select {
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, #a8bbd8 50%), linear-gradient(135deg, #a8bbd8 50%, transparent 50%);
+  background-position: calc(100% - 22px) 25px, calc(100% - 15px) 25px;
+  background-size: 7px 7px, 7px 7px;
+  background-repeat: no-repeat;
+  padding-right: 44px;
+}
+
+.locationsModalField textarea {
+  min-height: 132px;
+  padding: 16px 18px;
+  resize: vertical;
+}
+
+.locationsToolbarMeta {
+  min-height: 58px;
+  min-width: 190px;
+  display: grid;
+  align-content: center;
+  gap: 3px;
+  border: 1px solid rgba(65, 90, 130, 0.36);
+  border-radius: 20px;
+  background: rgba(16, 28, 45, 0.74);
+  padding: 12px 18px;
+}
+
+.locationsToolbarMeta span {
+  color: #f2f6ff;
+  font-size: 1.25rem;
+  font-weight: 950;
+}
+
+.locationsToolbarMeta strong {
+  color: #93a2be;
+  font-size: 0.72rem;
+  font-weight: 850;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.locationsCreateCard {
+  border: 1px solid rgba(65, 90, 130, 0.36);
+  border-radius: 26px;
+  background: linear-gradient(180deg, rgba(35, 47, 69, 0.94), rgba(24, 33, 50, 0.96));
+  padding: 18px;
+}
+
+.locationsCreateShell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+}
+
+.locationsGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 18px;
+}
+
+.locationsSection {
+  display: grid;
+  gap: 14px;
+}
+
+.locationsSection + .locationsSection {
+  margin-top: 20px;
+}
+
+.locationsSectionHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 24px;
+}
+
+.locationsSectionHead span {
+  color: #79a4ff;
+  font-size: 0.78rem;
+  font-weight: 950;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.locationsSectionDivider {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(121, 164, 255, 0.42), transparent);
+  opacity: 0.75;
+}
+
+.locationsSiteList {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr));
+  gap: 20px;
+  align-items: stretch;
+}
+
+.locationsSiteCard {
+  display: grid;
+  grid-template-rows: 92px 74px;
+  gap: 14px;
+  height: 216px;
+  border: 1px solid rgba(63, 88, 128, 0.42);
+  border-radius: 16px;
+  background:
+    radial-gradient(420px 220px at 20% 0%, rgba(62, 130, 255, 0.12), transparent 60%),
+    linear-gradient(180deg, rgba(18, 31, 50, 0.98), rgba(11, 21, 35, 0.98));
+  padding: 18px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035), 0 18px 48px rgba(0, 0, 0, 0.18);
+  transition: border-color 140ms ease, background 140ms ease;
+}
+
+.locationsSiteCard:hover {
+  border-color: rgba(91, 148, 255, 0.62);
+  background: linear-gradient(180deg, rgba(26, 42, 66, 0.98), rgba(14, 24, 39, 0.98));
+}
+
+.locationsSiteHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 92px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid rgba(74, 98, 138, 0.24);
+  overflow: hidden;
+}
+
+.locationsTypePill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  border: 1px solid rgba(96, 165, 250, 0.18);
+  border-radius: 999px;
+  background: rgba(37, 99, 235, 0.16);
+  color: #79a4ff;
+  font-size: 0.68rem;
+  font-weight: 950;
+  letter-spacing: 0.08em;
+  line-height: 1;
+  padding: 0 10px;
+  text-transform: uppercase;
+}
+
+.locationsSiteHead h2 {
+  margin: 10px 0 0;
+  color: #f4f7ff;
+  font-size: 1.08rem;
+  font-weight: 950;
+  line-height: 1.1;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.locationsSiteHead p {
+  margin: 6px 0 0;
+  color: #93a2be;
+  font-size: 0.86rem;
+}
+
+.locationsBentoMetrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0;
+  min-height: 74px;
+}
+
+.locationsBentoMetric {
+  min-height: 72px;
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 5px;
+  border-right: 1px solid rgba(74, 98, 138, 0.24);
+  padding: 0 10px;
+  text-align: center;
+}
+
+.locationsBentoMetric:last-child {
+  border-right: 0;
+}
+
+.locationsMetricIcon {
+  width: 25px;
+  height: 25px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  color: #74adff;
+  background: rgba(37, 99, 235, 0.22);
+}
+
+.locationsMetricIcon svg {
+  width: 15px;
+  height: 15px;
+}
+
+.locationsMetricIcon--qty {
+  color: #86efac;
+  background: rgba(34, 197, 94, 0.16);
+}
+
+.locationsMetricIcon--value {
+  color: #c084fc;
+  background: rgba(124, 58, 237, 0.2);
+}
+
+.locationsBentoMetric label {
+  display: block;
+  color: #8f9db9;
+  font-size: 0.58rem;
+  font-weight: 850;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.locationsBentoMetric strong {
+  display: block;
+  color: #f4f7ff;
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.locationsLocationList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.locationsLocationList--modal {
+  max-height: min(52vh, 520px);
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.locationsLocationRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 58px;
+  border: 1px solid rgba(55, 78, 112, 0.36);
+  border-radius: 12px;
+  background: rgba(8, 17, 31, 0.48);
+  padding: 9px 10px;
+}
+
+.locationsLocationMain {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.locationsLocationMain strong {
+  display: block;
+  color: #f4f7ff;
+  font-size: 0.94rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.locationsLocationMain span:not(.locationsPrimaryBadge) {
+  display: block;
+  color: #95a3be;
+  font-size: 0.76rem;
+  white-space: nowrap;
+}
+
+.locationsPrimaryBadge {
+  flex: 0 0 auto;
+  padding: 4px 7px;
+  border-radius: 999px;
+  background: rgba(52, 209, 153, 0.12);
+  color: #46e1aa;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.locationsLocationStats {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  color: #a7b5cf;
+  font-size: 0.76rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.locationsRowActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.locationsSiteFoot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 40px;
+  border-top: 1px solid rgba(74, 98, 138, 0.24);
+  padding-top: 12px;
+}
+
+.locationsSiteFoot span {
+  color: #93a2be;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.locationsSiteFoot strong {
+  color: #79a4ff;
+  font-size: 0.78rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.locationsCard {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-height: 240px;
+  border: 1px solid rgba(63, 88, 128, 0.42);
+  border-radius: 26px;
+  background: linear-gradient(180deg, rgba(24, 36, 55, 0.96), rgba(18, 28, 44, 0.98));
+  padding: 22px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.locationsCardHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.locationsCardHead strong {
+  display: block;
+  color: #f4f7ff;
+  font-size: 1.2rem;
+}
+
+.locationsCardHead span {
+  display: block;
+  margin-top: 6px;
+  color: #95a3be;
+  font-size: 0.92rem;
+}
+
+.locationsMetrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.locationsMetrics--compact {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.locationsMetric {
+  min-height: 92px;
+  border: 1px solid rgba(55, 78, 112, 0.45);
+  border-radius: 18px;
+  background: rgba(9, 17, 31, 0.72);
+  padding: 14px;
+}
+
+.locationsMetric label {
+  display: block;
+  color: #8f9db9;
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.locationsMetric strong {
+  display: block;
+  margin-top: 10px;
+  color: #f4f7ff;
+  font-size: 1.1rem;
+}
+
+.locationsCardActions,
+.locationsModalActions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.locationsModalActions--split {
+  justify-content: space-between;
+  align-items: center;
+}
+
+.locationsModalActions--split > div {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.locationsActionMenu {
+  position: relative;
+  display: inline-flex;
+}
+
+.locationsActionMenuPanel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 20;
+  min-width: 160px;
+  border: 1px solid rgba(74, 98, 138, 0.52);
+  border-radius: 12px;
+  background: rgba(8, 17, 31, 0.98);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.32);
+  color: #eef5ff;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-4px);
+  transition: opacity 140ms ease, transform 140ms ease;
+}
+
+.locationsActionMenuPanel span {
+  display: block;
+  padding: 10px 12px;
+  color: #eef5ff;
+  font-size: 0.74rem;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.locationsActionMenu:hover .locationsActionMenuPanel,
+.locationsActionMenu:focus-within .locationsActionMenuPanel {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.locationsDetailForm {
+  border: 1px solid rgba(63, 88, 128, 0.48);
+  border-radius: 30px;
+  background: linear-gradient(180deg, rgba(24, 36, 55, 0.96), rgba(18, 28, 44, 0.98));
+  padding: 24px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.24);
+}
+
+.locationsDetailHead {
+  display: flex;
+  align-items: flex-start;
+  gap: 18px;
+  margin-bottom: 24px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid rgba(74, 98, 138, 0.38);
+}
+
+.locationsDetailHead p,
+.locationsDetailHead h2,
+.locationsDetailHead span {
+  margin: 0;
+}
+
+.locationsDetailHead p {
+  color: #79a4ff;
+  font-size: 0.78rem;
+  font-weight: 850;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.locationsDetailHead h2 {
+  margin-top: 6px;
+  color: #f4f7ff;
+  font-size: 2rem;
+}
+
+.locationsDetailHead span {
+  display: block;
+  margin-top: 8px;
+  color: #93a2be;
+}
+
+.locationsDetailGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  margin-bottom: 24px;
+}
+
+.locationsModalField--wide {
+  grid-column: 1 / -1;
+}
+
+.locationsTypeGroup {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.locationsTypeGroup button {
+  min-height: 58px;
+  border: 1px solid rgba(70, 91, 127, 0.5);
+  border-radius: 18px;
+  background: rgba(10, 20, 38, 0.78);
+  color: #b9c8e3;
+  font: inherit;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.locationsTypeGroup button.is-active {
+  border-color: rgba(77, 137, 255, 0.78);
+  background: rgba(77, 137, 255, 0.18);
+  color: #f2f6ff;
+  box-shadow: inset 0 0 0 1px rgba(77, 137, 255, 0.2);
+}
+
+.locationsPrimaryButton,
+.locationsGhostButton,
+.locationsDangerButton,
+.locationsIconButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 48px;
+  border-radius: 16px;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform 140ms ease, border-color 140ms ease, background 140ms ease;
+}
+
+.locationsPrimaryButton {
+  border: 1px solid rgba(77, 137, 255, 0.52);
+  background: linear-gradient(135deg, #3f7aff, #6ca7ff);
+  color: #f8fbff;
+  padding: 0 18px;
+}
+
+.locationsHeader .locationsPrimaryButton,
+.locationsHeader .locationsPrimaryButton span {
+  color: #ffffff;
+  opacity: 1;
+}
+
+.locationsHeader .locationsPrimaryButton svg {
+  color: #ffffff;
+  opacity: 1;
+}
+
+.locationsGhostButton {
+  border: 1px solid rgba(70, 91, 127, 0.5);
+  background: rgba(17, 28, 44, 0.75);
+  color: #dce7ff;
+  padding: 0 16px;
+}
+
+.locationsDangerButton {
+  border: 1px solid rgba(247, 111, 111, 0.45);
+  background: rgba(53, 16, 22, 0.58);
+  color: #ffb5b5;
+  padding: 0 16px;
+}
+
+.locationsIconButton {
+  width: 38px;
+  min-width: 38px;
+  min-height: 38px;
+  border: 1px solid rgba(70, 91, 127, 0.5);
+  background: rgba(17, 28, 44, 0.78);
+  color: #dce7ff;
+}
+
+.locationsIconButton--danger {
+  border-color: rgba(247, 111, 111, 0.42);
+  background: rgba(53, 16, 22, 0.5);
+  color: #ffb5b5;
+}
+
+.locationsCardBadges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+  max-height: 28px;
+  overflow: hidden;
+}
+
+.locationsSystemBadge,
+.locationsFormerly {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 24px;
+  border-radius: 999px;
+  padding: 0 10px;
+  font-size: 0.66rem;
+  font-weight: 950;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.locationsSystemBadge {
+  border: 1px solid rgba(52, 211, 153, 0.36);
+  background: rgba(16, 185, 129, 0.12);
+  color: #8ff5c6;
+}
+
+.locationsSystemBadge svg {
+  width: 12px;
+  height: 12px;
+}
+
+.locationsFormerly {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  background: rgba(15, 23, 42, 0.48);
+  color: #b7c6dd;
+}
+
+.locationsFieldHint {
+  display: inline-block;
+  margin-top: 8px;
+  color: rgba(183, 198, 221, 0.82);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.locationsPrimaryButton svg,
+.locationsGhostButton svg,
+.locationsDangerButton svg,
+.locationsRoutingOpenButton svg,
+.locationsIconButton svg {
+  width: 16px;
+  height: 16px;
+}
+
+.locationsModalBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(4, 10, 20, 0.72);
+  backdrop-filter: blur(8px);
+}
+
+.locationsModalCard {
+  width: min(680px, 100%);
+  border: 1px solid rgba(69, 93, 133, 0.48);
+  border-radius: 30px;
+  background: linear-gradient(180deg, rgba(31, 44, 67, 0.98), rgba(17, 27, 41, 0.99));
+  padding: 24px;
+}
+
+.locationsModalCard--routing {
+  width: min(920px, 100%);
+  max-height: min(88vh, 820px);
+  overflow: auto;
+}
+
+.locationsModalCard--site {
+  width: min(860px, 100%);
+  max-height: min(86vh, 760px);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.locationsModalHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.locationsModalHead p,
+.locationsModalHead h3 {
+  margin: 0;
+}
+
+.locationsModalHead p {
+  color: #79a4ff;
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.locationsModalHead h3 {
+  margin-top: 6px;
+  color: #f4f7ff;
+  font-size: 1.7rem;
+}
+
+.locationsModalHead span {
+  display: block;
+  margin-top: 8px;
+  color: #93a2be;
+  font-size: 0.9rem;
+}
+
+.locationsModalHead--site {
+  padding-bottom: 18px;
+  border-bottom: 1px solid rgba(74, 98, 138, 0.32);
+}
+
+.locationsModalSummary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.locationsModalToolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 12px;
+}
+
+.locationsModalToolbar strong {
+  display: block;
+  color: #f4f7ff;
+  font-size: 1.05rem;
+}
+
+.locationsModalToolbar span {
+  display: block;
+  margin-top: 4px;
+  color: #93a2be;
+  font-size: 0.84rem;
+}
+
+.locationsModalField {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.locationsRoutingPanel {
+  border: 1px solid rgba(65, 90, 130, 0.36);
+  border-radius: 18px;
+  background: rgba(9, 17, 31, 0.38);
+  padding: 16px;
+}
+
+.locationsTaxPanel {
+  border: 1px solid rgba(65, 90, 130, 0.36);
+  border-radius: 18px;
+  background: rgba(9, 17, 31, 0.38);
+  padding: 16px;
+}
+
+.locationsSiteInfoPanel {
+  border: 1px solid rgba(65, 90, 130, 0.36);
+  border-radius: 18px;
+  background: rgba(9, 17, 31, 0.38);
+  padding: 16px;
+}
+
+.locationsRoutingHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(74, 98, 138, 0.28);
+}
+
+.locationsTaxHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.locationsSiteInfoHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.locationsSiteInfoHeadActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.locationsSectionToggle {
+  min-width: 92px;
+  min-height: 32px;
+  display: inline-grid;
+  grid-template-columns: minmax(0, 1fr) 22px;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid rgba(96, 165, 250, 0.36);
+  border-radius: 999px;
+  padding: 0 6px 0 12px;
+  background: rgba(77, 137, 255, 0.1);
+  color: #b9d2ff;
+  font: inherit;
+  font-size: 0.68rem;
+  font-weight: 950;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.locationsSectionToggle svg {
+  width: 14px;
+  height: 14px;
+  justify-self: center;
+  transition: transform 160ms ease;
+}
+
+.locationsSiteInfoPanel--open .locationsSectionToggle {
+  border-color: rgba(96, 165, 250, 0.62);
+  background: rgba(77, 137, 255, 0.18);
+  color: #e3edff;
+}
+
+.locationsSiteInfoPanel--open .locationsSectionToggle svg {
+  transform: rotate(180deg);
+}
+
+.locationsRoutingHead p {
+  margin: 6px 0 0;
+  color: #93a2be;
+  font-size: 0.86rem;
+  line-height: 1.35;
+}
+
+.locationsTaxHead p {
+  margin: 6px 0 0;
+  color: #93a2be;
+  font-size: 0.86rem;
+  line-height: 1.35;
+}
+
+.locationsSiteInfoHead p {
+  margin: 6px 0 0;
+  color: #93a2be;
+  font-size: 0.86rem;
+  line-height: 1.35;
+}
+
+.locationsSiteInfoBadge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  min-height: 26px;
+  border-radius: 999px;
+  padding: 0 10px;
+  font-size: 0.68rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.locationsSiteInfoBadge--complete {
+  border: 1px solid rgba(36, 211, 159, 0.38);
+  background: rgba(36, 211, 159, 0.12);
+  color: #63e6be;
+}
+
+.locationsSiteInfoBadge--missing {
+  border: 1px solid rgba(250, 204, 21, 0.38);
+  background: rgba(250, 204, 21, 0.12);
+  color: #fde68a;
+}
+
+.locationsSwitch {
+  min-width: 260px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #dbe7ff;
+  font-size: 0.8rem;
+  font-weight: 850;
+}
+
+.locationsSwitch input {
+  width: 18px;
+  min-height: 18px;
+  height: 18px;
+  accent-color: #5da2ff;
+}
+
+.locationsTaxGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(74, 98, 138, 0.28);
+}
+
+.locationsTaxGrid label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.locationsSiteInfoGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(74, 98, 138, 0.28);
+}
+
+.locationsSiteInfoGrid[hidden] {
+  display: none;
+}
+
+.locationsSiteInfoGrid label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.locationsSiteInfoGrid textarea {
+  min-height: 96px;
+}
+
+.locationsRoutingOpenButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 42px;
+  border: 1px solid rgba(77, 137, 255, 0.52);
+  border-radius: 14px;
+  background: rgba(77, 137, 255, 0.14);
+  color: #8bb7ff;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  padding: 0 14px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.locationsRoutingOpenButton:hover {
+  border-color: rgba(126, 172, 255, 0.78);
+  background: rgba(77, 137, 255, 0.22);
+  color: #d7e7ff;
+}
+
+.locationsRoutingSummary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.locationsRoutingSummary span {
+  border: 1px solid rgba(55, 78, 112, 0.36);
+  border-radius: 14px;
+  background: rgba(8, 17, 31, 0.48);
+  color: #93a2be;
+  font-size: 0.72rem;
+  font-weight: 850;
+  letter-spacing: 0.08em;
+  padding: 12px;
+  text-transform: uppercase;
+}
+
+.locationsRoutingSummary strong {
+  display: block;
+  margin-bottom: 3px;
+  color: #f4f7ff;
+  font-size: 1.05rem;
+  letter-spacing: 0;
+}
+
+.locationsRoutingModalBackdrop {
+  align-items: flex-start;
+  z-index: 96;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.locationsRoutingModalCard {
+  width: min(1600px, calc(100vw - 24px));
+  max-height: none;
+  display: flex;
+  flex-direction: column;
+  overflow: visible;
+  margin: auto 0;
+  padding: 18px;
+  border-radius: 22px;
+  background:
+    radial-gradient(circle at 16% 0%, rgba(37, 99, 235, 0.22), transparent 34%),
+    linear-gradient(180deg, rgba(12, 27, 48, 0.98), rgba(9, 18, 33, 0.99));
+}
+
+.locationsRoutingModalHead {
+  flex: 0 0 auto;
+  margin-bottom: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(74, 98, 138, 0.3);
+}
+
+.locationsRoutingModalHead h3 {
+  font-size: clamp(1.85rem, 2.55vw, 2.35rem);
+  line-height: 1;
+}
+
+.locationsRoutingModalHead span {
+  max-width: 980px;
+  color: #c4d2ea;
+  font-size: 0.92rem;
+}
+
+.locationsRoutingStats {
+  display: grid;
+  grid-template-columns: minmax(280px, 1.35fr) repeat(4, minmax(150px, 0.8fr));
+  gap: 0;
+  flex: 0 0 auto;
+  margin-bottom: 10px;
+  border: 1px solid rgba(74, 98, 138, 0.46);
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(20, 38, 64, 0.72), rgba(13, 26, 45, 0.76));
+  overflow: hidden;
+}
+
+.locationsRoutingStat {
+  min-height: 68px;
+  display: grid;
+  grid-template-columns: 34px auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-right: 1px solid rgba(74, 98, 138, 0.34);
+}
+
+.locationsRoutingStat:last-child {
+  border-right: 0;
+}
+
+.locationsRoutingStat--wide {
+  grid-template-columns: 34px minmax(0, 1fr);
+}
+
+.locationsRoutingStat > span {
+  width: 34px;
+  height: 34px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 12px;
+  background: rgba(37, 99, 235, 0.24);
+  color: #70a7ff;
+}
+
+.locationsRoutingStat > span svg {
+  width: 18px;
+  height: 18px;
+}
+
+.locationsRoutingStat strong {
+  color: #f4f7ff;
+  font-size: 1.26rem;
+  font-weight: 950;
+}
+
+.locationsRoutingStat b,
+.locationsRoutingStat em {
+  display: block;
+  font-style: normal;
+}
+
+.locationsRoutingStat b {
+  color: #f4f7ff;
+  font-size: 0.88rem;
+  font-weight: 950;
+}
+
+.locationsRoutingStat em {
+  margin-top: 2px;
+  color: #9db0ce;
+  font-size: 0.78rem;
+  line-height: 1.25;
+}
+
+.locationsRoutingWorkspace {
+  display: grid;
+  grid-template-columns: minmax(300px, 374px) minmax(0, 1fr);
+  gap: 10px;
+  flex: 0 0 auto;
+  min-height: auto;
+}
+
+.locationsRoutingSelfBucket,
+.locationsRoutingSection,
+.locationsRoutingBucket {
+  border: 1px solid rgba(55, 78, 112, 0.46);
+  background: rgba(12, 24, 42, 0.56);
+}
+
+.locationsRoutingSelfBucket {
+  min-height: auto;
+  display: flex;
+  flex-direction: column;
+  border-color: rgba(34, 197, 154, 0.48);
+  border-radius: 16px;
+  padding: 12px;
+  overflow: visible;
+}
+
+.locationsRoutingSelfBucket--over,
+.locationsRoutingSelfBucket.locationsRoutingBucket--over,
+.locationsRoutingBucket--over {
+  border-color: rgba(82, 166, 255, 0.92);
+  background: rgba(37, 91, 160, 0.22);
+  transform: translateY(-2px);
+}
+
+.locationsRoutingSelfBucket header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.locationsRoutingStep {
+  width: 22px;
+  height: 22px;
+  display: inline-grid;
+  place-items: center;
+  margin-right: 8px;
+  border-radius: 999px;
+  background: rgba(34, 197, 94, 0.34);
+  color: #c6f6d5;
+  font-size: 0.78rem;
+  font-weight: 950;
+}
+
+.locationsRoutingSelfBucket strong {
+  color: #f4f7ff;
+  font-size: 1rem;
+  font-weight: 950;
+}
+
+.locationsRoutingSelfBucket header em {
+  width: fit-content;
+  display: block;
+  margin: 5px 0 0 32px;
+  border-radius: 999px;
+  background: rgba(77, 137, 255, 0.12);
+  color: #dbe8ff;
+  padding: 4px 10px;
+  font-size: 0.78rem;
+  font-style: normal;
+  font-weight: 900;
+}
+
+.locationsRoutingSelfBucket p {
+  margin: 8px 0 0;
+  color: #a9b9d2;
+  font-size: 0.84rem;
+  line-height: 1.3;
+}
+
+.locationsRoutingSelfBucket p + p {
+  display: none;
+}
+
+.locationsRoutingFilters {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0 0 8px;
+}
+
+.locationsRoutingFilters span {
+  display: inline-flex;
+  justify-content: center;
+  gap: 7px;
+  min-height: 28px;
+  align-items: center;
+  border: 1px solid rgba(74, 98, 138, 0.42);
+  border-radius: 12px;
+  background: rgba(8, 17, 31, 0.48);
+  color: #b9c8e3;
+  font-size: 0.78rem;
+  font-weight: 850;
+}
+
+.locationsRoutingFilters b {
+  min-width: 22px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 999px;
+  background: rgba(77, 137, 255, 0.2);
+  color: #a9c8ff;
+}
+
+.locationsRoutingSelfBucket footer {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(74, 98, 138, 0.28);
+  color: #9fb0cb;
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.locationsRoutingSelfBucket footer svg {
+  width: 18px;
+  height: 18px;
+  color: #79a4ff;
+  flex: 0 0 auto;
+}
+
+.locationsRoutingDestinations {
+  display: grid;
+  grid-template-rows: auto auto;
+  gap: 8px;
+  min-height: auto;
+}
+
+.locationsRoutingSection {
+  display: flex;
+  flex-direction: column;
+  min-height: auto;
+  border-radius: 12px;
+  padding: 12px;
+  overflow: visible;
+}
+
+.locationsRoutingSectionHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex: 0 0 auto;
+  margin-bottom: 10px;
+}
+
+.locationsRoutingSectionHead > div {
+  display: grid;
+  grid-template-columns: 36px minmax(0, auto);
+  align-items: center;
+  column-gap: 12px;
+}
+
+.locationsRoutingSectionHead i {
+  grid-row: span 2;
+  width: 36px;
+  height: 36px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 13px;
+  background: rgba(37, 99, 235, 0.24);
+  color: #70a7ff;
+}
+
+.locationsRoutingSectionHead i svg {
+  width: 18px;
+  height: 18px;
+}
+
+.locationsRoutingSectionHead span {
+  display: block;
+  color: #f4f7ff;
+  font-size: 1rem;
+  font-weight: 950;
+}
+
+.locationsRoutingSectionHead p {
+  margin: 2px 0 0;
+  color: #93a2be;
+  font-size: 0.78rem;
+  line-height: 1.25;
+}
+
+.locationsRoutingSectionHead em {
+  flex: 0 0 auto;
+  border: 1px solid rgba(77, 137, 255, 0.32);
+  border-radius: 9px;
+  background: rgba(13, 30, 56, 0.62);
+  color: #8bb7ff;
+  font-size: 0.72rem;
+  font-style: normal;
+  font-weight: 850;
+  padding: 7px 10px;
+  white-space: nowrap;
+}
+
+.locationsRoutingBuckets {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(260px, 1fr));
+  gap: 10px;
+  min-height: auto;
+  overflow: visible;
+  padding-right: 0;
+}
+
+.locationsRoutingBucket {
+  display: flex;
+  flex-direction: column;
+  min-height: auto;
+  border-radius: 14px;
+  padding: 12px;
+  transition: border-color 0.16s ease, background 0.16s ease, transform 0.16s ease;
+}
+
+.locationsRoutingBucket--storage {
+  background: rgba(18, 37, 66, 0.42);
+}
+
+.locationsRoutingBucket header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex: 0 0 auto;
+}
+
+.locationsRoutingBucket header span {
+  display: none;
+}
+
+.locationsRoutingBucket header strong {
+  display: block;
+  color: #f4f7ff;
+  font-size: 0.96rem;
+  line-height: 1.15;
+}
+
+.locationsRoutingBucket header em {
+  display: inline-grid;
+  place-items: center;
+  min-width: 32px;
+  height: 32px;
+  border: 1px solid rgba(77, 137, 255, 0.34);
+  border-radius: 999px;
+  background: rgba(77, 137, 255, 0.16);
+  color: #d7e7ff;
+  font-style: normal;
+  font-weight: 950;
+}
+
+.locationsRoutingBucket p {
+  flex: 0 0 auto;
+  margin: 6px 0 8px;
+  color: #93a2be;
+  font-size: 0.76rem;
+  line-height: 1.25;
+}
+
+.locationsRoutingSearch {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  margin-bottom: 8px;
+}
+
+.locationsRoutingSearch svg {
+  position: absolute;
+  left: 13px;
+  width: 16px;
+  height: 16px;
+  color: #79a4ff;
+  pointer-events: none;
+}
+
+.locationsRoutingSearch input {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid rgba(74, 98, 138, 0.48);
+  border-radius: 13px;
+  background: rgba(8, 17, 31, 0.62);
+  color: #f4f7ff;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 800;
+  padding: 0 12px 0 38px;
+  outline: none;
+}
+
+.locationsRoutingSearch input::placeholder {
+  color: rgba(179, 195, 222, 0.62);
+}
+
+.locationsRoutingSearch input:focus {
+  border-color: rgba(96, 165, 250, 0.86);
+  box-shadow: 0 0 0 3px rgba(77, 137, 255, 0.14);
+}
+
+.locationsRoutingChips {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  flex: 0 0 auto;
+  min-height: auto;
+  overflow-y: visible;
+  overscroll-behavior: contain;
+  padding-right: 0;
+}
+
+.locationsRoutingChips--self {
+  margin-top: 2px;
+}
+
+.locationsRoutingChip {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  cursor: grab;
+  border: 1px solid rgba(74, 98, 138, 0.42);
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(28, 43, 66, 0.9), rgba(13, 24, 40, 0.92));
+  color: #f4f7ff;
+  min-height: 38px;
+  padding: 6px 9px;
+  user-select: none;
+}
+
+.locationsRoutingChip--self {
+  background: linear-gradient(180deg, rgba(28, 45, 70, 0.94), rgba(13, 26, 45, 0.96));
+}
+
+.locationsRoutingChip--mapped {
+  grid-template-columns: 26px minmax(0, 1fr) 28px;
+  border-color: rgba(34, 197, 94, 0.34);
+  background: rgba(22, 75, 52, 0.34);
+}
+
+.locationsRoutingChip[hidden] {
+  display: none;
+}
+
+.locationsRoutingChip:active {
+  cursor: grabbing;
+}
+
+.locationsRoutingChip:focus-visible {
+  outline: 2px solid rgba(96, 165, 250, 0.9);
+  outline-offset: 2px;
+}
+
+.locationsRoutingChip strong,
+.locationsRoutingChip span,
+.locationsRoutingChip em {
+  display: block;
+}
+
+.locationsRoutingChip i {
+  width: 28px;
+  height: 28px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 999px;
+  background: rgba(77, 137, 255, 0.16);
+  color: #79a4ff;
+}
+
+.locationsRoutingChip--mapped i {
+  width: 26px;
+  height: 26px;
+  background: rgba(34, 197, 94, 0.18);
+  color: #8ef0b0;
+}
+
+.locationsRoutingChip i svg {
+  width: 16px;
+  height: 16px;
+}
+
+.locationsRoutingChip strong {
+  overflow: hidden;
+  font-size: 0.84rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.locationsRoutingChip span {
+  grid-column: 2 / -1;
+  margin-top: -4px;
+  color: #93a2be;
+  font-size: 0.7rem;
+}
+
+.locationsRoutingChip em {
+  min-width: 28px;
+  height: 28px;
+  display: inline-grid;
+  place-items: center;
+  color: #79a4ff;
+  font-size: 0.62rem;
+  font-style: normal;
+  font-weight: 900;
+  border-radius: 999px;
+  background: rgba(34, 197, 94, 0.18);
+  letter-spacing: 0;
+}
+
+.locationsRoutingChipRemove {
+  width: 28px;
+  height: 28px;
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #a8b8d0;
+  cursor: pointer;
+}
+
+.locationsRoutingChipRemove:hover,
+.locationsRoutingChipRemove:focus-visible {
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+  outline: none;
+}
+
+.locationsRoutingChipRemove svg {
+  width: 15px;
+  height: 15px;
+}
+
+.locationsRoutingDropHint {
+  display: grid;
+  place-items: center;
+  min-height: 62px;
+  border: 1px dashed rgba(74, 98, 138, 0.42);
+  border-radius: 12px;
+  color: #91a4c0;
+  font-size: 0.76rem;
+  font-weight: 850;
+  text-align: center;
+}
+
+.locationsRoutingDropHint svg {
+  width: 22px;
+  height: 22px;
+  color: #9db0ce;
+  transform: rotate(-90deg);
+}
+
+.locationsRoutingDropHint span,
+.locationsRoutingDropHint small {
+  display: block;
+}
+
+.locationsRoutingDropHint small {
+  margin-top: -10px;
+  color: #6f8fca;
+  font-size: 0.74rem;
+  font-weight: 750;
+}
+
+.locationsRoutingNoResults {
+  display: grid;
+  place-items: center;
+  min-height: 62px;
+  border: 1px dashed rgba(74, 98, 138, 0.42);
+  border-radius: 14px;
+  color: #93a2be;
+  font-size: 0.76rem;
+  font-weight: 850;
+  text-align: center;
+}
+
+.locationsRoutingNoResults[hidden] {
+  display: none;
+}
+
+.locationsRoutingFooter {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 10px;
+  border: 1px solid rgba(74, 98, 138, 0.34);
+  background: rgba(8, 17, 31, 0.42);
+  padding: 10px 14px;
+}
+
+.locationsRoutingFooter > span {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #9fb0cb;
+  font-size: 0.86rem;
+}
+
+.locationsRoutingFooter > span svg {
+  width: 18px;
+  height: 18px;
+  color: #79a4ff;
+}
+
+.locationsRoutingFooter > div {
+  display: inline-flex;
+  gap: 12px;
+}
+
+.locationsSecondaryButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  min-width: 112px;
+  border: 1px solid rgba(70, 91, 127, 0.56);
+  border-radius: 10px;
+  background: rgba(10, 20, 38, 0.78);
+  color: #dce7ff;
+  font: inherit;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.locationsRoutingList {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+  max-height: min(42vh, 420px);
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.locationsRoutingRow {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.7fr) minmax(220px, 0.9fr);
+  gap: 12px;
+  align-items: center;
+  border: 1px solid rgba(55, 78, 112, 0.36);
+  border-radius: 14px;
+  background: rgba(8, 17, 31, 0.48);
+  padding: 12px;
+}
+
+.locationsRoutingRow strong {
+  display: block;
+  color: #f4f7ff;
+  font-size: 0.92rem;
+}
+
+.locationsRoutingRow span {
+  display: block;
+  margin-top: 4px;
+  color: #93a2be;
+  font-size: 0.72rem;
+}
+
+.locationsRoutingRow em {
+  display: inline-flex;
+  margin-top: 7px;
+  border-radius: 999px;
+  background: rgba(77, 137, 255, 0.14);
+  color: #79a4ff;
+  padding: 4px 8px;
+  font-size: 0.64rem;
+  font-style: normal;
+  font-weight: 850;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.locationsRoutingRow select {
+  width: 100%;
+  min-height: 44px;
+  border: 1px solid #28415f;
+  border-radius: 12px;
+  background-color: rgba(10, 20, 38, 0.96);
+  color: #f2f6ff;
+  font: inherit;
+  font-weight: 800;
+  padding: 0 42px 0 14px;
+}
+
+.locationsRoutingEmpty {
+  border: 1px dashed rgba(74, 98, 138, 0.42);
+  border-radius: 14px;
+  color: #93a2be;
+  padding: 16px;
+  text-align: center;
+}
+
+.locationsModalGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.locationsNotice,
+.locationsToast {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: min(520px, calc(100vw - 32px));
+  border-radius: 18px;
+  padding: 14px 18px;
+  color: #f6f8ff;
+}
+
+.locationsNotice {
+  top: 20px;
+  border: 1px solid rgba(247, 111, 111, 0.5);
+  background: rgba(56, 18, 24, 0.94);
+}
+
+.locationsToast {
+  bottom: 24px;
+  justify-content: space-between;
+  border: 1px solid rgba(77, 137, 255, 0.42);
+  background: rgba(18, 29, 45, 0.96);
+}
+
+.locationsToast button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 34px;
+  border: 1px solid rgba(147, 162, 190, 0.32);
+  border-radius: 999px;
+  background: rgba(9, 17, 31, 0.58);
+  color: #dce7ff;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 800;
+  padding: 0 12px;
+  cursor: pointer;
+}
+
+.locationsToast button svg {
+  width: 14px;
+  height: 14px;
+}
+
+.locationsToast--error {
+  border-color: rgba(247, 111, 111, 0.46);
+}
+
+.locationsEmpty {
+  display: grid;
+  place-items: center;
+  min-height: 220px;
+  border: 1px dashed rgba(74, 98, 138, 0.42);
+  border-radius: 24px;
+  color: #93a2be;
+  text-align: center;
+  padding: 20px;
+}
+
+.locationsEmpty--compact {
+  min-height: 78px;
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 980px) {
+  .locationsShell {
+    padding: 20px;
+  }
+
+  .locationsHeader,
+  .locationsSiteHead,
+  .locationsDetailHead,
+  .locationsRoutingHead,
+  .locationsTaxHead,
+  .locationsSiteInfoHead {
+    flex-direction: column;
+  }
+
+  .locationsToolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .locationsHeaderActions {
+    width: 100%;
+    justify-content: stretch;
+  }
+
+  .locationsHeaderActions .locationsGhostButton,
+  .locationsHeaderActions .locationsPrimaryButton {
+    flex: 1 1 220px;
+  }
+
+  .locationsMetrics {
+    grid-template-columns: 1fr;
+  }
+
+  .locationsSwitch {
+    min-width: 0;
+  }
+
+  .locationsTaxGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .locationsSiteInfoGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .locationsSiteList {
+    grid-template-columns: 1fr;
+  }
+
+  .locationsBentoMetrics,
+  .locationsModalSummary,
+  .locationsModalToolbar,
+  .locationsRoutingSummary,
+  .locationsLocationRow,
+  .locationsRoutingRow {
+    grid-template-columns: 1fr;
+  }
+
+  .locationsModalToolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .locationsLocationStats,
+  .locationsRowActions {
+    justify-content: flex-start;
+  }
+
+  .locationsDetailGrid,
+  .locationsModalGrid,
+  .locationsTypeGroup {
+    grid-template-columns: 1fr;
+  }
+}

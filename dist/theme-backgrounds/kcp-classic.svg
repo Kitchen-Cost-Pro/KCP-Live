@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <linearGradient id="room" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#091425"/>
+      <stop offset=".55" stop-color="#10233c"/>
+      <stop offset="1" stop-color="#020617"/>
+    </linearGradient>
+    <radialGradient id="passLight" cx="36%" cy="18%" r="54%">
+      <stop offset="0" stop-color="#bfdbfe" stop-opacity=".48"/>
+      <stop offset=".42" stop-color="#60a5fa" stop-opacity=".16"/>
+      <stop offset="1" stop-color="#020617" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="soft" x="-10%" y="-10%" width="120%" height="120%">
+      <feGaussianBlur stdDeviation="10"/>
+    </filter>
+  </defs>
+  <rect width="1920" height="1080" fill="url(#room)"/>
+  <rect width="1920" height="1080" fill="url(#passLight)"/>
+  <rect x="0" y="0" width="1920" height="188" fill="#020617" opacity=".34"/>
+  <g opacity=".52">
+    <rect x="0" y="188" width="1920" height="16" fill="#e2e8f0" opacity=".22"/>
+    <rect x="120" y="238" width="360" height="178" rx="24" fill="#172554" opacity=".42"/>
+    <rect x="548" y="238" width="300" height="178" rx="24" fill="#0f766e" opacity=".26"/>
+    <rect x="940" y="238" width="412" height="178" rx="24" fill="#1d4ed8" opacity=".24"/>
+    <rect x="1430" y="238" width="286" height="178" rx="24" fill="#334155" opacity=".34"/>
+  </g>
+  <g opacity=".8">
+    <rect x="0" y="710" width="1920" height="280" fill="#020617" opacity=".44"/>
+    <path d="M0 730h1920" stroke="#e2e8f0" stroke-opacity=".25" stroke-width="5"/>
+    <rect x="120" y="760" width="390" height="118" rx="22" fill="#334155" opacity=".52"/>
+    <rect x="590" y="782" width="320" height="92" rx="18" fill="#475569" opacity=".42"/>
+    <rect x="1020" y="746" width="420" height="144" rx="24" fill="#1e293b" opacity=".76"/>
+  </g>
+  <g fill="none" stroke-linecap="round" filter="url(#soft)" opacity=".32">
+    <path d="M172 618C352 530 514 614 690 500s356-142 562-36 372 80 588-92" stroke="#93c5fd" stroke-width="28"/>
+    <path d="M238 664C482 590 636 662 842 584s312-124 492-28" stroke="#34d399" stroke-width="18"/>
+  </g>
+  <rect width="1920" height="1080" fill="none" stroke="#93c5fd" stroke-opacity=".08" stroke-width="22"/>
+</svg>

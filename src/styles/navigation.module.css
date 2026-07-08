@@ -1,0 +1,639 @@
+.sidebar {
+  grid-column: 1;
+  grid-row: 1 / -1;
+  width: 248px;
+  height: 100%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border-subtle);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--restaurant-theme-panel) 50%, var(--surface-primary)), color-mix(in srgb, var(--surface-primary) 24%, transparent));
+  color: var(--text-main);
+  box-shadow: var(--shadow-soft);
+  backdrop-filter: blur(16px);
+}
+
+.brand {
+  position: relative;
+  min-height: 84px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 18px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.logoMark {
+  width: 44px;
+  height: 44px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 14px;
+  background: var(--accent-blue);
+  color: #ffffff;
+  font-size: 0.78rem;
+  font-weight: 950;
+  letter-spacing: 0;
+  box-shadow: 0 18px 34px rgba(37, 99, 235, 0.24);
+}
+
+.logoMark img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  padding: 5px;
+  background: color-mix(in srgb, var(--surface-primary) 86%, transparent);
+}
+
+.logoMarkUploaded {
+  border-radius: 8px;
+  background: transparent;
+  box-shadow: none;
+}
+
+.logoMarkUploaded img {
+  padding: 0;
+  border-radius: 6px;
+  background: transparent;
+}
+
+.brandText {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.mobileMenuToggle {
+  width: 42px;
+  height: 42px;
+  margin-left: auto;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  padding: 0;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-main);
+  cursor: pointer;
+}
+
+.mobileMenuToggle svg {
+  width: 18px;
+  height: 18px;
+}
+
+.workspaceSwitcherTrigger {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--text-soft);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.68rem;
+  font-weight: 850;
+}
+
+.workspaceSwitcherTrigger svg {
+  width: 14px;
+  height: 14px;
+}
+
+.workspaceSwitcher {
+  position: absolute;
+  top: calc(100% + 10px);
+  left: 18px;
+  right: 18px;
+  z-index: 18;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(96, 165, 250, 0.18);
+  border-radius: 14px;
+  background: rgba(9, 16, 29, 0.98);
+  box-shadow:
+    0 18px 42px rgba(0, 0, 0, 0.36),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-6px);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.workspaceSwitcher[data-open="true"] {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.workspaceSearch input {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid rgba(96, 165, 250, 0.32);
+  border-radius: 10px;
+  padding: 0 11px;
+  background: rgba(8, 13, 24, 0.78);
+  color: var(--text-main);
+  font: inherit;
+  font-size: 0.74rem;
+  font-weight: 750;
+  outline: none;
+}
+
+.workspaceSearch input:focus {
+  border-color: rgba(147, 197, 253, 0.85);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.16);
+}
+
+.workspaceSwitcherList {
+  display: grid;
+  gap: 6px;
+  max-height: 270px;
+  overflow-y: auto;
+  padding-right: 3px;
+  scrollbar-color: rgba(148, 163, 184, 0.45) transparent;
+  scrollbar-width: thin;
+}
+
+.workspaceSwitcherList::-webkit-scrollbar {
+  width: 6px;
+}
+
+.workspaceSwitcherList::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.workspaceSwitcherList::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.36);
+}
+
+.workspaceOptionButton {
+  min-height: 68px;
+  display: grid;
+  align-content: center;
+  gap: 6px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 11px;
+  padding: 11px 12px 10px;
+  background: rgba(15, 23, 42, 0.54);
+  color: var(--text-main);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  transition: border-color 0.16s ease, background 0.16s ease, transform 0.16s ease;
+}
+
+.workspaceOptionButton:hover {
+  border-color: rgba(96, 165, 250, 0.36);
+  background: rgba(30, 41, 59, 0.64);
+}
+
+.workspaceOptionButton strong {
+  display: block;
+  min-width: 0;
+  color: var(--text-main);
+  font-size: 0.76rem;
+  font-weight: 900;
+  line-height: 1.22;
+  overflow-wrap: anywhere;
+}
+
+.workspaceOptionButton span {
+  display: block;
+  min-width: 0;
+  color: rgba(147, 197, 253, 0.68);
+  font-size: 0.62rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  line-height: 1.05;
+  text-transform: uppercase;
+}
+
+.workspaceOptionButtonActive {
+  border-color: rgba(59, 130, 246, 0.54);
+  background: rgba(37, 99, 235, 0.16);
+  box-shadow: inset 3px 0 0 rgba(96, 165, 250, 0.82);
+}
+
+.workspaceEmpty {
+  min-height: 64px;
+  display: grid;
+  place-items: center;
+  color: var(--text-soft);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.workspaceEmpty[hidden] {
+  display: none;
+}
+
+.autoLoginToggle {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  border-top: 1px solid rgba(148, 163, 184, 0.12);
+  margin: 2px -2px -2px;
+  padding: 10px 4px 2px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.autoLoginToggle input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.autoLoginTrack {
+  position: relative;
+  width: 34px;
+  height: 20px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 999px;
+  background: rgba(2, 6, 23, 0.86);
+  transition: border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
+}
+
+.autoLoginTrack::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.78);
+  transition: transform 0.18s ease, background 0.18s ease;
+}
+
+.autoLoginToggle:has(input:focus-visible) {
+  outline: 2px solid rgba(96, 165, 250, 0.75);
+  outline-offset: 2px;
+}
+
+.autoLoginToggle:has(input:checked) {
+  border-top-color: rgba(96, 165, 250, 0.2);
+  background: transparent;
+}
+
+.autoLoginToggle:has(input:checked) .autoLoginTrack {
+  border-color: rgba(96, 165, 250, 0.62);
+  background: rgba(37, 99, 235, 0.58);
+  box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.1);
+}
+
+.autoLoginToggle:has(input:checked) .autoLoginTrack::after {
+  transform: translateX(14px);
+  background: #dbeafe;
+}
+
+.autoLoginToggle strong,
+.autoLoginToggle small {
+  display: block;
+}
+
+.autoLoginToggle strong {
+  color: var(--text-main);
+  font-size: 0.68rem;
+  font-weight: 900;
+  line-height: 1.15;
+}
+
+.autoLoginToggle small {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 0.6rem;
+  font-weight: 750;
+  line-height: 1.3;
+}
+
+.brandText strong,
+.accountText strong {
+  overflow: hidden;
+  color: var(--text-main);
+  font-size: 0.86rem;
+  font-weight: 950;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.brandText span,
+.accountText span {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.navScroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 16px 12px;
+}
+
+.navGroup {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.navGroup p {
+  margin: 0;
+  padding: 0 8px;
+  color: var(--text-soft);
+  font-size: 0.66rem;
+  font-weight: 950;
+  text-transform: uppercase;
+}
+
+.navItems {
+  display: grid;
+  gap: 4px;
+}
+
+.navButton {
+  width: 100%;
+  min-width: 0;
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  border-radius: 14px;
+  padding: 0 11px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 850;
+  text-align: left;
+}
+
+.navButton:hover {
+  background: var(--surface-secondary);
+  color: var(--text-main);
+}
+
+.navButtonActive {
+  background: color-mix(in srgb, var(--accent-blue) 12%, transparent);
+  color: var(--accent-blue);
+  box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.12);
+}
+
+.navIcon {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+}
+
+.navIcon svg,
+.signOutButton svg {
+  width: 20px;
+  height: 20px;
+}
+
+.navLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.navBranch {
+  display: grid;
+  gap: 4px;
+}
+
+.navBranch .navButton {
+  padding-right: 8px;
+}
+
+.navChevron {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  display: grid;
+  place-items: center;
+  margin-left: auto;
+  transition: transform 160ms ease;
+}
+
+.navChevron svg {
+  width: 16px;
+  height: 16px;
+}
+
+.navBranch[data-open="true"] .navChevron {
+  transform: rotate(180deg);
+}
+
+.navChildren {
+  display: none;
+  gap: 4px;
+  padding-left: 18px;
+}
+
+.navBranch[data-open="true"] .navChildren {
+  display: grid;
+}
+
+.navChildButton {
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  padding: 0 10px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.73rem;
+  font-weight: 850;
+  text-align: left;
+}
+
+.navChildButton:hover {
+  border-color: var(--border-subtle);
+  background: var(--surface-secondary);
+  color: var(--text-main);
+}
+
+.navChildButtonActive {
+  border-color: rgba(37, 99, 235, 0.18);
+  background: color-mix(in srgb, var(--accent-blue) 10%, transparent);
+  color: var(--accent-blue);
+}
+
+.navChildDot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.55;
+}
+
+.accountPanel {
+  min-height: 76px;
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) 38px;
+  align-items: center;
+  gap: 10px;
+  padding: 14px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.avatar {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent-cyan) 14%, transparent);
+  color: var(--accent-cyan);
+  font-size: 0.78rem;
+  font-weight: 950;
+}
+
+.accountText {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.signOutButton {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--surface-primary);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.signOutButton:hover {
+  color: var(--accent-red);
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+}
+
+@media (max-width: 980px) {
+  .sidebar {
+    position: sticky;
+    top: 0;
+    z-index: 40;
+    width: 100%;
+    height: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .brand {
+    min-height: 0;
+    justify-content: flex-start;
+    padding: 14px 16px 12px;
+  }
+
+  .mobileMenuToggle {
+    display: inline-flex;
+  }
+
+  .brandText {
+    display: grid;
+    gap: 4px;
+  }
+
+  .workspaceSwitcherTrigger {
+    min-height: 30px;
+    font-size: 0.7rem;
+  }
+
+  .workspaceSwitcher {
+    left: 16px;
+    right: 16px;
+    top: calc(100% + 8px);
+  }
+
+  .navScroll {
+    max-height: 0;
+    overflow: hidden;
+    padding: 0 12px;
+    transition: max-height 180ms ease, padding 180ms ease;
+  }
+
+  .sidebar[data-mobile-nav-open="true"] .navScroll {
+    max-height: 62vh;
+    overflow-y: auto;
+    padding: 10px 12px 14px;
+  }
+
+  .navGroup p {
+    display: block;
+    padding: 0 6px;
+    font-size: 0.62rem;
+  }
+
+  .navItems {
+    display: grid;
+    gap: 6px;
+  }
+
+  .navButton {
+    min-height: 40px;
+    justify-content: flex-start;
+    gap: 8px;
+    padding: 0 12px;
+  }
+
+  .navLabel {
+    display: block;
+  }
+
+  .accountPanel {
+    display: none;
+  }
+
+  .sidebar[data-mobile-nav-open="true"] .accountPanel {
+    display: grid;
+  }
+}
+
+@media (max-width: 680px) {
+  .brand {
+    padding: 12px 14px 10px;
+  }
+
+  .workspaceSwitcher {
+    left: 14px;
+    right: 14px;
+  }
+
+  .navButton {
+    min-height: 38px;
+    padding: 0 10px;
+    font-size: 0.74rem;
+  }
+}
