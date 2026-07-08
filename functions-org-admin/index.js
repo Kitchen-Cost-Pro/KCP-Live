@@ -197,6 +197,10 @@ exports.listLinkedTransferProfiles = onCall({
   };
 });
 
+// DEPRECATED: the admin console now calls the cloudflare-v2 worker's
+// POST /api/admin/workspaces/:id/actions/send-low-stock-email route instead, which sends
+// via the new Gmail OAuth account rather than this old Gmail SMTP app-password path.
+// Left callable (not removed) in case anything else still references it; do not add new callers.
 exports.sendLowStockSummaryNow = onCall({
   region: REGION,
   timeoutSeconds: 120,

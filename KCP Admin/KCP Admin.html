@@ -1829,8 +1829,19 @@ function getWorkspaceIntegrationDomIds(wsId) {
     const safeWsId = String(wsId || '').replace(/[^a-z0-9_-]/gi, '_');
     return {
         secretKey: `integration-secret-key-${safeWsId}`,
-        personalToken: `integration-personal-token-${safeWsId}`
+        personalToken: `integration-personal-token-${safeWsId}`,
+        salesSyncStart: `integration-sales-sync-start-${safeWsId}`,
+        salesSyncEnd: `integration-sales-sync-end-${safeWsId}`
     };
+}
+
+const YOCO_SALES_SYNC_MAX_DAYS = 14;
+
+function defaultYocoSalesSyncRange() {
+    const end = new Date();
+    const start = new Date(end.getTime() - (YOCO_SALES_SYNC_MAX_DAYS - 1) * 24 * 60 * 60 * 1000);
+    const toDateInput = (d) => d.toISOString().slice(0, 10);
+    return { start: toDateInput(start), end: toDateInput(end) };
 }
 
 function getIntegrationQueueRows() {
@@ -2021,6 +2032,16 @@ function renderWorkspaceIntegrationPanel(wsId, options = {}) {
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <button onclick="syncYocoCatalogueFromAdmin(${adminInlineString(wsId)})" class="btn-ghost w-full text-blue-400"><i class="fa-solid fa-boxes-stacked mr-2"></i>Sync Products & Locations</button>
                     <button onclick="syncYocoSalesFromAdmin(${adminInlineString(wsId)})" class="btn-ghost w-full text-blue-400"><i class="fa-solid fa-receipt mr-2"></i>Sync Sales</button>
+                </div>
+                <div class="grid grid-cols-2 gap-2">
+                    <div>
+                        <label class="block text-[8px] font-black text-slate-500 uppercase tracking-widest mb-1">Sync From</label>
+                        <input type="date" id="${ids.salesSyncStart}" value="${defaultYocoSalesSyncRange().start}" max="${defaultYocoSalesSyncRange().end}" class="w-full text-xs">
+                    </div>
+                    <div>
+                        <label class="block text-[8px] font-black text-slate-500 uppercase tracking-widest mb-1">Sync To</label>
+                        <input type="date" id="${ids.salesSyncEnd}" value="${defaultYocoSalesSyncRange().end}" max="${defaultYocoSalesSyncRange().end}" class="w-full text-xs">
+                    </div>
                 </div>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <button onclick="sendLowStockSummaryFromAdmin(${adminInlineString(wsId)})" class="btn-ghost w-full text-emerald-300"><i class="fa-solid fa-envelope-circle-check mr-2"></i>Send Low Stock Email</button>
@@ -2276,6 +2297,14 @@ function renderWorkspaceVisualIntegrationSections(wsId) {
                     <button onclick="connectYocoIntegrationFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn bg-blue-600/90 !text-white border-blue-400/30"><i class="fa-solid fa-plug-circle-bolt mr-2"></i>Connect / Restart</button>
                     <button onclick="syncYocoCatalogueFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn"><i class="fa-solid fa-boxes-stacked mr-2"></i>Sync Products & Locations</button>
                     <button onclick="syncYocoSalesFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn"><i class="fa-solid fa-chart-simple mr-2"></i>Sync Sales</button>
+                    <div>
+                        <label class="block text-[9px] font-black text-slate-500 uppercase tracking-widest mb-1">Sync From</label>
+                        <input type="date" id="${ids.salesSyncStart}" value="${defaultYocoSalesSyncRange().start}" max="${defaultYocoSalesSyncRange().end}" class="w-full text-sm">
+                    </div>
+                    <div>
+                        <label class="block text-[9px] font-black text-slate-500 uppercase tracking-widest mb-1">Sync To</label>
+                        <input type="date" id="${ids.salesSyncEnd}" value="${defaultYocoSalesSyncRange().end}" max="${defaultYocoSalesSyncRange().end}" class="w-full text-sm">
+                    </div>
                     <button onclick="sendLowStockSummaryFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn !text-emerald-300 border-emerald-500/30"><i class="fa-solid fa-envelope-circle-check mr-2"></i>Send Low Stock Email</button>
                     <button onclick="syncYocoFullFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn"><i class="fa-solid fa-arrows-rotate mr-2"></i>Restart Sync</button>
                     <button onclick="forceRetryIntegrationWorkspace(${adminInlineString(wsId)})" class="workspace-action-btn"><i class="fa-solid fa-rotate mr-2"></i>Force Retry Queue</button>
@@ -2548,9 +2577,23 @@ async function syncYocoCatalogueFromAdmin(wsId = '') {
 }
 
 async function syncYocoSalesFromAdmin(wsId = '') {
+    const targetWsId = wsId || getIntegrationSelectedWorkspaceId();
+    const ids = getWorkspaceIntegrationDomIds(targetWsId);
+    const rawStart = document.getElementById(ids.salesSyncStart)?.value || '';
+    const rawEnd = document.getElementById(ids.salesSyncEnd)?.value || '';
+    let startDate = '';
+    let endDate = '';
+    if (rawStart && rawEnd) {
+        const end = new Date(`${rawEnd}T23:59:59.999Z`);
+        const earliestAllowed = new Date(end.getTime() - (YOCO_SALES_SYNC_MAX_DAYS - 1) * 24 * 60 * 60 * 1000);
+        const requestedStart = new Date(`${rawStart}T00:00:00.000Z`);
+        const clampedStart = requestedStart < earliestAllowed ? earliestAllowed : requestedStart;
+        startDate = clampedStart.toISOString();
+        endDate = end.toISOString();
+    }
     try {
         const result = await runAdminYocoAction(wsId, 'Syncing Yoco Sales...', async (workspaceId) => {
-            return callKcpCallable('syncYocoSales', { workspaceId });
+            return callKcpCallable('syncYocoSales', { workspaceId, startDate, endDate });
         });
         showToast(`Sales sync complete. ${result?.ordersProcessed || 0} orders and ${result?.refundsProcessed || 0} refunds processed.`, 'success');
     } catch (e) { }
@@ -2561,9 +2604,11 @@ async function sendLowStockSummaryFromAdmin(wsId = '') {
     if (!targetWsId) return showToast('Select a workspace first', 'error');
     showSync('Sending Low Stock Email...', `${getWorkspaceSiteName(targetWsId)} low-stock report is being sent...`);
     try {
-        const result = await callKcpCallable('sendLowStockSummaryNow', {
-            workspaceId: targetWsId,
-            workspaceName: getWorkspaceSiteName(targetWsId)
+        // Routed through the cloudflare-v2 worker so the email is sent via the new Gmail
+        // OAuth account (the same one used for forgot-password / new-workspace emails),
+        // not the legacy Firebase Gmail SMTP app-password path.
+        const result = await adminWorkerFetch(`/api/admin/workspaces/${encodeURIComponent(targetWsId)}/actions/send-low-stock-email`, {
+            method: 'POST'
         });
         await refreshAdminWorkspaceRecord(targetWsId);
         hideSync();

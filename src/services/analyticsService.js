@@ -1,5 +1,6 @@
 import { calculateDashboardMetrics, getDashboardSourceOnce, getTradeDateKey, getStockValuationUnitCost, getIngredientUnitCost } from './database.js';
 import { callCloudflareWorkspaceRoute } from './cloudflareApi.js';
+import { isWastageAdjustment as isWastageAdjustmentLog } from './wastageClassifier.js';
 import { DEFAULT_STOCK_LOCATION_ID, DEFAULT_STOCK_LOCATION_NAME, normalizeStockLocations } from './locationModel.js';
 import { getLocationStock, resolveBalanceKey, sumBalances, normalizeLocationKey } from '../utils/stockBalances.js';
 
@@ -1864,15 +1865,6 @@ function opsDashboardResolvedLocationId(line = {}, log = {}, context = {}) {
   const id = lineLocationId(line, log);
   if (id && !isAggregateLocationId(id)) return id;
   return context.defaultLocationId || DEFAULT_STOCK_LOCATION_ID;
-}
-
-function isWastageAdjustmentLog(log = {}) {
-  const mode = String(log.mode || '').toLowerCase();
-  const note = String(log.note || log.reason || '').toLowerCase();
-  // Wastage is its own adjustment_type ('wastage') on the backend, or carries an
-  // explicit wasteReason. A plain 'remove' is a MANUAL adjustment (stock correction),
-  // NOT wastage — classifying it as wastage previously emptied the Manual Adjustments metric.
-  return mode === 'wastage' || Boolean(log.wasteReason) || note.includes('waste') || note.includes('wastage');
 }
 
 function buildSyncLogRows(source, context) {

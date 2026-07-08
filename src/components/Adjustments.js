@@ -2,6 +2,7 @@ import '../styles/adjustments.css';
 import '../styles/fieldHelp.css';
 import { bindFieldHelpTooltips, renderFieldHelpLabel } from './fieldHelp.js';
 import { renderLoadingPanel } from './LoadingPanel.js';
+import { isWastageAdjustment } from '../services/wastageClassifier.js';
 
 const WASTE_REASONS = ['Damaged', 'Expired', 'Burnt', 'Prep Error', 'Spillage', 'Theft/Loss', 'Other'];
 const ADJUSTMENT_PAGE_SIZE = 25;
@@ -862,10 +863,7 @@ function renderWastageTab(adjustments, filters, onAdjustmentFilterChange, onAdju
 
 function renderWastageLog(adjustments) {
   const allAdj = adjustments.adjustments || [];
-  const wastageLines = allAdj.filter((log) => {
-    const mode = String(log.mode || '').toLowerCase();
-    return mode === 'wastage' || (mode === 'remove' && log.wasteReason);
-  });
+  const wastageLines = allAdj.filter((log) => isWastageAdjustment(log));
   if (!wastageLines.length) return '';
 
   // Group by adjustmentId so one record = one wastage event

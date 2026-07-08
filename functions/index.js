@@ -636,6 +636,11 @@ exports.refreshDashboardSummaries = onSchedule({
   });
 });
 
+// DEPRECATED: superseded by the cloudflare-v2 worker's `sendDueLowStockEmailSummaries`
+// cron trigger, which sends via the new Gmail OAuth account (the same one used for
+// forgot-password / new-workspace emails) instead of this old Gmail SMTP app-password
+// path. Left in place (short-circuited) rather than deleted until the new path has run
+// a full send cycle in production. Remove entirely once confirmed.
 exports.sendLowStockSummaryEmails = onSchedule({
   region: YOCO_FUNCTION_REGION,
   schedule: 'every 15 minutes',
@@ -648,6 +653,9 @@ exports.sendLowStockSummaryEmails = onSchedule({
     emailFromSecret
   ]
 }, async () => {
+  console.log('sendLowStockSummaryEmails is deprecated and disabled — low-stock emails now send via the cloudflare-v2 worker.');
+  return null;
+  // eslint-disable-next-line no-unreachable
   const transporter = createGmailTransporter();
   const now = new Date();
   const workspacesSnapshot = await rtdb.ref('workspaces').get();
@@ -870,7 +878,10 @@ exports.syncYocoSales = onCall({ region: YOCO_FUNCTION_REGION, secrets: [yocoEnc
   const { workspaceId, dataPath } = await requireWorkspaceAccess(admin, request.data?.workspaceId, request.auth);
   const secrets = await getYocoSecrets(db, workspaceId, yocoEncryptionSecret.value());
   try {
-    return await syncYocoSalesData(admin, dataPath, secrets.apiKey);
+    return await syncYocoSalesData(admin, dataPath, secrets.apiKey, {
+      startDate: request.data?.startDate,
+      endDate: request.data?.endDate
+    });
   } catch (error) {
     await rtdb.ref(`${dataPath}/integrations/yoco`).update({
       status: 'connected',

@@ -680,10 +680,13 @@ function getStockValuationUnitCost(item = {}) {
   return Number(item.lastPurchasePrice ?? item.cost ?? item.costExVat ?? item.unitCost ?? 0) || 0;
 }
 
+// Kept in sync by hand with src/services/wastageClassifier.js (Cloud Functions can't
+// import from src/). Wastage = adjustment_type 'wastage' or an explicit wasteReason/waste
+// note. A plain 'remove' with no wasteReason is a manual stock correction, not wastage.
 function isWastageAdjustment(log = {}) {
-  const mode = String(log.mode || log.type || '').toLowerCase();
-  const wasteReason = String(log.wasteReason || log.reason || '').trim();
-  return mode.includes('waste') || mode.includes('remove') || Boolean(wasteReason);
+  const mode = String(log.mode || '').toLowerCase();
+  const note = String(log.note || log.reason || '').toLowerCase();
+  return mode === 'wastage' || Boolean(log.wasteReason) || note.includes('waste') || note.includes('wastage');
 }
 
 function metricValue(raw, type, ratio = null) {

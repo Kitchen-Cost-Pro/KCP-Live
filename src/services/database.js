@@ -1,5 +1,6 @@
 import { callCloudflareWorkspaceRoute } from './cloudflareApi.js';
 import { normalizeSites, normalizeStockLocations } from './locationModel.js';
+import { isWastageAdjustment } from './wastageClassifier.js';
 
 const DASHBOARD_LOG_LIMIT = 2000;
 const DASHBOARD_ENTITY_LIMIT = 200;
@@ -679,14 +680,6 @@ function findEarliestSnapshotAfter(logs, dateKey) {
   return toArray(logs)
     .filter((snapshot) => String(snapshot?.date || '') > String(dateKey))
     .sort((left, right) => String(left.date || '').localeCompare(String(right.date || '')))[0] || null;
-}
-
-function isWastageAdjustment(log) {
-  const mode = String(log?.mode || '').toLowerCase();
-  const note = String(log?.note || log?.reason || '').toLowerCase();
-  // Wastage = adjustment_type 'wastage' or an explicit wasteReason. A plain 'remove'
-  // is a manual stock correction, not wastage (keep it in Manual Adjustments).
-  return mode === 'wastage' || Boolean(log?.wasteReason) || note.includes('waste') || note.includes('wastage');
 }
 
 function getLogDate(log, tradingDay = getTradingDayConfig()) {

@@ -11321,6 +11321,15 @@ async function saveAppearanceSettingsDraft() {
   await saveSettingsDraft({ closeAppearanceModal: true });
 }
 
+async function goLiveStockDepletion() {
+  const draft = appState.settings.draft || createDefaultSettingsDraft();
+  const nextDraft = { ...draft, stockDepletionEnabled: true };
+  await saveSettingsDraft({
+    draft: nextDraft,
+    successMessage: 'You are live. Completed Yoco sales will now deplete stock.'
+  });
+}
+
 async function exportSettingsSnapshot() {
   appState.settings = {
     ...appState.settings,
@@ -18050,6 +18059,7 @@ function renderApp() {
       onBackgroundClear: clearRestaurantBackground,
       onSave: saveSettingsDraft,
       onSaveAppearance: saveAppearanceSettingsDraft,
+      onGoLive: goLiveStockDepletion,
       onExportSnapshot: exportSettingsSnapshot,
       onImportSnapshot: importSettingsSnapshot,
       onRequestResetTotals: requestResetStockTotals,

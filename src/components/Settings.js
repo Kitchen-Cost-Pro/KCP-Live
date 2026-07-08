@@ -125,6 +125,7 @@ export function renderSettings({ state, onSettingsAction = {} } = {}) {
             </div>
           </section>
 
+          ${renderGoLivePanel(draft, state)}
           ${renderCompanyTaxPanel(draft)}
           ${renderProfileLinkingPanel(draft)}
 
@@ -183,6 +184,49 @@ export function renderSettings({ state, onSettingsAction = {} } = {}) {
 
   bindSettingsEvents(view, onSettingsAction, draft, settingsState);
   return view;
+}
+
+function renderGoLivePanel(draft = {}, state = {}) {
+  if (draft.stockDepletionEnabled) {
+    return `
+      <section class="settingsPanel settingsPanel--goLive">
+        <div class="settingsPanelHead">
+          <span>${icon('check')}</span>
+          <div>
+            <p>Yoco Integration</p>
+            <h2>Live</h2>
+          </div>
+        </div>
+        <p class="settingsFieldHint">Completed Yoco sales are depleting stock.</p>
+      </section>
+    `;
+  }
+
+  const source = state.source || {};
+  const checklist = [
+    { label: 'Products', ready: Object.keys(source.products || {}).length > 0 },
+    { label: 'Recipes', ready: Object.keys(source.recipes || {}).length > 0 || (Array.isArray(source.recipes) && source.recipes.length > 0) },
+    { label: 'Locations', ready: (source.locations || []).length > 0 }
+  ];
+
+  return `
+    <section class="settingsPanel settingsPanel--goLive">
+      <div class="settingsPanelHead">
+        <span>${icon('rocket')}</span>
+        <div>
+          <p>Yoco Integration</p>
+          <h2>Go Live</h2>
+        </div>
+      </div>
+      <p class="settingsFieldHint">Once live, completed Yoco sales will start depleting stock automatically.</p>
+      <ul class="settingsGoLiveChecklist">
+        ${checklist.map((item) => `<li class="${item.ready ? 'is-ready' : ''}">${item.ready ? '✓' : '•'} ${escapeHtml(item.label)}</li>`).join('')}
+      </ul>
+      <div class="settingsActions">
+        <button type="button" class="settingsPrimaryButton" data-settings-go-live>Go Live</button>
+      </div>
+    </section>
+  `;
 }
 
 function renderCompanyTaxPanel(draft = {}) {
@@ -859,6 +903,10 @@ function bindSettingsEvents(view, onSettingsAction, draft = {}, settingsState = 
   view.querySelectorAll('[data-settings-save-appearance]').forEach((button) => {
     button.addEventListener('click', () => onSettingsAction.onSaveAppearance?.());
   });
+  view.querySelector('[data-settings-go-live]')?.addEventListener('click', () => {
+    const confirmed = window.confirm('Once live, completed Yoco sales will start depleting stock. Continue?');
+    if (confirmed) onSettingsAction.onGoLive?.();
+  });
   view.querySelector('[data-settings-export]')?.addEventListener('click', () => onSettingsAction.onExportSnapshot?.());
   view.querySelector('[data-settings-reset-reporting]')?.addEventListener('click', () => onSettingsAction.onRequestResetTotals?.('reporting'));
   view.querySelector('[data-settings-reset-reporting-stock]')?.addEventListener('click', () => onSettingsAction.onRequestResetTotals?.('reporting_stock'));
@@ -996,6 +1044,7 @@ function createDefaultSettings(state = {}) {
     orgId: '',
     corpId: '',
     viewingOnly: false,
+    stockDepletionEnabled: false,
     yocoCategoryMap: {},
     stockCategoryRoutingMap: {},
     yocoStoreLocationsAsStockLocations: false,

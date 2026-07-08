@@ -396,9 +396,10 @@
   overflow: hidden;
 }
 
-/* Declutter: hide the ⓘ info-dots everywhere except beside the report title */
+/* Declutter: hide the ⓘ info-dots everywhere except beside the report title and table column headers */
 .analyticsDetailCanvas.analyticsDetail--modern .analyticsForecastInfo { display: none; }
-.analyticsDetailCanvas.analyticsDetail--modern .analyticsReportTitle .analyticsForecastInfo {
+.analyticsDetailCanvas.analyticsDetail--modern .analyticsReportTitle .analyticsForecastInfo,
+.analyticsDetailCanvas.analyticsDetail--modern th .analyticsForecastInfo {
   display: inline-flex;
   color: var(--rep-text-soft);
 }

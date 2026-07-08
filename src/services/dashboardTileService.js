@@ -1,4 +1,5 @@
 import { callCloudflareWorkspaceRoute } from './cloudflareApi.js';
+import { isWastageAdjustment } from './wastageClassifier.js';
 
 const tileKeys = [
   'settings',
@@ -207,18 +208,14 @@ function summarizeMovements(movements = []) {
     const type = String(movement.movement_type || movement.movementType || '').toLowerCase();
     const value = Number(movement.value_delta ?? movement.valueDelta ?? 0) || 0;
     const metadata = parseJsonObject(movement.metadata_json || movement.metadataJson || movement.metadata);
-    const isWastageAdjustment = type.includes('adjust') && (
-      Number(movement.quantity_delta ?? movement.quantityDelta ?? 0) < 0 ||
-      String(metadata.mode || '').toLowerCase() === 'remove' ||
-      Boolean(String(metadata.wasteReason || '').trim())
-    );
+    const isAdjustmentWastage = type.includes('adjust') && isWastageAdjustment(metadata);
     if (type.includes('grv') || type.includes('goods')) totals.grv += value;
     else if (type.includes('credit')) totals.creditNote += value;
     else if (type.includes('sale')) totals.sale += value;
     else if (type.includes('stock_take') || type.includes('stocktake')) totals.stockTake += value;
     else if (type.includes('waste')) totals.wastage += value;
     else if (type.includes('manufact')) totals.manufacturingWastage += value;
-    else if (isWastageAdjustment) totals.wastage += value;
+    else if (isAdjustmentWastage) totals.wastage += value;
     else if (type.includes('adjust')) totals.adjustment += value;
   });
 

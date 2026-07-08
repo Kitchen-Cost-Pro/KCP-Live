@@ -15,7 +15,21 @@ const DEFAULT_SITE_ID = 'site_main';
 const DEFAULT_STOCK_LOCATION_ID = 'main';
 const DEFAULT_STOCK_LOCATION_NAME = 'Main Store';
 
-async function syncYocoSalesData(admin, dataPath, apiKey) {
+const MAX_MANUAL_SYNC_RANGE_MS = 14 * 24 * 60 * 60 * 1000;
+
+function resolveManualSyncBounds(now, options = {}) {
+  const requestedEnd = Date.parse(options.endDate);
+  const end = Number.isFinite(requestedEnd) ? new Date(Math.min(requestedEnd, Date.parse(now))) : new Date(now);
+  const requestedStart = Date.parse(options.startDate);
+  const earliestAllowedStart = end.getTime() - MAX_MANUAL_SYNC_RANGE_MS;
+  // Hard cap the manual sync window to 14 days server-side regardless of what the client sends.
+  const start = Number.isFinite(requestedStart)
+    ? new Date(Math.max(requestedStart, earliestAllowedStart))
+    : new Date(earliestAllowedStart);
+  return { startDate: start.toISOString(), endDate: end.toISOString() };
+}
+
+async function syncYocoSalesData(admin, dataPath, apiKey, options = {}) {
   const now = serverTimestampIso();
   await admin.database().ref(`${dataPath}/integrations/yoco`).update({
     status: 'connected',
@@ -25,10 +39,12 @@ async function syncYocoSalesData(admin, dataPath, apiKey) {
     lastError: ''
   });
 
-  const lowerBound = await resolveLastKnownYocoSaleDate(admin, dataPath);
+  const manualRange = (options.startDate || options.endDate) ? resolveManualSyncBounds(now, options) : null;
+  const lowerBound = manualRange ? manualRange.startDate : await resolveLastKnownYocoSaleDate(admin, dataPath);
+  const upperBound = manualRange ? manualRange.endDate : now;
   const params = {
     status: ['completed'],
-    updated_at__lte: now
+    updated_at__lte: upperBound
   };
   if (lowerBound) params.updated_at__gte = lowerBound;
 
@@ -36,8 +52,8 @@ async function syncYocoSalesData(admin, dataPath, apiKey) {
   const refunds = await listRefunds(apiKey, lowerBound ? {
     status: ['approved'],
     updated_at__gte: lowerBound,
-    updated_at__lte: now
-  } : { status: ['approved'], updated_at__lte: now });
+    updated_at__lte: upperBound
+  } : { status: ['approved'], updated_at__lte: upperBound });
 
   const summary = {
     ordersProcessed: 0,
@@ -77,14 +93,22 @@ async function syncYocoSalesData(admin, dataPath, apiKey) {
     }
   }
 
+  const cursorUpdate = manualRange
+    // A manual date-range sync re-scans a past window; don't move the auto-sync cursor
+    // backward or it would cause future automatic syncs to re-scan the same range.
+    ? {}
+    : {
+      lastSuccessfulOrderUpdatedAt: maxIso(orders.map((order) => order.updated_at || order.closed_at || order.created_at)) || lowerBound || now,
+      lastSuccessfulRefundUpdatedAt: maxIso(refunds.map((refund) => refund.updated_at || refund.processed_at || refund.created_at)) || lowerBound || now
+    };
+
   await admin.database().ref(`${dataPath}/integrations/yoco`).update({
     status: 'connected',
     connectionActive: true,
     syncState: 'idle',
     health: summary.errors.length ? 'attention' : 'healthy',
     lastSyncCompletedAt: serverTimestampIso(),
-    lastSuccessfulOrderUpdatedAt: maxIso(orders.map((order) => order.updated_at || order.closed_at || order.created_at)) || lowerBound || now,
-    lastSuccessfulRefundUpdatedAt: maxIso(refunds.map((refund) => refund.updated_at || refund.processed_at || refund.created_at)) || lowerBound || now,
+    ...cursorUpdate,
     lastError: summary.errors[0] || ''
   });
 
@@ -175,6 +199,8 @@ async function processYocoOrder(admin, dataPath, order = {}, options = {}) {
         : String(firstApprovedPayment(order)?.id || '').trim();
       const rawSignature = `yoco:${mode}:${orderId}:${paymentOrRefundId}:${lineId}:${sellingLocation.id}:${quantity}`;
       const signatureHash = hashSignature(rawSignature);
+      // This dedupe check runs unconditionally regardless of sync mode (auto-cursor or a
+      // manual date-range re-sync), so re-syncing an overlapping window never double-deducts stock.
       if (yocoProcessed[signatureHash] || newSignatures[signatureHash]) {
         skippedDuplicates += 1;
         return;
@@ -222,6 +248,15 @@ async function processYocoOrder(admin, dataPath, order = {}, options = {}) {
           sourceLocationId: '',
           routingLabel: reportingRoutingLabel
         }));
+        newSignatures[signatureHash] = buildSignatureMeta(rawSignature, now);
+        return;
+      }
+
+      // Workspace hasn't clicked "Go Live" in Business Settings yet — record the sale for
+      // reporting but skip depleting stock until onboarding is confirmed complete. Run
+      // functions/scripts/backfillStockDepletionEnabled.js BEFORE this deploys so existing
+      // live workspaces (which have no stockDepletionEnabled value yet) aren't gated off.
+      if (settings.stockDepletionEnabled !== true) {
         newSignatures[signatureHash] = buildSignatureMeta(rawSignature, now);
         return;
       }
