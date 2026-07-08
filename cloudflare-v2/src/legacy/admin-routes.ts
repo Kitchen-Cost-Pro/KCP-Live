@@ -495,7 +495,7 @@ export async function writeAdminAuditEvent(
   return normalizeAdminAuditRow(row);
 }
 
-function adminAuditActor(adminSession: Awaited<ReturnType<typeof requireAdmin>>) {
+export function adminAuditActor(adminSession: Awaited<ReturnType<typeof requireAdmin>>) {
   return {
     uid: text(adminSession.auth?.uid || adminSession.admin?.id || ''),
     email: text(adminSession.admin?.email || adminSession.auth?.email || '')
@@ -1697,7 +1697,22 @@ export async function postAdminUnlinkOrgSite(request: Request, env: Env, siteId:
   return json(request, env, { ok: true, siteId, linkType });
 }
 
-export async function getAdminOrgSites(request: Request, env: Env) {
+export interface AdminOrgFields {
+  orgId?: string;
+  corpId?: string;
+  permissionLevel?: string;
+  groupMetadata?: unknown;
+  linkedSites?: unknown;
+}
+
+// `orgProvider` supplies the per-workspace org fields from each workspace's DO settings (the source
+// of truth). The front Worker passes it (fanning out to the DOs); without it we fall back to the
+// central workspace_settings copy, which is usually empty — hence the "org manager shows no data" bug.
+export async function getAdminOrgSites(
+  request: Request,
+  env: Env,
+  orgProvider?: (workspaceIds: string[]) => Promise<Record<string, AdminOrgFields>>
+) {
   await requireAdmin(request, env);
   const rows = await env.DB.prepare(
     `SELECT w.id, w.name, ws.raw_json
@@ -1706,16 +1721,20 @@ export async function getAdminOrgSites(request: Request, env: Env) {
       ORDER BY lower(w.name) ASC`
   ).all<{ id: string; name: string; raw_json: string }>();
 
+  const workspaceIds = (rows.results || []).map((row) => row.id);
+  const orgFields = orgProvider ? await orgProvider(workspaceIds).catch(() => ({} as Record<string, AdminOrgFields>)) : {};
+
   const sites = (rows.results || []).map((row) => {
     const settings = safeJsonParse<Record<string, any>>(row.raw_json, {});
+    const org = orgFields[row.id] || {};
     return {
       id: row.id,
       name: text(settings.siteName || settings.businessName || row.name || row.id),
-      orgId: text(settings.orgId || settings.org_id),
-      corpId: text(settings.corpId || settings.corp_id),
-      permissionLevel: text(settings.permissionLevel),
-      groupMetadata: settings.groupMetadata || null,
-      linkedSites: settings.linkedSites || {}
+      orgId: text(org.orgId ?? settings.orgId ?? settings.org_id),
+      corpId: text(org.corpId ?? settings.corpId ?? settings.corp_id),
+      permissionLevel: text(org.permissionLevel ?? settings.permissionLevel),
+      groupMetadata: org.groupMetadata ?? settings.groupMetadata ?? null,
+      linkedSites: org.linkedSites ?? settings.linkedSites ?? {}
     };
   });
 
@@ -1796,6 +1815,11 @@ export async function postAdminWorkspaceEmailQueue(request: Request, env: Env, w
 
 export async function getAdminYocoStatus(request: Request, env: Env, workspaceId: string) {
   await requireAdmin(request, env);
+  return json(request, env, await buildAdminYocoStatus(env, workspaceId));
+}
+
+// Reusable status payload (no auth, no Response) so it can run in the tenant DO too.
+export async function buildAdminYocoStatus(env: Env, workspaceId: string) {
   const [connection, catalogue, modifierCatalogue, locations] = await Promise.all([
     getYocoConnection(env, workspaceId),
     env.DB.prepare(
@@ -1816,7 +1840,7 @@ export async function getAdminYocoStatus(request: Request, env: Env, workspaceId
     ).bind(workspaceId).first<{ count: number }>()
   ]);
   const status = text(connection?.status || 'disconnected').toLowerCase();
-  return json(request, env, {
+  return {
     ok: true,
     status,
     connectionActive: connection?.connection_active === 1 || status === 'connected',
@@ -1839,7 +1863,7 @@ export async function getAdminYocoStatus(request: Request, env: Env, workspaceId
       productModifiersCount: Number(modifierCatalogue?.productModifiersCount || 0)
     },
     locations: { count: Number(locations?.count || 0) }
-  });
+  };
 }
 
 export async function postAdminYocoConnect(request: Request, env: Env, workspaceId: string) {

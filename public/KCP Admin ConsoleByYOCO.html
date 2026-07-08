@@ -2036,6 +2036,7 @@ function renderWorkspaceIntegrationPanel(wsId, options = {}) {
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <button onclick="syncYocoCatalogueFromAdmin(${adminInlineString(wsId)})" class="btn-ghost w-full text-blue-400"><i class="fa-solid fa-boxes-stacked mr-2"></i>Sync Products & Locations</button>
                     <button onclick="syncYocoSalesFromAdmin(${adminInlineString(wsId)})" class="btn-ghost w-full text-blue-400"><i class="fa-solid fa-receipt mr-2"></i>Sync Sales</button>
+                    <button onclick="syncYocoSalesLast14DaysFromAdmin(${adminInlineString(wsId)})" class="btn-ghost w-full text-blue-400"><i class="fa-solid fa-calendar-week mr-2"></i>Sales Sync 2 Weeks</button>
                 </div>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <button onclick="sendLowStockSummaryFromAdmin(${adminInlineString(wsId)})" class="btn-ghost w-full text-emerald-300"><i class="fa-solid fa-envelope-circle-check mr-2"></i>Send Low Stock Email</button>
@@ -2284,6 +2285,7 @@ function renderWorkspaceVisualIntegrationSections(wsId) {
                     <button onclick="connectYocoIntegrationFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn bg-blue-600/90 !text-white border-blue-400/30"><i class="fa-solid fa-plug-circle-bolt mr-2"></i>Connect / Restart</button>
                     <button onclick="syncYocoCatalogueFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn"><i class="fa-solid fa-boxes-stacked mr-2"></i>Sync Products & Locations</button>
                     <button onclick="syncYocoSalesFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn"><i class="fa-solid fa-chart-simple mr-2"></i>Sync Sales</button>
+                    <button onclick="syncYocoSalesLast14DaysFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn"><i class="fa-solid fa-calendar-week mr-2"></i>Sales Sync 2 Weeks</button>
                     <button onclick="sendLowStockSummaryFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn !text-emerald-300 border-emerald-500/30"><i class="fa-solid fa-envelope-circle-check mr-2"></i>Send Low Stock Email</button>
                     <button onclick="syncYocoFullFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn"><i class="fa-solid fa-arrows-rotate mr-2"></i>Restart Sync</button>
                     <button onclick="forceRetryIntegrationWorkspace(${adminInlineString(wsId)})" class="workspace-action-btn"><i class="fa-solid fa-rotate mr-2"></i>Force Retry Queue</button>
@@ -2541,6 +2543,15 @@ async function syncYocoSalesFromAdmin(wsId = '') {
             return callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(workspaceId)}/yoco/sync-sales`);
         });
         showToast(`Sales sync complete. ${result?.ordersProcessed || 0} orders and ${result?.refundsProcessed || 0} refunds processed.`, 'success');
+    } catch (e) { }
+}
+
+async function syncYocoSalesLast14DaysFromAdmin(wsId = '') {
+    try {
+        const result = await runAdminYocoAction(wsId, 'Syncing last 14 days of sales...', async (workspaceId) => {
+            return callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(workspaceId)}/yoco/sync-sales`, { sinceDays: 14 });
+        });
+        showToast(`2-week sales sync complete. ${result?.ordersProcessed || 0} orders and ${result?.refundsProcessed || 0} refunds processed.`, 'success');
     } catch (e) { }
 }
 
@@ -5619,18 +5630,27 @@ async function deleteWorkspace(wsId) {
 }
 
 async function getWorkspaceDeleteGroupBlock(wsId) {
-    const ws = allWorkspaces[wsId] || KCPStore.state.workspaces?.[wsId] || {};
-    const registry = {};
+    // Read the CURRENT source of truth from the backend (org fields now come from the workspace's
+    // own DO settings), not cached local state — otherwise a workspace already removed from its org
+    // stays blocked because the browser cache still carries a stale orgId/corpId.
+    let site = null;
+    try {
+        const res = await callAdminApi('GET', '/api/admin/org-sites');
+        site = (res?.sites || []).find((s) => String(s.id) === String(wsId)) || null;
+    } catch (e) {
+        site = null; // On fetch failure, fall back to cached state below rather than hard-blocking.
+    }
 
+    const ws = allWorkspaces[wsId] || KCPStore.state.workspaces?.[wsId] || {};
     const profile = ws?.profile || {};
     const settings = ws?.data?.settings || ws?.settings || {};
-    const groupMetadata = registry.groupMetadata || settings.groupMetadata || profile.groupMetadata || null;
-    const orgId = String(registry.orgId || registry.org_id || settings.orgId || settings.org_id || profile.orgId || profile.org_id || '').trim();
-    const corpId = String(registry.corpId || registry.corp_id || settings.corpId || settings.corp_id || profile.corpId || profile.corp_id || '').trim();
-    const linkedSites = {
-        ...(profile.linkedSites || {}),
-        ...(settings.linkedSites || {})
-    };
+    const source = site || {};
+    const groupMetadata = source.groupMetadata ?? (site ? null : (settings.groupMetadata || profile.groupMetadata || null));
+    const orgId = String(source.orgId ?? (site ? '' : (settings.orgId || settings.org_id || profile.orgId || profile.org_id || ''))).trim();
+    const corpId = String(source.corpId ?? (site ? '' : (settings.corpId || settings.corp_id || profile.corpId || profile.corp_id || ''))).trim();
+    const linkedSites = site
+        ? (source.linkedSites || {})
+        : { ...(profile.linkedSites || {}), ...(settings.linkedSites || {}) };
     const linkType = groupMetadata?.linkType || (corpId ? 'corp' : (orgId ? 'org' : 'group'));
     const linkId = linkType === 'corp' ? corpId : orgId;
     const groupName = groupMetadata?.name || linkId || 'linked organization group';

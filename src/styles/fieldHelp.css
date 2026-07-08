@@ -5,9 +5,13 @@
 }
 
 .inventoryHelpIcon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  /* Grid place-items centering (same technique as the report icons `.analyticsForecastInfo`).
+     A fixed box with box-sizing:border-box, line-height:1 and NO padding keeps it a perfect
+     circle and centers the glyph both axes. The previous line-height:18px + padding-top:1px on a
+     content-box element made it 19px tall (an oval) and pushed the "i" down. */
+  box-sizing: border-box;
+  display: inline-grid;
+  place-items: center;
   width: 18px;
   min-width: 18px;
   height: 18px;
@@ -17,13 +21,10 @@
   color: #9ab3dc;
   font-size: 0.72rem;
   font-weight: 700;
-  line-height: 18px;
-  text-align: center;
+  line-height: 1;
+  padding: 0;
   font-style: normal;
   font-variant: normal;
-  /* Optical correction: the "i" glyph's ascender/descender sit slightly high within a
-     flexbox-centered line box, so it reads as off-center inside the circle without this nudge. */
-  padding-top: 1px;
   cursor: help;
 }
 

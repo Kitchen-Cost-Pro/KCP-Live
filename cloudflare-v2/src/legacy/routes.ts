@@ -17,7 +17,8 @@ import {
 } from './yoco-service';
 import { findRefund, verifyYocoWebhook } from './yoco-webhooks';
 import { decryptTextWithSecret, encryptTextWithSecret, hmacSha256Base64 } from './crypto';
-import { getAdminGmailCallback, getEmailDeliveryConfig } from './admin-routes';
+import { getAdminGmailCallback, getEmailDeliveryConfig, buildAdminYocoStatus } from './admin-routes';
+import { sendWorkspaceLowStockNow } from './low-stock-email';
 import { sendEmail } from './email';
 
 function text(value: unknown, fallback = '') {
@@ -1453,6 +1454,100 @@ export async function patchAdminWorkspaceSettingsDO(request: Request, env: Env, 
      ON CONFLICT(workspace_id) DO UPDATE SET raw_json = excluded.raw_json`
   ).bind(workspaceId, JSON.stringify(merged)).run();
   return json(request, env, { ok: true, settings: merged });
+}
+
+// --- DO-side admin actions. The front Worker gates with requireAdmin (CENTRAL_DB) and forwards
+// here; these run against tenant env.DB and must NOT re-auth. They exist because the admin console's
+// workspace actions query tenant tables (yoco_connections, products, locations, settings) that live
+// in the DO, not CENTRAL_DB — running them centrally threw the generic "Something went wrong". ---
+export async function adminYocoActionDO(request: Request, env: Env, _auth: AuthContext, workspaceId: string, action: string) {
+  const body = await readJson<Record<string, unknown>>(request).catch(() => ({}));
+  console.log(`[admin-yoco] ${action} ws=${workspaceId}`);
+  try {
+    if (action === 'connect') {
+      const result = await connectYoco(env, workspaceId, text(body.apiKey || body.secretKey));
+      return json(request, env, { ok: true, ...result });
+    }
+    if (action === 'disconnect') {
+      const result = await disconnectYoco(env, workspaceId);
+      return json(request, env, { ok: true, ...result });
+    }
+    if (action === 'sync-catalogue') {
+      const result = await syncYocoCatalogue(env, workspaceId);
+      return json(request, env, { ok: true, ...result });
+    }
+    if (action === 'sync-sales') {
+      const sinceDays = Number(body.sinceDays || 0);
+      // Clamp an explicit lookback window to a sane maximum (31 days).
+      const clampedDays = Number.isFinite(sinceDays) && sinceDays > 0 ? Math.min(sinceDays, 31) : 0;
+      const sinceIso = clampedDays > 0 ? new Date(Date.now() - clampedDays * 24 * 60 * 60 * 1000).toISOString() : '';
+      const result = await syncYocoSales(env, workspaceId, sinceIso ? { sinceIso } : {});
+      return json(request, env, { ok: true, ...result });
+    }
+    if (action === 'reset-webhook') {
+      const apiKey = await getYocoApiKey(env, workspaceId);
+      if (!apiKey) return error(request, env, 409, 'No Yoco API key stored for this workspace — connect Yoco first.');
+      await disconnectYoco(env, workspaceId);
+      const result = await connectYoco(env, workspaceId, apiKey);
+      return json(request, env, { ok: true, ...result });
+    }
+    return error(request, env, 404, `Unknown Yoco admin action: ${action}`);
+  } catch (caught) {
+    const message = caught instanceof Error ? caught.message : String(caught);
+    console.error(`[admin-yoco] ${action} ws=${workspaceId} failed: ${message}`);
+    return error(request, env, 502, message || `Yoco ${action} failed.`);
+  }
+}
+
+export async function adminYocoStatusDO(request: Request, env: Env, _auth: AuthContext, workspaceId: string) {
+  return json(request, env, await buildAdminYocoStatus(env, workspaceId));
+}
+
+export async function adminActionDO(request: Request, env: Env, _auth: AuthContext, workspaceId: string, action: string) {
+  console.log(`[admin-action] ${action} ws=${workspaceId}`);
+  try {
+    if (action === 'send-low-stock-email') {
+      const result = await sendWorkspaceLowStockNow(env, workspaceId);
+      return json(request, env, { ok: true, ...result });
+    }
+    return error(request, env, 404, `Unknown workspace action: ${action}`);
+  } catch (caught) {
+    const message = caught instanceof Error ? caught.message : String(caught);
+    console.error(`[admin-action] ${action} ws=${workspaceId} failed: ${message}`);
+    return error(request, env, 502, message || `Action ${action} failed.`);
+  }
+}
+
+const ORG_LINK_FIELDS = ['orgId', 'org_id', 'corpId', 'corp_id', 'permissionLevel', 'groupMetadata', 'linkedSites'];
+
+export async function adminOrgFieldsDO(request: Request, env: Env, _auth: AuthContext, workspaceId: string) {
+  const row = await env.DB.prepare(
+    `SELECT raw_json FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`
+  ).bind(workspaceId).first<{ raw_json?: string }>();
+  const settings = objectValue(jsonParse(row?.raw_json));
+  return json(request, env, {
+    ok: true,
+    orgId: text(settings.orgId || settings.org_id),
+    corpId: text(settings.corpId || settings.corp_id),
+    permissionLevel: text(settings.permissionLevel),
+    groupMetadata: settings.groupMetadata || null,
+    linkedSites: settings.linkedSites || {}
+  });
+}
+
+export async function adminUnlinkOrgDO(request: Request, env: Env, _auth: AuthContext, workspaceId: string) {
+  const row = await env.DB.prepare(
+    `SELECT raw_json FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`
+  ).bind(workspaceId).first<{ raw_json?: string }>();
+  const settings = objectValue(jsonParse(row?.raw_json));
+  for (const field of ORG_LINK_FIELDS) delete settings[field];
+  await env.DB.prepare(
+    `INSERT INTO workspace_settings (workspace_id, raw_json)
+     VALUES (?1, ?2)
+     ON CONFLICT(workspace_id) DO UPDATE SET raw_json = excluded.raw_json`
+  ).bind(workspaceId, JSON.stringify(settings)).run();
+  console.log(`[admin-unlink-org] cleared org fields ws=${workspaceId}`);
+  return json(request, env, { ok: true });
 }
 
 async function recordYocoWebhookRejection(env: Env, details: {

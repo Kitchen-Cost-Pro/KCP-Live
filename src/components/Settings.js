@@ -220,10 +220,15 @@ function renderGoLivePanel(draft = {}, state = {}) {
       </div>
       <p class="settingsFieldHint">Once live, completed Yoco sales will start depleting stock automatically.</p>
       <ul class="settingsGoLiveChecklist">
-        ${checklist.map((item) => `<li class="${item.ready ? 'is-ready' : ''}">${item.ready ? '✓' : '•'} ${escapeHtml(item.label)}</li>`).join('')}
+        ${checklist.map((item) => `
+          <li class="${item.ready ? 'is-ready' : ''}">
+            <span class="settingsGoLiveCheck">${item.ready ? '✓' : '○'}</span>
+            <span class="settingsGoLiveCheckLabel">${escapeHtml(item.label)}</span>
+          </li>
+        `).join('')}
       </ul>
-      <div class="settingsActions">
-        <button type="button" class="settingsPrimaryButton" data-settings-go-live>Go Live</button>
+      <div class="settingsActions settingsActions--goLive">
+        <button type="button" class="settingsPrimaryButton settingsGoLiveButton" data-settings-go-live>Go Live</button>
       </div>
     </section>
   `;

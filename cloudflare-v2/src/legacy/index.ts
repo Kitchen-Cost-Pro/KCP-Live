@@ -73,6 +73,11 @@ import {
   purgeWorkspaceTenant,
   getAdminWorkspaceSettingsDO,
   patchAdminWorkspaceSettingsDO,
+  adminYocoActionDO,
+  adminYocoStatusDO,
+  adminActionDO,
+  adminOrgFieldsDO,
+  adminUnlinkOrgDO,
   migrateImport,
   getLocations,
   getManufacturingBatches,
@@ -572,6 +577,26 @@ export async function dispatchWorkspaceRoute(
   }
   if ((request.method === 'PATCH' || request.method === 'POST') && resource === 'admin-settings') {
     return patchAdminWorkspaceSettingsDO(request, env, auth, workspaceId);
+  }
+
+  // Admin workspace actions fanned in by the front Worker (already requireAdmin-gated there).
+  // These run against tenant env.DB — they must NOT re-auth. See routes.ts adminYoco*/admin*DO.
+  if (request.method === 'GET' && resource === 'admin-yoco/status') {
+    return adminYocoStatusDO(request, env, auth, workspaceId);
+  }
+  const adminYocoM = resource.match(/^admin-yoco\/([^/]+)$/);
+  if (request.method === 'POST' && adminYocoM) {
+    return adminYocoActionDO(request, env, auth, workspaceId, adminYocoM[1]);
+  }
+  const adminActionM = resource.match(/^admin-action\/([^/]+)$/);
+  if (request.method === 'POST' && adminActionM) {
+    return adminActionDO(request, env, auth, workspaceId, adminActionM[1]);
+  }
+  if (request.method === 'GET' && resource === 'admin-org-fields') {
+    return adminOrgFieldsDO(request, env, auth, workspaceId);
+  }
+  if (request.method === 'POST' && resource === 'admin-unlink-org') {
+    return adminUnlinkOrgDO(request, env, auth, workspaceId);
   }
 
   // Data-migration bulk import into THIS DO (superuser-gated by the front Worker before forwarding).

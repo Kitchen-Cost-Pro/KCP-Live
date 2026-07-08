@@ -1,7 +1,7 @@
 import type { Env, AuthContext } from './types';
 import type { Env as LegacyEnv } from './legacy/types';
-import { postAdminApproveRegistration, getAdminOverview, deleteAdminWorkspace, getAdminWorkspaceSettings, patchAdminWorkspaceSettings } from './legacy/admin-routes';
-import type { AdminTenantSummary } from './legacy/admin-routes';
+import { postAdminApproveRegistration, getAdminOverview, deleteAdminWorkspace, getAdminWorkspaceSettings, patchAdminWorkspaceSettings, getAdminOrgSites, requireAdmin, writeAdminAuditEvent, adminAuditActor } from './legacy/admin-routes';
+import type { AdminTenantSummary, AdminOrgFields } from './legacy/admin-routes';
 import { dispatchCentralRoute } from './legacy/index';
 import { sendDueLowStockEmailSummaries } from './legacy/low-stock-email';
 
@@ -79,6 +79,75 @@ async function dispatchCentral(request: Request, env: Env, url: URL): Promise<Re
       const r = await callWorkspaceDO(env, id, 'admin-settings', adminAuth, 'PATCH', payload);
       return ((r as any)?.settings as Record<string, any>) || {};
     });
+  }
+
+  // --- Workspace-scoped admin actions: these query TENANT tables (yoco_connections, locations,
+  // products, this workspace's settings) which live in the DO, not CENTRAL_DB. Gate centrally with
+  // requireAdmin (CENTRAL_DB), run the tenant op inside the DO, then write the audit event centrally.
+  // Previously these ran in the front Worker against CENTRAL_DB and threw → generic "Something went
+  // wrong" for every workspace admin action. ---
+  const adminAuth = { uid: 'admin', email: '' };
+  const yocoM = url.pathname.match(/^\/api\/admin\/workspaces\/([^/]+)\/yoco\/([^/]+)$/);
+  if (yocoM) {
+    const wsId = decodeURIComponent(yocoM[1]);
+    const action = yocoM[2];
+    if (request.method === 'GET' && action === 'status') {
+      await requireAdmin(request, lenv);
+      const r = await callWorkspaceDO(env, wsId, 'admin-yoco/status', adminAuth, 'GET');
+      return json(request, env, r || { ok: false, error: 'No response from workspace.' }, r ? 200 : 502);
+    }
+    if (request.method === 'POST') {
+      const session = await requireAdmin(request, lenv);
+      const body = await request.clone().json().catch(() => ({}));
+      const r = await callWorkspaceDO(env, wsId, `admin-yoco/${action}`, adminAuth, 'POST', body);
+      if (!r || (r as any).ok === false) {
+        return json(request, env, { ok: false, error: (r as any)?.error || `Yoco ${action} failed for this workspace.` }, 502);
+      }
+      await writeAdminAuditEvent(lenv, adminAuditActor(session), `yoco.${action.replace(/-/g, '_')}`, wsId, {}).catch(() => {});
+      return json(request, env, r);
+    }
+  }
+
+  const actionM = url.pathname.match(/^\/api\/admin\/workspaces\/([^/]+)\/actions\/([^/]+)$/);
+  if (actionM && request.method === 'POST') {
+    const wsId = decodeURIComponent(actionM[1]);
+    const action = actionM[2];
+    const session = await requireAdmin(request, lenv);
+    const body = await request.clone().json().catch(() => ({}));
+    const r = await callWorkspaceDO(env, wsId, `admin-action/${action}`, adminAuth, 'POST', body);
+    if (!r || (r as any).ok === false) {
+      return json(request, env, { ok: false, error: (r as any)?.error || `Action ${action} failed for this workspace.` }, 502);
+    }
+    await writeAdminAuditEvent(lenv, adminAuditActor(session), `action.${action.replace(/-/g, '_')}`, wsId, {}).catch(() => {});
+    return json(request, env, r);
+  }
+
+  // (email-queue stays central: workspace_invitations lives in CENTRAL_DB, so it already works.)
+
+  // Org manager list: org fields (orgId/corpId/groupMetadata/linkedSites) live in each workspace's DO
+  // settings. Gate centrally, then fan out to every workspace DO and feed the org fields in.
+  if (request.method === 'GET' && url.pathname === '/api/admin/org-sites') {
+    const provider = async (workspaceIds: string[]): Promise<Record<string, AdminOrgFields>> => {
+      const results = await fanOutWorkspaceDOs(env, workspaceIds, 'admin-org-fields', adminAuth);
+      const map: Record<string, AdminOrgFields> = {};
+      for (const r of results) {
+        const d = r.data as any;
+        if (d && d.ok) map[r.workspaceId] = { orgId: d.orgId, corpId: d.corpId, groupMetadata: d.groupMetadata, linkedSites: d.linkedSites };
+      }
+      return map;
+    };
+    return getAdminOrgSites(request, lenv, provider);
+  }
+
+  // Unlink a workspace from its org/group: clear the target's OWN org fields in its DO settings
+  // (source of truth), then best-effort strip it from every peer's linkedSites.
+  const unlinkM = url.pathname.match(/^\/api\/admin\/org-sites\/([^/]+)\/unlink$/);
+  if (unlinkM && request.method === 'POST') {
+    const wsId = decodeURIComponent(unlinkM[1]);
+    await requireAdmin(request, lenv);
+    const r = await callWorkspaceDO(env, wsId, 'admin-unlink-org', adminAuth, 'POST', {});
+    try { await cleanupPeerGroupLinks(env, wsId); } catch { /* peer cleanup is best-effort */ }
+    return json(request, env, r || { ok: true }, r ? 200 : 200);
   }
 
   return dispatchCentralRoute(request, lenv);

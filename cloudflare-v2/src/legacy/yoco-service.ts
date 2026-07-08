@@ -971,12 +971,15 @@ async function recordYocoSyncError(env: Env, workspaceId: string, details: {
   ).run();
 }
 
-export async function syncYocoSales(env: Env, workspaceId: string, options: { full?: boolean } = {}) {
+export async function syncYocoSales(env: Env, workspaceId: string, options: { full?: boolean; sinceIso?: string } = {}) {
   const apiKey = await getYocoApiKey(env, workspaceId);
   const connection = await getYocoConnection(env, workspaceId);
   const now = nowIso();
-  const orderLowerBound = options.full ? '' : text(connection?.last_successful_order_updated_at || connection?.last_sales_sync_at);
-  const refundLowerBound = options.full ? '' : text(connection?.last_successful_refund_updated_at || connection?.last_sales_sync_at);
+  // An explicit `sinceIso` (e.g. "last 14 days" from the admin console) overrides the stored
+  // incremental cursor so admins can re-pull a fixed recent window on demand. `full` wins over both.
+  const explicitSince = text(options.sinceIso);
+  const orderLowerBound = options.full ? '' : (explicitSince || text(connection?.last_successful_order_updated_at || connection?.last_sales_sync_at));
+  const refundLowerBound = options.full ? '' : (explicitSince || text(connection?.last_successful_refund_updated_at || connection?.last_sales_sync_at));
   const orders = await listOrders(env, apiKey, orderLowerBound ? {
     status: ['completed'],
     updated_at__gte: orderLowerBound,
