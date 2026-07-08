@@ -14,11 +14,11 @@ function text(value) {
 }
 
 export function getManufacturingExpectedQty(log = {}) {
-  return number(log.expectedQty ?? log.expectedOutput);
+  return number(log.expectedQty ?? log.expectedOutput ?? log.expected_qty ?? log.expected_output);
 }
 
 export function getManufacturingProducedQty(log = {}) {
-  return number(log.producedQty ?? log.actualQty ?? log.qty);
+  return number(log.producedQty ?? log.actualQty ?? log.qty ?? log.produced_qty ?? log.actual_qty);
 }
 
 export function getManufacturingVarianceQty(log = {}) {
@@ -72,17 +72,17 @@ export function getManufacturingWastageValue(log = {}) {
 export function normalizeManufacturingComponent(component = {}) {
   return {
     ...component,
-    id: text(component.id || component.ingId || component.itemId || component.stockItemId),
-    ingId: text(component.ingId || component.id || component.itemId || component.stockItemId),
-    itemId: text(component.itemId || component.id || component.ingId || component.stockItemId),
-    stockItemId: text(component.stockItemId || component.itemId || component.id || component.ingId),
-    name: text(component.name || component.itemName || component.stockItemName),
+    id: text(component.id || component.ingId || component.itemId || component.stockItemId || component.ing_id || component.item_id || component.stock_item_id),
+    ingId: text(component.ingId || component.id || component.itemId || component.stockItemId || component.ing_id || component.item_id || component.stock_item_id),
+    itemId: text(component.itemId || component.id || component.ingId || component.stockItemId || component.item_id || component.ing_id || component.stock_item_id),
+    stockItemId: text(component.stockItemId || component.itemId || component.id || component.ingId || component.stock_item_id || component.item_id || component.ing_id),
+    name: text(component.name || component.itemName || component.stockItemName || component.item_name || component.stock_item_name),
     unit: text(component.unit || component.uom),
-    qty: number(component.qty ?? component.usage ?? component.quantity),
-    usage: number(component.usage ?? component.qty ?? component.quantity),
-    quantity: number(component.quantity ?? component.qty ?? component.usage),
-    cost: number(component.cost ?? component.unitCost),
-    unitCost: number(component.unitCost ?? component.cost)
+    qty: number(component.qty ?? component.usage ?? component.quantity ?? component.qty_used),
+    usage: number(component.usage ?? component.qty ?? component.quantity ?? component.qty_used),
+    quantity: number(component.quantity ?? component.qty ?? component.usage ?? component.qty_used),
+    cost: number(component.cost ?? component.unitCost ?? component.unit_cost),
+    unitCost: number(component.unitCost ?? component.cost ?? component.unit_cost)
   };
 }
 
@@ -90,26 +90,26 @@ export function normalizeManufacturingLog(log = {}, fallbackId = '') {
   const components = toArray(log.components || log.recipe || log.items).map(normalizeManufacturingComponent);
   const base = {
     ...log,
-    id: text(log.id || fallbackId),
-    itemId: text(log.itemId || log.manufacturedItemId || log.stockItemId),
-    manufacturedItemId: text(log.manufacturedItemId || log.itemId || log.stockItemId),
-    stockItemId: text(log.stockItemId || log.itemId || log.manufacturedItemId),
-    itemName: text(log.itemName || log.manufacturedItemName || log.stockItemName || log.name),
-    manufacturedItemName: text(log.manufacturedItemName || log.itemName || log.stockItemName || log.name),
+    id: text(log.id || log.batchId || log.batch_id || fallbackId),
+    itemId: text(log.itemId || log.manufacturedItemId || log.stockItemId || log.item_id || log.manufactured_item_id || log.stock_item_id),
+    manufacturedItemId: text(log.manufacturedItemId || log.itemId || log.stockItemId || log.manufactured_item_id || log.item_id || log.stock_item_id),
+    stockItemId: text(log.stockItemId || log.itemId || log.manufacturedItemId || log.stock_item_id || log.item_id || log.manufactured_item_id),
+    itemName: text(log.itemName || log.manufacturedItemName || log.stockItemName || log.name || log.item_name || log.manufactured_item_name || log.stock_item_name),
+    manufacturedItemName: text(log.manufacturedItemName || log.itemName || log.stockItemName || log.name || log.manufactured_item_name || log.item_name || log.stock_item_name),
     producedQty: getManufacturingProducedQty(log),
     expectedQty: getManufacturingExpectedQty(log),
-    batchCount: number(log.batchCount ?? log.batchMultiplier),
+    batchCount: number(log.batchCount ?? log.batchMultiplier ?? log.batch_count ?? log.batch_multiplier),
     unit: text(log.unit || log.uom),
-    locationId: text(log.locationId),
-    locationName: text(log.locationName),
-    date: text(log.date || log.tradeDate),
-    timestamp: log.timestamp || log.createdAt || log.postedAt || '',
-    createdAt: log.createdAt || log.timestamp || log.postedAt || '',
+    locationId: text(log.locationId || log.location_id),
+    locationName: text(log.locationName || log.location_name),
+    date: text(log.date || log.tradeDate || log.trade_date),
+    timestamp: log.timestamp || log.createdAt || log.created_at || log.postedAt || log.posted_at || '',
+    createdAt: log.createdAt || log.created_at || log.timestamp || log.postedAt || log.posted_at || '',
     note: text(log.note || log.notes),
-    batchCost: number(log.batchCost),
-    expectedUnitCost: number(log.expectedUnitCost ?? log.unitCost),
-    actualUnitCost: number(log.actualUnitCost ?? log.unitCost),
-    unitCost: number(log.unitCost ?? log.expectedUnitCost ?? log.actualUnitCost),
+    batchCost: number(log.batchCost ?? log.batch_cost),
+    expectedUnitCost: number(log.expectedUnitCost ?? log.unitCost ?? log.expected_unit_cost ?? log.unit_cost),
+    actualUnitCost: number(log.actualUnitCost ?? log.unitCost ?? log.actual_unit_cost ?? log.unit_cost),
+    unitCost: number(log.unitCost ?? log.expectedUnitCost ?? log.actualUnitCost ?? log.unit_cost ?? log.expected_unit_cost ?? log.actual_unit_cost),
     components
   };
   return {

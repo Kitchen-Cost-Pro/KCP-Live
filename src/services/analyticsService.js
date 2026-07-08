@@ -1,5 +1,6 @@
 import { calculateDashboardMetrics, getDashboardSourceOnce, getTradeDateKey, getStockValuationUnitCost, getIngredientUnitCost } from './database.js';
 import { callCloudflareWorkspaceRoute } from './cloudflareApi.js';
+import { normalizeAdjustmentLogs } from './adjustmentLog.js';
 import { isWastageAdjustment as isWastageAdjustmentLog } from './wastageClassifier.js';
 import { getManufacturingComponentTotal, getManufacturingExpectedQty, getManufacturingShortfallQty, getManufacturingVarianceQty, getManufacturingWastageValue, normalizeManufacturingLogs } from './manufacturingLog.js';
 import { DEFAULT_STOCK_LOCATION_ID, DEFAULT_STOCK_LOCATION_NAME, normalizeStockLocations } from './locationModel.js';
@@ -162,7 +163,7 @@ export function normalizeAnalyticsSource(source = {}) {
     purchaseOrders: toArray(source.purchaseOrders),
     logs_grv: filterRowsAfterReset(source.logs_grv, resetAt),
     logs_cn: filterRowsAfterReset(source.logs_cn, resetAt),
-    logs_adj: filterRowsAfterReset(source.logs_adj, resetAt),
+    logs_adj: normalizeAdjustmentLogs(filterRowsAfterReset(source.logs_adj, resetAt)),
     logs_stocktakes: filterRowsAfterReset(source.logs_stocktakes, resetAt),
     logs_inventory_audit: filterRowsAfterReset(source.logs_inventory_audit, resetAt),
     logs_mfg: normalizeManufacturingLogs(filterRowsAfterReset(source.logs_mfg, resetAt)),

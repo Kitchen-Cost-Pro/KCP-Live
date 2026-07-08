@@ -4,7 +4,7 @@
 // 'remove' with no wasteReason is a manual stock correction, NOT wastage — treating it
 // as wastage previously inflated the dashboard tile and emptied Manual Adjustments.
 export function isWastageAdjustment(log = {}) {
-  const mode = String(log.mode || '').toLowerCase();
-  const note = String(log.note || log.reason || '').toLowerCase();
-  return mode === 'wastage' || Boolean(log.wasteReason) || note.includes('waste') || note.includes('wastage');
+  const mode = String(log.mode || log.adjustmentType || log.adjustment_type || '').toLowerCase();
+  const note = String(log.note || log.notes || log.reason || '').toLowerCase();
+  return mode === 'wastage' || Boolean(log.wasteReason || log.waste_reason) || note.includes('waste') || note.includes('wastage');
 }

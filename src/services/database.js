@@ -1,4 +1,5 @@
 import { callCloudflareWorkspaceRoute } from './cloudflareApi.js';
+import { normalizeAdjustmentLogs, normalizeWastageResponse } from './adjustmentLog.js';
 import { normalizeSites, normalizeStockLocations } from './locationModel.js';
 import { isWastageAdjustment } from './wastageClassifier.js';
 import { getManufacturingWastageValue, normalizeManufacturingLogs } from './manufacturingLog.js';
@@ -166,6 +167,7 @@ async function fetchCloudflareDashboardSource(workspaceId) {
     grvResponse,
     creditNoteResponse,
     adjustmentResponse,
+    wastageResponse,
     stockTakeResponse,
     stockTakeTemplateResponse,
     manufacturingResponse,
@@ -182,6 +184,7 @@ async function fetchCloudflareDashboardSource(workspaceId) {
     callCloudflareWorkspaceRoute(workspaceId, 'grvs', { query: { limit: 500 } }),
     callCloudflareWorkspaceRoute(workspaceId, 'credit-notes', { query: { limit: 500 } }),
     callCloudflareWorkspaceRoute(workspaceId, 'adjustments', { query: { limit: 500 } }),
+    callCloudflareWorkspaceRoute(workspaceId, 'wastage-adjustments', { query: { limit: 500 } }).catch(() => ({})),
     callCloudflareWorkspaceRoute(workspaceId, 'stock-takes', { query: { limit: 500 } }),
     callCloudflareWorkspaceRoute(workspaceId, 'stock-take-templates', { query: { limit: 500 } }),
     callCloudflareWorkspaceRoute(workspaceId, 'manufacturing-batches', { query: { limit: 500 } }),
@@ -203,7 +206,10 @@ async function fetchCloudflareDashboardSource(workspaceId) {
     dashboardMetrics: dashboardResponse.valuation || {},
     logs_grv: grvResponse.receipts || grvResponse.grvs || [],
     logs_cn: creditNoteResponse.creditNotes || creditNoteResponse.items || [],
-    logs_adj: adjustmentResponse.adjustments || adjustmentResponse.items || [],
+    logs_adj: normalizeAdjustmentLogs([
+      ...(adjustmentResponse.adjustments || adjustmentResponse.items || []),
+      ...normalizeWastageResponse(wastageResponse)
+    ]),
     logs_stocktakes: stockTakeResponse.stockTakes || stockTakeResponse.items || [],
     logs_inventory_audit: reportingResponse.logs_inventory_audit || [],
     logs_mfg: manufacturingResponse.batches || manufacturingResponse.manufacturingBatches || manufacturingResponse.items || [],
@@ -353,7 +359,7 @@ function normalizeDashboardSource(source) {
     logs_grv: toArray(source.logs_grv),
     logs_cn: toArray(source.logs_cn),
     logs_stocktakes: toArray(source.logs_stocktakes),
-    logs_adj: toArray(source.logs_adj),
+    logs_adj: normalizeAdjustmentLogs(source.logs_adj),
     logs_inventory_audit: toArray(source.logs_inventory_audit),
     logs_transfers: toArray(source.logs_transfers),
     logs_mfg: normalizeManufacturingLogs(source.logs_mfg),
