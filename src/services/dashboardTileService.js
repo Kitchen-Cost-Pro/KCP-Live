@@ -89,7 +89,9 @@ async function fetchDashboardTiles(workspaceId, { range = '7', siteId = '' } = {
   const siteName = siteResponse.siteConfiguration?.site_name || siteResponse.siteConfiguration?.siteName || '';
   const valuation = dashboardResponse.valuation || {};
   const movements = dashboardResponse.movements || [];
-  const movementTotals = summarizeMovements(movements);
+  const movementTotals = dashboardResponse.movementTotals && typeof dashboardResponse.movementTotals === 'object'
+    ? normalizeMovementTotals(dashboardResponse.movementTotals)
+    : summarizeMovements(movements);
   const stockValue = numberValue(valuation.stock_value, sumStockValue(stockItems));
   const purchases = movementTotals.grv + movementTotals.creditNote;
   const costOfSales = Math.abs(movementTotals.sale);
@@ -133,11 +135,9 @@ async function fetchDashboardTiles(workspaceId, { range = '7', siteId = '' } = {
     closingStock: serverSummary.closingStock || metricValue(stockValue, 'currency'),
     costOfSales: serverSummary.costOfSales || metricValue(costOfSales, 'currency'),
     countVariance: serverSummary.countVariance || metricValue(countVariance, 'currency'),
-    manualAdjustments: metricValue(manualAdjustments, 'currency'),
-    wastage: metricValue(wastage, 'currency'),
-    // Manufacturing wastage is its own tile — surface it explicitly (prefer the server value,
-    // fall back to the locally-summarized manufacturing movement total) so the tile isn't blank.
-    manufacturingWastage: metricValue(Math.abs(movementTotals.manufacturingWastage), 'currency'),
+    manualAdjustments: serverSummary.manualAdjustments || metricValue(manualAdjustments, 'currency'),
+    wastage: normalizeAbsoluteMetric(serverSummary.wastage, wastage),
+    manufacturingWastage: normalizeAbsoluteMetric(serverSummary.manufacturingWastage, movementTotals.manufacturingWastage),
     lowStockCount: serverSummary.lowStockCount || metricValue(lowStockItemCount, 'number'),
     gpPercentage: serverSummary.gpPercentage || metricValue(averageGp, 'percent'),
     averageGp: serverSummary.averageGp || metricValue(averageGp, 'percent')
@@ -233,6 +233,18 @@ function normalizeMetricMap(source = {}) {
       .map(([key, value]) => [key, normalizeMetricValue(value)])
       .filter(([, value]) => value)
   );
+}
+
+function normalizeMovementTotals(source = {}) {
+  return {
+    grv: numberValue(source.grv, 0),
+    creditNote: numberValue(source.creditNote ?? source.credit_note, 0),
+    sale: numberValue(source.sale, 0),
+    adjustment: numberValue(source.adjustment, 0),
+    stockTake: numberValue(source.stockTake ?? source.stock_take, 0),
+    wastage: numberValue(source.wastage, 0),
+    manufacturingWastage: numberValue(source.manufacturingWastage ?? source.manufacturing_wastage, 0)
+  };
 }
 
 function normalizeMetricValue(value) {

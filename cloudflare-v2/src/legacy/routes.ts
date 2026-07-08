@@ -7663,7 +7663,7 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
   const dailyRows = await env.DB.prepare(
     `SELECT date(sm.occurred_at) AS day,
             COALESCE(SUM(CASE WHEN ${IS_SALE_SQL} THEN abs(${TXN_VALUE_SQL}) ELSE 0 END), 0) AS cos,
-            COALESCE(SUM(CASE WHEN ${IS_WASTE_SQL} THEN abs(${DERIVED_VALUE_SQL}) ELSE 0 END), 0) AS waste,
+            COALESCE(SUM(CASE WHEN ${IS_WASTE_SQL} AND NOT ${IS_MANUFACTURING_WASTE_SQL} THEN abs(${DERIVED_VALUE_SQL}) ELSE 0 END), 0) AS waste,
             COALESCE(SUM(CASE WHEN ${IS_MANUFACTURING_WASTE_SQL} THEN abs(${DERIVED_VALUE_SQL}) ELSE 0 END), 0) AS manuf_waste,
             COALESCE(SUM(CASE WHEN NOT ${IS_ACCOUNTING_ONLY_SQL} THEN ${CLASS_VALUE_SQL} ELSE 0 END), 0) AS net
        FROM stock_movements sm

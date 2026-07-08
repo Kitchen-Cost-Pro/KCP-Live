@@ -7540,6 +7540,7 @@ function buildReportMetrics(reportData, filters = {}) {
       ...base,
       { label: 'Purchases', value: formatNumber(sumRows(rows, 'Purchases')), icon: 'cart', tone: 'green' },
       { label: 'Sales Usage', value: formatNumber(sumRows(rows, 'Sales Usage')), icon: 'activity', tone: 'purple' },
+      { label: 'Manufactured', value: formatNumber(sumRows(rows, 'Manufactured')), icon: 'box', tone: 'blue' },
       { label: 'Wastage', value: formatNumber(sumRows(rows, 'Wastage')), icon: 'trash', tone: 'red' }
     ];
   }
@@ -8295,8 +8296,8 @@ function isQuantityCell(column, value, row = {}, reportId = '') {
   if (/date|status|action|reason|source|note|location|category|supplier|invoice|item|product|ingredient|mode|type|from|to|user|summary|order/.test(key)) return false;
   if (/cost|value|impact|price|sales price|refund|net impact|loss|gp|percent|%/.test(key)) return false;
   if (/rows|lines|items counted|low stock items|locations|categories|suppliers|products|orders|counted|active/.test(key)) return false;
-  return /(qty|quantity|stock|threshold|variance|purchase|sales usage|wastage|adjustment|transfer|expected|produced|depleted|sold|usage|on hand|current|theoretical|actual)/.test(key)
-    || (reportId === 'movement' && ['purchases', 'sales usage', 'wastage', 'adjustments', 'transfers net', 'net qty'].includes(key));
+  return /(qty|quantity|stock|threshold|variance|purchase|sales usage|manufactured|wastage|adjustment|transfer|expected|produced|depleted|sold|usage|on hand|current|theoretical|actual)/.test(key)
+    || (reportId === 'movement' && ['purchases', 'sales usage', 'manufactured', 'wastage', 'adjustments', 'transfers net', 'net qty'].includes(key));
 }
 
 export function reportRowUnit(row = {}) {

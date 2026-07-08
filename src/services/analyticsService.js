@@ -31,7 +31,7 @@ const analyticsNodes = [
 export const reportCatalog = [
   { id: 'custom_report', title: 'Custom Report Builder', group: 'Advanced', description: 'Build custom reports from available business datasets.', columns: ['Product Category', 'Region', 'Sales Rep', 'Sum of Sales Amount', 'Sum of Profit', 'Count of Orders'] },
   { id: 'stock', title: 'Stock On Hand', group: 'Inventory', description: 'Current stock balances and ex-VAT value.', columns: ['Item', 'Category', 'Location', 'On Hand', 'Unit', 'UOM Config', 'UOM 1 Name', 'UOM 1 Ratio', 'UOM 1 Barcode', 'UOM 2 Name', 'UOM 2 Ratio', 'UOM 2 Barcode', 'UOM 3 Name', 'UOM 3 Ratio', 'UOM 3 Barcode', 'Unit Cost', 'Stock Value'] },
-  { id: 'movement', title: 'Stock Movement', group: 'Inventory', description: 'Purchases, usage, wastage, adjustments, and transfers by item.', columns: ['Item', 'Category', 'Unit', 'Purchases', 'Sales Usage', 'Wastage', 'Adjustments', 'Transfers Net', 'Net Qty'] },
+  { id: 'movement', title: 'Stock Movement', group: 'Inventory', description: 'Purchases, usage, manufacturing output, wastage, adjustments, and transfers by item.', columns: ['Item', 'Category', 'Unit', 'Purchases', 'Sales Usage', 'Manufactured', 'Wastage', 'Adjustments', 'Transfers Net', 'Net Qty'] },
   { id: 'low_stock', title: 'Low Stock Alerts', group: 'Inventory', description: 'Items below low-stock threshold or par.', columns: ['Item', 'Category', 'Unit', 'Low Locations', 'Total Current Stock', 'Total Threshold', 'Total Variance', 'Total Deficit Value'] },
   { id: 'grv', title: 'GRV Log', group: 'Inventory', description: 'Goods received history.', columns: ['Date', 'Time', 'Supplier', 'Invoice', 'Location', 'Items', 'Total Ex', 'User', 'Action'] },
   { id: 'cn', title: 'Credit Notes', group: 'Inventory', description: 'Supplier credit note and return history.', columns: ['Date', 'Time', 'Supplier', 'Reference', 'Location', 'Items', 'Total Ex', 'User', 'Action'] },
@@ -42,7 +42,7 @@ export const reportCatalog = [
   { id: 'adj', title: 'Adjustments', group: 'Operations', description: 'Manual adjustment audit.', columns: ['Date', 'Time', 'User', 'Item', 'Category', 'Location', 'Mode', 'Quantity', 'Unit', 'Impact Ex', 'Reason'] },
   { id: 'stocktake', title: 'Stock Take Audit', group: 'Operations', description: 'Physical count sessions and variance.', columns: ['Date', 'Time', 'Location', 'User', 'Items Counted', 'Variance Lines', 'Net Impact', 'Action'] },
   { id: 'inventory_audit', title: 'Inventory Change Audit', group: 'Operations', description: 'Stock items created, updated, deleted, imported, or reset.', columns: ['Date', 'Time', 'Area', 'Item', 'Action', 'Location', 'Before', 'After', 'User', 'Source'] },
-  { id: 'mfg', title: 'Manufacturing Productions', group: 'Operations', description: 'Production batches, sub-recipe costing, and yield variance.', columns: ['Date', 'Time', 'Item', 'Type', 'Location', 'Expected', 'Produced', 'Variance', 'COGS Ex', 'Unit'] },
+  { id: 'mfg', title: 'Manufacturing Productions', group: 'Operations', description: 'Production batches, posted output, wastage, and yield variance.', columns: ['Date', 'Time', 'Item', 'Type', 'Location', 'Expected', 'Produced', 'Wastage Qty', 'Variance', 'Batch Cost Ex', 'Wastage Value Ex', 'Unit'] },
   { id: 'transfers', title: 'Stock Transfers', group: 'Operations', description: 'Location-to-location movement history.', columns: ['Date', 'Time', 'User', 'Item', 'From', 'To', 'Quantity', 'Unit', 'Note'] },
   { id: 'ops_overview', title: 'Ops Overview By Category', group: 'Operations', description: 'Category-level operational summary.', columns: ['Category', 'Location', 'Stock Value', 'Purchases Ex', 'Wastage Ex', 'Manual Adjustments Ex', 'Low Stock Items'] },
   { id: 'ops_category_overview', title: 'Operations Overview By Inventory Category', group: 'Operations', description: 'Opening/closing stock value, purchases and actual vs theoretical cost of sales per inventory category.', columns: ['Inventory Category', 'Locations', 'Opening Stock Value', 'Purchases', 'Closing Stock Value', 'COS Actual', 'COS Theoretical', 'COS Difference'] },
@@ -491,6 +491,7 @@ function buildMovementRows(source, context) {
     item,
     purchases: 0,
     sales: 0,
+    manufactured: 0,
     wastage: 0,
     adjustments: 0,
     transfers: 0
@@ -519,7 +520,7 @@ function buildMovementRows(source, context) {
   source.logs_mfg.filter((log) => inDateRange(logDate(log), context)).forEach((log) => {
     if (!matchesLocationId(context, logLocationId(log))) return;
     toArray(log.components || log.recipe || log.items).forEach((line) => addMovement(map, line.ingId || line.itemId || line.stockItemId, 'sales', Math.abs(qty(line))));
-    addMovement(map, log.itemId || log.stockItemId || log.manufacturedItemId, 'adjustments', Number(log.producedQty || log.actualQty || log.qty || 0));
+    addMovement(map, log.itemId || log.stockItemId || log.manufacturedItemId, 'manufactured', Number(log.producedQty || log.actualQty || log.qty || 0));
     const shortfallQty = getManufacturingShortfallQty(log);
     if (shortfallQty > 0) addMovement(map, log.itemId || log.stockItemId || log.manufacturedItemId, 'wastage', shortfallQty);
   });
@@ -540,21 +541,22 @@ function buildMovementRows(source, context) {
     // items are consumed via their exploded base ingredients (added above), so they
     // must not also appear as their own movement rows (double counting).
     .filter(({ item }) => isStockOnHandItem(item))
-    .map(({ item, purchases, sales, wastage, adjustments, transfers }) => ({
+    .map(({ item, purchases, sales, manufactured, wastage, adjustments, transfers }) => ({
       Item: item.name,
       Category: item.category || 'General',
       Unit: item.unit || item.uom || '',
       Purchases: number(purchases),
       'Sales Usage': number(sales),
+      Manufactured: number(manufactured),
       Wastage: number(wastage),
       Adjustments: number(adjustments),
       'Transfers Net': number(transfers),
-      'Net Qty': number(purchases - sales - wastage + adjustments + transfers),
+      'Net Qty': number(purchases - sales + manufactured - wastage + adjustments + transfers),
       _unit: item.unit || item.uom || '',
       _sort: item.name
     }))
     .filter((row) => passesCommon(row, context))
-    .filter((row) => ['Purchases', 'Sales Usage', 'Wastage', 'Adjustments', 'Transfers Net'].some((key) => Number(row[key]) !== 0) || context.query)
+    .filter((row) => ['Purchases', 'Sales Usage', 'Manufactured', 'Wastage', 'Adjustments', 'Transfers Net'].some((key) => Number(row[key]) !== 0) || context.query)
     .sort(sortBy('_sort'));
 }
 
@@ -1479,18 +1481,25 @@ function auditObjectValue(value) {
 }
 
 function buildManufacturingRows(source, context) {
-  return source.logs_mfg.filter((log) => inDateRange(logDate(log), context)).map((log) => ({
-    Date: displayDate(logDate(log)),
-    Time: displayTime(reportTimestamp(log)),
-    Item: log.itemName || log.stockItemName || log.manufacturedItemName || context.ingredientMap.get(String(log.itemId || log.manufacturedItemId))?.name || '',
-    Type: 'Manufactured / Prep',
-    Location: log.locationName || locationName(context, logLocationId(log), ''),
-    Expected: number(getManufacturingExpectedQty(log)),
-    Produced: number(log.producedQty ?? log.actualQty ?? log.qty ?? 0),
-    Variance: number(getManufacturingVarianceQty(log)),
-    'COGS Ex': currency(getManufacturingComponentTotal(log)),
-    Unit: log.unit || context.ingredientMap.get(String(log.itemId || log.manufacturedItemId))?.unit || ''
-  })).filter((row) => passesReportFilters(row, context));
+  return source.logs_mfg.filter((log) => inDateRange(logDate(log), context)).map((log) => {
+    const expectedQty = getManufacturingExpectedQty(log);
+    const producedQty = log.producedQty ?? log.actualQty ?? log.qty ?? 0;
+    const wastageQty = getManufacturingShortfallQty(log);
+    return {
+      Date: displayDate(logDate(log)),
+      Time: displayTime(reportTimestamp(log)),
+      Item: log.itemName || log.stockItemName || log.manufacturedItemName || context.ingredientMap.get(String(log.itemId || log.manufacturedItemId))?.name || '',
+      Type: 'Manufactured / Prep',
+      Location: log.locationName || locationName(context, logLocationId(log), ''),
+      Expected: number(expectedQty),
+      Produced: number(producedQty),
+      'Wastage Qty': number(wastageQty),
+      Variance: number(getManufacturingVarianceQty(log)),
+      'Batch Cost Ex': currency(getManufacturingComponentTotal(log)),
+      'Wastage Value Ex': currency(getManufacturingWastageValue(log)),
+      Unit: log.unit || context.ingredientMap.get(String(log.itemId || log.manufacturedItemId))?.unit || ''
+    };
+  }).filter((row) => passesReportFilters(row, context));
 }
 
 function buildTransferRows(source, context) {
