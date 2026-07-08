@@ -1,4 +1,4 @@
-import { callCloudflareWorkspaceRoute } from './cloudflareApi.js';
+import { callCloudflareWorkspaceRoute, callOptionalCloudflareWorkspaceRoute } from './cloudflareApi.js';
 import { normalizeAdjustmentLogs, normalizeWastageResponse } from './adjustmentLog.js';
 import { normalizeSites, normalizeStockLocations } from './locationModel.js';
 import { isWastageAdjustment } from './wastageClassifier.js';
@@ -184,7 +184,7 @@ async function fetchCloudflareDashboardSource(workspaceId) {
     callCloudflareWorkspaceRoute(workspaceId, 'grvs', { query: { limit: 500 } }),
     callCloudflareWorkspaceRoute(workspaceId, 'credit-notes', { query: { limit: 500 } }),
     callCloudflareWorkspaceRoute(workspaceId, 'adjustments', { query: { limit: 500 } }),
-    callCloudflareWorkspaceRoute(workspaceId, 'wastage-adjustments', { query: { limit: 500 } }).catch(() => ({})),
+    callOptionalCloudflareWorkspaceRoute(workspaceId, 'wastage-adjustments', { query: { limit: 500 }, fallback: {} }),
     callCloudflareWorkspaceRoute(workspaceId, 'stock-takes', { query: { limit: 500 } }),
     callCloudflareWorkspaceRoute(workspaceId, 'stock-take-templates', { query: { limit: 500 } }),
     callCloudflareWorkspaceRoute(workspaceId, 'manufacturing-batches', { query: { limit: 500 } }),

@@ -39,9 +39,14 @@ export function getCloudSessionToken() {
 // tab switch. Any write (non-GET) clears the cache; explicit refreshes call clearApiCache() too.
 const GET_CACHE_TTL_MS = 30000;
 const apiGetCache = new Map(); // key -> { promise, expires }
+const unsupportedWorkspaceRoutes = new Set();
 
 export function clearApiCache() {
   apiGetCache.clear();
+}
+
+export function clearUnsupportedWorkspaceRouteCache() {
+  unsupportedWorkspaceRoutes.clear();
 }
 
 export async function callCloudflareRoute(path, {
@@ -140,6 +145,28 @@ export async function callCloudflareWorkspaceRoute(workspaceId, resource, {
   });
 
   return callCloudflareRoute(url.pathname + url.search, { method, payload, token });
+}
+
+export async function callOptionalCloudflareWorkspaceRoute(workspaceId, resource, {
+  method = 'GET',
+  payload,
+  query,
+  fallback = {}
+} = {}) {
+  const workspaceKey = String(workspaceId || '').trim();
+  const requestMethod = String(method || 'GET').toUpperCase();
+  const routeKey = `${workspaceKey}::${String(resource || '').trim()}::${requestMethod}`;
+  if (unsupportedWorkspaceRoutes.has(routeKey)) return fallback;
+  try {
+    return await callCloudflareWorkspaceRoute(workspaceId, resource, { method, payload, query });
+  } catch (error) {
+    const message = String(error?.message || '');
+    if (requestMethod === 'GET' && /\(404\)/.test(message)) {
+      unsupportedWorkspaceRoutes.add(routeKey);
+      return fallback;
+    }
+    throw error;
+  }
 }
 
 function createApiUrl(path) {

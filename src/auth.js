@@ -4,6 +4,7 @@ import styles from './styles/auth.module.css';
 let authTurnstileSiteKey = '';
 let authTurnstileEnabled = false;
 let authTurnstileWidgetId = null;
+let authTurnstileWidgetHost = null;
 let authTurnstileToken = '';
 let authTurnstileConfigLoaded = false;
 let authTurnstileConfigPromise = null;
@@ -285,7 +286,8 @@ function renderAuthTurnstile(root = document) {
     window.clearTimeout(authTurnstileLoadTimer);
     authTurnstileLoadTimer = null;
   }
-  if (authTurnstileWidgetId !== null && widget.childElementCount > 0) return;
+  if (authTurnstileWidgetId !== null && authTurnstileWidgetHost === widget && widget.childElementCount > 0) return;
+  removeAuthTurnstileWidget();
   authTurnstileToken = '';
   widget.innerHTML = '';
   retry?.classList.remove(styles.isVisible);
@@ -307,6 +309,7 @@ function renderAuthTurnstile(root = document) {
       retry?.classList.add(styles.isVisible);
     }
   });
+  authTurnstileWidgetHost = widget;
 }
 
 function markAuthTurnstileUnavailable(root, message = 'Security check could not load. Allow challenges.cloudflare.com, then retry.') {
@@ -321,7 +324,7 @@ function markAuthTurnstileUnavailable(root, message = 'Security check could not 
 function reloadAuthTurnstile(root = document) {
   window.KCP_APP_TURNSTILE_LOAD_FAILED = false;
   authTurnstileToken = '';
-  authTurnstileWidgetId = null;
+  removeAuthTurnstileWidget();
   const { widget, status, retry } = getAuthTurnstileElements(root);
   if (widget) widget.innerHTML = '';
   if (status) status.textContent = 'Security check loading...';
@@ -339,6 +342,19 @@ function resetAuthTurnstile(root = document) {
     renderAuthTurnstile(root);
   }
   if (status && authTurnstileEnabled) status.textContent = 'Security check loading...';
+}
+
+function removeAuthTurnstileWidget() {
+  if (authTurnstileWidgetId !== null && window.turnstile?.remove) {
+    try {
+      window.turnstile.remove(authTurnstileWidgetId);
+    } catch {
+      // Ignore stale widget cleanup failures; the element will still be cleared.
+    }
+  }
+  if (authTurnstileWidgetHost) authTurnstileWidgetHost.innerHTML = '';
+  authTurnstileWidgetId = null;
+  authTurnstileWidgetHost = null;
 }
 
 async function requireAuthTurnstileToken(root) {
@@ -681,4 +697,3 @@ function icon(name) {
   };
   return icons[name] || '';
 }
-

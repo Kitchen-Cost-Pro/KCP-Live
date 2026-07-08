@@ -1,4 +1,4 @@
-import { callCloudflareWorkspaceRoute } from './cloudflareApi.js';
+import { callCloudflareWorkspaceRoute, callOptionalCloudflareWorkspaceRoute } from './cloudflareApi.js';
 import { fetchStock } from './stockService.js';
 import { getStockValuationUnitCost } from './database.js';
 import { normalizeAdjustmentLogs, normalizeWastageResponse } from './adjustmentLog.js';
@@ -33,7 +33,7 @@ export async function fetchAdjustmentsWorkspace(workspaceId) {
 
   const [adjustmentResponse, wastageResponse, stockResponse, locationResponse, siteResponse, productResponse] = await Promise.all([
     callCloudflareWorkspaceRoute(workspaceKey, 'adjustments', { query: { limit: 500 } }),
-    callCloudflareWorkspaceRoute(workspaceKey, 'wastage-adjustments', { query: { limit: 500 } }).catch(() => ({})),
+    callOptionalCloudflareWorkspaceRoute(workspaceKey, 'wastage-adjustments', { query: { limit: 500 }, fallback: {} }),
     fetchStock(workspaceKey),
     callCloudflareWorkspaceRoute(workspaceKey, 'locations'),
     callCloudflareWorkspaceRoute(workspaceKey, 'site-configuration'),
