@@ -65,6 +65,7 @@ import {
 import {
   getDashboard,
   getAdjustments,
+  getWastageAdjustments,
   getCreditNotes,
   getGoodsReceipts,
   getLinkedTransferProfiles,
@@ -733,6 +734,10 @@ export async function dispatchWorkspaceRoute(
 
   if (request.method === 'POST' && resource === 'adjustments') {
     return postAdjustment(request, env, auth, workspaceId);
+  }
+
+  if (request.method === 'GET' && resource === 'wastage-adjustments') {
+    return getWastageAdjustments(request, env, auth, workspaceId);
   }
 
   if (request.method === 'POST' && resource === 'wastage-adjustments') {

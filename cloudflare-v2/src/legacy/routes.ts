@@ -4328,6 +4328,14 @@ export async function getAdjustments(request: Request, env: Env, auth: AuthConte
   return json(request, env, { ok: true, adjustments, page: { limit, offset } });
 }
 
+export async function getWastageAdjustments(request: Request, env: Env, auth: AuthContext, workspaceId: string) {
+  // Legacy frontend queries both /adjustments and /wastage-adjustments and concatenates them.
+  // In D1, GET /adjustments already returns all adjustments including wastage.
+  // We return an empty list here to prevent 404 errors in the console while maintaining compat.
+  await scoped(request, env, auth, workspaceId);
+  return json(request, env, { ok: true, items: [], wastageAdjustments: [] });
+}
+
 export async function postAdjustment(request: Request, env: Env, auth: AuthContext, workspaceId: string) {
   await scoped(request, env, auth, workspaceId);
   const payload = await readJson<Record<string, unknown>>(request);
