@@ -17,7 +17,13 @@
   color: #9ab3dc;
   font-size: 0.72rem;
   font-weight: 700;
-  line-height: 1;
+  line-height: 18px;
+  text-align: center;
+  font-style: normal;
+  font-variant: normal;
+  /* Optical correction: the "i" glyph's ascender/descender sit slightly high within a
+     flexbox-centered line box, so it reads as off-center inside the circle without this nudge. */
+  padding-top: 1px;
   cursor: help;
 }
 

@@ -67,6 +67,10 @@
   grid-column: span 5;
 }
 
+.settingsBentoGrid--withTools .settingsPanel--goLive {
+  grid-column: span 5;
+}
+
 .settingsPanel {
   position: relative;
   z-index: 1;
@@ -106,6 +110,13 @@
   grid-column: span 5;
 }
 
+.settingsPanel--goLive {
+  grid-column: span 5;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
 .settingsBentoGrid--standard .settingsPanel--workspace {
   grid-column: span 7;
 }
@@ -124,6 +135,10 @@
 }
 
 .settingsBentoGrid--standard .settingsPanel--routing {
+  grid-column: span 6;
+}
+
+.settingsBentoGrid--standard .settingsPanel--goLive {
   grid-column: span 6;
 }
 
@@ -221,6 +236,34 @@
   font-weight: 750;
   line-height: 1.35;
   letter-spacing: 0;
+}
+
+.settingsGoLiveChecklist {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.settingsGoLiveChecklist li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--surface-primary) 30%, transparent);
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.settingsGoLiveChecklist li.is-ready {
+  color: var(--text-main);
+  border-color: color-mix(in srgb, var(--accent-blue) 45%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent-blue) 10%, transparent);
 }
 
 .settingsFormGrid input,

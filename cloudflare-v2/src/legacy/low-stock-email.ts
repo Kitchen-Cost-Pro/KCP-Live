@@ -71,14 +71,36 @@ function timePartsInZone(date: Date, timeZone: string) {
 }
 
 function isSendWindow(date: Date, dispatchTime: string, timeZone: string) {
-  const [hourText] = dispatchTime.split(':');
+  const [hourText, minuteText] = dispatchTime.split(':');
   const local = timePartsInZone(date, timeZone);
-  return local.hour === Number(hourText);
+  // Match hour+minute (not hour-only) so a custom dispatch time only opens a window around
+  // its own configured minute, with a tolerance matching the cron's 15-minute cadence.
+  if (local.hour !== Number(hourText)) return false;
+  return Math.abs(local.minute - Number(minuteText || 0)) < 15;
 }
 
-function isDue(rawSettings: Record<string, any>, lastSentValue: unknown, frequency: string, now: Date) {
+// The most recent instant `dispatchTime` (in `timeZone`) occurred at/before `now`, stepped back
+// an extra `frequencyDays - 1` days for multi-day frequencies (e.g. "every 2 weeks").
+function mostRecentDispatchBoundary(now: Date, dispatchTime: string, timeZone: string, frequencyDays: number) {
+  const day = 24 * 60 * 60 * 1000;
+  const [hourText, minuteText] = dispatchTime.split(':');
+  const targetMinutes = Number(hourText) * 60 + Number(minuteText || 0);
+  const local = timePartsInZone(now, timeZone);
+  const nowMinutes = local.hour * 60 + local.minute;
+  const todaysBoundary = now.getTime() - (nowMinutes - targetMinutes) * 60 * 1000;
+  const lastBoundary = todaysBoundary <= now.getTime() ? todaysBoundary : todaysBoundary - day;
+  return lastBoundary - Math.max(0, frequencyDays - 1) * day;
+}
+
+function isDue(rawSettings: Record<string, any>, lastSentValue: unknown, frequency: string, now: Date, dispatchTime: string, timeZone: string) {
   const lastSentAt = Date.parse(clean(rawSettings.lowStockEmailLastSentAt || lastSentValue));
-  return !Number.isFinite(lastSentAt) || now.getTime() - lastSentAt >= intervalMs(frequency);
+  if (!Number.isFinite(lastSentAt)) return true;
+  // Anchored to the configured dispatch-time boundary rather than a naive rolling
+  // `now - lastSentAt` window — otherwise changing dispatchTime to something later than the
+  // schema's 08:00 default leaves lastSentAt anchored near 8am, and the new later window never
+  // fires until enough time has drifted back around to the old anchor.
+  const boundary = mostRecentDispatchBoundary(now, dispatchTime, timeZone, intervalMs(frequency) / (24 * 60 * 60 * 1000));
+  return lastSentAt < boundary;
 }
 
 function money(value: number) {
@@ -314,7 +336,7 @@ async function sendWorkspaceLowStockSummary(env: Env, workspace: Record<string, 
   const timeZone = clean(rawSettings.lowStockEmailTimeZone || rawSettings.timeZone || workspace.emailTimezone || workspace.timezone || 'Africa/Johannesburg');
   const dispatchTime = normalizeDispatchTime(rawSettings.lowStockEmailDispatchTime || workspace.settingsTime || workspace.dispatchTime);
   if (!isSendWindow(now, dispatchTime, timeZone)) return { workspaceId, status: 'outside_send_window' };
-  if (!isDue(rawSettings, workspace.lastSentAt, frequency, now)) return { workspaceId, status: 'not_due' };
+  if (!isDue(rawSettings, workspace.lastSentAt, frequency, now, dispatchTime, timeZone)) return { workspaceId, status: 'not_due' };
 
   const recipients = await getRecipients(env, workspaceId);
   const rows = await getLowStockRows(env, workspaceId);

@@ -7466,9 +7466,18 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
   // Transactional movements (sale/grv/credit): the stored value_delta is the ACTUAL
   // transaction amount — trust it, deriving qty×current cost only when it is missing.
   const TXN_VALUE_SQL = `CASE WHEN sm.value_delta != 0 THEN sm.value_delta ELSE sm.quantity_delta * ${CURRENT_COST_SQL} END`;
+  const IS_ACCOUNTING_ONLY_SQL = `(json_extract(sm.metadata_json,'$.accountingOnly') IN (1,'true') OR json_extract(sm.metadata_json,'$.reportingOnly') IN (1,'true'))`;
   // Wastage/adjustment/stock-take: derive qty × CURRENT cost first (audit rule; matches
   // the report's deriveCostImpact), falling back to the stored value only when no cost.
-  const DERIVED_VALUE_SQL = `CASE WHEN ${CURRENT_COST_SQL} > 0 THEN sm.quantity_delta * ${CURRENT_COST_SQL} ELSE sm.value_delta END`;
+  // Accounting-only movements (e.g. manufacturing_wastage) deliberately carry quantity_delta=0
+  // (they aren't a real unit-count change — the real stock effect is already recorded on the
+  // paired manufacturing_finished_in movement), so qty×cost would wrongly collapse to 0 here —
+  // trust the value captured at write time instead for these rows.
+  const DERIVED_VALUE_SQL = `CASE
+    WHEN ${IS_ACCOUNTING_ONLY_SQL} THEN sm.value_delta
+    WHEN ${CURRENT_COST_SQL} > 0 THEN sm.quantity_delta * ${CURRENT_COST_SQL}
+    ELSE sm.value_delta
+  END`;
   // Canonical wastage rule (matches frontend isWastageAdjustmentLog): a waste/manufact
   // movement, OR an adjustment with an explicit wasteReason / mode='wastage'. A plain
   // 'remove' or negative qty is a MANUAL adjustment, NOT wastage.
@@ -7486,7 +7495,9 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
   const IS_STOCKTAKE_SQL = `(lower(sm.movement_type) LIKE '%stock_take%' OR lower(sm.movement_type) LIKE '%stocktake%')`;
   // Manual adjustment = an adjust-type movement that is NOT wastage.
   const IS_ADJUST_SQL = `(lower(sm.movement_type) LIKE '%adjust%' AND NOT ${IS_WASTE_SQL})`;
-  const IS_ACCOUNTING_ONLY_SQL = `(json_extract(sm.metadata_json,'$.accountingOnly') IN (1,'true') OR json_extract(sm.metadata_json,'$.reportingOnly') IN (1,'true'))`;
+  // Subset of IS_WASTE_SQL for manufacturing yield loss specifically, so the dashboard tile
+  // can show it as its own line item alongside (not folded silently into) other wastage.
+  const IS_MANUFACTURING_WASTE_SQL = `lower(sm.movement_type) LIKE '%manufact%'`;
   // Per-movement value chosen by class: transactional keeps stored value; everything
   // else (wastage/adjustment/stock-take) derives qty × current cost.
   const CLASS_VALUE_SQL = `CASE WHEN ${IS_SALE_SQL} OR ${IS_GRV_SQL} OR ${IS_CREDIT_SQL} THEN ${TXN_VALUE_SQL} ELSE ${DERIVED_VALUE_SQL} END`;
@@ -7513,7 +7524,8 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
         COALESCE(SUM(CASE WHEN ${IS_CREDIT_SQL} THEN ${TXN_VALUE_SQL} ELSE 0 END), 0) AS credit_note,
         COALESCE(SUM(CASE WHEN ${IS_SALE_SQL} THEN ${TXN_VALUE_SQL} ELSE 0 END), 0) AS sale,
         COALESCE(SUM(CASE WHEN ${IS_STOCKTAKE_SQL} THEN ${DERIVED_VALUE_SQL} ELSE 0 END), 0) AS stock_take,
-        COALESCE(SUM(CASE WHEN ${IS_WASTE_SQL} THEN ${DERIVED_VALUE_SQL} ELSE 0 END), 0) AS wastage,
+        COALESCE(SUM(CASE WHEN ${IS_WASTE_SQL} AND NOT ${IS_MANUFACTURING_WASTE_SQL} THEN ${DERIVED_VALUE_SQL} ELSE 0 END), 0) AS wastage,
+        COALESCE(SUM(CASE WHEN ${IS_MANUFACTURING_WASTE_SQL} THEN ${DERIVED_VALUE_SQL} ELSE 0 END), 0) AS manufacturing_wastage,
         COALESCE(SUM(CASE WHEN ${IS_ADJUST_SQL} THEN ${DERIVED_VALUE_SQL} ELSE 0 END), 0) AS adjustment,
         COALESCE(SUM(CASE WHEN NOT ${IS_ACCOUNTING_ONLY_SQL} THEN ${CLASS_VALUE_SQL} ELSE 0 END), 0) AS net_value
        FROM stock_movements sm
@@ -7529,7 +7541,7 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
     adjustment: numberValue(totalsRow.adjustment, 0),
     stockTake: numberValue(totalsRow.stock_take, 0),
     wastage: numberValue(totalsRow.wastage, 0),
-    manufacturingWastage: 0, // manufacturing wastage is folded into `wastage` via IS_WASTE_SQL
+    manufacturingWastage: numberValue(totalsRow.manufacturing_wastage, 0),
     netValue: numberValue(totalsRow.net_value, 0)
   };
 
@@ -7813,6 +7825,7 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
       countVariance: { raw: countVariance, type: 'currency' },
       manualAdjustments: { raw: manualAdjustments, type: 'currency' },
       wastage: { raw: wastage, type: 'currency' },
+      manufacturingWastage: { raw: numberValue(movementTotals.manufacturingWastage, 0), type: 'currency' },
       lowStockCount: { raw: insightCounts.lowStockCount, type: 'number' },
       gpPercentage: { raw: averageGp, type: 'percent' },
       averageGp: { raw: averageGp, type: 'percent' }

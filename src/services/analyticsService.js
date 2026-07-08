@@ -2413,7 +2413,7 @@ function buildWasteParetoRows(source, context) {
       Quantity: `${number(qtyValue)}${log.unit || item.unit || item.uom ? ` ${log.unit || item.unit || item.uom}` : ''}`,
       'Loss Value': currency(loss),
       Note: log.note || log.notes || log.reason || '',
-      Source: 'Adjustment',
+      Source: 'Wastage Adjustment',
       _ts: timestamp,
       _loss: loss
     });
@@ -2449,7 +2449,7 @@ function buildWasteParetoRows(source, context) {
       Quantity: `${number(variance)}${unit ? ` ${unit}` : ''}`,
       'Loss Value': currency(loss),
       Note: log.note || log.notes || 'Actual yield below expected yield',
-      Source: 'Manufacturing',
+      Source: 'Manufacture Wastage',
       _ts: timestamp,
       _loss: loss
     });

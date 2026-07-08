@@ -2543,7 +2543,7 @@ function menuHealthColumnInfo(column = '') {
 
 // Incident-level columns for the main wastage table (day/time, item, location, user…).
 function wasteIncidentColumns() {
-  return ['Date', 'Time', 'Item', 'Category', 'Location', 'User', 'Reason', 'Quantity', 'Loss Value'];
+  return ['Date', 'Time', 'Item', 'Category', 'Location', 'User', 'Source', 'Reason', 'Quantity', 'Loss Value'];
 }
 
 function wasteIncidentColumnInfo(column = '') {
@@ -2554,6 +2554,7 @@ function wasteIncidentColumnInfo(column = '') {
     Category: 'Inventory/menu category of the wasted item.',
     Location: 'Location where the wastage occurred.',
     User: 'User (or integration) who recorded the wastage.',
+    Source: 'Where this wastage came from: Wastage Adjustment (manually recorded ingredient/menu-item wastage) or Manufacture Wastage (yield loss from a production event).',
     Reason: 'Recorded waste reason (e.g. spoilage, breakage, expiry).',
     Quantity: 'Quantity wasted, with its unit.',
     'Loss Value': 'Cost of the wasted quantity = qty × last-purchase unit cost.'
@@ -2591,6 +2592,7 @@ function renderWasteIncidentRow(event = {}) {
       <td>${escapeHtml(event.Category || '')}</td>
       <td>${escapeHtml(event.Location || '')}</td>
       <td>${escapeHtml(event.User || 'Unknown')}</td>
+      <td>${escapeHtml(event.Source || '')}</td>
       <td>${escapeHtml(event.Reason || '')}</td>
       <td>${escapeHtml(event.Quantity || '')}</td>
       <td>${escapeHtml(event['Loss Value'] || '')}</td>
