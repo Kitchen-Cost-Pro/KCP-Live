@@ -1465,6 +1465,42 @@
                         <button onclick="disconnectSystemGmail()" id="gmail-disconnect-btn" class="btn-ghost text-red-400 hidden"><i class="fa-solid fa-unlink mr-2"></i>Disconnect</button>
                     </div>
                 </div>
+                <div class="glass-card p-6 space-y-4 md:col-span-2">
+                    <div class="flex items-center mb-2">
+                        <h4 class="text-xs font-black uppercase tracking-widest text-rose-400"><i class="fa-solid fa-key mr-2"></i>System Email — Gmail App Password (SMTP)</h4>
+                        <i class="fa-solid fa-circle-info info-icon" onclick="showInfo('System Email (SMTP)', 'Send system emails (password resets, low stock alerts) via Gmail SMTP using an app password instead of OAuth. Generate an app password at myaccount.google.com/apppasswords.')"></i>
+                    </div>
+                    <div id="email-config-status" class="text-xs text-slate-400">Loading current config…</div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div>
+                            <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Provider</label>
+                            <select id="email-config-provider" class="w-full text-xs">
+                                <option value="gmail_smtp">Gmail SMTP (App Password)</option>
+                                <option value="resend">Resend</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">From Name</label>
+                            <input type="text" id="email-config-from-name" placeholder="Kitchen Cost Pro" class="w-full text-xs">
+                        </div>
+                        <div>
+                            <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">From / Gmail Address</label>
+                            <input type="email" id="email-config-from-email" placeholder="alerts@yourdomain.com" class="w-full text-xs">
+                        </div>
+                        <div>
+                            <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">SMTP Username (usually same as From)</label>
+                            <input type="text" id="email-config-smtp-username" placeholder="alerts@yourdomain.com" class="w-full text-xs">
+                        </div>
+                        <div class="md:col-span-2">
+                            <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Gmail App Password</label>
+                            <input type="password" id="email-config-smtp-password" placeholder="Leave blank to keep current password" class="w-full text-xs">
+                        </div>
+                    </div>
+                    <div class="flex gap-2 flex-wrap">
+                        <button onclick="saveEmailConfig()" class="btn-primary"><i class="fa-solid fa-floppy-disk mr-2"></i>Save Email Config</button>
+                        <button onclick="sendTestEmail()" class="btn-ghost text-blue-300"><i class="fa-solid fa-paper-plane mr-2"></i>Send Test Email</button>
+                    </div>
+                </div>
                 <div class="glass-card p-6 space-y-4">
                     <div class="flex items-center mb-2">
                         <h4 class="text-xs font-black uppercase tracking-widest text-blue-400 group"><i class="fa-solid fa-link mr-2"></i>Quick Access</h4>
@@ -3206,6 +3242,51 @@ async function loadSystemGmailStatus() {
     }
 }
 
+async function loadEmailConfig() {
+    const statusEl = document.getElementById('email-config-status');
+    try {
+        const res = await callAdminApi('GET', '/api/admin/system-settings').catch(() => null);
+        const config = res?.emailConfig || {};
+        document.getElementById('email-config-provider').value = config.provider || 'gmail_smtp';
+        document.getElementById('email-config-from-name').value = config.fromName || '';
+        document.getElementById('email-config-from-email').value = config.fromEmail || '';
+        document.getElementById('email-config-smtp-username').value = config.smtpUsername || '';
+        if (statusEl) {
+            statusEl.innerHTML = config.hasSmtpPassword
+                ? `<span class="text-emerald-400"><i class="fa-solid fa-circle-check mr-1"></i>App password is set (provider: ${adminEscapeHtml(config.provider || 'unknown')}).</span>`
+                : `<span class="text-slate-500"><i class="fa-solid fa-circle-xmark mr-1"></i>No app password saved yet — low stock/system emails will not send via SMTP.</span>`;
+        }
+    } catch (e) {
+        if (statusEl) statusEl.innerHTML = `<span class="text-red-400">Could not load email config.</span>`;
+    }
+}
+
+async function saveEmailConfig() {
+    const provider = document.getElementById('email-config-provider').value;
+    const fromName = document.getElementById('email-config-from-name').value.trim();
+    const fromEmail = document.getElementById('email-config-from-email').value.trim();
+    const smtpUsername = document.getElementById('email-config-smtp-username').value.trim();
+    const smtpPassword = document.getElementById('email-config-smtp-password').value;
+    if (!fromEmail) return showToast('From/Gmail address is required.', 'error');
+    showSync('Saving email config...');
+    try {
+        await callAdminApi('PATCH', '/api/admin/system-settings/email', {
+            provider,
+            fromName,
+            fromEmail,
+            smtpUsername,
+            ...(smtpPassword ? { smtpPassword } : {})
+        });
+        document.getElementById('email-config-smtp-password').value = '';
+        showToast('Email config saved.', 'success');
+        loadEmailConfig();
+    } catch (e) {
+        showToast('Failed to save email config: ' + (e.message || e), 'error');
+    } finally {
+        hideSync();
+    }
+}
+
 async function connectSystemGmail() {
     try {
         const res = await callAdminApi('GET', '/api/admin/gmail/connect');
@@ -3400,7 +3481,7 @@ function switchTab(tab){
     if (tab === 'logs') fetchAuditLogs();
     if (tab === 'orgs' && !orgManagerLoaded) fetchOrgManagerSites();
     if (tab === 'integrations') renderIntegrationControlTower();
-    if (tab === 'tools') { renderAccentSwatches(); loadSystemGmailStatus(); }
+    if (tab === 'tools') { renderAccentSwatches(); loadSystemGmailStatus(); loadEmailConfig(); }
     if (tab === 'billing') { renderBillingTable(); fetchAllBillingStatuses(); }
     if (tab === 'invitations') { fetchSignupRequests().then(() => { fetchInvitations().then(renderInvitations); }); }
     // Close mobile sidebar
