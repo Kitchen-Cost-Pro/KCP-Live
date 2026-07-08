@@ -1446,7 +1446,13 @@ export async function patchAdminWorkspaceSettingsDO(request: Request, env: Env, 
     `SELECT raw_json FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`
   ).bind(workspaceId).first<{ raw_json?: string }>();
   const existing = objectValue(jsonParse(row?.raw_json));
-  const merged = { ...existing, ...payload };
+  const deleteKeys = Array.isArray(payload.__deleteKeys)
+    ? payload.__deleteKeys.map((value) => String(value || '').trim()).filter(Boolean)
+    : [];
+  const nextPayload = { ...payload } as Record<string, unknown>;
+  delete nextPayload.__deleteKeys;
+  const merged = { ...existing, ...nextPayload } as Record<string, unknown>;
+  for (const key of deleteKeys) delete merged[key];
   await env.DB.prepare(
     `INSERT INTO workspace_settings (workspace_id, raw_json)
      VALUES (?1, ?2)

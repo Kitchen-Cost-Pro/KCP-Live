@@ -1000,6 +1000,58 @@ export type AdminTenantSummary = {
   yoco?: Record<string, unknown>;
 };
 
+export type AdminOrgSiteSettings = {
+  siteName?: string;
+  businessName?: string;
+  workspaceName?: string;
+  orgId?: string;
+  org_id?: string;
+  corpId?: string;
+  corp_id?: string;
+  permissionLevel?: string;
+  viewingOnly?: boolean;
+  viewing_only?: boolean;
+  groupMetadata?: Record<string, unknown> | null;
+  linkedSites?: Record<string, unknown>;
+  linked_sites?: Record<string, unknown>;
+};
+
+export type AdminOrgSettingsProvider = (workspaceIds: string[]) => Promise<Record<string, AdminOrgSiteSettings>>;
+
+export type AdminOrgGroupInput = {
+  siteIds: string[];
+  linkType: 'org' | 'corp';
+  linkId: string;
+  groupName: string;
+  permissionLevel: string;
+  viewingOnly: boolean;
+  now: string;
+};
+
+export type AdminOrgGroupMutationResult = {
+  siteIds: string[];
+  linkType: 'org' | 'corp';
+  linkId: string;
+  groupName: string;
+  permissionLevel: string;
+};
+
+export type AdminOrgGroupCoordinator = (
+  input: AdminOrgGroupInput,
+  adminSession: Awaited<ReturnType<typeof requireAdmin>>
+) => Promise<AdminOrgGroupMutationResult>;
+
+export type AdminOrgUnlinkInput = {
+  siteId: string;
+  linkType: 'org' | 'corp';
+  now: string;
+};
+
+export type AdminOrgUnlinkCoordinator = (
+  input: AdminOrgUnlinkInput,
+  adminSession: Awaited<ReturnType<typeof requireAdmin>>
+) => Promise<{ siteId: string; linkType: 'org' | 'corp'; oldLinkId?: string }>;
+
 export async function getAdminOverview(
   request: Request,
   env: Env,
@@ -1554,7 +1606,11 @@ export async function postAdminInvite(request: Request, env: Env) {
   return json(request, env, { ok: true, auth: authDelivery });
 }
 
-export async function postAdminSaveOrgGroup(request: Request, env: Env) {
+export async function postAdminSaveOrgGroup(
+  request: Request,
+  env: Env,
+  coordinator?: AdminOrgGroupCoordinator
+) {
   const adminSession = await requireAdmin(request, env);
   const payload = await readJson<Record<string, unknown>>(request);
   const siteIds = Array.isArray(payload.siteIds)
@@ -1568,8 +1624,28 @@ export async function postAdminSaveOrgGroup(request: Request, env: Env) {
   const requestedId = text(payload.linkId);
   const linkId = requestedId || `${linkType}_${crypto.randomUUID()}`;
   const now = nowIso();
+  const viewingOnly = permissionLevel === 'corporate_view_only';
 
   if (!cleanSiteIds.length) return error(request, env, 400, 'Select at least one workspace.');
+
+  if (coordinator) {
+    const result = await coordinator({
+      siteIds: cleanSiteIds,
+      linkType,
+      linkId,
+      groupName,
+      permissionLevel,
+      viewingOnly,
+      now
+    }, adminSession);
+    await writeAdminAuditEvent(env, adminAuditActor(adminSession), 'org_group.save', result.linkId, {
+      siteIds: result.siteIds,
+      linkType: result.linkType,
+      groupName: result.groupName,
+      permissionLevel: result.permissionLevel
+    });
+    return json(request, env, { ok: true, ...result });
+  }
 
   const statements: DbStatementLike[] = [];
   for (const workspaceId of cleanSiteIds) {
@@ -1626,10 +1702,25 @@ export async function postAdminSaveOrgGroup(request: Request, env: Env) {
   return json(request, env, { ok: true, siteIds: cleanSiteIds, linkType, linkId, groupName });
 }
 
-export async function postAdminUnlinkOrgSite(request: Request, env: Env, siteId: string) {
+export async function postAdminUnlinkOrgSite(
+  request: Request,
+  env: Env,
+  siteId: string,
+  coordinator?: AdminOrgUnlinkCoordinator
+) {
   const adminSession = await requireAdmin(request, env);
   const payload = await readJson<Record<string, unknown>>(request);
   const linkType = groupPrefix(text(payload.linkType || 'org'));
+
+  if (coordinator) {
+    const result = await coordinator({ siteId, linkType, now: nowIso() }, adminSession);
+    await writeAdminAuditEvent(env, adminAuditActor(adminSession), 'org_group.unlink_site', result.siteId, {
+      linkType: result.linkType,
+      oldLinkId: text(result.oldLinkId)
+    });
+    return json(request, env, { ok: true, siteId: result.siteId, linkType: result.linkType });
+  }
+
   const fields = groupField(linkType);
   const current = await getWorkspaceSettingsMap(env, siteId);
   const oldLinkId = text(current[fields.camel] || current[fields.snake]);
@@ -1697,25 +1788,37 @@ export async function postAdminUnlinkOrgSite(request: Request, env: Env, siteId:
   return json(request, env, { ok: true, siteId, linkType });
 }
 
-export async function getAdminOrgSites(request: Request, env: Env) {
+export async function getAdminOrgSites(
+  request: Request,
+  env: Env,
+  settingsProvider?: AdminOrgSettingsProvider
+) {
   await requireAdmin(request, env);
   const rows = await env.DB.prepare(
-    `SELECT w.id, w.name, ws.raw_json
+    `SELECT w.id, w.name, w.status, w.org_id, w.corp_id
        FROM workspaces w
-       LEFT JOIN workspace_settings ws ON ws.workspace_id = w.id
+      WHERE w.status = 'active'
       ORDER BY lower(w.name) ASC`
-  ).all<{ id: string; name: string; raw_json: string }>();
+  ).all<{ id: string; name: string; status: string; org_id?: string; corp_id?: string }>();
+  const workspaceIds = (rows.results || []).map((row) => text(row.id)).filter(Boolean);
+  const settingsMap = settingsProvider
+    ? await settingsProvider(workspaceIds)
+    : Object.fromEntries(await Promise.all(workspaceIds.map(async (workspaceId) => [workspaceId, await getWorkspaceSettingsMap(env, workspaceId)] as const)));
 
   const sites = (rows.results || []).map((row) => {
-    const settings = safeJsonParse<Record<string, any>>(row.raw_json, {});
+    const rawSettings = settingsMap[row.id];
+    const settings = rawSettings && typeof rawSettings === 'object' && !Array.isArray(rawSettings) ? rawSettings : {};
+    const orgId = text(row.org_id || settings.orgId || settings.org_id);
+    const corpId = text(row.corp_id || settings.corpId || settings.corp_id);
     return {
       id: row.id,
       name: text(settings.siteName || settings.businessName || row.name || row.id),
-      orgId: text(settings.orgId || settings.org_id),
-      corpId: text(settings.corpId || settings.corp_id),
+      orgId,
+      corpId,
       permissionLevel: text(settings.permissionLevel),
+      viewingOnly: Boolean(settings.viewingOnly === true || settings.viewing_only === true),
       groupMetadata: settings.groupMetadata || null,
-      linkedSites: settings.linkedSites || {}
+      linkedSites: settings.linkedSites || settings.linked_sites || {}
     };
   });
 
@@ -2033,4 +2136,3 @@ export async function refreshSystemGmailAccessToken(env: Env): Promise<string> {
   if (!res.ok || !result.access_token) throw new Error(text(result.error_description || result.error || 'Failed to refresh Gmail token.'));
   return text(result.access_token);
 }
-

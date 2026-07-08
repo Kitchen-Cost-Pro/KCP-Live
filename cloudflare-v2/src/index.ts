@@ -1,6 +1,15 @@
 import type { Env, AuthContext } from './types';
 import type { Env as LegacyEnv } from './legacy/types';
-import { postAdminApproveRegistration, getAdminOverview, deleteAdminWorkspace, getAdminWorkspaceSettings, patchAdminWorkspaceSettings } from './legacy/admin-routes';
+import {
+  postAdminApproveRegistration,
+  getAdminOverview,
+  deleteAdminWorkspace,
+  getAdminWorkspaceSettings,
+  patchAdminWorkspaceSettings,
+  getAdminOrgSites,
+  postAdminSaveOrgGroup,
+  postAdminUnlinkOrgSite
+} from './legacy/admin-routes';
 import type { AdminTenantSummary } from './legacy/admin-routes';
 import { dispatchCentralRoute } from './legacy/index';
 import { sendDueLowStockEmailSummaries } from './legacy/low-stock-email';
@@ -45,6 +54,24 @@ async function dispatchCentral(request: Request, env: Env, url: URL): Promise<Re
       return map;
     };
     return getAdminOverview(request, lenv, provider);
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/admin/org-sites') {
+    return getAdminOrgSites(request, lenv, async (workspaceIds) => getAdminWorkspaceSettingsMap(env, workspaceIds));
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/admin/org-groups') {
+    return postAdminSaveOrgGroup(request, lenv, async (input) => saveAdminOrgGroupFanOut(env, input));
+  }
+
+  const adminOrgSiteMatch = url.pathname.match(/^\/api\/admin\/org-sites\/([^/]+)\/unlink$/);
+  if (adminOrgSiteMatch && request.method === 'POST') {
+    return postAdminUnlinkOrgSite(
+      request,
+      lenv,
+      decodeURIComponent(adminOrgSiteMatch[1]),
+      async (input) => unlinkAdminOrgSiteFanOut(env, input)
+    );
   }
 
   // Delete workspace: central rows come out of CENTRAL_DB here, but the tenant tables live in the DO.
@@ -137,6 +164,30 @@ function json(request: Request, env: Env, data: unknown, status = 200): Response
     status,
     headers: { 'Content-Type': 'application/json', ...corsHeaders(request, env) }
   });
+}
+
+function text(value: unknown, fallback = ''): string {
+  return String(value ?? fallback).trim();
+}
+
+function objectValue(value: unknown): Record<string, any> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, any> : {};
+}
+
+function orgGroupField(linkType: 'org' | 'corp') {
+  return linkType === 'corp'
+    ? { camel: 'corpId', snake: 'corp_id', central: 'corp_id' }
+    : { camel: 'orgId', snake: 'org_id', central: 'org_id' };
+}
+
+function filterLinkedSitesByType(linkedSites: Record<string, any>, linkType: 'org' | 'corp') {
+  const kept: Record<string, any> = {};
+  for (const [linkedId, entry] of Object.entries(linkedSites || {})) {
+    const link = objectValue(entry);
+    if (text(link.linkType || linkType) === linkType) continue;
+    kept[linkedId] = entry;
+  }
+  return kept;
 }
 
 /** Validate the bearer token against the CENTRAL auth plane. */
@@ -243,6 +294,269 @@ async function fanOutWorkspaceDOs(
       data: await callWorkspaceDO(env, workspaceId, resource, auth)
     }))
   );
+}
+
+async function getAdminWorkspaceSettingsMap(
+  env: Env,
+  workspaceIds: string[]
+): Promise<Record<string, Record<string, any>>> {
+  if (!workspaceIds.length) return {};
+  const adminAuth = { uid: 'admin', email: '' };
+  const results = await fanOutWorkspaceDOs(env, workspaceIds, 'admin-settings', adminAuth);
+  const map: Record<string, Record<string, any>> = {};
+  for (const result of results) {
+    map[result.workspaceId] = objectValue((result.data as any)?.settings);
+  }
+  return map;
+}
+
+async function patchWorkspaceAdminSettings(
+  env: Env,
+  workspaceId: string,
+  payload: Record<string, unknown>
+): Promise<Record<string, any>> {
+  const adminAuth = { uid: 'admin', email: '' };
+  const result = await callWorkspaceDO(env, workspaceId, 'admin-settings', adminAuth, 'PATCH', payload);
+  return objectValue((result as any)?.settings);
+}
+
+async function updateCentralGroupMembership(
+  env: Env,
+  workspaceIds: string[],
+  linkType: 'org' | 'corp',
+  linkId: string,
+  now: string
+): Promise<void> {
+  if (!workspaceIds.length) return;
+  const field = orgGroupField(linkType);
+  await env.CENTRAL_DB.batch(workspaceIds.map((workspaceId) =>
+    env.CENTRAL_DB.prepare(
+      `UPDATE workspaces
+          SET ${field.central} = ?2,
+              updated_at = ?3
+        WHERE id = ?1
+          AND status = 'active'`
+    ).bind(workspaceId, linkId, now)
+  ));
+}
+
+async function clearCentralGroupMembership(
+  env: Env,
+  workspaceId: string,
+  linkType: 'org' | 'corp',
+  now: string
+): Promise<void> {
+  const field = orgGroupField(linkType);
+  await env.CENTRAL_DB.prepare(
+    `UPDATE workspaces
+        SET ${field.central} = NULL,
+            updated_at = ?2
+      WHERE id = ?1`
+  ).bind(workspaceId, now).run();
+}
+
+async function listCentralGroupMembers(
+  env: Env,
+  linkType: 'org' | 'corp',
+  linkId: string
+): Promise<Array<{ id: string; name: string; org_id?: string; corp_id?: string }>> {
+  if (!linkId) return [];
+  const field = orgGroupField(linkType);
+  const rows = await env.CENTRAL_DB.prepare(
+    `SELECT id, name, org_id, corp_id
+       FROM workspaces
+      WHERE status = 'active'
+        AND ${field.central} = ?1
+      ORDER BY lower(name)`
+  ).bind(linkId).all<{ id: string; name: string; org_id?: string; corp_id?: string }>();
+  return rows.results || [];
+}
+
+async function syncGroupMembersToWorkspaceSettings(
+  env: Env,
+  input: {
+    memberIds: string[];
+    linkType: 'org' | 'corp';
+    linkId: string;
+    groupName: string;
+    permissionLevel: string;
+    viewingOnly: boolean;
+    now: string;
+  }
+): Promise<void> {
+  const field = orgGroupField(input.linkType);
+  const settingsMap = await getAdminWorkspaceSettingsMap(env, input.memberIds);
+  await Promise.all(input.memberIds.map(async (workspaceId) => {
+    const current = objectValue(settingsMap[workspaceId]);
+    const linkedSites = filterLinkedSitesByType(
+      objectValue(current.linkedSites || current.linked_sites),
+      input.linkType
+    );
+    for (const peerId of input.memberIds) {
+      if (peerId === workspaceId) continue;
+      linkedSites[peerId] = {
+        siteId: peerId,
+        linkType: input.linkType,
+        linkId: input.linkId,
+        groupName: input.groupName,
+        permissionLevel: input.permissionLevel,
+        viewingOnly: input.viewingOnly,
+        linkedAt: input.now
+      };
+    }
+
+    await patchWorkspaceAdminSettings(env, workspaceId, {
+      [field.camel]: input.linkId,
+      [field.snake]: input.linkId,
+      permissionLevel: input.permissionLevel,
+      viewingOnly: input.viewingOnly,
+      groupMetadata: {
+        ...objectValue(current.groupMetadata),
+        id: input.linkId,
+        name: input.groupName,
+        type: input.linkType,
+        permissionLevel: input.permissionLevel,
+        viewingOnly: input.viewingOnly,
+        updatedAt: input.now
+      },
+      linkedSites,
+      updatedAt: input.now
+    });
+  }));
+}
+
+async function saveAdminOrgGroupFanOut(
+  env: Env,
+  input: {
+    siteIds: string[];
+    linkType: 'org' | 'corp';
+    linkId: string;
+    groupName: string;
+    permissionLevel: string;
+    viewingOnly: boolean;
+    now: string;
+  }
+): Promise<{
+  siteIds: string[];
+  linkType: 'org' | 'corp';
+  linkId: string;
+  groupName: string;
+  permissionLevel: string;
+}> {
+  const siteIds = [...new Set(input.siteIds.map((value) => text(value)).filter(Boolean))];
+  const field = orgGroupField(input.linkType);
+  const previousRows = await Promise.all(siteIds.map((workspaceId) =>
+    env.CENTRAL_DB.prepare(
+      `SELECT ${field.central} AS link_id
+         FROM workspaces
+        WHERE id = ?1
+        LIMIT 1`
+    ).bind(workspaceId).first<{ link_id?: string }>()
+  ));
+  const staleLinkIds = [...new Set(previousRows
+    .map((row) => text(row?.link_id))
+    .filter((linkId) => linkId && linkId !== input.linkId))];
+  await updateCentralGroupMembership(env, siteIds, input.linkType, input.linkId, input.now);
+
+  const groupMembers = await listCentralGroupMembers(env, input.linkType, input.linkId);
+  const memberIds = groupMembers.map((row) => text(row.id)).filter(Boolean);
+  await syncGroupMembersToWorkspaceSettings(env, {
+    memberIds,
+    linkType: input.linkType,
+    linkId: input.linkId,
+    groupName: input.groupName,
+    permissionLevel: input.permissionLevel,
+    viewingOnly: input.viewingOnly,
+    now: input.now
+  });
+
+  for (const staleLinkId of staleLinkIds) {
+    const remainingMembers = await listCentralGroupMembers(env, input.linkType, staleLinkId);
+    const remainingIds = remainingMembers.map((row) => text(row.id)).filter(Boolean);
+    if (!remainingIds.length) continue;
+    const remainingSettings = await getAdminWorkspaceSettingsMap(env, [remainingIds[0]]);
+    const template = objectValue(remainingSettings[remainingIds[0]]);
+    await syncGroupMembersToWorkspaceSettings(env, {
+      memberIds: remainingIds,
+      linkType: input.linkType,
+      linkId: staleLinkId,
+      groupName: text(objectValue(template.groupMetadata).name || staleLinkId || 'Linked Group'),
+      permissionLevel: text(template.permissionLevel || 'full_transfer'),
+      viewingOnly: Boolean(template.viewingOnly === true || template.viewing_only === true),
+      now: input.now
+    });
+  }
+
+  return {
+    siteIds,
+    linkType: input.linkType,
+    linkId: input.linkId,
+    groupName: input.groupName,
+    permissionLevel: input.permissionLevel
+  };
+}
+
+async function unlinkAdminOrgSiteFanOut(
+  env: Env,
+  input: {
+    siteId: string;
+    linkType: 'org' | 'corp';
+    now: string;
+  }
+): Promise<{ siteId: string; linkType: 'org' | 'corp'; oldLinkId?: string }> {
+  const field = orgGroupField(input.linkType);
+  const currentRow = await env.CENTRAL_DB.prepare(
+    `SELECT id, ${field.central} AS link_id
+       FROM workspaces
+      WHERE id = ?1
+      LIMIT 1`
+  ).bind(input.siteId).first<{ id: string; link_id?: string }>();
+  const oldLinkId = text(currentRow?.link_id);
+
+  await clearCentralGroupMembership(env, input.siteId, input.linkType, input.now);
+
+  const remainingMembers = oldLinkId
+    ? await listCentralGroupMembers(env, input.linkType, oldLinkId)
+    : [];
+  const remainingIds = remainingMembers.map((row) => text(row.id)).filter(Boolean);
+  const settingsMap = await getAdminWorkspaceSettingsMap(env, [input.siteId, ...remainingIds]);
+  const current = objectValue(settingsMap[input.siteId]);
+  const linkedSites = filterLinkedSitesByType(
+    objectValue(current.linkedSites || current.linked_sites),
+    input.linkType
+  );
+  const currentMeta = objectValue(current.groupMetadata);
+  const keepMetadata = text(currentMeta.type) && text(currentMeta.type) !== input.linkType;
+  const nextPermissionLevel = keepMetadata
+    ? text(current.permissionLevel || 'full_transfer')
+    : remainingIds.length ? text(current.permissionLevel || 'full_transfer') : 'full_transfer';
+  const nextViewingOnly = keepMetadata
+    ? Boolean(current.viewingOnly === true || current.viewing_only === true)
+    : remainingIds.length ? Boolean(current.viewingOnly === true || current.viewing_only === true) : false;
+
+  await patchWorkspaceAdminSettings(env, input.siteId, {
+    permissionLevel: nextPermissionLevel,
+    viewingOnly: nextViewingOnly,
+    groupMetadata: keepMetadata ? currentMeta : null,
+    linkedSites,
+    updatedAt: input.now,
+    __deleteKeys: [field.camel, field.snake]
+  });
+
+  if (remainingIds.length) {
+    const template = objectValue(settingsMap[remainingIds[0]] || current);
+    await syncGroupMembersToWorkspaceSettings(env, {
+      memberIds: remainingIds,
+      linkType: input.linkType,
+      linkId: oldLinkId,
+      groupName: text(objectValue(template.groupMetadata).name || oldLinkId || 'Linked Group'),
+      permissionLevel: text(template.permissionLevel || current.permissionLevel || 'full_transfer'),
+      viewingOnly: Boolean(template.viewingOnly === true || template.viewing_only === true),
+      now: input.now
+    });
+  }
+
+  return { siteId: input.siteId, linkType: input.linkType, oldLinkId };
 }
 
 /** Central-plane tables the data-migration tool may write (into CENTRAL_DB). */
