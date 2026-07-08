@@ -36,7 +36,9 @@ function routeText(value: unknown, fallback = '') {
 }
 
 function nowIso() {
-  return new Date().toISOString();
+  const d = new Date();
+  d.setUTCHours(d.getUTCHours() + 2);
+  return d.toISOString().replace('Z', '+02:00');
 }
 
 function id(prefix: string) {
@@ -7597,7 +7599,7 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
   // 'remove' or negative qty is a MANUAL adjustment, NOT wastage.
   const IS_WASTE_SQL = `(
     lower(sm.movement_type) LIKE '%waste%'
-    OR lower(sm.movement_type) LIKE '%manufact%'
+    OR lower(sm.movement_type) = 'manufacturing_wastage'
     OR (lower(sm.movement_type) LIKE '%adjust%' AND (
          lower(COALESCE(json_extract(sm.metadata_json, '$.mode'), '')) = 'wastage'
          OR COALESCE(json_extract(sm.metadata_json, '$.wasteReason'), '') != ''
@@ -7611,7 +7613,7 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
   const IS_ADJUST_SQL = `(lower(sm.movement_type) LIKE '%adjust%' AND NOT ${IS_WASTE_SQL})`;
   // Subset of IS_WASTE_SQL for manufacturing yield loss specifically, so the dashboard tile
   // can show it as its own line item alongside (not folded silently into) other wastage.
-  const IS_MANUFACTURING_WASTE_SQL = `lower(sm.movement_type) LIKE '%manufact%'`;
+  const IS_MANUFACTURING_WASTE_SQL = `lower(sm.movement_type) = 'manufacturing_wastage'`;
   // Per-movement value chosen by class: transactional keeps stored value; everything
   // else (wastage/adjustment/stock-take) derives qty × current cost.
   const CLASS_VALUE_SQL = `CASE WHEN ${IS_SALE_SQL} OR ${IS_GRV_SQL} OR ${IS_CREDIT_SQL} THEN ${TXN_VALUE_SQL} ELSE ${DERIVED_VALUE_SQL} END`;

@@ -25,7 +25,9 @@ function text(value: unknown, fallback = '') {
 }
 
 function nowIso() {
-  return new Date().toISOString();
+  const d = new Date();
+  d.setUTCHours(d.getUTCHours() + 2);
+  return d.toISOString().replace('Z', '+02:00');
 }
 
 function id(prefix: string) {
