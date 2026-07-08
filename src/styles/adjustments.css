@@ -83,8 +83,13 @@
 }
 
 #view-adjustments .adj-helpDot {
+  box-sizing: border-box;
+  display: inline-grid;
+  place-items: center;
   width: 24px;
   height: 24px;
+  padding: 0;
+  line-height: 1;
   border: 0;
   border-radius: 999px;
   background: rgba(34, 193, 241, 0.18);
@@ -92,6 +97,7 @@
   font: inherit;
   font-size: 12px;
   font-weight: 950;
+  cursor: help;
 }
 
 #view-adjustments .adj-engineLead {

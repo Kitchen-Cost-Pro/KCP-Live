@@ -82,6 +82,11 @@ export async function callCloudflareRoute(path, {
   return result;
 }
 
+// A hung connection (dead socket, DO cold start with no response) would otherwise leave
+// `await fetch(...)` pending forever, stranding callers (e.g. a stock take commit) in a
+// permanent "saving" state with no error to recover from. This guarantees a rejection.
+const REQUEST_TIMEOUT_MS = 30000;
+
 async function executeRequest(url, requestMethod, payload, token, headers) {
   const requestHeaders = {
     'Content-Type': 'application/json',
@@ -89,12 +94,26 @@ async function executeRequest(url, requestMethod, payload, token, headers) {
   };
   if (token) requestHeaders.Authorization = `Bearer ${token}`;
 
-  const response = await fetch(url.toString(), {
-    method: requestMethod,
-    headers: requestHeaders,
-    cache: requestMethod === 'GET' ? 'no-store' : 'default',
-    body: requestMethod === 'GET' ? undefined : JSON.stringify(payload || {})
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  let response;
+  try {
+    response = await fetch(url.toString(), {
+      method: requestMethod,
+      headers: requestHeaders,
+      cache: requestMethod === 'GET' ? 'no-store' : 'default',
+      body: requestMethod === 'GET' ? undefined : JSON.stringify(payload || {}),
+      signal: controller.signal
+    });
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw new Error('Request timed out — please check your connection and try again.');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
   const result = await response.json().catch(() => ({}));
   if (!response.ok || result.ok === false) {

@@ -1,18 +1,8 @@
 import type { Env, AuthContext } from './types';
 import type { Env as LegacyEnv } from './legacy/types';
-import {
-  postAdminApproveRegistration,
-  getAdminOverview,
-  deleteAdminWorkspace,
-  getAdminWorkspaceSettings,
-  patchAdminWorkspaceSettings,
-  getAdminOrgSites,
-  postAdminSaveOrgGroup,
-  postAdminUnlinkOrgSite
-} from './legacy/admin-routes';
+import { postAdminApproveRegistration, getAdminOverview, deleteAdminWorkspace, getAdminWorkspaceSettings, patchAdminWorkspaceSettings } from './legacy/admin-routes';
 import type { AdminTenantSummary } from './legacy/admin-routes';
 import { dispatchCentralRoute } from './legacy/index';
-import { sendDueLowStockEmailSummaries } from './legacy/low-stock-email';
 
 export { WorkspaceDO } from './workspace-do';
 
@@ -106,6 +96,96 @@ async function dispatchCentral(request: Request, env: Env, url: URL): Promise<Re
       const r = await callWorkspaceDO(env, id, 'admin-settings', adminAuth, 'PATCH', payload);
       return ((r as any)?.settings as Record<string, any>) || {};
     });
+  }
+
+  // --- Workspace-scoped admin actions: these query TENANT tables (yoco_connections, locations,
+  // products, this workspace's settings) which live in the DO, not CENTRAL_DB. Gate centrally with
+  // requireAdmin (CENTRAL_DB), run the tenant op inside the DO, then write the audit event centrally.
+  // Previously these ran in the front Worker against CENTRAL_DB and threw → generic "Something went
+  // wrong" for every workspace admin action. ---
+  const adminAuth = { uid: 'admin', email: '' };
+  const yocoM = url.pathname.match(/^\/api\/admin\/workspaces\/([^/]+)\/yoco\/([^/]+)$/);
+  if (yocoM) {
+    const wsId = decodeURIComponent(yocoM[1]);
+    const action = yocoM[2];
+    if (request.method === 'GET' && action === 'status') {
+      await requireAdmin(request, lenv);
+      const r = await callWorkspaceDO(env, wsId, 'admin-yoco/status', adminAuth, 'GET');
+      return json(request, env, r || { ok: false, error: 'No response from workspace.' }, r ? 200 : 502);
+    }
+    if (request.method === 'POST') {
+      const session = await requireAdmin(request, lenv);
+      const body = await request.clone().json().catch(() => ({}));
+      const r = await callWorkspaceDO(env, wsId, `admin-yoco/${action}`, adminAuth, 'POST', body);
+      if (!r || (r as any).ok === false) {
+        return json(request, env, { ok: false, error: (r as any)?.error || `Yoco ${action} failed for this workspace.` }, 502);
+      }
+      await writeAdminAuditEvent(lenv, adminAuditActor(session), `yoco.${action.replace(/-/g, '_')}`, wsId, {}).catch(() => {});
+      return json(request, env, r);
+    }
+  }
+
+  const actionM = url.pathname.match(/^\/api\/admin\/workspaces\/([^/]+)\/actions\/([^/]+)$/);
+  if (actionM && request.method === 'POST') {
+    const wsId = decodeURIComponent(actionM[1]);
+    const action = actionM[2];
+    const session = await requireAdmin(request, lenv);
+    const body = await request.clone().json().catch(() => ({}));
+    const r = await callWorkspaceDO(env, wsId, `admin-action/${action}`, adminAuth, 'POST', body);
+    if (!r || (r as any).ok === false) {
+      return json(request, env, { ok: false, error: (r as any)?.error || `Action ${action} failed for this workspace.` }, 502);
+    }
+    await writeAdminAuditEvent(lenv, adminAuditActor(session), `action.${action.replace(/-/g, '_')}`, wsId, {}).catch(() => {});
+    return json(request, env, r);
+  }
+
+  // (email-queue stays central: workspace_invitations lives in CENTRAL_DB, so it already works.)
+
+  // Org manager list: org fields (orgId/corpId/groupMetadata/linkedSites) live in each workspace's DO
+  // settings. Gate centrally, then fan out to every workspace DO and feed the org fields in.
+  if (request.method === 'GET' && url.pathname === '/api/admin/org-sites') {
+    const provider = async (workspaceIds: string[]): Promise<Record<string, AdminOrgFields>> => {
+      const results = await fanOutWorkspaceDOs(env, workspaceIds, 'admin-org-fields', adminAuth);
+      const map: Record<string, AdminOrgFields> = {};
+      for (const r of results) {
+        const d = r.data as any;
+        if (d && d.ok) map[r.workspaceId] = { orgId: d.orgId, corpId: d.corpId, groupMetadata: d.groupMetadata, linkedSites: d.linkedSites };
+      }
+      return map;
+    };
+    return getAdminOrgSites(request, lenv, provider);
+  }
+
+  // Save an org/group across workspaces: org fields live in each workspace's DO settings (tenant),
+  // and workspace_settings does not exist in the central D1 — so the save must read/write through
+  // each workspace's DO (reusing the admin-settings GET/PATCH resources), not run centrally.
+  if (request.method === 'POST' && url.pathname === '/api/admin/org-groups') {
+    const reader = async (id: string): Promise<Record<string, any>> => {
+      const r = await callWorkspaceDO(env, id, 'admin-settings', adminAuth, 'GET');
+      return ((r as any)?.settings as Record<string, any>) || {};
+    };
+    const writer = async (id: string, nextSettings: Record<string, any>): Promise<void> => {
+      await callWorkspaceDO(env, id, 'admin-settings', adminAuth, 'PATCH', nextSettings);
+    };
+    return postAdminSaveOrgGroup(request, lenv, reader, writer);
+  }
+
+  // Unlink a workspace from its org/group: clear the target's OWN org fields in its DO settings
+  // (source of truth), then best-effort strip it from every peer's linkedSites.
+  const unlinkM = url.pathname.match(/^\/api\/admin\/org-sites\/([^/]+)\/unlink$/);
+  if (unlinkM && request.method === 'POST') {
+    const wsId = decodeURIComponent(unlinkM[1]);
+    await requireAdmin(request, lenv);
+    const r = await callWorkspaceDO(env, wsId, 'admin-unlink-org', adminAuth, 'POST', {});
+    try { await cleanupPeerGroupLinks(env, wsId); } catch { /* peer cleanup is best-effort */ }
+    // Also clear the central workspaces.org_id/corp_id scalar columns (used for peer discovery) so a
+    // stale value there can never resurface the link after the tenant settings have been cleared.
+    try {
+      await env.CENTRAL_DB.prepare(
+        `UPDATE workspaces SET org_id = NULL, corp_id = NULL WHERE id = ?1`
+      ).bind(wsId).run();
+    } catch { /* central column cleanup is best-effort */ }
+    return json(request, env, r || { ok: true }, 200);
   }
 
   return dispatchCentralRoute(request, lenv);
@@ -699,6 +779,21 @@ async function handle(request: Request, env: Env): Promise<Response> {
     return json(request, env, { ok: false, error: 'Unknown migrate route' }, 404);
   }
 
+  // Yoco webhook ingress. Yoco POSTs to /webhooks/yoco/:workspaceId (registered URL). This is a
+  // TENANT operation — it reads yoco_connections + depletes stock via processYocoOrder, all tenant
+  // tables — so it MUST run in the workspace DO. Previously it fell through to the central dispatcher
+  // (env.DB = CENTRAL_DB), where the connection lookup returned nothing and it rejected before
+  // depleting (webhook depletion silently never happened; only manual sync worked). Signature
+  // verification runs inside the DO handler using the tenant-stored webhook_secret.
+  const yocoWebhookM = url.pathname.match(/^\/webhooks\/yoco\/([^/]+)$/);
+  if (yocoWebhookM && request.method === 'POST') {
+    const wsId = decodeURIComponent(yocoWebhookM[1]);
+    const response = await forwardToWorkspaceDO(request, env, wsId, 'yoco-webhook', { uid: 'yoco-webhook', email: '' });
+    const headers = new Headers(response.headers);
+    for (const [k, v] of Object.entries(corsHeaders(request, env))) headers.set(k, v);
+    return new Response(response.body, { status: response.status, headers });
+  }
+
   // Central plane — all /api/auth/* + /api/admin/* + security-config etc. run in the front Worker
   // against CENTRAL_DB (via the shared legacy dispatcher).
   const centralResponse = await dispatchCentral(request, env, url);
@@ -754,9 +849,21 @@ export default {
     }
   },
 
-  // Supersedes the old Firebase `sendLowStockSummaryEmails` scheduled function — sends via
-  // the new Gmail OAuth account instead of the legacy Gmail SMTP app-password account.
+  // Low-stock email cron. The per-workspace stock/settings/run tables are tenant-only, so we
+  // enumerate active workspaces from CENTRAL_DB here (front Worker) and fan out to each workspace's
+  // DO, where `sendWorkspaceLowStockDue` reads tenant tables via env.DB and central tables via
+  // env.CENTRAL_DB. (Running it centrally would throw "no such table" on the tenant joins.)
   async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
-    await sendDueLowStockEmailSummaries(centralLegacyEnv(env));
+    const list = await env.CENTRAL_DB.prepare(
+      `SELECT id FROM workspaces WHERE status = 'active' ORDER BY id ASC`
+    ).all<{ id: string }>();
+    const ids = (list.results || []).map((r) => String(r.id)).filter(Boolean);
+    console.log(`[low-stock-cron] evaluating ${ids.length} active workspaces`);
+    await Promise.all(
+      ids.map((id) =>
+        callWorkspaceDO(env, id, 'admin-action/low-stock-due', { uid: 'system', email: '' }, 'POST', {})
+          .catch((cause) => { console.error(`[low-stock-cron] ws=${id} failed: ${cause}`); return null; })
+      )
+    );
   }
 };

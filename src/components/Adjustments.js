@@ -48,7 +48,7 @@ export function renderAdjustments({ state, onAdjustmentFilterChange, onAdjustmen
         ${icon('clipboard')} Stock Adjustment
       </button>
       <button type="button" class="adj-tabBtn ${activeTab === 'wastage' ? 'is-active' : ''}" data-adj-tab="wastage">
-        ${icon('flame')} Wastage Adjustment
+        ${icon('flame')} Product Wastage Adjustment
       </button>
     </div>
 
@@ -250,7 +250,7 @@ function bindAdjustmentEvents(view, adjustments, filters, onAdjustmentFilterChan
   });
 
   view.querySelector('[data-adj-stock-add]')?.addEventListener('click', () => onAdjustmentAction.onAddSelectedStock?.());
-  view.querySelector('[data-adj-edit-line]')?.addEventListener('click', () => {});
+  view.querySelector('[data-adj-edit-line]')?.addEventListener('click', () => { });
   view.querySelectorAll('[data-adj-edit-line]').forEach((button) => {
     button.addEventListener('click', () => onAdjustmentAction.onEditLine?.(Number(button.dataset.adjEditLine)));
   });
@@ -355,13 +355,13 @@ function renderStockOverlay(stockItems, filters, selectedStockIds, allStockItems
           <label>
             ${renderFieldHelpLabel('Category', 'Filter the adjustment picker by category to find items faster.')}
             ${renderOverlayDropdown({
-              id: 'stock-category',
-              action: 'stockCategory',
-              selectedValue: filters.stockCategory || '',
-              fallbackLabel: 'All categories',
-              options: categoryOptions,
-              openDropdown: filters.openDropdown
-            })}
+    id: 'stock-category',
+    action: 'stockCategory',
+    selectedValue: filters.stockCategory || '',
+    fallbackLabel: 'All categories',
+    options: categoryOptions,
+    openDropdown: filters.openDropdown
+  })}
           </label>
         </div>
         <div class="adj-pickerTable" data-scroll-key="adjustments-stock-picker">
@@ -376,16 +376,17 @@ function renderStockOverlay(stockItems, filters, selectedStockIds, allStockItems
             </thead>
             <tbody>
               ${pagination.items.map((item) => {
-                const isSelected = selectedStockIds.has(String(item.id));
-                const isLockedOut = !isBulk && selectedStockIds.size > 0 && !isSelected;
-                return `
+    const isSelected = selectedStockIds.has(String(item.id));
+    const isLockedOut = !isBulk && selectedStockIds.size > 0 && !isSelected;
+    return `
                 <tr class="${item.alreadyAdded ? 'is-added' : ''}">
                   <td><input type="checkbox" data-adj-stock-select="${escapeAttribute(item.id)}" ${isSelected ? 'checked' : ''} ${isLockedOut ? 'disabled' : ''} /></td>
                   <td><strong>${escapeHtml(item.name || '')}</strong>${item.alreadyAdded ? '<span>Already added</span>' : ''}</td>
                   <td>${escapeHtml(item.category || '')}</td>
                   <td>${escapeHtml(String(item.unit || '').toUpperCase())}</td>
                 </tr>
-              `; }).join('') || '<tr><td colspan="4"><div class="adj-empty"><span>No stock items match.</span></div></td></tr>'}
+              `;
+  }).join('') || '<tr><td colspan="4"><div class="adj-empty"><span>No stock items match.</span></div></td></tr>'}
             </tbody>
           </table>
         </div>
@@ -443,38 +444,38 @@ function renderLineDetailOverlay(detailDraft, sites, locations, filters = {}, st
             <label>
               ${renderFieldHelpLabel('Location Group', 'Choose the trading location group for this stock correction.')}
               ${renderOverlayDropdown({
-                id: 'detail-siteId',
-                action: 'detail:siteId',
-                selectedValue: siteId,
-                fallbackLabel: 'Select location group',
-                options: siteOptions,
-                openDropdown: filters.openDropdown
-              })}
+    id: 'detail-siteId',
+    action: 'detail:siteId',
+    selectedValue: siteId,
+    fallbackLabel: 'Select location group',
+    options: siteOptions,
+    openDropdown: filters.openDropdown
+  })}
             </label>
           ` : ''}
 
           <label>
             ${renderFieldHelpLabel('Location', 'Choose which selling location is being corrected.')}
             ${renderOverlayDropdown({
-              id: 'detail-locationId',
-              action: 'detail:locationId',
-              selectedValue: detailDraft.locationId || 'main',
-              fallbackLabel: 'Select location',
-              options: locationOptions,
-              openDropdown: filters.openDropdown
-            })}
+    id: 'detail-locationId',
+    action: 'detail:locationId',
+    selectedValue: detailDraft.locationId || 'main',
+    fallbackLabel: 'Select location',
+    options: locationOptions,
+    openDropdown: filters.openDropdown
+  })}
           </label>
 
           <label>
             ${renderFieldHelpLabel('Correction Type', 'Choose whether stock is being removed, added, or overridden to a target balance.')}
             ${renderOverlayDropdown({
-              id: 'detail-mode',
-              action: 'detail:mode',
-              selectedValue: modeSelected,
-              fallbackLabel: 'Select Correction Type...',
-              options: modeOptions,
-              openDropdown: filters.openDropdown
-            })}
+    id: 'detail-mode',
+    action: 'detail:mode',
+    selectedValue: modeSelected,
+    fallbackLabel: 'Select Correction Type...',
+    options: modeOptions,
+    openDropdown: filters.openDropdown
+  })}
           </label>
 
           <label>
@@ -494,13 +495,13 @@ function renderLineDetailOverlay(detailDraft, sites, locations, filters = {}, st
             <label>
               ${renderFieldHelpLabel('Waste Reason', 'Classify wastage so reporting can separate true waste from other stock corrections.')}
               ${renderOverlayDropdown({
-                id: 'detail-wasteReason',
-                action: 'detail:wasteReason',
-                selectedValue: detailDraft.wasteReason || 'Other',
-                fallbackLabel: 'Select waste reason',
-                options: wasteOptions,
-                openDropdown: filters.openDropdown
-              })}
+    id: 'detail-wasteReason',
+    action: 'detail:wasteReason',
+    selectedValue: detailDraft.wasteReason || 'Other',
+    fallbackLabel: 'Select waste reason',
+    options: wasteOptions,
+    openDropdown: filters.openDropdown
+  })}
             </label>
           </div>
         ` : ''}
@@ -601,9 +602,9 @@ function renderOverlayDropdown({ id, action, selectedValue, fallbackLabel, optio
           <button
             type="button"
             ${isWastageDropdown
-              ? `data-wastage-option data-wastage-option-field="${escapeAttribute(fieldName)}" data-wastage-option-value="${escapeAttribute(option.value)}"`
-              : `data-adj-option data-adj-option-action="${escapeAttribute(action)}" data-adj-option-value="${escapeAttribute(option.value)}"`
-            }
+      ? `data-wastage-option data-wastage-option-field="${escapeAttribute(fieldName)}" data-wastage-option-value="${escapeAttribute(option.value)}"`
+      : `data-adj-option data-adj-option-action="${escapeAttribute(action)}" data-adj-option-value="${escapeAttribute(option.value)}"`
+    }
             class="${String(option.value) === String(selectedValue) ? 'is-active' : ''}"
           >
             ${escapeHtml(option.label)}
@@ -757,7 +758,7 @@ function renderWastageTab(adjustments, filters, onAdjustmentFilterChange, onAdju
           <section class="adj-card adj-engineIntro">
             <div class="adj-engineIcon">${icon('flame')}</div>
             <div class="adj-engineHead">
-              <h3 class="adj-title">Wastage Adjustment</h3>
+              <h3 class="adj-title">Product Wastage Adjustment</h3>
             </div>
             <p class="adj-engineLead">Select menu items that were wasted. KCP will automatically deduct all recipe ingredients from the selected location's stock and record the wastage.</p>
             <div class="adj-engineActions">
@@ -811,28 +812,28 @@ function renderWastageTab(adjustments, filters, onAdjustmentFilterChange, onAdju
               <label>
                 <span>Location</span>
                 ${renderOverlayDropdown({
-                  id: 'wastage-location',
-                  action: '',
-                  selectedValue: draft.locationId || '',
-                  fallbackLabel: 'Select location…',
-                  options: locationOptions,
-                  openDropdown: filters.openDropdown,
-                  fieldPrefix: 'wastage',
-                  fieldName: 'locationId'
-                })}
+    id: 'wastage-location',
+    action: '',
+    selectedValue: draft.locationId || '',
+    fallbackLabel: 'Select location…',
+    options: locationOptions,
+    openDropdown: filters.openDropdown,
+    fieldPrefix: 'wastage',
+    fieldName: 'locationId'
+  })}
               </label>
               <label>
                 <span>Waste Reason</span>
                 ${renderOverlayDropdown({
-                  id: 'wastage-reason',
-                  action: '',
-                  selectedValue: draft.wasteReason || '',
-                  fallbackLabel: 'Select reason…',
-                  options: wasteOptions,
-                  openDropdown: filters.openDropdown,
-                  fieldPrefix: 'wastage',
-                  fieldName: 'wasteReason'
-                })}
+    id: 'wastage-reason',
+    action: '',
+    selectedValue: draft.wasteReason || '',
+    fallbackLabel: 'Select reason…',
+    options: wasteOptions,
+    openDropdown: filters.openDropdown,
+    fieldPrefix: 'wastage',
+    fieldName: 'wasteReason'
+  })}
               </label>
               <label>
                 <span>Note (optional)</span>
@@ -939,7 +940,7 @@ function renderWastagePickerOverlay(products, filters) {
       <section class="adj-overlayCard adj-overlayCard--picker">
         <header>
           <div>
-            <p>Wastage Adjustment</p>
+            <p>Product Wastage Adjustment</p>
             <h3>Choose menu items to waste</h3>
           </div>
           <button type="button" class="adj-iconButton" data-wastage-picker-close aria-label="Close">${icon('x')}</button>
@@ -952,13 +953,13 @@ function renderWastagePickerOverlay(products, filters) {
           <label>
             <span>Category</span>
             ${renderOverlayDropdown({
-              id: 'wastage-category',
-              action: 'wastageCategory',
-              selectedValue: cat,
-              fallbackLabel: 'All categories',
-              options: [{ value: '', label: 'All categories' }, ...categoryOptions.map((c) => ({ value: c, label: c }))],
-              openDropdown: filters.openDropdown
-            })}
+    id: 'wastage-category',
+    action: 'wastageCategory',
+    selectedValue: cat,
+    fallbackLabel: 'All categories',
+    options: [{ value: '', label: 'All categories' }, ...categoryOptions.map((c) => ({ value: c, label: c }))],
+    openDropdown: filters.openDropdown
+  })}
           </label>
         </div>
         <div class="adj-pickerTable" data-scroll-key="wastage-picker">
@@ -968,14 +969,14 @@ function renderWastagePickerOverlay(products, filters) {
             </thead>
             <tbody>
               ${paginated.items.map((p) => {
-                const isSelected = selectedIds.has(String(p.id));
-                return `
+    const isSelected = selectedIds.has(String(p.id));
+    return `
                 <tr>
                   <td><input type="checkbox" data-wastage-select="${escapeAttribute(p.id)}" ${isSelected ? 'checked' : ''} /></td>
                   <td><strong>${escapeHtml(p.name || '')}</strong></td>
                   <td>${escapeHtml(p.category || '')}</td>
                 </tr>`;
-              }).join('') || '<tr><td colspan="3"><div class="adj-empty"><span>No menu items found.</span></div></td></tr>'}
+  }).join('') || '<tr><td colspan="3"><div class="adj-empty"><span>No menu items found.</span></div></td></tr>'}
             </tbody>
           </table>
         </div>

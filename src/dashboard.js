@@ -362,6 +362,7 @@ function renderDashboardGrid(state) {
             ${renderOperationalValue('Count Variances', metricDisplay(summary, 'countVariance', 'currency'), 'variance', 'indigo')}
             ${renderOperationalValue('Manual Adjustments', metricDisplay(summary, 'manualAdjustments', 'currency'), 'sliders', 'orange')}
             ${renderOperationalValue('Wastage', metricDisplay(summary, 'wastage', 'currency'), 'trash', 'red')}
+            ${renderOperationalValue('Manufacturing Wastage', metricDisplay(summary, 'manufacturingWastage', 'currency'), 'trash', 'red')}
           </div>
         </article>
 
@@ -421,7 +422,8 @@ function renderMovementChartPanel(state) {
   const tabs = [
     { key: 'costOfSales', label: 'Cost of Sales', tone: 'blue', format: 'currency' },
     { key: 'stockValue', label: 'Stock Value', tone: 'emerald', format: 'currency' },
-    { key: 'wastage', label: 'Wastage', tone: 'red', format: 'currency' }
+    { key: 'wastage', label: 'Wastage', tone: 'red', format: 'currency' },
+    { key: 'manufacturingWastage', label: 'Manufacturing Wastage', tone: 'orange', format: 'currency' }
   ];
   const active = tabs.find((tab) => tab.key === (state.dashboardChartTab || 'costOfSales')) || tabs[0];
   return `
@@ -1349,7 +1351,7 @@ function buildRangeDashboardSummary(source, startDate, endDate) {
   const dailySummaries = dates.map((date) => calculateDashboardMetrics(source, date).summary || {});
   const firstSummary = dailySummaries[0] || {};
   const lastSummary = dailySummaries[dailySummaries.length - 1] || {};
-  const aggregateKeys = ['purchases', 'costOfSales', 'countVariance', 'manualAdjustments', 'wastage'];
+  const aggregateKeys = ['purchases', 'costOfSales', 'countVariance', 'manualAdjustments', 'wastage', 'manufacturingWastage'];
   const summary = {
     stockValue: cloneMetric(lastSummary.closingStock || lastSummary.stockValue),
     totalStockValue: cloneMetric(lastSummary.totalStockValue || lastSummary.closingStock || lastSummary.stockValue),

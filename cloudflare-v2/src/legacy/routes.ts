@@ -17,7 +17,8 @@ import {
 } from './yoco-service';
 import { findRefund, verifyYocoWebhook } from './yoco-webhooks';
 import { decryptTextWithSecret, encryptTextWithSecret, hmacSha256Base64 } from './crypto';
-import { getAdminGmailCallback, getEmailDeliveryConfig } from './admin-routes';
+import { getAdminGmailCallback, getEmailDeliveryConfig, buildAdminYocoStatus } from './admin-routes';
+import { sendWorkspaceLowStockNow, sendWorkspaceLowStockDue } from './low-stock-email';
 import { sendEmail } from './email';
 
 function text(value: unknown, fallback = '') {
@@ -1459,6 +1460,105 @@ export async function patchAdminWorkspaceSettingsDO(request: Request, env: Env, 
      ON CONFLICT(workspace_id) DO UPDATE SET raw_json = excluded.raw_json`
   ).bind(workspaceId, JSON.stringify(merged)).run();
   return json(request, env, { ok: true, settings: merged });
+}
+
+// --- DO-side admin actions. The front Worker gates with requireAdmin (CENTRAL_DB) and forwards
+// here; these run against tenant env.DB and must NOT re-auth. They exist because the admin console's
+// workspace actions query tenant tables (yoco_connections, products, locations, settings) that live
+// in the DO, not CENTRAL_DB — running them centrally threw the generic "Something went wrong". ---
+export async function adminYocoActionDO(request: Request, env: Env, _auth: AuthContext, workspaceId: string, action: string) {
+  const body = await readJson<Record<string, unknown>>(request).catch(() => ({} as Record<string, unknown>));
+  console.log(`[admin-yoco] ${action} ws=${workspaceId}`);
+  try {
+    if (action === 'connect') {
+      const result = await connectYoco(env, workspaceId, text(body.apiKey || body.secretKey));
+      return json(request, env, { ok: true, ...result });
+    }
+    if (action === 'disconnect') {
+      const result = await disconnectYoco(env, workspaceId);
+      return json(request, env, { ok: true, ...result });
+    }
+    if (action === 'sync-catalogue') {
+      const result = await syncYocoCatalogue(env, workspaceId);
+      return json(request, env, { ok: true, ...result });
+    }
+    if (action === 'sync-sales') {
+      const sinceDays = Number(body.sinceDays || 0);
+      // Clamp an explicit lookback window to a sane maximum (31 days).
+      const clampedDays = Number.isFinite(sinceDays) && sinceDays > 0 ? Math.min(sinceDays, 31) : 0;
+      const sinceIso = clampedDays > 0 ? new Date(Date.now() - clampedDays * 24 * 60 * 60 * 1000).toISOString() : '';
+      const result = await syncYocoSales(env, workspaceId, sinceIso ? { sinceIso } : {});
+      return json(request, env, { ok: true, ...result });
+    }
+    if (action === 'reset-webhook') {
+      const apiKey = await getYocoApiKey(env, workspaceId);
+      if (!apiKey) return error(request, env, 409, 'No Yoco API key stored for this workspace — connect Yoco first.');
+      await disconnectYoco(env, workspaceId);
+      const result = await connectYoco(env, workspaceId, apiKey);
+      return json(request, env, { ok: true, ...result });
+    }
+    return error(request, env, 404, `Unknown Yoco admin action: ${action}`);
+  } catch (caught) {
+    const message = caught instanceof Error ? caught.message : String(caught);
+    console.error(`[admin-yoco] ${action} ws=${workspaceId} failed: ${message}`);
+    return error(request, env, 502, message || `Yoco ${action} failed.`);
+  }
+}
+
+export async function adminYocoStatusDO(request: Request, env: Env, _auth: AuthContext, workspaceId: string) {
+  return json(request, env, await buildAdminYocoStatus(env, workspaceId));
+}
+
+export async function adminActionDO(request: Request, env: Env, _auth: AuthContext, workspaceId: string, action: string) {
+  console.log(`[admin-action] ${action} ws=${workspaceId}`);
+  try {
+    if (action === 'send-low-stock-email') {
+      const result = await sendWorkspaceLowStockNow(env, workspaceId);
+      return json(request, env, { ok: true, ...result });
+    }
+    if (action === 'low-stock-due') {
+      // Scheduled cron fan-out: due/window-gated per-workspace send (runs in this DO).
+      const result = await sendWorkspaceLowStockDue(env, workspaceId);
+      return json(request, env, { ok: true, ...result });
+    }
+    return error(request, env, 404, `Unknown workspace action: ${action}`);
+  } catch (caught) {
+    const message = caught instanceof Error ? caught.message : String(caught);
+    console.error(`[admin-action] ${action} ws=${workspaceId} failed: ${message}`);
+    return error(request, env, 502, message || `Action ${action} failed.`);
+  }
+}
+
+const ORG_LINK_FIELDS = ['orgId', 'org_id', 'corpId', 'corp_id', 'permissionLevel', 'groupMetadata', 'linkedSites'];
+
+export async function adminOrgFieldsDO(request: Request, env: Env, _auth: AuthContext, workspaceId: string) {
+  const row = await env.DB.prepare(
+    `SELECT raw_json FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`
+  ).bind(workspaceId).first<{ raw_json?: string }>();
+  const settings = objectValue(jsonParse(row?.raw_json));
+  return json(request, env, {
+    ok: true,
+    orgId: text(settings.orgId || settings.org_id),
+    corpId: text(settings.corpId || settings.corp_id),
+    permissionLevel: text(settings.permissionLevel),
+    groupMetadata: settings.groupMetadata || null,
+    linkedSites: settings.linkedSites || {}
+  });
+}
+
+export async function adminUnlinkOrgDO(request: Request, env: Env, _auth: AuthContext, workspaceId: string) {
+  const row = await env.DB.prepare(
+    `SELECT raw_json FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`
+  ).bind(workspaceId).first<{ raw_json?: string }>();
+  const settings = objectValue(jsonParse(row?.raw_json));
+  for (const field of ORG_LINK_FIELDS) delete settings[field];
+  await env.DB.prepare(
+    `INSERT INTO workspace_settings (workspace_id, raw_json)
+     VALUES (?1, ?2)
+     ON CONFLICT(workspace_id) DO UPDATE SET raw_json = excluded.raw_json`
+  ).bind(workspaceId, JSON.stringify(settings)).run();
+  console.log(`[admin-unlink-org] cleared org fields ws=${workspaceId}`);
+  return json(request, env, { ok: true });
 }
 
 async function recordYocoWebhookRejection(env: Env, details: {
@@ -7472,9 +7572,18 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
   // Transactional movements (sale/grv/credit): the stored value_delta is the ACTUAL
   // transaction amount — trust it, deriving qty×current cost only when it is missing.
   const TXN_VALUE_SQL = `CASE WHEN sm.value_delta != 0 THEN sm.value_delta ELSE sm.quantity_delta * ${CURRENT_COST_SQL} END`;
+  const IS_ACCOUNTING_ONLY_SQL = `(json_extract(sm.metadata_json,'$.accountingOnly') IN (1,'true') OR json_extract(sm.metadata_json,'$.reportingOnly') IN (1,'true'))`;
   // Wastage/adjustment/stock-take: derive qty × CURRENT cost first (audit rule; matches
   // the report's deriveCostImpact), falling back to the stored value only when no cost.
-  const DERIVED_VALUE_SQL = `CASE WHEN ${CURRENT_COST_SQL} > 0 THEN sm.quantity_delta * ${CURRENT_COST_SQL} ELSE sm.value_delta END`;
+  // Accounting-only movements (e.g. manufacturing_wastage) deliberately carry quantity_delta=0
+  // (they aren't a real unit-count change — the real stock effect is already recorded on the
+  // paired manufacturing_finished_in movement), so qty×cost would wrongly collapse to 0 here —
+  // trust the value captured at write time instead for these rows.
+  const DERIVED_VALUE_SQL = `CASE
+    WHEN ${IS_ACCOUNTING_ONLY_SQL} THEN sm.value_delta
+    WHEN ${CURRENT_COST_SQL} > 0 THEN sm.quantity_delta * ${CURRENT_COST_SQL}
+    ELSE sm.value_delta
+  END`;
   // Canonical wastage rule (matches frontend isWastageAdjustmentLog): a waste/manufact
   // movement, OR an adjustment with an explicit wasteReason / mode='wastage'. A plain
   // 'remove' or negative qty is a MANUAL adjustment, NOT wastage.
@@ -7492,7 +7601,9 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
   const IS_STOCKTAKE_SQL = `(lower(sm.movement_type) LIKE '%stock_take%' OR lower(sm.movement_type) LIKE '%stocktake%')`;
   // Manual adjustment = an adjust-type movement that is NOT wastage.
   const IS_ADJUST_SQL = `(lower(sm.movement_type) LIKE '%adjust%' AND NOT ${IS_WASTE_SQL})`;
-  const IS_ACCOUNTING_ONLY_SQL = `(json_extract(sm.metadata_json,'$.accountingOnly') IN (1,'true') OR json_extract(sm.metadata_json,'$.reportingOnly') IN (1,'true'))`;
+  // Subset of IS_WASTE_SQL for manufacturing yield loss specifically, so the dashboard tile
+  // can show it as its own line item alongside (not folded silently into) other wastage.
+  const IS_MANUFACTURING_WASTE_SQL = `lower(sm.movement_type) LIKE '%manufact%'`;
   // Per-movement value chosen by class: transactional keeps stored value; everything
   // else (wastage/adjustment/stock-take) derives qty × current cost.
   const CLASS_VALUE_SQL = `CASE WHEN ${IS_SALE_SQL} OR ${IS_GRV_SQL} OR ${IS_CREDIT_SQL} THEN ${TXN_VALUE_SQL} ELSE ${DERIVED_VALUE_SQL} END`;
@@ -7519,7 +7630,8 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
         COALESCE(SUM(CASE WHEN ${IS_CREDIT_SQL} THEN ${TXN_VALUE_SQL} ELSE 0 END), 0) AS credit_note,
         COALESCE(SUM(CASE WHEN ${IS_SALE_SQL} THEN ${TXN_VALUE_SQL} ELSE 0 END), 0) AS sale,
         COALESCE(SUM(CASE WHEN ${IS_STOCKTAKE_SQL} THEN ${DERIVED_VALUE_SQL} ELSE 0 END), 0) AS stock_take,
-        COALESCE(SUM(CASE WHEN ${IS_WASTE_SQL} THEN ${DERIVED_VALUE_SQL} ELSE 0 END), 0) AS wastage,
+        COALESCE(SUM(CASE WHEN ${IS_WASTE_SQL} AND NOT ${IS_MANUFACTURING_WASTE_SQL} THEN ${DERIVED_VALUE_SQL} ELSE 0 END), 0) AS wastage,
+        COALESCE(SUM(CASE WHEN ${IS_MANUFACTURING_WASTE_SQL} THEN ${DERIVED_VALUE_SQL} ELSE 0 END), 0) AS manufacturing_wastage,
         COALESCE(SUM(CASE WHEN ${IS_ADJUST_SQL} THEN ${DERIVED_VALUE_SQL} ELSE 0 END), 0) AS adjustment,
         COALESCE(SUM(CASE WHEN NOT ${IS_ACCOUNTING_ONLY_SQL} THEN ${CLASS_VALUE_SQL} ELSE 0 END), 0) AS net_value
        FROM stock_movements sm
@@ -7535,7 +7647,7 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
     adjustment: numberValue(totalsRow.adjustment, 0),
     stockTake: numberValue(totalsRow.stock_take, 0),
     wastage: numberValue(totalsRow.wastage, 0),
-    manufacturingWastage: 0, // manufacturing wastage is folded into `wastage` via IS_WASTE_SQL
+    manufacturingWastage: numberValue(totalsRow.manufacturing_wastage, 0),
     netValue: numberValue(totalsRow.net_value, 0)
   };
 
@@ -7552,6 +7664,7 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
     `SELECT date(sm.occurred_at) AS day,
             COALESCE(SUM(CASE WHEN ${IS_SALE_SQL} THEN abs(${TXN_VALUE_SQL}) ELSE 0 END), 0) AS cos,
             COALESCE(SUM(CASE WHEN ${IS_WASTE_SQL} THEN abs(${DERIVED_VALUE_SQL}) ELSE 0 END), 0) AS waste,
+            COALESCE(SUM(CASE WHEN ${IS_MANUFACTURING_WASTE_SQL} THEN abs(${DERIVED_VALUE_SQL}) ELSE 0 END), 0) AS manuf_waste,
             COALESCE(SUM(CASE WHEN NOT ${IS_ACCOUNTING_ONLY_SQL} THEN ${CLASS_VALUE_SQL} ELSE 0 END), 0) AS net
        FROM stock_movements sm
        LEFT JOIN stock_items si ON si.id = sm.stock_item_id AND si.workspace_id = sm.workspace_id
@@ -7571,8 +7684,8 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
   } catch { /* ignore malformed range */ }
   if (!days.length) days.push(to);
 
-  const dayBuckets = new Map<string, { cos: number; waste: number; net: number }>();
-  for (const day of days) dayBuckets.set(day, { cos: 0, waste: 0, net: 0 });
+  const dayBuckets = new Map<string, { cos: number; waste: number; manufWaste: number; net: number }>();
+  for (const day of days) dayBuckets.set(day, { cos: 0, waste: 0, manufWaste: 0, net: 0 });
   for (const entry of dailyRows.results || []) {
     const row = objectValue(entry);
     const bucket = dayBuckets.get(text(row.day));
@@ -7580,6 +7693,7 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
     // cos/waste/net are already classified + valued in SQL (matches the summary tile).
     bucket.cos += numberValue(row.cos, 0);
     bucket.waste += numberValue(row.waste, 0);
+    bucket.manufWaste += numberValue(row.manuf_waste, 0);
     bucket.net += numberValue(row.net, 0);
   }
   // End-of-day stock value reconstructed backward from the current valuation.
@@ -7594,6 +7708,7 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
     labels: days,
     costOfSales: days.map((d) => round2(dayBuckets.get(d)?.cos || 0)),
     wastage: days.map((d) => round2(dayBuckets.get(d)?.waste || 0)),
+    manufacturingWastage: days.map((d) => round2(dayBuckets.get(d)?.manufWaste || 0)),
     stockValue: stockValueByDay
   };
 
@@ -7819,6 +7934,7 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
       countVariance: { raw: countVariance, type: 'currency' },
       manualAdjustments: { raw: manualAdjustments, type: 'currency' },
       wastage: { raw: wastage, type: 'currency' },
+      manufacturingWastage: { raw: numberValue(movementTotals.manufacturingWastage, 0), type: 'currency' },
       lowStockCount: { raw: insightCounts.lowStockCount, type: 'number' },
       gpPercentage: { raw: averageGp, type: 'percent' },
       averageGp: { raw: averageGp, type: 'percent' }

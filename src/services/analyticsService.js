@@ -50,7 +50,7 @@ export const reportCatalog = [
   { id: 'sync_log', title: 'Sales Sync Log', group: 'Operations', description: 'Sales import summaries.', columns: ['Date', 'Product', 'Product Status', 'Location', 'Qty Sold', 'COS Impact', 'Source'] },
   { id: 'sales_error_log', title: 'Sales Error Log', group: 'Operations', description: 'Sales import exceptions.', columns: ['Date', 'Type', 'Product', 'Location', 'Reason', 'Detail'] },
   { id: 'activity_log', title: 'Detailed Activity Log', group: 'Operations', description: 'Unified inventory activity stream.', columns: ['Date', 'Time', 'Type', 'Location', 'User', 'Action', 'Summary'] },
-  { id: 'payments', title: 'Payments Report', group: 'Operations', description: 'Consolidated payment tender summary by POS source. Gross and Net exclude tips (tips are shown separately).', columns: ['POS Source', 'Tender', 'Location', 'Orders', 'Gross Sales', 'Tips', 'Refunds', 'Tax Amount', 'Orders With Tip', 'Taxed Orders', 'No Tax Orders', 'Net (incl VAT)', 'Net (ex-VAT)'] },
+  { id: 'payments', title: 'Payments Report', group: 'Operations', description: 'Consolidated payment tender summary by POS source. Gross is VAT-inclusive takings; Net is revenue excluding VAT. Both exclude tips (tips shown separately).', columns: ['POS Source', 'Tender', 'Location', 'Orders', 'Gross Sales', 'Tips', 'Refunds', 'Tax Amount', 'Orders With Tip', 'Taxed Orders', 'No Tax Orders', 'Net'] },
   { id: 'modifier_gp_detail', title: 'Modifier GP Tracking', group: 'Sales', description: 'Track GP impact of modifier combinations attached to each main product.', columns: ['Date', 'Main Product Sold', 'Modifier Item', 'Modifier Combination', 'Qty Sold', 'Main Product Selling', 'Modifier Selling', 'Main Selling Recipe Cost', 'Modifier Cost', 'Total Selling', 'Total Cost', 'GP Main %', 'GP Combined %', 'Additional GP %'] },
   { id: 'modifier_gp_summary', title: 'Modifier Summary Report', group: 'Sales', description: 'Summarise modifier sales, cost, and GP independent of main product GP tracking.', columns: ['Date', 'Sale ID / Order ID', 'Main Product Sold', 'Modifier Item', 'Modifier Category', 'Qty Sold', 'Modifier Selling', 'Modifier Cost', 'Modifier GP', 'Modifier GP %', 'Status'] },
   { id: 'forecast', title: 'Stock-Out Forecast', group: 'Advanced', description: 'Predict items likely to run out based on current stock and consumption trends.', columns: ['Item', 'Category', 'Location', 'Unit', 'Current Stock', 'Avg Daily Usage', 'Days of Cover', 'Predicted Stock-out Date', 'Risk Level', 'Suggested Reorder Qty', 'Action'] },
@@ -2134,9 +2134,10 @@ function buildPaymentRows(source, context) {
   });
 
   return [...groups.values()].map((row) => {
-    // Net (incl VAT) = Gross (excl tips) − Refunds. Net (ex-VAT) = that − Tax (VAT portion).
-    const netInclVat = row.gross - row.refunds;
-    const netExVat = netInclVat - row.tax;
+    // Net = revenue EXCLUSIVE of VAT: (Gross excl tips − Refunds) − Tax (the VAT portion).
+    // We intentionally do NOT expose a VAT-inclusive "Net" — Net always means ex-VAT.
+    const netAfterRefunds = row.gross - row.refunds;
+    const netExVat = netAfterRefunds - row.tax;
     return {
       'POS Source': row['POS Source'],
       Tender: row.Tender,
@@ -2149,8 +2150,7 @@ function buildPaymentRows(source, context) {
       'Orders With Tip': String(row.withTip),
       'Taxed Orders': String(row.taxed),
       'No Tax Orders': String(row.noTax),
-      'Net (incl VAT)': currency(netInclVat),
-      'Net (ex-VAT)': currency(netExVat),
+      Net: currency(netExVat),
       _sort: `${row['POS Source']} ${row.Tender} ${row.Location}`
     };
   }).filter((row) => passesSearch(row, context)).sort(sortBy('_sort'));
@@ -2394,7 +2394,11 @@ function buildWasteParetoRows(source, context) {
     const timestamp = log.createdAt || log.timestamp || log.date || '';
     const user = reportActor(log) || 'Unknown';
     const qtyValue = Math.abs(Number(log.qty ?? log.quantity ?? log.impactQty ?? 0));
-    const key = `${reason}::${user}`;
+    // Distinguish the two adjustment-based wastage sources: the dedicated product/menu-item wastage
+    // flow (postWastageAdjustment) always writes adjustment_type='wastage' → mode==='wastage';
+    // a manual stock adjustment tagged as wastage (e.g. a 'remove' carrying a wasteReason) is not.
+    const source = String(log.mode || '').toLowerCase() === 'wastage' ? 'Product Wastage Adjustment' : 'Manual Adjustment';
+    const key = `${source}::${reason}::${user}`;
     const current = reasons.get(key) || { reason, incidents: 0, loss: 0, locations: new Set(), users: new Set(), categoryLoss: new Map(), locationLoss: new Map(), events: [] };
     current.incidents += 1;
     current.loss += loss;
@@ -2413,7 +2417,7 @@ function buildWasteParetoRows(source, context) {
       Quantity: `${number(qtyValue)}${log.unit || item.unit || item.uom ? ` ${log.unit || item.unit || item.uom}` : ''}`,
       'Loss Value': currency(loss),
       Note: log.note || log.notes || log.reason || '',
-      Source: 'Adjustment',
+      Source: source,
       _ts: timestamp,
       _loss: loss
     });
@@ -2430,7 +2434,7 @@ function buildWasteParetoRows(source, context) {
     const timestamp = log.createdAt || log.timestamp || log.postedAt || log.date || '';
     const user = reportActor(log) || 'Unknown';
     const unit = log.unit || log.uom || '';
-    const key = `${reason}::${user}`;
+    const key = `Manufacture Wastage::${reason}::${user}`;
     const current = reasons.get(key) || { reason, incidents: 0, loss: 0, locations: new Set(), users: new Set(), categoryLoss: new Map(), locationLoss: new Map(), events: [] };
     current.incidents += 1;
     current.loss += loss;
@@ -2449,7 +2453,7 @@ function buildWasteParetoRows(source, context) {
       Quantity: `${number(variance)}${unit ? ` ${unit}` : ''}`,
       'Loss Value': currency(loss),
       Note: log.note || log.notes || 'Actual yield below expected yield',
-      Source: 'Manufacturing',
+      Source: 'Manufacture Wastage',
       _ts: timestamp,
       _loss: loss
     });

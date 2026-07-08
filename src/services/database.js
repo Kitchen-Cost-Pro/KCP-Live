@@ -458,7 +458,8 @@ export function calculateDashboardMetrics(source, dateKey = isoToday()) {
       costOfSales: metricValue(costOfSales, 'currency'),
       countVariance: metricValue(countVariance, 'currency', percentOf(countVariance, stockValue)),
       manualAdjustments: metricValue(manualAdjustments, 'currency', percentOf(manualAdjustments, stockValue)),
-      wastage: metricValue(wastage, 'currency', percentOf(wastage, stockValue))
+      wastage: metricValue(wastage, 'currency', percentOf(wastage, stockValue)),
+      manufacturingWastage: metricValue(manufacturingWastage, 'currency', percentOf(manufacturingWastage, stockValue))
     }
   };
 }

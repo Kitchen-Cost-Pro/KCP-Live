@@ -73,6 +73,11 @@ import {
   purgeWorkspaceTenant,
   getAdminWorkspaceSettingsDO,
   patchAdminWorkspaceSettingsDO,
+  adminYocoActionDO,
+  adminYocoStatusDO,
+  adminActionDO,
+  adminOrgFieldsDO,
+  adminUnlinkOrgDO,
   migrateImport,
   getLocations,
   getManufacturingBatches,
@@ -165,7 +170,7 @@ import {
   postYocoSyncSales,
   postYocoWebhook
 } from './routes';
-import { sendDueLowStockEmailSummaries, sendWorkspaceLowStockNow } from './low-stock-email';
+import { sendWorkspaceLowStockNow } from './low-stock-email';
 
 function routePattern(pathname: string, pattern: RegExp) {
   return pathname.match(pattern);
@@ -574,6 +579,26 @@ export async function dispatchWorkspaceRoute(
     return patchAdminWorkspaceSettingsDO(request, env, auth, workspaceId);
   }
 
+  // Admin workspace actions fanned in by the front Worker (already requireAdmin-gated there).
+  // These run against tenant env.DB — they must NOT re-auth. See routes.ts adminYoco*/admin*DO.
+  if (request.method === 'GET' && resource === 'admin-yoco/status') {
+    return adminYocoStatusDO(request, env, auth, workspaceId);
+  }
+  const adminYocoM = resource.match(/^admin-yoco\/([^/]+)$/);
+  if (request.method === 'POST' && adminYocoM) {
+    return adminYocoActionDO(request, env, auth, workspaceId, adminYocoM[1]);
+  }
+  const adminActionM = resource.match(/^admin-action\/([^/]+)$/);
+  if (request.method === 'POST' && adminActionM) {
+    return adminActionDO(request, env, auth, workspaceId, adminActionM[1]);
+  }
+  if (request.method === 'GET' && resource === 'admin-org-fields') {
+    return adminOrgFieldsDO(request, env, auth, workspaceId);
+  }
+  if (request.method === 'POST' && resource === 'admin-unlink-org') {
+    return adminUnlinkOrgDO(request, env, auth, workspaceId);
+  }
+
   // Data-migration bulk import into THIS DO (superuser-gated by the front Worker before forwarding).
   if (request.method === 'POST' && resource === 'migrate-import') {
     return migrateImport(request, env, auth, workspaceId);
@@ -882,6 +907,12 @@ export async function dispatchWorkspaceRoute(
     return postYocoSyncSales(request, env, auth, workspaceId);
   }
 
+  // Yoco webhook forwarded from the front Worker ingress (/webhooks/yoco/:ws). Runs in the tenant DO
+  // so it can verify the signature against the tenant-stored webhook_secret and deplete stock.
+  if (request.method === 'POST' && resource === 'yoco-webhook') {
+    return postYocoWebhook(request, env, workspaceId);
+  }
+
   if (request.method === 'GET' && resource === 'gmail/status') {
     return getGmailStatus(request, env, auth, workspaceId);
   }
@@ -917,7 +948,9 @@ export default {
       return error(request, env, status, message);
     }
   },
-  async scheduled(_controller: unknown, env: Env, _ctx: unknown) {
-    await sendDueLowStockEmailSummaries(env);
+  async scheduled(_controller: unknown, _env: Env, _ctx: unknown) {
+    // No-op: the deployed entry point is src/index.ts (see wrangler.toml `main`), whose scheduled()
+    // handler runs the low-stock cron by fanning out to each workspace DO. This legacy default
+    // export is not the active Worker entry.
   }
 };
