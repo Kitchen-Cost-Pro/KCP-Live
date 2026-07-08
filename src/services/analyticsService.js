@@ -1,6 +1,7 @@
 import { calculateDashboardMetrics, getDashboardSourceOnce, getTradeDateKey, getStockValuationUnitCost, getIngredientUnitCost } from './database.js';
 import { callCloudflareWorkspaceRoute } from './cloudflareApi.js';
 import { isWastageAdjustment as isWastageAdjustmentLog } from './wastageClassifier.js';
+import { getManufacturingComponentTotal, getManufacturingExpectedQty, getManufacturingVarianceQty, getManufacturingWastageValue } from './manufacturingLog.js';
 import { DEFAULT_STOCK_LOCATION_ID, DEFAULT_STOCK_LOCATION_NAME, normalizeStockLocations } from './locationModel.js';
 import { getLocationStock, resolveBalanceKey, sumBalances, normalizeLocationKey } from '../utils/stockBalances.js';
 
@@ -32,46 +33,46 @@ export const reportCatalog = [
   { id: 'stock', title: 'Stock On Hand', group: 'Inventory', description: 'Current stock balances and ex-VAT value.', columns: ['Item', 'Category', 'Location', 'On Hand', 'Unit', 'UOM Config', 'UOM 1 Name', 'UOM 1 Ratio', 'UOM 1 Barcode', 'UOM 2 Name', 'UOM 2 Ratio', 'UOM 2 Barcode', 'UOM 3 Name', 'UOM 3 Ratio', 'UOM 3 Barcode', 'Unit Cost', 'Stock Value'] },
   { id: 'movement', title: 'Stock Movement', group: 'Inventory', description: 'Purchases, usage, wastage, adjustments, and transfers by item.', columns: ['Item', 'Category', 'Unit', 'Purchases', 'Sales Usage', 'Wastage', 'Adjustments', 'Transfers Net', 'Net Qty'] },
   { id: 'low_stock', title: 'Low Stock Alerts', group: 'Inventory', description: 'Items below low-stock threshold or par.', columns: ['Item', 'Category', 'Unit', 'Low Locations', 'Total Current Stock', 'Total Threshold', 'Total Variance', 'Total Deficit Value'] },
-  { id: 'grv', title: 'GRV Log', group: 'Inventory', description: 'Goods received history.', columns: ['Date', 'Supplier', 'Invoice', 'Location', 'Items', 'Total Ex', 'User', 'Action'] },
-  { id: 'cn', title: 'Credit Notes', group: 'Inventory', description: 'Supplier credit note and return history.', columns: ['Date', 'Supplier', 'Reference', 'Location', 'Items', 'Total Ex', 'User', 'Action'] },
-  { id: 'purchase_orders', title: 'Purchase Orders', group: 'Inventory', description: 'Purchase order status and value.', columns: ['Date', 'Supplier', 'Reference', 'Status', 'Location', 'Items', 'Total Ex', 'User', 'Action'] },
-  { id: 'sale_movement', title: 'Sale Stock Movement', group: 'Inventory', description: 'Stock depletion associated with sales imports.', columns: ['Date', 'Product', 'Product Status', 'Location', 'Qty Sold', 'Recipe Lines', 'Qty Depleted', 'COGS Ex', 'Action'] },
+  { id: 'grv', title: 'GRV Log', group: 'Inventory', description: 'Goods received history.', columns: ['Date', 'Time', 'Supplier', 'Invoice', 'Location', 'Items', 'Total Ex', 'User', 'Action'] },
+  { id: 'cn', title: 'Credit Notes', group: 'Inventory', description: 'Supplier credit note and return history.', columns: ['Date', 'Time', 'Supplier', 'Reference', 'Location', 'Items', 'Total Ex', 'User', 'Action'] },
+  { id: 'purchase_orders', title: 'Purchase Orders', group: 'Inventory', description: 'Purchase order status and value.', columns: ['Date', 'Time', 'Supplier', 'Reference', 'Status', 'Location', 'Items', 'Total Ex', 'User', 'Action'] },
+  { id: 'sale_movement', title: 'Sale Stock Movement', group: 'Inventory', description: 'Stock depletion associated with sales imports.', columns: ['Date', 'Time', 'Product', 'Product Status', 'Location', 'Qty Sold', 'Recipe Lines', 'Qty Depleted', 'COGS Ex', 'Action'] },
   { id: 'menu', title: 'Menu Health', group: 'Operations', description: 'Menu pricing, recipe cost, and GP.', columns: ['Menu Item', 'Category', 'Selling Price', 'Recipe Cost', 'GP %', 'Recipe Lines'] },
   { id: 'missing_recipes', title: 'Missing Recipes', group: 'Operations', description: 'Menu items without recipe links.', columns: ['Menu Item', 'Category', 'Selling Price', 'Status'] },
   { id: 'adj', title: 'Adjustments', group: 'Operations', description: 'Manual adjustment audit.', columns: ['Date', 'Time', 'User', 'Item', 'Category', 'Location', 'Mode', 'Quantity', 'Unit', 'Impact Ex', 'Reason'] },
-  { id: 'stocktake', title: 'Stock Take Audit', group: 'Operations', description: 'Physical count sessions and variance.', columns: ['Date', 'Location', 'User', 'Items Counted', 'Variance Lines', 'Net Impact', 'Action'] },
-  { id: 'inventory_audit', title: 'Inventory Change Audit', group: 'Operations', description: 'Stock items created, updated, deleted, imported, or reset.', columns: ['Date', 'Area', 'Item', 'Action', 'Location', 'Before', 'After', 'User', 'Source'] },
-  { id: 'mfg', title: 'Manufacturing Productions', group: 'Operations', description: 'Production batches, sub-recipe costing, and yield variance.', columns: ['Date', 'Item', 'Type', 'Location', 'Expected', 'Produced', 'Variance', 'COGS Ex', 'Unit'] },
+  { id: 'stocktake', title: 'Stock Take Audit', group: 'Operations', description: 'Physical count sessions and variance.', columns: ['Date', 'Time', 'Location', 'User', 'Items Counted', 'Variance Lines', 'Net Impact', 'Action'] },
+  { id: 'inventory_audit', title: 'Inventory Change Audit', group: 'Operations', description: 'Stock items created, updated, deleted, imported, or reset.', columns: ['Date', 'Time', 'Area', 'Item', 'Action', 'Location', 'Before', 'After', 'User', 'Source'] },
+  { id: 'mfg', title: 'Manufacturing Productions', group: 'Operations', description: 'Production batches, sub-recipe costing, and yield variance.', columns: ['Date', 'Time', 'Item', 'Type', 'Location', 'Expected', 'Produced', 'Variance', 'COGS Ex', 'Unit'] },
   { id: 'transfers', title: 'Stock Transfers', group: 'Operations', description: 'Location-to-location movement history.', columns: ['Date', 'Time', 'User', 'Item', 'From', 'To', 'Quantity', 'Unit', 'Note'] },
   { id: 'ops_overview', title: 'Ops Overview By Category', group: 'Operations', description: 'Category-level operational summary.', columns: ['Category', 'Location', 'Stock Value', 'Purchases Ex', 'Wastage Ex', 'Manual Adjustments Ex', 'Low Stock Items'] },
   { id: 'ops_category_overview', title: 'Operations Overview By Inventory Category', group: 'Operations', description: 'Opening/closing stock value, purchases and actual vs theoretical cost of sales per inventory category.', columns: ['Inventory Category', 'Locations', 'Opening Stock Value', 'Purchases', 'Closing Stock Value', 'COS Actual', 'COS Theoretical', 'COS Difference'] },
   { id: 'ops_category_detail', title: 'Operations Detail By Inventory Category (Per Item)', group: 'Operations', description: 'Per-item breakdown within each inventory category: opening/closing stock value, purchases and actual vs theoretical cost of sales.', columns: ['Inventory Category', 'Locations', 'Item', 'Unit', 'Opening Stock Value', 'Purchases', 'Closing Stock Value', 'COS Actual', 'COS Theoretical', 'COS Difference'] },
   { id: 'ops_dashboard', title: 'Operations Dashboard', group: 'Operations', description: 'Single-period operational control summary.', columns: ['Location', 'Purchases Ex', 'Opening Stock', 'Closing Stock', 'Cost Of Sales', 'Count Variance', 'Manual Adjustments', 'Wastage'] },
-  { id: 'sync_log', title: 'Sales Sync Log', group: 'Operations', description: 'Sales import summaries.', columns: ['Date', 'Product', 'Product Status', 'Location', 'Qty Sold', 'COS Impact', 'Source'] },
-  { id: 'sales_error_log', title: 'Sales Error Log', group: 'Operations', description: 'Sales import exceptions.', columns: ['Date', 'Type', 'Product', 'Location', 'Reason', 'Detail'] },
+  { id: 'sync_log', title: 'Sales Sync Log', group: 'Operations', description: 'Sales import summaries.', columns: ['Date', 'Time', 'Product', 'Product Status', 'Location', 'Qty Sold', 'COS Impact', 'Source'] },
+  { id: 'sales_error_log', title: 'Sales Error Log', group: 'Operations', description: 'Sales import exceptions.', columns: ['Date', 'Time', 'Type', 'Product', 'Location', 'Reason', 'Detail'] },
   { id: 'activity_log', title: 'Detailed Activity Log', group: 'Operations', description: 'Unified inventory activity stream.', columns: ['Date', 'Time', 'Type', 'Location', 'User', 'Action', 'Summary'] },
   { id: 'payments', title: 'Payments Report', group: 'Operations', description: 'Consolidated payment tender summary by POS source. Gross is VAT-inclusive takings; Net is revenue excluding VAT. Both exclude tips (tips shown separately).', columns: ['POS Source', 'Tender', 'Location', 'Orders', 'Gross Sales', 'Tips', 'Refunds', 'Tax Amount', 'Orders With Tip', 'Taxed Orders', 'No Tax Orders', 'Net'] },
-  { id: 'modifier_gp_detail', title: 'Modifier GP Tracking', group: 'Sales', description: 'Track GP impact of modifier combinations attached to each main product.', columns: ['Date', 'Main Product Sold', 'Modifier Item', 'Modifier Combination', 'Qty Sold', 'Main Product Selling', 'Modifier Selling', 'Main Selling Recipe Cost', 'Modifier Cost', 'Total Selling', 'Total Cost', 'GP Main %', 'GP Combined %', 'Additional GP %'] },
-  { id: 'modifier_gp_summary', title: 'Modifier Summary Report', group: 'Sales', description: 'Summarise modifier sales, cost, and GP independent of main product GP tracking.', columns: ['Date', 'Sale ID / Order ID', 'Main Product Sold', 'Modifier Item', 'Modifier Category', 'Qty Sold', 'Modifier Selling', 'Modifier Cost', 'Modifier GP', 'Modifier GP %', 'Status'] },
+  { id: 'modifier_gp_detail', title: 'Modifier GP Tracking', group: 'Sales', description: 'Track GP impact of modifier combinations attached to each main product.', columns: ['Date', 'Time', 'Main Product Sold', 'Modifier Item', 'Modifier Combination', 'Qty Sold', 'Main Product Selling', 'Modifier Selling', 'Main Selling Recipe Cost', 'Modifier Cost', 'Total Selling', 'Total Cost', 'GP Main %', 'GP Combined %', 'Additional GP %'] },
+  { id: 'modifier_gp_summary', title: 'Modifier Summary Report', group: 'Sales', description: 'Summarise modifier sales, cost, and GP independent of main product GP tracking.', columns: ['Date', 'Time', 'Sale ID / Order ID', 'Main Product Sold', 'Modifier Item', 'Modifier Category', 'Qty Sold', 'Modifier Selling', 'Modifier Cost', 'Modifier GP', 'Modifier GP %', 'Status'] },
   { id: 'forecast', title: 'Stock-Out Forecast', group: 'Advanced', description: 'Predict items likely to run out based on current stock and consumption trends.', columns: ['Item', 'Category', 'Location', 'Unit', 'Current Stock', 'Avg Daily Usage', 'Days of Cover', 'Predicted Stock-out Date', 'Risk Level', 'Suggested Reorder Qty', 'Action'] },
   { id: 'volatility', title: 'Price Volatility Audit', group: 'Advanced', description: 'Monitor price changes and volatility by items vs suppliers.', columns: ['Item', 'Category', 'Supplier', 'Invoice Count', 'Current Unit Cost', 'Prior Unit Cost', '% Change', 'Variance (R)', 'Volatility Score', 'Risk Level', 'Action'] },
   { id: 'variance', title: 'Theoretical vs Actual Usage', group: 'Advanced', description: 'Compares movement-derived usage to recipe theoretical usage.', columns: ['Ingredient', 'Category', 'Unit', 'Actual Usage', 'Theoretical Usage', 'Variance Qty', 'Loss Value'] },
   { id: 'waste_pareto', title: 'Waste Pareto', group: 'Advanced', description: 'Waste loss by reason with cumulative contribution.', columns: ['Waste Reason', 'Location', 'User', 'Incidents', 'Total Loss Value', 'Cumulative %'] },
-  { id: 'yoco_sales', title: 'Yoco Sales Report', group: 'Integrations', description: 'Yoco sale and refund lines from imported sales logs.', columns: ['Date', 'Sale / Refund', 'Item Name', 'Item Status', 'Qty Sold', 'Total Impact', 'Location', 'Action'] }
+  { id: 'yoco_sales', title: 'Yoco Sales Report', group: 'Integrations', description: 'Yoco sale and refund lines from imported sales logs.', columns: ['Date', 'Time', 'Sale / Refund', 'Item Name', 'Item Status', 'Qty Sold', 'Total Impact', 'Location', 'Action'] }
 ];
 
 const customReportDefaultColumns = {
   inventory: ['Item', 'Category', 'Location', 'On Hand', 'Unit', 'UOM Config', 'Stock Value'],
-  sales: ['Date', 'Sale / Refund', 'Item Name', 'Qty Sold', 'Total Impact', 'Location'],
-  invoices: ['Date', 'Supplier', 'Invoice', 'Location', 'Items', 'Total Ex'],
+  sales: ['Date', 'Time', 'Sale / Refund', 'Item Name', 'Qty Sold', 'Total Impact', 'Location'],
+  invoices: ['Date', 'Time', 'Supplier', 'Invoice', 'Location', 'Items', 'Total Ex'],
   stock: ['Item', 'Category', 'Location', 'On Hand', 'Unit', 'UOM Config', 'Stock Value'],
   menu: ['Menu Item', 'Category', 'Selling Price', 'Recipe Cost', 'GP %'],
-  purchase_orders: ['Date', 'Supplier', 'Reference', 'Status', 'Location', 'Total Ex', 'User'],
-  grv: ['Date', 'Supplier', 'Invoice', 'Location', 'Items', 'Total Ex', 'User'],
-  cn: ['Date', 'Supplier', 'Reference', 'Location', 'Items', 'Total Ex', 'User'],
+  purchase_orders: ['Date', 'Time', 'Supplier', 'Reference', 'Status', 'Location', 'Total Ex', 'User'],
+  grv: ['Date', 'Time', 'Supplier', 'Invoice', 'Location', 'Items', 'Total Ex', 'User'],
+  cn: ['Date', 'Time', 'Supplier', 'Reference', 'Location', 'Items', 'Total Ex', 'User'],
   adj: ['Date', 'Time', 'User', 'Item', 'Category', 'Location', 'Mode', 'Quantity', 'Impact Ex'],
   transfers: ['Date', 'Time', 'User', 'Item', 'From', 'To', 'Quantity', 'Unit'],
-  yoco_sales: ['Date', 'Sale / Refund', 'Item Name', 'Qty Sold', 'Total Impact', 'Location'],
+  yoco_sales: ['Date', 'Time', 'Sale / Refund', 'Item Name', 'Qty Sold', 'Total Impact', 'Location'],
   modifier_gp_detail: ['Date', 'Main Product Sold', 'Modifier Combination', 'Qty Sold', 'Main Product Selling', 'Modifier Selling', 'Total Selling', 'Total Cost', 'GP Main %', 'GP Combined %', 'Additional GP %'],
   modifier_gp_summary: ['Date', 'Sale ID / Order ID', 'Main Product Sold', 'Modifier Item', 'Modifier Category', 'Qty Sold', 'Modifier Selling', 'Modifier Cost', 'Modifier GP', 'Modifier GP %', 'Status']
 };
@@ -586,6 +587,7 @@ function buildGrvRows(source, context) {
     _detailId: log.id || log.grvNumber || log.invoice,
     _raw: log,
     Date: displayDate(logDate(log)),
+    Time: displayTime(reportTimestamp(log)),
     Supplier: log.supplier || log.supplierName || 'Manual Receipt',
     Invoice: log.invoice || log.grvNumber || log.id || '',
     Location: log.locationName || locationName(context, logLocationId(log), 'Multiple'),
@@ -602,6 +604,7 @@ function buildCreditNoteRows(source, context) {
     _detailId: log.id || log.cnNumber || log.creditNoteNumber || log.reference || log.number || log.invoice,
     _raw: log,
     Date: displayDate(logDate(log)),
+    Time: displayTime(reportTimestamp(log)),
     Supplier: log.supplier || log.supplierName || '',
     Reference: log.reference || log.creditNoteNumber || log.cnNumber || log.number || log.invoice || log.id || '',
     Location: log.locationName || locationName(context, logLocationId(log), 'Multiple'),
@@ -627,6 +630,7 @@ function buildPurchaseOrderRows(source, context) {
       _raw: order,
       _grvs: grvsForOrder,
       Date: displayDate(logDate(order)),
+      Time: displayTime(reportTimestamp(order)),
       Supplier: order.supplierName || order.supplier || '',
       Reference: reference,
       Status: order.status || 'draft',
@@ -756,6 +760,7 @@ function buildSaleMovementSummaryRow({ log = {}, line = {}, movements = [], cont
 
   return {
     Date: displayDate(date || logDate(log)),
+    Time: displayTime(line.timestamp || line.saleTimestamp || log.timestamp || log.createdAt || date || logDate(log)),
     Product: productLabel,
     'Product Status': productStatusLabel(product),
     Location: location,
@@ -911,6 +916,7 @@ function buildModifierGpCombinationRow({ log = {}, line = {}, modifiers = [], mo
 
   return {
     Date: displayDate(date || logDate(log)),
+    Time: displayTime(line.timestamp || line.saleTimestamp || log.timestamp || log.createdAt || date || logDate(log)),
     'Main Product Sold': mainProduct,
     'Modifier Item': modifierItems.length ? modifierItems.map((item) => item.name).join(', ') : 'No Modifier',
     'Modifier Combination': modifierCombination,
@@ -991,6 +997,7 @@ function buildModifierGpSummaryDetailRows(log = {}, context = {}) {
 
     return {
       Date: displayDate(date),
+      Time: displayTime(modifier.timestamp || modifier.saleTimestamp || log.timestamp || log.createdAt || date),
       'Sale ID / Order ID': orderId,
       'Main Product Sold': mainProduct,
       'Modifier Item': modifierName,
@@ -1328,6 +1335,7 @@ function buildStockTakeRows(source, context) {
     const impact = items.reduce((sum, item) => sum + Number(item.variance || 0) * Number(context.ingredientMap.get(String(item.id || item.itemId))?.cost || item.cost || 0), 0);
     return {
       Date: displayDate(logDate(log)),
+      Time: displayTime(reportTimestamp(log)),
       Location: log.locationName || locationName(context, logLocationId(log), ''),
       User: reportActor(log),
       'Items Counted': String(items.length),
@@ -1362,6 +1370,7 @@ function buildInventoryAuditRows(source, context) {
       const locationId = log.locationId || after.locationId || before.locationId || after.targetLocation || before.targetLocation || '';
       return {
         Date: displayDate(logDate(log)),
+        Time: displayTime(reportTimestamp(log)),
         Area: titleCase(area),
         Item: itemName || 'Workspace',
         Action: auditActionLabel(log.action || log.eventType || log.event_type || 'updated'),
@@ -1470,15 +1479,14 @@ function auditObjectValue(value) {
 function buildManufacturingRows(source, context) {
   return source.logs_mfg.filter((log) => inDateRange(logDate(log), context)).map((log) => ({
     Date: displayDate(logDate(log)),
+    Time: displayTime(reportTimestamp(log)),
     Item: log.itemName || log.stockItemName || log.manufacturedItemName || context.ingredientMap.get(String(log.itemId || log.manufacturedItemId))?.name || '',
     Type: 'Manufactured / Prep',
     Location: log.locationName || locationName(context, logLocationId(log), ''),
-      Expected: number(log.expectedQty ?? log.expectedOutput ?? 0),
-      Produced: number(log.producedQty ?? log.actualQty ?? log.qty ?? 0),
-      Variance: number(log.variance ?? (Number(log.expectedQty || 0) - Number(log.producedQty || 0))),
-    'COGS Ex': currency(toArray(log.components).reduce((sum, component) => {
-      return sum + (Number(component.qty || 0) || 0) * (Number(component.cost || component.unitCost || 0) || 0);
-    }, 0)),
+    Expected: number(getManufacturingExpectedQty(log)),
+    Produced: number(log.producedQty ?? log.actualQty ?? log.qty ?? 0),
+    Variance: number(getManufacturingVarianceQty(log)),
+    'COGS Ex': currency(getManufacturingComponentTotal(log)),
     Unit: log.unit || context.ingredientMap.get(String(log.itemId || log.manufacturedItemId))?.unit || ''
   })).filter((row) => passesReportFilters(row, context));
 }
@@ -1831,15 +1839,7 @@ function opsDashboardWastage(source, context, locationId) {
   const manufacturingWastage = source.logs_mfg
     .filter((log) => inDateRange(logDate(log), context))
     .filter((log) => opsDashboardResolvedLocationId({}, log, context) === locationId)
-    .reduce((sum, log) => {
-      const variance = Number(log.variance || 0);
-      if (!(variance > 0)) return sum;
-      const expectedQty = Number(log.expectedQty || 1) || 1;
-      const unitCost = toArray(log.components).reduce((componentSum, component) => (
-        componentSum + ((Number(component.qty || 0) || 0) / expectedQty) * (Number(component.cost || component.unitCost || 0) || 0)
-      ), 0);
-      return sum + (variance * unitCost);
-    }, 0);
+    .reduce((sum, log) => sum + getManufacturingWastageValue(log), 0);
 
   return adjustmentWastage + manufacturingWastage;
 }
@@ -1914,6 +1914,7 @@ function buildSyncLogRows(source, context) {
 
   return [...rowsByDayProduct.values()].map((row) => ({
     Date: displayDate(row.date),
+    Time: displayTime(row._sortDate || row.date),
     Product: row.Product,
     'Product Status': row['Product Status'],
     Location: row.Location,
@@ -1930,6 +1931,7 @@ function buildSalesErrorRows(source, context) {
     const location = log.locationName || locationName(context, logLocationId(log), '');
     return {
       Date: displayDate(logDate(log)),
+      Time: displayTime(reportTimestamp(log)),
       Type: titleCase(log.type || log.errorType || log.status || 'Import Error'),
       Product: log.productName || log.name || log.orderId || 'Yoco order',
       Location: location || 'Unknown Location',
@@ -2425,10 +2427,10 @@ function buildWasteParetoRows(source, context) {
   });
   source.logs_mfg.filter((log) => inDateRange(logDate(log), context)).forEach((log) => {
     if (!matchesLocationId(context, logLocationId(log))) return;
-    const variance = Number(log.variance || 0);
+    const variance = Math.max(getManufacturingVarianceQty(log), 0);
     if (!(variance > 0)) return;
     const reason = 'Manufacturing Variance';
-    const loss = variance * Number(log.unitCost || 0);
+    const loss = getManufacturingWastageValue(log);
     const category = String(log.category || log.itemCategory || 'Manufacturing').trim() || 'Manufacturing';
     const locationLabel = locationName(context, logLocationId(log), context.defaultLocationName || DEFAULT_STOCK_LOCATION_NAME);
     const timestamp = log.createdAt || log.timestamp || log.postedAt || log.date || '';
@@ -2596,6 +2598,7 @@ function buildYocoSalesRows(source, context) {
       const orderLabel = row.orderId || row.orderNumber || 'N/A';
       return {
         Date: row.date,
+        Time: displayTime(row.timestamp || row.date),
         'Sale / Refund': row.type,
         'Item Name': row.name,
         'Item Status': row.status || 'Active',
@@ -3104,6 +3107,10 @@ function displayTime(value) {
   return match?.[1] || '';
 }
 
+function reportTimestamp(log = {}) {
+  return log.createdAt || log.updatedAt || log.modifiedAt || log.timestamp || log.postedAt || log.date || '';
+}
+
 function locationName(context, id, fallback = '') {
   const location = context.locationMap.get(String(id || ''));
   // Never leak a raw location id (e.g. loc_WS-…_main) to the UI/export. If the id
@@ -3217,7 +3224,7 @@ function toArray(value) {
 }
 
 function qty(line = {}) {
-  return Number(line.qty ?? line.quantity ?? line.receivedQty ?? line.purchasedQty ?? line.depletedQty ?? 0) || 0;
+  return Number(line.qty ?? line.usage ?? line.quantity ?? line.receivedQty ?? line.purchasedQty ?? line.depletedQty ?? 0) || 0;
 }
 
 function normalizeTender(value = '') {

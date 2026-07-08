@@ -3847,7 +3847,7 @@ function updateDashboardLocation(locationId = '') {
 }
 
 function setDashboardChartTab(tab = 'costOfSales') {
-  const next = ['costOfSales', 'stockValue', 'wastage'].includes(String(tab)) ? String(tab) : 'costOfSales';
+  const next = ['costOfSales', 'stockValue', 'wastage', 'manufacturingWastage'].includes(String(tab)) ? String(tab) : 'costOfSales';
   if (appState.dashboardChartTab === next) return;
   appState.dashboardChartTab = next;
   // Series are already loaded in metrics.trends — no re-fetch, just re-render.
@@ -13959,9 +13959,11 @@ async function saveManufacturingProductionEvent() {
   try {
     const { postManufacturingBatch } = await import('./services/manufacturingService.js');
     for (const { item, batchCount, expected, produced } of items) {
+      const impact = getManufacturingProductionImpactForSave(item, batchCount, expected, produced, draft.locationId);
       await postManufacturingBatch(appState.workspace?.id, {
         id: submitIds[item.id],
         manufacturedItemId: item.id,
+        itemId: item.id,
         itemName: item.name || '',
         siteId: draft.siteId,
         siteName: draft.siteName,
@@ -13969,9 +13971,16 @@ async function saveManufacturingProductionEvent() {
         locationName: draft.locationName,
         batchMultiplier: 1,
         unit: item.unit || 'ea',
-        unitCost: item.unitCost || item.cost || 0,
+        unitCost: impact.expectedUnitCost,
+        expectedUnitCost: impact.expectedUnitCost,
+        actualUnitCost: impact.actualUnitCost,
+        batchCost: impact.batchCost,
         expectedQty: expected,
         producedQty: produced,
+        variance: impact.variance,
+        wastageQty: impact.wastageQty,
+        wastageValue: impact.wastageValue,
+        components: impact.components,
         batchCount,
         date: draft.date,
         note: draft.note
@@ -14004,6 +14013,10 @@ function getManufacturingProductionImpactForSave(item = {}, batchCount = 0, expe
   const stockItems = appState.manufacturing.stockItems || [];
   const componentMap = new Map(stockItems.map((entry) => [String(entry.id), entry]));
   const recipe = Array.isArray(item.recipe) ? item.recipe : [];
+  const fallbackUnitCost = Number(item.unitCost || item.cost || 0) || 0;
+  const batchCost = (Number(item.batchCost || 0) || (expectedQty * fallbackUnitCost)) * Math.max(batchCount || 0, 0);
+  const expectedUnitCost = expectedQty > 0 ? batchCost / expectedQty : fallbackUnitCost;
+  const actualUnitCost = producedQty > 0 ? batchCost / producedQty : expectedUnitCost;
   const yieldBatch = Math.max(parseDecimalInputValue(item.yieldBatch, 0) || 0, 0);
   const components = recipe.map((line) => {
     const component = componentMap.get(String(line.ingId || line.id || line.stockItemId || ''));
@@ -14011,10 +14024,14 @@ function getManufacturingProductionImpactForSave(item = {}, batchCount = 0, expe
     const usage = yieldBatch > 0 ? (componentQty / yieldBatch) * expectedQty : 0;
     const before = getManufacturingLocationQuantity(component, locationId);
     const after = before - usage;
+    const cost = Number(component?.cost || component?.unitCost || component?.lastPurchasePrice || 0) || 0;
     return {
       id: String(component?.id || line.ingId || ''),
       name: component?.name || 'Missing ingredient',
       unit: String(component?.unit || '').toLowerCase(),
+      qty: usage,
+      cost,
+      unitCost: cost,
       before,
       usage,
       after,
@@ -14024,9 +14041,16 @@ function getManufacturingProductionImpactForSave(item = {}, batchCount = 0, expe
   });
   return {
     itemName: item.name || 'Production item',
+    itemId: String(item.id || '').trim(),
     batchCount,
     expectedQty,
     producedQty,
+    variance: expectedQty - producedQty,
+    wastageQty: Math.max(expectedQty - producedQty, 0),
+    wastageValue: Math.max(expectedQty - producedQty, 0) * expectedUnitCost,
+    batchCost,
+    expectedUnitCost,
+    actualUnitCost,
     components,
     hasMissingRecipe: !recipe.length,
     hasInsufficientStock: components.some((line) => line.missing || line.insufficient)

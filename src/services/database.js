@@ -1,6 +1,7 @@
 import { callCloudflareWorkspaceRoute } from './cloudflareApi.js';
 import { normalizeSites, normalizeStockLocations } from './locationModel.js';
 import { isWastageAdjustment } from './wastageClassifier.js';
+import { getManufacturingWastageValue } from './manufacturingLog.js';
 
 const DASHBOARD_LOG_LIMIT = 2000;
 const DASHBOARD_ENTITY_LIMIT = 200;
@@ -434,14 +435,7 @@ export function calculateDashboardMetrics(source, dateKey = isoToday()) {
 
   const manufacturingWastage = toArray(source.logs_mfg)
     .filter((log) => getLogDate(log, tradingDay) === today)
-    .reduce((total, log) => {
-      const variance = Number(log.variance || 0);
-      if (!(variance > 0)) return total;
-      const unitCost = toArray(log.components).reduce((sum, component) => {
-        return sum + (Number(component.qty || 0) / Number(log.expectedQty || 1)) * Number(component.cost || 0);
-      }, 0);
-      return total + variance * unitCost;
-    }, 0);
+    .reduce((total, log) => total + getManufacturingWastageValue(log), 0);
 
   const wastage = manualWastage + manufacturingWastage;
 
@@ -555,15 +549,7 @@ function calculateDailyNetStockValueChange(source, dateKey, tradingDay = getTrad
 
   const manufacturingDelta = toArray(source.logs_mfg)
     .filter((log) => getLogDate(log, tradingDay) === date)
-    .reduce((total, log) => {
-      const variance = Number(log.variance || 0);
-      if (!(variance > 0)) return total;
-      const expectedQty = Number(log.expectedQty || 1) || 1;
-      const unitCost = toArray(log.components).reduce((sum, component) => {
-        return sum + ((Number(component.qty || 0) || 0) / expectedQty) * (Number(component.cost || 0) || 0);
-      }, 0);
-      return total - (variance * unitCost);
-    }, 0);
+    .reduce((total, log) => total - getManufacturingWastageValue(log), 0);
 
   const salesDelta = toArray(source.logs_sales)
     .filter((log) => getLogDate(log, tradingDay) === date)

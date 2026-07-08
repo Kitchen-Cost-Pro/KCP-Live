@@ -131,11 +131,11 @@ async function fetchDashboardTiles(workspaceId, { range = '7', siteId = '' } = {
     closingStock: serverSummary.closingStock || metricValue(stockValue, 'currency'),
     costOfSales: serverSummary.costOfSales || metricValue(costOfSales, 'currency'),
     countVariance: serverSummary.countVariance || metricValue(countVariance, 'currency'),
-    manualAdjustments: serverSummary.manualAdjustments || metricValue(manualAdjustments, 'currency'),
-    wastage: serverSummary.wastage || metricValue(wastage, 'currency'),
+    manualAdjustments: serverSummary.manualAdjustments || serverSummary.adjustments || metricValue(manualAdjustments, 'currency'),
+    wastage: normalizeAbsoluteMetric(serverSummary.wastage, wastage),
     // Manufacturing wastage is its own tile — surface it explicitly (prefer the server value,
     // fall back to the locally-summarized manufacturing movement total) so the tile isn't blank.
-    manufacturingWastage: serverSummary.manufacturingWastage || metricValue(Math.abs(movementTotals.manufacturingWastage), 'currency'),
+    manufacturingWastage: normalizeAbsoluteMetric(serverSummary.manufacturingWastage, Math.abs(movementTotals.manufacturingWastage)),
     lowStockCount: serverSummary.lowStockCount || metricValue(lowStockItemCount, 'number'),
     gpPercentage: serverSummary.gpPercentage || metricValue(averageGp, 'percent'),
     averageGp: serverSummary.averageGp || metricValue(averageGp, 'percent')
@@ -246,6 +246,12 @@ function normalizeMetricValue(value) {
   }
   if (value === undefined || value === null || value === '') return null;
   return metricValue(value, 'number');
+}
+
+function normalizeAbsoluteMetric(metric, fallback = 0) {
+  const normalized = normalizeMetricValue(metric);
+  if (normalized) return { ...normalized, raw: Math.abs(Number(normalized.raw || 0)), value: formatMetric(Math.abs(Number(normalized.raw || 0)), normalized.type || 'currency') };
+  return metricValue(Math.abs(numberValue(fallback, 0)), 'currency');
 }
 
 function normalizeStockItem(row = {}) {
