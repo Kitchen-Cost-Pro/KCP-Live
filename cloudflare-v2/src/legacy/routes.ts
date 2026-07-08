@@ -4106,6 +4106,7 @@ export async function postStockResetReporting(request: Request, env: Env, auth: 
   const payload = await readJson<{ includeStockOnHand?: boolean }>(request);
   const includeStockOnHand = payload.includeStockOnHand === true;
   const now = nowIso();
+  const resetAt = `${now.slice(0, 10)}T00:00:00.000Z`;
   const stockBalanceCount = includeStockOnHand
     ? await env.DB.prepare(
       `SELECT COUNT(*) AS count
@@ -4138,17 +4139,17 @@ export async function postStockResetReporting(request: Request, env: Env, auth: 
     env.DB.prepare(`DELETE FROM audit_events WHERE workspace_id = ?1`).bind(workspaceId),
     env.DB.prepare(
       `INSERT INTO workspace_settings (workspace_id, raw_json, updated_at)
-       VALUES (?1, json_set('{}', '$.reportingResetAt', ?2, '$.reporting_reset_at', ?2), ?2)
+       VALUES (?1, json_set('{}', '$.reportingResetAt', ?2, '$.reporting_reset_at', ?2), ?3)
        ON CONFLICT(workspace_id) DO UPDATE SET
         raw_json = json_set(
           CASE WHEN json_valid(workspace_settings.raw_json) THEN workspace_settings.raw_json ELSE '{}' END,
           '$.reportingResetAt',
-          excluded.updated_at,
+          ?2,
           '$.reporting_reset_at',
-          excluded.updated_at
+          ?2
         ),
         updated_at = excluded.updated_at`
-    ).bind(workspaceId, now),
+    ).bind(workspaceId, resetAt, now),
     env.DB.prepare(
       `INSERT INTO audit_events (id, workspace_id, actor_uid, event_type, entity_type, after_json, created_at)
        VALUES (?1, ?2, ?3, 'reporting_reset', 'workspace', ?4, ?5)`
@@ -7640,9 +7641,9 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
         COALESCE(SUM(CASE WHEN ${IS_CREDIT_SQL} THEN ${TXN_VALUE_SQL} ELSE 0 END), 0) AS credit_note,
         COALESCE(SUM(CASE WHEN ${IS_SALE_SQL} THEN ${TXN_VALUE_SQL} ELSE 0 END), 0) AS sale,
         COALESCE(SUM(CASE WHEN ${IS_STOCKTAKE_SQL} THEN ${DERIVED_VALUE_SQL} ELSE 0 END), 0) AS stock_take,
-        COALESCE(SUM(CASE WHEN ${IS_WASTE_SQL} AND NOT ${IS_MANUFACTURING_WASTE_SQL} THEN ${DERIVED_VALUE_SQL} ELSE 0 END), 0) AS wastage,
-        COALESCE(SUM(CASE WHEN ${IS_MANUFACTURING_WASTE_SQL} THEN ${DERIVED_VALUE_SQL} ELSE 0 END), 0) AS manufacturing_wastage,
-        COALESCE(SUM(CASE WHEN ${IS_ADJUST_SQL} THEN ${DERIVED_VALUE_SQL} ELSE 0 END), 0) AS adjustment,
+        COALESCE(SUM(CASE WHEN ${IS_WASTE_SQL} AND NOT ${IS_MANUFACTURING_WASTE_SQL} THEN abs(${DERIVED_VALUE_SQL}) ELSE 0 END), 0) AS wastage,
+        COALESCE(SUM(CASE WHEN ${IS_MANUFACTURING_WASTE_SQL} THEN abs(${TXN_VALUE_SQL}) ELSE 0 END), 0) AS manufacturing_wastage,
+        COALESCE(SUM(CASE WHEN ${IS_ADJUST_SQL} THEN abs(${DERIVED_VALUE_SQL}) ELSE 0 END), 0) AS adjustment,
         COALESCE(SUM(CASE WHEN NOT ${IS_ACCOUNTING_ONLY_SQL} THEN ${CLASS_VALUE_SQL} ELSE 0 END), 0) AS net_value
        FROM stock_movements sm
        LEFT JOIN stock_items si ON si.id = sm.stock_item_id AND si.workspace_id = sm.workspace_id
@@ -7674,7 +7675,7 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
     `SELECT date(sm.occurred_at) AS day,
             COALESCE(SUM(CASE WHEN ${IS_SALE_SQL} THEN abs(${TXN_VALUE_SQL}) ELSE 0 END), 0) AS cos,
             COALESCE(SUM(CASE WHEN ${IS_WASTE_SQL} AND NOT ${IS_MANUFACTURING_WASTE_SQL} THEN abs(${DERIVED_VALUE_SQL}) ELSE 0 END), 0) AS waste,
-            COALESCE(SUM(CASE WHEN ${IS_MANUFACTURING_WASTE_SQL} THEN abs(${DERIVED_VALUE_SQL}) ELSE 0 END), 0) AS manuf_waste,
+            COALESCE(SUM(CASE WHEN ${IS_MANUFACTURING_WASTE_SQL} THEN abs(${TXN_VALUE_SQL}) ELSE 0 END), 0) AS manuf_waste,
             COALESCE(SUM(CASE WHEN NOT ${IS_ACCOUNTING_ONLY_SQL} THEN ${CLASS_VALUE_SQL} ELSE 0 END), 0) AS net
        FROM stock_movements sm
        LEFT JOIN stock_items si ON si.id = sm.stock_item_id AND si.workspace_id = sm.workspace_id
