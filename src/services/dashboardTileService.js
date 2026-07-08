@@ -133,6 +133,9 @@ async function fetchDashboardTiles(workspaceId, { range = '7', siteId = '' } = {
     countVariance: serverSummary.countVariance || metricValue(countVariance, 'currency'),
     manualAdjustments: serverSummary.manualAdjustments || metricValue(manualAdjustments, 'currency'),
     wastage: serverSummary.wastage || metricValue(wastage, 'currency'),
+    // Manufacturing wastage is its own tile — surface it explicitly (prefer the server value,
+    // fall back to the locally-summarized manufacturing movement total) so the tile isn't blank.
+    manufacturingWastage: serverSummary.manufacturingWastage || metricValue(Math.abs(movementTotals.manufacturingWastage), 'currency'),
     lowStockCount: serverSummary.lowStockCount || metricValue(lowStockItemCount, 'number'),
     gpPercentage: serverSummary.gpPercentage || metricValue(averageGp, 'percent'),
     averageGp: serverSummary.averageGp || metricValue(averageGp, 'percent')
@@ -495,7 +498,8 @@ function buildMovementTrends(series, rangeKey = '7') {
   return {
     stockValue: { [rangeKey]: toSeries(series.stockValue) },
     costOfSales: { [rangeKey]: toSeries(series.costOfSales) },
-    wastage: { [rangeKey]: toSeries(series.wastage) }
+    wastage: { [rangeKey]: toSeries(series.wastage) },
+    manufacturingWastage: { [rangeKey]: toSeries(series.manufacturingWastage) }
   };
 }
 

@@ -7658,6 +7658,7 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
     `SELECT date(sm.occurred_at) AS day,
             COALESCE(SUM(CASE WHEN ${IS_SALE_SQL} THEN abs(${TXN_VALUE_SQL}) ELSE 0 END), 0) AS cos,
             COALESCE(SUM(CASE WHEN ${IS_WASTE_SQL} THEN abs(${DERIVED_VALUE_SQL}) ELSE 0 END), 0) AS waste,
+            COALESCE(SUM(CASE WHEN ${IS_MANUFACTURING_WASTE_SQL} THEN abs(${DERIVED_VALUE_SQL}) ELSE 0 END), 0) AS manuf_waste,
             COALESCE(SUM(CASE WHEN NOT ${IS_ACCOUNTING_ONLY_SQL} THEN ${CLASS_VALUE_SQL} ELSE 0 END), 0) AS net
        FROM stock_movements sm
        LEFT JOIN stock_items si ON si.id = sm.stock_item_id AND si.workspace_id = sm.workspace_id
@@ -7677,8 +7678,8 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
   } catch { /* ignore malformed range */ }
   if (!days.length) days.push(to);
 
-  const dayBuckets = new Map<string, { cos: number; waste: number; net: number }>();
-  for (const day of days) dayBuckets.set(day, { cos: 0, waste: 0, net: 0 });
+  const dayBuckets = new Map<string, { cos: number; waste: number; manufWaste: number; net: number }>();
+  for (const day of days) dayBuckets.set(day, { cos: 0, waste: 0, manufWaste: 0, net: 0 });
   for (const entry of dailyRows.results || []) {
     const row = objectValue(entry);
     const bucket = dayBuckets.get(text(row.day));
@@ -7686,6 +7687,7 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
     // cos/waste/net are already classified + valued in SQL (matches the summary tile).
     bucket.cos += numberValue(row.cos, 0);
     bucket.waste += numberValue(row.waste, 0);
+    bucket.manufWaste += numberValue(row.manuf_waste, 0);
     bucket.net += numberValue(row.net, 0);
   }
   // End-of-day stock value reconstructed backward from the current valuation.
@@ -7700,6 +7702,7 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
     labels: days,
     costOfSales: days.map((d) => round2(dayBuckets.get(d)?.cos || 0)),
     wastage: days.map((d) => round2(dayBuckets.get(d)?.waste || 0)),
+    manufacturingWastage: days.map((d) => round2(dayBuckets.get(d)?.manufWaste || 0)),
     stockValue: stockValueByDay
   };
 

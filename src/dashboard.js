@@ -422,7 +422,8 @@ function renderMovementChartPanel(state) {
   const tabs = [
     { key: 'costOfSales', label: 'Cost of Sales', tone: 'blue', format: 'currency' },
     { key: 'stockValue', label: 'Stock Value', tone: 'emerald', format: 'currency' },
-    { key: 'wastage', label: 'Wastage', tone: 'red', format: 'currency' }
+    { key: 'wastage', label: 'Wastage', tone: 'red', format: 'currency' },
+    { key: 'manufacturingWastage', label: 'Manufacturing Wastage', tone: 'orange', format: 'currency' }
   ];
   const active = tabs.find((tab) => tab.key === (state.dashboardChartTab || 'costOfSales')) || tabs[0];
   return `
