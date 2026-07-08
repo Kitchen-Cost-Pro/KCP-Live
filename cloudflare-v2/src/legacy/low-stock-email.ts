@@ -310,7 +310,8 @@ function groupLowStockByLocation(rows: Record<string, any>[]) {
 }
 
 async function getRecipients(env: Env, workspaceId: string) {
-  const rows = await env.DB.prepare(
+  // workspace_members is a CENTRAL table — read via env.CENTRAL_DB so this works inside the DO too.
+  const rows = await env.CENTRAL_DB.prepare(
     `SELECT email, display_name AS displayName
        FROM workspace_members
       WHERE workspace_id = ?1
@@ -320,6 +321,46 @@ async function getRecipients(env: Env, workspaceId: string) {
       ORDER BY email ASC`
   ).bind(workspaceId).all<{ email: string; displayName?: string }>();
   return (rows.results || []).map((row) => clean(row.email).toLowerCase()).filter(Boolean);
+}
+
+// Load a workspace's low-stock context by reading each table from its correct plane:
+// `workspaces` from CENTRAL_DB; `workspace_settings` / `low_stock_email_settings` /
+// `low_stock_email_runs` from the tenant DB. Replaces the old single cross-plane 4-table join,
+// which could only ever succeed in one plane. Returns null if the central workspace row is missing.
+async function loadWorkspaceLowStockContext(env: Env, workspaceId: string) {
+  const workspace = await env.CENTRAL_DB.prepare(
+    `SELECT id AS workspaceId, name, timezone, status FROM workspaces WHERE id = ?1 LIMIT 1`
+  ).bind(workspaceId).first<Record<string, any>>();
+  if (!workspace || clean(workspace.status) !== 'active') return null;
+
+  const [settingsRow, emailSettingsRow, lastRunRow] = await Promise.all([
+    env.DB.prepare(
+      `SELECT raw_json AS rawJson, low_stock_email_period AS settingsPeriod, low_stock_email_time AS settingsTime
+         FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`
+    ).bind(workspaceId).first<Record<string, any>>(),
+    env.DB.prepare(
+      `SELECT period, dispatch_time AS dispatchTime, timezone AS emailTimezone, enabled
+         FROM low_stock_email_settings WHERE workspace_id = ?1 LIMIT 1`
+    ).bind(workspaceId).first<Record<string, any>>(),
+    env.DB.prepare(
+      `SELECT MAX(sent_at) AS lastSentAt FROM low_stock_email_runs
+        WHERE workspace_id = ?1 AND status IN ('sent', 'no-low-stock')`
+    ).bind(workspaceId).first<{ lastSentAt?: string }>()
+  ]);
+
+  return {
+    workspaceId,
+    name: workspace.name,
+    timezone: workspace.timezone,
+    rawJson: settingsRow?.rawJson,
+    settingsPeriod: settingsRow?.settingsPeriod,
+    settingsTime: settingsRow?.settingsTime,
+    period: emailSettingsRow?.period,
+    dispatchTime: emailSettingsRow?.dispatchTime,
+    emailTimezone: emailSettingsRow?.emailTimezone,
+    enabled: emailSettingsRow?.enabled,
+    lastSentAt: lastRunRow?.lastSentAt
+  };
 }
 
 async function sendWorkspaceLowStockSummary(env: Env, workspace: Record<string, any>, now: Date) {
@@ -335,8 +376,11 @@ async function sendWorkspaceLowStockSummary(env: Env, workspace: Record<string, 
 
   const timeZone = clean(rawSettings.lowStockEmailTimeZone || rawSettings.timeZone || workspace.emailTimezone || workspace.timezone || 'Africa/Johannesburg');
   const dispatchTime = normalizeDispatchTime(rawSettings.lowStockEmailDispatchTime || workspace.settingsTime || workspace.dispatchTime);
-  if (!isSendWindow(now, dispatchTime, timeZone)) return { workspaceId, status: 'outside_send_window' };
-  if (!isDue(rawSettings, workspace.lastSentAt, frequency, now, dispatchTime, timeZone)) return { workspaceId, status: 'not_due' };
+  const inWindow = isSendWindow(now, dispatchTime, timeZone);
+  const due = isDue(rawSettings, workspace.lastSentAt, frequency, now, dispatchTime, timeZone);
+  console.log(`[low-stock] ws=${workspaceId} freq=${frequency} dispatch=${dispatchTime} tz=${timeZone} inWindow=${inWindow} due=${due}`);
+  if (!inWindow) return { workspaceId, status: 'outside_send_window' };
+  if (!due) return { workspaceId, status: 'not_due' };
 
   const recipients = await getRecipients(env, workspaceId);
   const rows = await getLowStockRows(env, workspaceId);
@@ -389,63 +433,24 @@ async function sendWorkspaceLowStockSummary(env: Env, workspace: Record<string, 
   return { workspaceId, status, recipients: recipients.length, lowStockCount: rows.length };
 }
 
-export async function sendDueLowStockEmailSummaries(env: Env, now = new Date()) {
-  const workspaces = await env.DB.prepare(
-    `SELECT
-        w.id AS workspaceId,
-        w.name,
-        w.timezone,
-        ws.raw_json AS rawJson,
-        ws.low_stock_email_period AS settingsPeriod,
-        ws.low_stock_email_time AS settingsTime,
-        lses.period,
-        lses.dispatch_time AS dispatchTime,
-        lses.timezone AS emailTimezone,
-        lses.enabled,
-        MAX(lser.sent_at) AS lastSentAt
-       FROM workspaces w
-       LEFT JOIN workspace_settings ws ON ws.workspace_id = w.id
-       LEFT JOIN low_stock_email_settings lses ON lses.workspace_id = w.id
-       LEFT JOIN low_stock_email_runs lser ON lser.workspace_id = w.id AND lser.status IN ('sent', 'no-low-stock')
-      WHERE w.status = 'active'
-      GROUP BY w.id
-      ORDER BY w.name ASC`
-  ).all<Record<string, any>>();
-
-  const results = [];
-  for (const workspace of workspaces.results || []) {
-    try {
-      results.push(await sendWorkspaceLowStockSummary(env, workspace, now));
-    } catch (cause) {
-      const workspaceId = clean(workspace.workspaceId);
-      const message = cause instanceof Error ? cause.message : 'Low stock summary failed.';
-      await recordRun(env, {
-        workspaceId,
-        scheduledFor: now.toISOString(),
-        status: 'error',
-        errorMessage: message
-      }).catch(() => null);
-      results.push({ workspaceId, status: 'error', error: message });
-    }
+// Per-workspace scheduled send (due/window-gated). Runs INSIDE the workspace DO — the front
+// Worker's scheduled() handler enumerates active workspaces from CENTRAL_DB and fans out here,
+// because the per-workspace stock/settings/run tables are tenant-only.
+export async function sendWorkspaceLowStockDue(env: Env, workspaceId: string, now = new Date()) {
+  const context = await loadWorkspaceLowStockContext(env, workspaceId);
+  if (!context) return { workspaceId, status: 'not_found' };
+  try {
+    return await sendWorkspaceLowStockSummary(env, context, now);
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : 'Low stock summary failed.';
+    console.error(`[low-stock] due ws=${workspaceId} failed: ${message}`);
+    await recordRun(env, { workspaceId, scheduledFor: now.toISOString(), status: 'error', errorMessage: message }).catch(() => null);
+    return { workspaceId, status: 'error', error: message };
   }
-  return results;
 }
 
 export async function sendWorkspaceLowStockNow(env: Env, workspaceId: string) {
-  const workspace = await env.DB.prepare(
-    `SELECT w.id AS workspaceId, w.name, w.timezone, ws.raw_json AS rawJson,
-            ws.low_stock_email_period AS settingsPeriod, ws.low_stock_email_time AS settingsTime,
-            lses.period, lses.dispatch_time AS dispatchTime, lses.timezone AS emailTimezone, lses.enabled,
-            MAX(lser.sent_at) AS lastSentAt
-       FROM workspaces w
-       LEFT JOIN workspace_settings ws ON ws.workspace_id = w.id
-       LEFT JOIN low_stock_email_settings lses ON lses.workspace_id = w.id
-       LEFT JOIN low_stock_email_runs lser ON lser.workspace_id = w.id AND lser.status IN ('sent', 'no-low-stock')
-      WHERE w.id = ?1 AND w.status = 'active'
-      GROUP BY w.id
-      LIMIT 1`
-  ).bind(workspaceId).first<Record<string, any>>();
-
+  const workspace = await loadWorkspaceLowStockContext(env, workspaceId);
   if (!workspace) throw new Error('Workspace not found.');
 
   const rawSettings = safeJsonParse<Record<string, any>>(workspace.rawJson, {});

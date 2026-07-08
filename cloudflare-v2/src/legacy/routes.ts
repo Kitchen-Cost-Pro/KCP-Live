@@ -18,7 +18,7 @@ import {
 import { findRefund, verifyYocoWebhook } from './yoco-webhooks';
 import { decryptTextWithSecret, encryptTextWithSecret, hmacSha256Base64 } from './crypto';
 import { getAdminGmailCallback, getEmailDeliveryConfig, buildAdminYocoStatus } from './admin-routes';
-import { sendWorkspaceLowStockNow } from './low-stock-email';
+import { sendWorkspaceLowStockNow, sendWorkspaceLowStockDue } from './low-stock-email';
 import { sendEmail } from './email';
 
 function text(value: unknown, fallback = '') {
@@ -1508,6 +1508,11 @@ export async function adminActionDO(request: Request, env: Env, _auth: AuthConte
   try {
     if (action === 'send-low-stock-email') {
       const result = await sendWorkspaceLowStockNow(env, workspaceId);
+      return json(request, env, { ok: true, ...result });
+    }
+    if (action === 'low-stock-due') {
+      // Scheduled cron fan-out: due/window-gated per-workspace send (runs in this DO).
+      const result = await sendWorkspaceLowStockDue(env, workspaceId);
       return json(request, env, { ok: true, ...result });
     }
     return error(request, env, 404, `Unknown workspace action: ${action}`);

@@ -170,7 +170,7 @@ import {
   postYocoSyncSales,
   postYocoWebhook
 } from './routes';
-import { sendDueLowStockEmailSummaries, sendWorkspaceLowStockNow } from './low-stock-email';
+import { sendWorkspaceLowStockNow } from './low-stock-email';
 
 function routePattern(pathname: string, pattern: RegExp) {
   return pathname.match(pattern);
@@ -942,7 +942,9 @@ export default {
       return error(request, env, status, message);
     }
   },
-  async scheduled(_controller: unknown, env: Env, _ctx: unknown) {
-    await sendDueLowStockEmailSummaries(env);
+  async scheduled(_controller: unknown, _env: Env, _ctx: unknown) {
+    // No-op: the deployed entry point is src/index.ts (see wrangler.toml `main`), whose scheduled()
+    // handler runs the low-stock cron by fanning out to each workspace DO. This legacy default
+    // export is not the active Worker entry.
   }
 };

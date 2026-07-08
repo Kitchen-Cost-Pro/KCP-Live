@@ -1,9 +1,8 @@
 import type { Env, AuthContext } from './types';
 import type { Env as LegacyEnv } from './legacy/types';
-import { postAdminApproveRegistration, getAdminOverview, deleteAdminWorkspace, getAdminWorkspaceSettings, patchAdminWorkspaceSettings, getAdminOrgSites, requireAdmin, writeAdminAuditEvent, adminAuditActor } from './legacy/admin-routes';
+import { postAdminApproveRegistration, getAdminOverview, deleteAdminWorkspace, getAdminWorkspaceSettings, patchAdminWorkspaceSettings, getAdminOrgSites, postAdminSaveOrgGroup, requireAdmin, writeAdminAuditEvent, adminAuditActor } from './legacy/admin-routes';
 import type { AdminTenantSummary, AdminOrgFields } from './legacy/admin-routes';
 import { dispatchCentralRoute } from './legacy/index';
-import { sendDueLowStockEmailSummaries } from './legacy/low-stock-email';
 
 export { WorkspaceDO } from './workspace-do';
 
@@ -139,6 +138,20 @@ async function dispatchCentral(request: Request, env: Env, url: URL): Promise<Re
     return getAdminOrgSites(request, lenv, provider);
   }
 
+  // Save an org/group across workspaces: org fields live in each workspace's DO settings (tenant),
+  // and workspace_settings does not exist in the central D1 — so the save must read/write through
+  // each workspace's DO (reusing the admin-settings GET/PATCH resources), not run centrally.
+  if (request.method === 'POST' && url.pathname === '/api/admin/org-groups') {
+    const reader = async (id: string): Promise<Record<string, any>> => {
+      const r = await callWorkspaceDO(env, id, 'admin-settings', adminAuth, 'GET');
+      return ((r as any)?.settings as Record<string, any>) || {};
+    };
+    const writer = async (id: string, nextSettings: Record<string, any>): Promise<void> => {
+      await callWorkspaceDO(env, id, 'admin-settings', adminAuth, 'PATCH', nextSettings);
+    };
+    return postAdminSaveOrgGroup(request, lenv, reader, writer);
+  }
+
   // Unlink a workspace from its org/group: clear the target's OWN org fields in its DO settings
   // (source of truth), then best-effort strip it from every peer's linkedSites.
   const unlinkM = url.pathname.match(/^\/api\/admin\/org-sites\/([^/]+)\/unlink$/);
@@ -147,7 +160,14 @@ async function dispatchCentral(request: Request, env: Env, url: URL): Promise<Re
     await requireAdmin(request, lenv);
     const r = await callWorkspaceDO(env, wsId, 'admin-unlink-org', adminAuth, 'POST', {});
     try { await cleanupPeerGroupLinks(env, wsId); } catch { /* peer cleanup is best-effort */ }
-    return json(request, env, r || { ok: true }, r ? 200 : 200);
+    // Also clear the central workspaces.org_id/corp_id scalar columns (used for peer discovery) so a
+    // stale value there can never resurface the link after the tenant settings have been cleared.
+    try {
+      await env.CENTRAL_DB.prepare(
+        `UPDATE workspaces SET org_id = NULL, corp_id = NULL WHERE id = ?1`
+      ).bind(wsId).run();
+    } catch { /* central column cleanup is best-effort */ }
+    return json(request, env, r || { ok: true }, 200);
   }
 
   return dispatchCentralRoute(request, lenv);
@@ -509,9 +529,21 @@ export default {
     }
   },
 
-  // Supersedes the old Firebase `sendLowStockSummaryEmails` scheduled function — sends via
-  // the new Gmail OAuth account instead of the legacy Gmail SMTP app-password account.
+  // Low-stock email cron. The per-workspace stock/settings/run tables are tenant-only, so we
+  // enumerate active workspaces from CENTRAL_DB here (front Worker) and fan out to each workspace's
+  // DO, where `sendWorkspaceLowStockDue` reads tenant tables via env.DB and central tables via
+  // env.CENTRAL_DB. (Running it centrally would throw "no such table" on the tenant joins.)
   async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
-    await sendDueLowStockEmailSummaries(centralLegacyEnv(env));
+    const list = await env.CENTRAL_DB.prepare(
+      `SELECT id FROM workspaces WHERE status = 'active' ORDER BY id ASC`
+    ).all<{ id: string }>();
+    const ids = (list.results || []).map((r) => String(r.id)).filter(Boolean);
+    console.log(`[low-stock-cron] evaluating ${ids.length} active workspaces`);
+    await Promise.all(
+      ids.map((id) =>
+        callWorkspaceDO(env, id, 'admin-action/low-stock-due', { uid: 'system', email: '' }, 'POST', {})
+          .catch((cause) => { console.error(`[low-stock-cron] ws=${id} failed: ${cause}`); return null; })
+      )
+    );
   }
 };

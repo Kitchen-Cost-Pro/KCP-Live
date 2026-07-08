@@ -80,9 +80,13 @@ function composeSender(fromName: string, fromEmail: string) {
   return name ? `${name} <${email}>` : email;
 }
 
+// admin_system_settings is a CENTRAL table. Always read/write it via env.CENTRAL_DB so these work
+// both in the front Worker (where CENTRAL_DB === DB) and inside a workspace DO (where env.DB is the
+// tenant SQLite and lacks this table) — the latter is needed so low-stock email delivery, which now
+// runs in the DO, can resolve the stored email/Gmail-SMTP config.
 async function readAdminSetting<T>(env: Env, key: string, fallback: T): Promise<T> {
   try {
-    const row = await env.DB.prepare(
+    const row = await env.CENTRAL_DB.prepare(
       `SELECT value
          FROM admin_system_settings
         WHERE key = ?1
@@ -97,7 +101,7 @@ async function readAdminSetting<T>(env: Env, key: string, fallback: T): Promise<
 
 async function writeAdminSetting(env: Env, key: string, value: Record<string, unknown>, updatedBy = '') {
   const now = nowIso();
-  await env.DB.prepare(
+  await env.CENTRAL_DB.prepare(
     `INSERT INTO admin_system_settings (key, value, updated_at, updated_by)
      VALUES (?1, ?2, ?3, ?4)
      ON CONFLICT(key) DO UPDATE SET
@@ -1554,7 +1558,16 @@ export async function postAdminInvite(request: Request, env: Env) {
   return json(request, env, { ok: true, auth: authDelivery });
 }
 
-export async function postAdminSaveOrgGroup(request: Request, env: Env) {
+// `reader`/`writer` let the front Worker route each workspace's settings read/write through its DO
+// (tenant plane). Org fields live ONLY in the tenant workspace_settings — the central D1 has no such
+// table — so without these callbacks the save throws "no such table: workspace_settings" and the org
+// manager stays empty. When omitted, falls back to env.DB (legacy central path; now shadowed).
+export async function postAdminSaveOrgGroup(
+  request: Request,
+  env: Env,
+  reader?: (workspaceId: string) => Promise<Record<string, any>>,
+  writer?: (workspaceId: string, nextSettings: Record<string, any>) => Promise<void>
+) {
   const adminSession = await requireAdmin(request, env);
   const payload = await readJson<Record<string, unknown>>(request);
   const siteIds = Array.isArray(payload.siteIds)
@@ -1573,7 +1586,7 @@ export async function postAdminSaveOrgGroup(request: Request, env: Env) {
 
   const statements: DbStatementLike[] = [];
   for (const workspaceId of cleanSiteIds) {
-    const current = await getWorkspaceSettingsMap(env, workspaceId);
+    const current = reader ? await reader(workspaceId) : await getWorkspaceSettingsMap(env, workspaceId);
     const linkedSites: Record<string, any> = {};
     for (const linkedId of cleanSiteIds) {
       if (linkedId === workspaceId) continue;
@@ -1605,18 +1618,22 @@ export async function postAdminSaveOrgGroup(request: Request, env: Env) {
       },
       updatedAt: now
     };
-    statements.push(
-      env.DB.prepare(
-        `INSERT INTO workspace_settings (workspace_id, raw_json, updated_at)
-         VALUES (?1, ?2, ?3)
-         ON CONFLICT(workspace_id) DO UPDATE SET
-           raw_json = excluded.raw_json,
-           updated_at = excluded.updated_at`
-      ).bind(workspaceId, JSON.stringify(next), now)
-    );
+    if (writer) {
+      await writer(workspaceId, next);
+    } else {
+      statements.push(
+        env.DB.prepare(
+          `INSERT INTO workspace_settings (workspace_id, raw_json, updated_at)
+           VALUES (?1, ?2, ?3)
+           ON CONFLICT(workspace_id) DO UPDATE SET
+             raw_json = excluded.raw_json,
+             updated_at = excluded.updated_at`
+        ).bind(workspaceId, JSON.stringify(next), now)
+      );
+    }
   }
 
-  await env.DB.batch(statements);
+  if (statements.length) await env.DB.batch(statements);
   await writeAdminAuditEvent(env, adminAuditActor(adminSession), 'org_group.save', linkId, {
     siteIds: cleanSiteIds,
     linkType,
