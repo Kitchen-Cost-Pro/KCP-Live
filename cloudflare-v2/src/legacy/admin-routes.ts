@@ -1899,6 +1899,10 @@ export async function postAdminWorkspaceEmailQueue(request: Request, env: Env, w
 
 export async function getAdminYocoStatus(request: Request, env: Env, workspaceId: string) {
   await requireAdmin(request, env);
+  return json(request, env, await buildAdminYocoStatus(env, workspaceId));
+}
+
+export async function buildAdminYocoStatus(env: Env, workspaceId: string) {
   const [connection, catalogue, modifierCatalogue, locations] = await Promise.all([
     getYocoConnection(env, workspaceId),
     env.DB.prepare(
@@ -1919,7 +1923,7 @@ export async function getAdminYocoStatus(request: Request, env: Env, workspaceId
     ).bind(workspaceId).first<{ count: number }>()
   ]);
   const status = text(connection?.status || 'disconnected').toLowerCase();
-  return json(request, env, {
+  return {
     ok: true,
     status,
     connectionActive: connection?.connection_active === 1 || status === 'connected',
@@ -1942,7 +1946,7 @@ export async function getAdminYocoStatus(request: Request, env: Env, workspaceId
       productModifiersCount: Number(modifierCatalogue?.productModifiersCount || 0)
     },
     locations: { count: Number(locations?.count || 0) }
-  });
+  };
 }
 
 export async function postAdminYocoConnect(request: Request, env: Env, workspaceId: string) {
