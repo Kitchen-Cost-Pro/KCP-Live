@@ -43,7 +43,7 @@ export const reportCatalog = [
   { id: 'adj', title: 'Adjustments', group: 'Operations', description: 'Manual adjustment audit.', columns: ['Date', 'Time', 'User', 'Item', 'Category', 'Location', 'Mode', 'Quantity', 'Unit', 'Impact Ex', 'Reason'] },
   { id: 'stocktake', title: 'Stock Take Audit', group: 'Operations', description: 'Physical count sessions and variance.', columns: ['Date', 'Time', 'Location', 'User', 'Items Counted', 'Variance Lines', 'Net Impact', 'Action'] },
   { id: 'inventory_audit', title: 'Inventory Change Audit', group: 'Operations', description: 'Stock items created, updated, deleted, imported, or reset.', columns: ['Date', 'Time', 'Area', 'Item', 'Action', 'Location', 'Before', 'After', 'User', 'Source'] },
-  { id: 'mfg', title: 'Manufacturing Productions', group: 'Operations', description: 'Production batches, posted output, wastage, and yield variance.', columns: ['Date', 'Time', 'Item', 'Type', 'Location', 'Expected', 'Produced', 'Wastage Qty', 'Variance', 'Batch Cost Ex', 'Wastage Value Ex', 'Unit'] },
+  { id: 'mfg', title: 'Manufacturing Productions', group: 'Operations', description: 'Production batches, posted output, wastage, and yield variance.', columns: ['Date', 'Time', 'User', 'Item', 'Type', 'Location', 'Expected', 'Produced', 'Wastage Qty', 'Variance', 'Batch Cost Ex', 'Wastage Value Ex', 'Unit'] },
   { id: 'transfers', title: 'Stock Transfers', group: 'Operations', description: 'Location-to-location movement history.', columns: ['Date', 'Time', 'User', 'Item', 'From', 'To', 'Quantity', 'Unit', 'Note'] },
   { id: 'ops_overview', title: 'Ops Overview By Category', group: 'Operations', description: 'Category-level operational summary.', columns: ['Category', 'Location', 'Stock Value', 'Purchases Ex', 'Wastage Ex', 'Manual Adjustments Ex', 'Low Stock Items'] },
   { id: 'ops_category_overview', title: 'Operations Overview By Inventory Category', group: 'Operations', description: 'Opening/closing stock value, purchases and actual vs theoretical cost of sales per inventory category.', columns: ['Inventory Category', 'Locations', 'Opening Stock Value', 'Purchases', 'Closing Stock Value', 'COS Actual', 'COS Theoretical', 'COS Difference'] },
@@ -1489,6 +1489,7 @@ function buildManufacturingRows(source, context) {
     return {
       Date: displayDate(logDate(log)),
       Time: displayTime(reportTimestamp(log)),
+      User: reportActor(log) || 'Unknown',
       Item: log.itemName || log.stockItemName || log.manufacturedItemName || context.ingredientMap.get(String(log.itemId || log.manufacturedItemId))?.name || '',
       Type: 'Manufactured / Prep',
       Location: log.locationName || locationName(context, logLocationId(log), ''),
