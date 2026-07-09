@@ -1,5 +1,6 @@
 import { callCloudflareWorkspaceRoute } from './cloudflareApi.js';
 import { downloadFileBlob } from './dataService.js';
+import { isStockCountableItem } from './stockCountEligibility.js';
 import {
   DEFAULT_RESTAURANT_BACKGROUND_ID,
   DEFAULT_RESTAURANT_THEME_ID,
@@ -87,6 +88,7 @@ export async function getStockCategoryOptions(workspaceId) {
   const categories = new Map();
 
   entries.forEach((item = {}) => {
+    if (!isStockCountableItem(item)) return;
     if (!item || typeof item !== 'object') return;
     const raw = String(item.category || 'General').trim() || 'General';
     const name = normalizeStockCategoryBase(raw);

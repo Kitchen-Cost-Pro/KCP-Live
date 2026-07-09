@@ -49,7 +49,7 @@ export class WorkspaceDO extends DurableObject<Env> {
     const workspaceId = request.headers.get('x-kcp-workspace') || '';
     const resource = request.headers.get('x-kcp-resource') || new URL(request.url).pathname;
 
-    let fwd: { uid?: string; email?: string } = {};
+    let fwd: { uid?: string; email?: string; name?: string } = {};
     try {
       fwd = JSON.parse(request.headers.get('x-kcp-auth') || '{}');
     } catch {
@@ -58,7 +58,7 @@ export class WorkspaceDO extends DurableObject<Env> {
     const auth: LegacyAuth = {
       uid: String(fwd.uid || ''),
       email: String(fwd.email || ''),
-      token: { sub: String(fwd.uid || ''), email: String(fwd.email || '') }
+      token: { sub: String(fwd.uid || ''), email: String(fwd.email || ''), name: String(fwd.name || '') }
     };
 
     // The ported handlers see `env.DB` = this workspace's SQLite facade and `env.CENTRAL_DB` = the

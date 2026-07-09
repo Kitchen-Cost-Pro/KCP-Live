@@ -376,7 +376,9 @@ function calculateDashboardMetrics(source, dateKey = isoToday()) {
   source.logs_adj
     .filter((log) => getLogDate(log, tradingDay) === today)
     .forEach((log) => {
-      const impact = Number(log.impactEx || 0);
+      const qty = Number(log.impactQty ?? log.qty ?? 0);
+      const cost = getStockValuationUnitCost(ingredientMap.get(String(log.stockItemId || log.itemId)) || {});
+      const impact = (qty !== 0 && cost > 0) ? qty * cost : Number(log.impactEx || 0);
       if (isWastageAdjustment(log)) manualWastage += Math.abs(impact);
       else manualAdjustments += impact;
     });
@@ -684,9 +686,14 @@ function getStockValuationUnitCost(item = {}) {
 // import from src/). Wastage = adjustment_type 'wastage' or an explicit wasteReason/waste
 // note. A plain 'remove' with no wasteReason is a manual stock correction, not wastage.
 function isWastageAdjustment(log = {}) {
-  const mode = String(log.mode || '').toLowerCase();
-  const note = String(log.note || log.reason || '').toLowerCase();
-  return mode === 'wastage' || Boolean(log.wasteReason) || note.includes('waste') || note.includes('wastage');
+  const mode = String(log.mode || log.adjustmentType || log.adjustment_type || '').toLowerCase();
+  const note = String(log.note || log.notes || log.reason || '').toLowerCase();
+  
+  if (mode === 'add' || mode === 'override') {
+    return false;
+  }
+  
+  return mode === 'wastage' || Boolean(log.wasteReason || log.waste_reason) || note.includes('waste') || note.includes('wastage');
 }
 
 function metricValue(raw, type, ratio = null) {

@@ -194,18 +194,18 @@ async function requireAuth(request: Request, env: Env): Promise<AuthContext | nu
   const match = (request.headers.get('authorization') || '').match(/^Bearer\s+(.+)$/i);
   if (!match) return null;
   const row = await env.CENTRAL_DB.prepare(
-    `SELECT u.id AS uid, u.email AS email, s.expires_at AS expires_at, u.status AS status
+    `SELECT u.id AS uid, u.email AS email, s.expires_at AS expires_at, u.status AS status, u.display_name AS display_name
        FROM auth_sessions s
        JOIN app_users u ON u.id = s.user_id
       WHERE s.token = ?1
       LIMIT 1`
   )
     .bind(match[1])
-    .first<{ uid: string; email: string; expires_at: string; status: string }>();
+    .first<{ uid: string; email: string; expires_at: string; status: string; display_name?: string }>();
   if (!row) return null;
   if (row.status && row.status !== 'active') return null;
   if (row.expires_at && Date.parse(row.expires_at) < Date.now()) return null;
-  return { uid: String(row.uid), email: String(row.email || '') };
+  return { uid: String(row.uid), email: String(row.email || ''), name: String(row.display_name || '') };
 }
 
 /** Confirm the user may access this workspace (membership OR superuser), via the CENTRAL plane. */

@@ -2180,8 +2180,9 @@ function buildPaymentRows(source, context) {
       };
       const allocatedTip = tip * share;
       const allocatedTax = tax * share;
+      const grossAdd = amount + (paymentTotal < grossTotal ? allocatedTip : 0);
       current.orders += 1;
-      current.gross += refund ? 0 : amount;
+      current.gross += refund ? 0 : grossAdd;
       current.refunds += refund ? amount : 0;
       current.tips += refund ? -allocatedTip : allocatedTip;
       current.tax += refund ? -allocatedTax : allocatedTax;
@@ -2896,9 +2897,14 @@ function buildOpsCategoryItemMetrics(source, context) {
     .forEach((log) => {
       saleMovementLines(log).forEach((line) => {
         if (!matchesLocationId(context, lineLocationId(line, log))) return;
-        const target = ensure(stockMovementItemId(line));
+        const itemId = String(stockMovementItemId(line));
+        const target = ensure(itemId);
         if (!target) return;
-        target.cosActual += Math.abs(saleLineCostImpact(line, log, context.ingredientMap));
+        const item = context.ingredientMap ? context.ingredientMap.get(itemId) : null;
+        const unitCost = Number(item?.cost ?? line.unitCost ?? line.cost ?? 0) || 0;
+        const stored = line.impactEx ?? line.impact ?? line.valueDelta ?? line.totalImpact;
+        const costImpact = Math.abs(deriveCostImpact(saleMovementQty(line), unitCost, stored));
+        target.cosActual += costImpact;
       });
     });
 
@@ -3056,14 +3062,15 @@ function passesCommon(row, context) {
 }
 
 function isLowStockEligibleItem(item = {}) {
-  if (item.isSubRecipe === true) return false;
-  const explicit = String(item.itemType || item.stockItemType || item.specificationType || '')
+  const isSub = item.isSubRecipe === true || item.is_sub_recipe === true || item.SubRecipe === true || item.isSubRecipe === 'true' || item.is_sub_recipe === 'true' || item.SubRecipe === 'true' || item.isSubRecipe === 1 || item.is_sub_recipe === 1 || item.SubRecipe === 1;
+  if (isSub) return false;
+  const explicit = String(item.itemType || item.stockItemType || item.specificationType || item.item_type || '')
     .trim()
     .toLowerCase()
     .replace(/[\s-]+/g, '_');
-  if (['sub_recipe', 'subrecipe'].includes(explicit)) return false;
+  if (['sub_recipe', 'subrecipe', 'virtual'].includes(explicit)) return false;
   const category = String(item.category || '').toLowerCase();
-  return !category.includes('sub recipe') && !category.includes('sub-recipe');
+  return !category.includes('sub recipe') && !category.includes('sub-recipe') && !category.includes('virtual');
 }
 
 function isOpsReportEligibleItem(item = {}) {

@@ -78,8 +78,20 @@ function stockItemIsStocked(row: Record<string, unknown>) {
 }
 
 const STOCKED_ITEM_TYPE_SQL = (alias: string) => `REPLACE(REPLACE(LOWER(COALESCE(${alias}.item_type, json_extract(${alias}.raw_json, '$.itemType'), '')), '-', '_'), ' ', '_')`;
-const STOCKED_ITEM_SQL = `${STOCKED_ITEM_TYPE_SQL('stock_items')} NOT IN ('sub_recipe', 'subrecipe', 'virtual')`;
-const STOCKED_ITEM_ALIAS_SQL = (alias: string) => `${STOCKED_ITEM_TYPE_SQL(alias)} NOT IN ('sub_recipe', 'subrecipe', 'virtual')`;
+const STOCKED_ITEM_SQL = `
+  (${STOCKED_ITEM_TYPE_SQL('stock_items')} NOT IN ('sub_recipe', 'subrecipe', 'virtual')
+   AND COALESCE(json_extract(stock_items.raw_json, '$.isSubRecipe'), json_extract(stock_items.raw_json, '$.is_sub_recipe'), json_extract(stock_items.raw_json, '$.SubRecipe'), 0) NOT IN (1, 'true', 'yes')
+   AND LOWER(COALESCE(stock_items.category, '')) NOT LIKE '%sub recipe%'
+   AND LOWER(COALESCE(stock_items.category, '')) NOT LIKE '%sub-recipe%'
+   AND LOWER(COALESCE(stock_items.category, '')) NOT LIKE '%virtual%')
+`;
+const STOCKED_ITEM_ALIAS_SQL = (alias: string) => `
+  (${STOCKED_ITEM_TYPE_SQL(alias)} NOT IN ('sub_recipe', 'subrecipe', 'virtual')
+   AND COALESCE(json_extract(${alias}.raw_json, '$.isSubRecipe'), json_extract(${alias}.raw_json, '$.is_sub_recipe'), json_extract(${alias}.raw_json, '$.SubRecipe'), 0) NOT IN (1, 'true', 'yes')
+   AND LOWER(COALESCE(${alias}.category, '')) NOT LIKE '%sub recipe%'
+   AND LOWER(COALESCE(${alias}.category, '')) NOT LIKE '%sub-recipe%'
+   AND LOWER(COALESCE(${alias}.category, '')) NOT LIKE '%virtual%')
+`;
 
 function normalizeUomConfigurations(value: unknown) {
   const rows = Array.isArray(value)
@@ -4218,21 +4230,25 @@ async function attachActorInfo<T extends Record<string, unknown>>(
     env.CENTRAL_DB.prepare(
       `SELECT auth_uid, email, display_name
          FROM workspace_members
-        WHERE workspace_id = ?1 AND auth_uid IN (${memberPh})`
-    ).bind(workspaceId, ...uids).all<{ auth_uid: string; email: string; display_name: string }>(),
+        WHERE workspace_id = ?1 AND (auth_uid IN (${memberPh}) OR email IN (${memberPh}))`
+    ).bind(workspaceId, ...uids, ...uids).all<{ auth_uid: string; email: string; display_name: string }>(),
     env.CENTRAL_DB.prepare(
       `SELECT id, email, display_name
          FROM app_users
-        WHERE id IN (${appPh})`
-    ).bind(...uids).all<{ id: string; email: string; display_name: string }>()
+        WHERE id IN (${appPh}) OR email IN (${appPh})`
+    ).bind(...uids, ...uids).all<{ id: string; email: string; display_name: string }>()
   ]);
   const map = new Map<string, { email: string; name: string }>();
   // app_users first, then workspace_members overrides (member identity takes precedence).
   for (const a of appRes.results || []) {
-    map.set(text(a.id), { email: text(a.email), name: text(a.display_name) });
+    const info = { email: text(a.email), name: text(a.display_name) };
+    if (a.id) map.set(text(a.id), info);
+    if (a.email) map.set(text(a.email), info);
   }
   for (const m of memberRes.results || []) {
-    map.set(text(m.auth_uid), { email: text(m.email), name: text(m.display_name) });
+    const info = { email: text(m.email), name: text(m.display_name) };
+    if (m.auth_uid) map.set(text(m.auth_uid), info);
+    if (m.email) map.set(text(m.email), info);
   }
   for (const row of rows) {
     const info = map.get(text(row[createdByKey]));

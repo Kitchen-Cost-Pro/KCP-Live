@@ -238,7 +238,7 @@ function bindStockTakeEvents(view, onStockTakeFilterChange, onStockTakeAction) {
   view.querySelectorAll('[data-stocktake-count]').forEach((field) => {
     field.addEventListener('input', () => {
       onStockTakeAction.onPreserveFocus?.(field);
-      onStockTakeAction.onCountChange?.(field.dataset.stocktakeCount, field.value);
+      onStockTakeAction.onCountChange?.(field.dataset.stocktakeCount, field.value, field.dataset.stocktakeUom || 'base');
     });
   });
 
@@ -413,15 +413,45 @@ function renderActiveSession({ draft, filters, visibleItems, draftMap, locations
                     </td>
                     <td>${formatNumber(system)} ${escapeHtml(item.unit || '')}</td>
                     <td>
-                      <div class="stockTakeCountInput">
-                        <input
-                          type="text"
-                          inputmode="decimal"
-                          value="${escapeAttribute(String(shelfCount))}"
-                          data-stocktake-count="${escapeAttribute(item.id)}"
-                          data-focus-key="stocktake-${escapeAttribute(item.id)}"
-                        />
-                        <em>${escapeHtml(String(item.unit || 'ea').toLowerCase())}</em>
+                      <div class="stockTakeCountGroup" style="display: flex; flex-direction: column; gap: 6px;">
+                        ${(() => {
+                          const uomConfigs = getUomConfigs(item).slice(0, 3);
+                          const baseVal = current?.uomCounts?.['base'] ?? (current && Object.keys(current.uomCounts || {}).length === 0 ? shelfCount : '');
+                          let html = `
+                            <div class="stockTakeCountInput">
+                              <input
+                                type="text"
+                                inputmode="decimal"
+                                value="${escapeAttribute(String(baseVal))}"
+                                data-stocktake-count="${escapeAttribute(item.id)}"
+                                data-stocktake-uom="base"
+                                data-focus-key="stocktake-${escapeAttribute(item.id)}-base"
+                                placeholder="0"
+                              />
+                              <em>${escapeHtml(String(item.unit || 'ea').toLowerCase())}</em>
+                            </div>
+                          `;
+                          uomConfigs.forEach((cfg) => {
+                            const key = String(cfg.customUom || '').trim();
+                            if (!key) return;
+                            const customVal = current?.uomCounts?.[key] ?? '';
+                            html += `
+                              <div class="stockTakeCountInput" style="margin-top: 4px;">
+                                <input
+                                  type="text"
+                                  inputmode="decimal"
+                                  value="${escapeAttribute(String(customVal))}"
+                                  data-stocktake-count="${escapeAttribute(item.id)}"
+                                  data-stocktake-uom="${escapeAttribute(key)}"
+                                  data-focus-key="stocktake-${escapeAttribute(item.id)}-${escapeAttribute(key)}"
+                                  placeholder="0"
+                                />
+                                <em>${escapeHtml(key.toLowerCase())}</em>
+                              </div>
+                            `;
+                          });
+                          return html;
+                        })()}
                       </div>
                     </td>
                     <td class="${variance < 0 ? 'is-negative' : variance > 0 ? 'is-positive' : ''}" data-stocktake-variance="${escapeAttribute(item.id)}">
@@ -1366,4 +1396,20 @@ function icon(name) {
     trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/></svg>'
   };
   return icons[name] || icons.x;
+}
+
+function getUomConfigs(item = {}) {
+  const value = item.uomConfigurations || item.uomConfig || item.uomConversions || [];
+  const rows = Array.isArray(value) ? value : (value && typeof value === 'object' ? [value] : []);
+  return rows
+    .map((entry = {}) => {
+      const row = entry && typeof entry === 'object' ? entry : {};
+      const ratio = Number(row.ratio ?? row.conversionRatio ?? row.unitsPerCustomUnit ?? row.units_per_custom_unit ?? 0);
+      return {
+        baseUom: String(row.baseUom || row.base_uom || row.baseUnit || row.unit || '').trim(),
+        customUom: String(row.customUom || row.custom_uom || row.customUnit || row.orderingUom || '').trim(),
+        ratio: Number.isFinite(ratio) ? ratio : 0
+      };
+    })
+    .filter((entry) => entry.customUom && entry.ratio > 0);
 }

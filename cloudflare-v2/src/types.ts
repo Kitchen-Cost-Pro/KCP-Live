@@ -41,4 +41,5 @@ export interface TenantEnv extends Omit<Env, 'CENTRAL_DB' | 'WORKSPACE'> {
 export interface AuthContext {
   uid: string;
   email: string;
+  name?: string;
 }

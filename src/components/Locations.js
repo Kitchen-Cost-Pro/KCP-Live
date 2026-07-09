@@ -2,6 +2,7 @@ import '../styles/locations.css';
 import '../styles/fieldHelp.css';
 import { bindFieldHelpTooltips, renderFieldHelpLabel } from './fieldHelp.js';
 import { renderLoadingPanel } from './LoadingPanel.js';
+import { isStockCountableItem } from '../services/stockCountEligibility.js';
 
 export function renderLocations({ state, onLocationFilterChange, onLocationAction = {} } = {}) {
   const locations = state.locations || {};
@@ -861,6 +862,7 @@ function getLocationRoutingCategories(state = {}) {
     {};
   const categories = new Map();
   stockItems.forEach((item = {}) => {
+    if (!isStockCountableItem(item)) return;
     const name = normalizeStockCategoryName(item.category || 'General');
     const mapped = getMappedRoutingLabel(name, routingMap);
     const routeKey = mapped || name;

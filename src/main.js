@@ -15866,13 +15866,18 @@ async function exportStockTakeTemplatePdf(templateId) {
         const category = String(item.category || 'General').trim() || 'General';
         if (lastCategory && lastCategory !== category) rows.push(['', '', '', '', '', '']);
         lastCategory = category;
+        const uomConfigs = normalizeLineUomConfigurations(item.uomConfigurations || item.uomConfig || item.uomConversions).slice(0, 3);
+        let countLines = '______';
+        if (uomConfigs.length > 0) {
+          countLines = `${item.unit || 'ea'}: ______\n` + uomConfigs.map((c) => `${c.customUom}: ______`).join('\n');
+        }
         rows.push([
           locationName,
           category,
           item.name || '',
           item.unit || 'ea',
           formatStockItemUomConfigSummary(item) || `Count in ${item.unit || 'ea'}`,
-          ''
+          countLines
         ]);
       });
     if (locationIndex < exportLocationIds.length - 1) rows.push(['', '', '', '', '', '']);
@@ -16468,29 +16473,60 @@ function refreshStockTakeSessionComputed() {
   }
 }
 
-function updateStockTakeCount(stockItemId, value) {
+function updateStockTakeCount(stockItemId, value, uomKey = 'base') {
   const draft = hydrateStockTakeDraft(appState.stockTake.draftSession, appState.stockTake.locations || []);
   const raw = String(value ?? '').trim();
   const items = [...(draft.items || [])];
   const index = items.findIndex((item) => String(item.stockItemId) === String(stockItemId));
+  
+  const stockItem = (appState.stockTake.stockItems || []).find((item) => String(item.id) === String(stockItemId));
+  if (!stockItem) return;
+
+  const existingEntry = index >= 0 ? items[index] : {
+    stockItemId: String(stockItem.id),
+    stockItemName: stockItem.name || '',
+    unit: stockItem.unit || 'ea',
+    shelfCount: 0,
+    uomCounts: {}
+  };
+
+  const uomCounts = { ...(existingEntry.uomCounts || {}) };
+  // Populate 'base' fallback if legacy count exists without detailed breakdown.
+  if (existingEntry.shelfCount > 0 && Object.keys(uomCounts).length === 0) {
+    uomCounts['base'] = existingEntry.shelfCount;
+  }
+
   if (!raw) {
+    delete uomCounts[uomKey];
+  } else {
+    const val = Number(raw);
+    if (!Number.isFinite(val) || val < 0) return;
+    uomCounts[uomKey] = val;
+  }
+
+  if (Object.keys(uomCounts).length === 0) {
     if (index >= 0) items.splice(index, 1);
   } else {
-    const shelfCount = Number(raw);
-    if (!Number.isFinite(shelfCount) || shelfCount < 0) return;
-    const stockItem = (appState.stockTake.stockItems || []).find((item) => String(item.id) === String(stockItemId));
-    if (!stockItem) return;
+    const uomConfigs = normalizeLineUomConfigurations(stockItem.uomConfigurations || stockItem.uomConfig || stockItem.uomConversions);
+    let shelfCount = Number(uomCounts['base'] || 0);
+    uomConfigs.forEach((cfg) => {
+      const key = String(cfg.customUom || '').trim();
+      if (key && uomCounts[key] !== undefined) {
+        shelfCount += Number(uomCounts[key] || 0) * (Number(cfg.ratio || 1) || 1);
+      }
+    });
+
     const systemStock = getLocationStock(stockItem, draft.locationId, appState.stockTake.locations || []);
     const variance = shelfCount - systemStock;
     const nextEntry = {
-      stockItemId: String(stockItem.id),
-      stockItemName: stockItem.name || '',
-      unit: stockItem.unit || 'ea',
+      ...existingEntry,
       shelfCount,
       systemStock,
       variance,
-      varianceImpactEx: variance * (Number(stockItem.cost || 0) || 0)
+      varianceImpactEx: variance * (Number(stockItem.cost || 0) || 0),
+      uomCounts
     };
+
     if (index >= 0) items[index] = nextEntry;
     else items.push(nextEntry);
   }
@@ -16502,8 +16538,6 @@ function updateStockTakeCount(stockItemId, value) {
       items
     }
   };
-  // renderApp() is suppressed while the count input (type=text) is focused, so
-  // refresh every computed element directly from the draft in one pass.
   refreshStockTakeSessionComputed();
   renderApp();
 }

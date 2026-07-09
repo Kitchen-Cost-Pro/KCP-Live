@@ -226,8 +226,8 @@ function getOrderLineItems(order: Row) {
 }
 
 function refundProportion(order: Row, refund: Row): number {
-  const refundAmt = moneyToMajor(objectValue(refund.amounts).net_amount || refund.total_amount || refund.amount || refund.net_amount);
-  const orderAmt = moneyToMajor(objectValue(order.amounts).net_amount || order.total_price || order.total_amount || order.net_amount);
+  const refundAmt = moneyToMajor(refund.total_amount || objectValue(refund.amounts).net_amount || refund.amount || refund.net_amount);
+  const orderAmt = moneyToMajor(order.total_price || objectValue(order.amounts).net_amount || order.total_amount || order.net_amount);
   if (refundAmt > 0 && orderAmt > 0 && refundAmt < orderAmt * 0.9999) return refundAmt / orderAmt;
   return 1;
 }
@@ -862,9 +862,15 @@ function buildSaleComponents(
 }
 
 function stockItemType(item: StockItemRow) {
-  const raw = normalizeText(item.item_type || objectValue(jsonParse(item.raw_json)).itemType || item.category);
-  if (raw.includes('recipe source') || raw.includes('non stock') || raw.includes('virtual')) return 'sub_recipe';
-  if (raw.includes('sub recipe') || raw.includes('subrecipe')) return 'sub_recipe';
+  const rawJson = objectValue(jsonParse(item.raw_json));
+  const isSub = item.is_sub_recipe === 1 || item.is_sub_recipe === 'true' || item.is_sub_recipe === true ||
+                rawJson.isSubRecipe === 1 || rawJson.isSubRecipe === 'true' || rawJson.isSubRecipe === true ||
+                rawJson.SubRecipe === 1 || rawJson.SubRecipe === 'true' || rawJson.SubRecipe === true;
+  if (isSub) return 'sub_recipe';
+
+  const raw = normalizeText(item.item_type || rawJson.itemType || item.category);
+  if (raw.includes('sub recipe') || raw.includes('subrecipe') || raw.includes('virtual')) return 'sub_recipe';
+  if (raw.includes('recipe source') || raw.includes('non stock') || raw.includes('non_stock')) return 'non_stock';
   if (raw.includes('manufactured') || raw.includes('prep')) return 'manufactured';
   return 'raw';
 }
@@ -1081,6 +1087,27 @@ export async function processYocoOrder(
   const modifierCatalogue = buildModifierCatalogue(modifierGroups);
   const sourceLines = mode === 'refund' ? getRefundLineItems(order, refund) : getOrderLineItems(order);
   const paymentId = getPaymentId(order, refund);
+  let refundIndex = 0;
+  if (refund) {
+    const refunds = Array.isArray(order.refunds) ? order.refunds : [];
+    const returns = Array.isArray(order.returns) ? order.returns : [];
+    const rIdx = refunds.findIndex((r: any) =>
+      text(r.id) === text(refund.id) ||
+      text(r.payment_id) === text(refund.payment_id) ||
+      text(r.paymentId) === text(refund.paymentId)
+    );
+    if (rIdx >= 0) {
+      refundIndex = rIdx;
+    } else {
+      const retIdx = returns.findIndex((r: any) =>
+        text(r.id) === text(refund.id) ||
+        text(r.payment_id) === text(refund.payment_id)
+      );
+      if (retIdx >= 0) {
+        refundIndex = retIdx;
+      }
+    }
+  }
   const occurredAt = mode === 'refund'
     ? text(refund?.processed_at || refund?.created_at || refund?.updated_at || order.closed_at || order.created_at || new Date().toISOString())
     : text(order.closed_at || order.created_at || order.updated_at || new Date().toISOString());
@@ -1127,7 +1154,10 @@ export async function processYocoOrder(
     mode,
     mode === 'refund' ? 'refunded' : text(order.status, 'completed'),
     getPaymentMethod(order, refund),
-    moneyToMajor(objectValue(order.amounts).net_amount || order.total_price || refund?.total_amount) * (mode === 'refund' ? -1 : 1),
+    (mode === 'refund'
+      ? moneyToMajor(refund?.total_amount || order.total_price || objectValue(order.amounts).net_amount || 0)
+      : moneyToMajor(order.total_price || objectValue(order.amounts).net_amount || 0)
+    ) * (mode === 'refund' ? -1 : 1),
     occurredAt,
     jsonString(order)
   ));
@@ -1171,7 +1201,8 @@ export async function processYocoOrder(
       const linkedProductRecipeLines = linkedProductRecipes.flatMap((linkedRecipe) => linesForRecipe(text(linkedRecipe.id), recipeLines));
 	      const recipe = productRecipe || recipeSourceStockItemRecipe || linkedProductRecipes[0] || manualModifierRecipe;
       const effectiveProduct = product || linkedProducts[0] || null;
-      const rawSignature = `yoco:${mode}:${orderId}:${paymentId}:${component.lineId}:${text(sellingLocation.id)}:${quantitySold}`;
+      const signaturePaymentPart = mode === 'refund' ? `refund_${refundIndex}` : paymentId;
+      const rawSignature = `yoco:${mode}:${orderId}:${signaturePaymentPart}:${component.lineId}:${text(sellingLocation.id)}:${quantitySold}`;
       const signatureHash = await hash(rawSignature);
       if (existingSignatureHashes.has(signatureHash)) {
         const hasMovement = await componentMovementExists(env, workspaceId, orderId, component, effectiveProduct);
