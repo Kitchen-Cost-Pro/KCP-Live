@@ -77,8 +77,9 @@ function stockItemIsStocked(row: Record<string, unknown>) {
   return true;
 }
 
-const STOCKED_ITEM_SQL = `COALESCE(stock_items.item_type, json_extract(stock_items.raw_json, '$.itemType'), '') NOT IN ('sub_recipe', 'virtual')`;
-const STOCKED_ITEM_ALIAS_SQL = (alias: string) => `COALESCE(${alias}.item_type, json_extract(${alias}.raw_json, '$.itemType'), '') NOT IN ('sub_recipe', 'virtual')`;
+const STOCKED_ITEM_TYPE_SQL = (alias: string) => `REPLACE(REPLACE(LOWER(COALESCE(${alias}.item_type, json_extract(${alias}.raw_json, '$.itemType'), '')), '-', '_'), ' ', '_')`;
+const STOCKED_ITEM_SQL = `${STOCKED_ITEM_TYPE_SQL('stock_items')} NOT IN ('sub_recipe', 'subrecipe', 'virtual')`;
+const STOCKED_ITEM_ALIAS_SQL = (alias: string) => `${STOCKED_ITEM_TYPE_SQL(alias)} NOT IN ('sub_recipe', 'subrecipe', 'virtual')`;
 
 function normalizeUomConfigurations(value: unknown) {
   const rows = Array.isArray(value)
@@ -5806,6 +5807,22 @@ export async function postStockTakeTemplate(request: Request, env: Env, auth: Au
   if (!payload.name) return error(request, env, 400, 'Enter a template name.');
   if (!payload.normalized.targetLocations.length) return error(request, env, 400, 'Choose at least one target location.');
   if (!payload.normalized.selections.length) return error(request, env, 400, 'Select at least one category or stock item.');
+  if (payload.normalized.scope === 'items') {
+    const requestedSelections = payload.normalized.selections;
+    const placeholders = requestedSelections.map((_, index) => `?${index + 2}`).join(', ');
+    const rows = await env.DB.prepare(
+      `SELECT id
+         FROM stock_items si
+        WHERE si.workspace_id = ?1
+          AND si.active = 1
+          AND ${STOCKED_ITEM_ALIAS_SQL('si')}
+          AND si.id IN (${placeholders})`
+    ).bind(workspaceId, ...requestedSelections).all<{ id: string }>();
+    const allowed = new Set((rows.results || []).map((row) => text(row.id)).filter(Boolean));
+    payload.normalized.selections = requestedSelections.filter((selection) => allowed.has(selection));
+    if (!payload.normalized.selections.length) return error(request, env, 400, 'Select at least one countable stock item.');
+    payload.rawJson = JSON.stringify(payload.normalized);
+  }
 
   const now = nowIso();
   const statements = [
@@ -7716,7 +7733,7 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
 
   const productWastageRow = objectValue(await env.DB.prepare(
     `SELECT
-        COALESCE(SUM(abs(al.quantity_delta * COALESCE(NULLIF(al.unit_cost, 0), NULLIF(si.unit_cost, 0), 0))), 0) AS product_wastage
+        COALESCE(SUM(abs(al.quantity_delta * COALESCE(NULLIF(al.unit_cost, 0), NULLIF(${CURRENT_COST_SQL}, 0), 0))), 0) AS product_wastage
        FROM adjustment_lines al
        JOIN adjustments a ON a.id = al.adjustment_id AND a.workspace_id = al.workspace_id
        LEFT JOIN stock_items si ON si.id = al.stock_item_id AND si.workspace_id = al.workspace_id
@@ -7762,7 +7779,7 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
   const productWastageDaily = await env.DB.prepare(
     `SELECT
         date(a.occurred_at) AS day,
-        COALESCE(SUM(abs(al.quantity_delta * COALESCE(NULLIF(al.unit_cost, 0), NULLIF(si.unit_cost, 0), 0))), 0) AS waste
+        COALESCE(SUM(abs(al.quantity_delta * COALESCE(NULLIF(al.unit_cost, 0), NULLIF(${CURRENT_COST_SQL}, 0), 0))), 0) AS waste
        FROM adjustment_lines al
        JOIN adjustments a ON a.id = al.adjustment_id AND a.workspace_id = al.workspace_id
        LEFT JOIN stock_items si ON si.id = al.stock_item_id AND si.workspace_id = al.workspace_id

@@ -63,6 +63,7 @@ import {
 } from './themePresets.js';
 import { matchesBarcodeQuery, parseBarcodeValues } from './utils/barcodes.js';
 import { todayLocal } from './utils/date.js';
+import { isStockCountableItem } from './services/stockCountEligibility.js';
 // Canonical per-location balance resolver (same one the Transfers UI uses to show before/after),
 // so the transfer insufficient-stock validation resolves the source balance identically.
 import { getLocationStock as resolveLocationStock } from './utils/stockBalances.js';
@@ -14986,14 +14987,7 @@ function getStockTakeTemplateItems(template, stockItems = []) {
 }
 
 function isStockTakeCountableItem(item = {}) {
-  if (item.isSubRecipe === true) return false;
-  const type = String(item.itemType || item.stockItemType || item.specificationType || '')
-    .trim()
-    .toLowerCase()
-    .replace(/[\s-]+/g, '_');
-  if (['sub_recipe', 'subrecipe'].includes(type)) return false;
-  const category = String(item.category || '').toLowerCase();
-  return !category.includes('sub recipe') && !category.includes('sub-recipe');
+  return isStockCountableItem(item);
 }
 
 function getStockTakeTemplateLocationIds(template = {}) {
@@ -16125,9 +16119,10 @@ function parseStockTakeCountRows(rows = [], { stockItems = [], locations = [] } 
     if (!hasSplitCountInput && !hasLegacyCountInput && !hasManualTotalInput) return;
 
     const item = findStockItemForImport(stockItems, rawItem);
+    const countableItem = item && isStockTakeCountableItem(item) ? item : null;
     const location = findLocationForImport(locations, rawLocation) || ((locations || []).length ? null : { id: 'main', name: 'Main Store' });
-    const uomConfigs = item
-      ? normalizeLineUomConfigurations(item.uomConfigurations || item.uomConfig || item.uomConversions)
+    const uomConfigs = countableItem
+      ? normalizeLineUomConfigurations(countableItem.uomConfigurations || countableItem.uomConfig || countableItem.uomConversions)
       : [];
     let shelfCount = NaN;
     if (hasSplitCountInput) {
@@ -16145,15 +16140,16 @@ function parseStockTakeCountRows(rows = [], { stockItems = [], locations = [] } 
       shelfCount = parseStockTakeImportNumber(rawLegacyCount);
     }
     if (!item) errors.push(`Row ${lineNumber}: stock item "${rawItem}" was not found.`);
+    if (item && !countableItem) errors.push(`Row ${lineNumber}: "${item.name || rawItem}" cannot be counted in stock takes.`);
     if (!location) errors.push(`Row ${lineNumber}: location "${rawLocation}" was not found.`);
     if (!Number.isFinite(shelfCount) || shelfCount < 0) errors.push(`Row ${lineNumber}: count must be zero or greater.`);
-    if (!item || !location || !Number.isFinite(shelfCount) || shelfCount < 0) return;
+    if (!countableItem || !location || !Number.isFinite(shelfCount) || shelfCount < 0) return;
     lines.push({
-      stockItemId: String(item.id),
-      stockItemName: item.name || '',
+      stockItemId: String(countableItem.id),
+      stockItemName: countableItem.name || '',
       locationId: String(location.id),
       shelfCount,
-      unit: item.unit || 'ea'
+      unit: countableItem.unit || 'ea'
     });
   });
   return { lines, errors };
@@ -16328,11 +16324,12 @@ function bulkStockTakeTemplateSelection(selectAll) {
   const scope = current.scope === 'items' ? 'items' : 'category';
   const matches = scope === 'items'
     ? (appState.stockTake.stockItems || [])
+      .filter(isStockTakeCountableItem)
       .filter((item) => !query
         || String(item.name || '').toLowerCase().includes(query)
         || String(item.category || '').toLowerCase().includes(query))
       .map((item) => String(item.id))
-    : [...new Set((appState.stockTake.stockItems || []).map((item) => String(item.category || '').trim()).filter(Boolean))]
+    : [...new Set((appState.stockTake.stockItems || []).filter(isStockTakeCountableItem).map((item) => String(item.category || '').trim()).filter(Boolean))]
       .filter((category) => !query || category.toLowerCase().includes(query));
 
   const selections = selectAll ? new Set((current.selections || []).map(String)) : new Set((current.selections || []).map(String));

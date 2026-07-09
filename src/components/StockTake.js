@@ -3,6 +3,7 @@ import '../styles/fieldHelp.css';
 import { bindFieldHelpTooltips, renderFieldHelpLabel } from './fieldHelp.js';
 import { renderLoadingPanel } from './LoadingPanel.js';
 import { getLocationStock } from '../utils/stockBalances.js';
+import { isStockCountableItem } from '../services/stockCountEligibility.js';
 
 export function renderStockTake({ state, onStockTakeFilterChange, onStockTakeAction = {} } = {}) {
   const stockTake = state.stockTake || {};
@@ -1238,7 +1239,7 @@ function getTemplateLocationNames(template = {}, locations = []) {
 function getTemplateSelectionOptions(stockItems = [], scope = 'category', query = '', selections = []) {
   const q = String(query || '').trim().toLowerCase();
   const selectedSet = new Set((selections || []).map(String));
-  const physicalStockItems = (stockItems || []).filter(isPhysicalStockItem);
+  const physicalStockItems = (stockItems || []).filter(isStockCountableItem);
   if (scope === 'items') {
     return physicalStockItems
       .filter((item) => !q || String(item.name || '').toLowerCase().includes(q) || String(item.category || '').toLowerCase().includes(q))
@@ -1262,17 +1263,7 @@ function getTemplateSelectionOptions(stockItems = [], scope = 'category', query 
 }
 
 function isPhysicalStockItem(item = {}) {
-  // Sub recipes are made in-house and are not counted in stock takes.
-  if (item.isSubRecipe === true) return false;
-  const type = String(item.itemType || item.stockItemType || item.specificationType || '')
-    .trim()
-    .toLowerCase()
-    .replace(/[\s-]+/g, '_');
-  if (['virtual', 'sub_recipe'].includes(type)) return false;
-  const category = String(item.category || '').toLowerCase();
-  return !category.includes('virtual') &&
-    !category.includes('sub recipe') &&
-    !category.includes('sub-recipe');
+  return isStockCountableItem(item);
 }
 
 function createEmptyDraft() {

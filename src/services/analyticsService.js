@@ -670,8 +670,7 @@ function reportActor(log = {}) {
 function resolveReportActor(context, log = {}, fallback = '') {
   const explicit = reportActor(log);
   if (explicit) return explicit;
-  return resolveUserLabel(
-    context,
+  const candidates = [
     log.createdBy,
     log.created_by,
     log.actorUid,
@@ -682,7 +681,14 @@ function resolveReportActor(context, log = {}, fallback = '') {
     log.submittedBy,
     log.userEmail,
     log.createdByEmail
-  ) || fallback;
+  ];
+  const resolved = resolveUserLabel(
+    context,
+    ...candidates
+  );
+  if (resolved && resolved !== 'System') return resolved;
+  const rawActor = candidates.map((value) => String(value || '').trim()).find(Boolean);
+  return rawActor || fallback || resolved;
 }
 
 function buildSupplierRows(source, context) {
