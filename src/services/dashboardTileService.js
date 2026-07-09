@@ -211,6 +211,7 @@ function summarizeMovements(movements = []) {
 
   movements.forEach((movement = {}) => {
     const type = String(movement.movement_type || movement.movementType || '').toLowerCase();
+    const documentType = String(movement.document_type || movement.documentType || '').toLowerCase();
     const value = Number(movement.value_delta ?? movement.valueDelta ?? 0) || 0;
     const metadata = parseJsonObject(movement.metadata_json || movement.metadataJson || movement.metadata);
     const isAdjustmentWastage = type.includes('adjust') && isWastageAdjustment(metadata);
@@ -218,8 +219,8 @@ function summarizeMovements(movements = []) {
     else if (type.includes('credit')) totals.creditNote += value;
     else if (type.includes('sale')) totals.sale += value;
     else if (type.includes('stock_take') || type.includes('stocktake')) totals.stockTake += value;
-    else if (type.includes('waste')) totals.wastage += value;
     else if (type.includes('manufact')) totals.manufacturingWastage += value;
+    else if (documentType === 'wastage_adjustment' || documentType === 'wastage-adjustment' || type.includes('waste')) totals.wastage += value;
     else if (isAdjustmentWastage) totals.wastage += value;
     else if (type.includes('adjust')) totals.adjustment += value;
   });

@@ -4241,6 +4241,16 @@ async function attachActorInfo<T extends Record<string, unknown>>(
   return rows;
 }
 
+function preferredResolvedActor(...candidates: unknown[]) {
+  for (const candidate of candidates) {
+    const value = text(candidate);
+    if (!value) continue;
+    if (['system', 'manual'].includes(value.toLowerCase())) continue;
+    return value;
+  }
+  return '';
+}
+
 export async function getAdjustments(request: Request, env: Env, auth: AuthContext, workspaceId: string) {
   await scoped(request, env, auth, workspaceId);
   const url = new URL(request.url);
@@ -6342,6 +6352,17 @@ export async function getManufacturingBatches(request: Request, env: Env, auth: 
   const batches = rowsResults.map((row) => {
     const record = row;
     const raw = objectValue(jsonParse(record.raw_json));
+    const resolvedActorName = preferredResolvedActor(
+      record.created_by_name,
+      record.created_by_email,
+      raw.createdByName,
+      raw.createdByEmail,
+      raw.user
+    );
+    const resolvedActorEmail = preferredResolvedActor(
+      record.created_by_email,
+      raw.createdByEmail
+    );
     return {
       ...raw,
       id: text(record.id),
@@ -6359,9 +6380,9 @@ export async function getManufacturingBatches(request: Request, env: Env, auth: 
       note: text(raw.note),
       components: arrayValue(raw.components),
       createdBy: text(record.created_by || raw.createdBy),
-      createdByName: text(record.created_by_name || raw.createdByName || record.created_by || raw.createdBy),
-      createdByEmail: text(record.created_by_email || raw.createdByEmail),
-      user: text(record.created_by_name || raw.createdByName || record.created_by_email || raw.createdByEmail || record.created_by || raw.createdBy)
+      createdByName: resolvedActorName || text(record.created_by || raw.createdBy),
+      createdByEmail: resolvedActorEmail,
+      user: resolvedActorName || resolvedActorEmail || text(record.created_by || raw.createdBy)
     };
   });
   return json(request, env, { ok: true, batches });
@@ -7605,6 +7626,7 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
 
   const movementBinds = locationId ? [workspaceId, locationId, from, to] : [workspaceId, from, to];
   const movementLocationClause = locationId ? 'AND location_id = ?2' : '';
+  const adjustmentLocationClause = locationId ? 'AND al.location_id = ?2' : '';
   const fromIndex = locationId ? 3 : 2;
   const toIndex = locationId ? 4 : 3;
 
@@ -7624,6 +7646,7 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
   // transaction amount — trust it, deriving qty×current cost only when it is missing.
   const TXN_VALUE_SQL = `CASE WHEN sm.value_delta != 0 THEN sm.value_delta ELSE sm.quantity_delta * ${CURRENT_COST_SQL} END`;
   const IS_ACCOUNTING_ONLY_SQL = `(json_extract(sm.metadata_json,'$.accountingOnly') IN (1,'true') OR json_extract(sm.metadata_json,'$.reportingOnly') IN (1,'true'))`;
+  const IS_PRODUCT_WASTAGE_SQL = `(lower(COALESCE(sm.document_type, '')) IN ('wastage_adjustment', 'wastage-adjustment'))`;
   // Wastage/adjustment/stock-take: derive qty × CURRENT cost first (audit rule; matches
   // the report's deriveCostImpact), falling back to the stored value only when no cost.
   // Accounting-only movements (e.g. manufacturing_wastage) deliberately carry quantity_delta=0
@@ -7681,7 +7704,7 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
         COALESCE(SUM(CASE WHEN ${IS_CREDIT_SQL} THEN ${TXN_VALUE_SQL} ELSE 0 END), 0) AS credit_note,
         COALESCE(SUM(CASE WHEN ${IS_SALE_SQL} THEN ${TXN_VALUE_SQL} ELSE 0 END), 0) AS sale,
         COALESCE(SUM(CASE WHEN ${IS_STOCKTAKE_SQL} THEN ${DERIVED_VALUE_SQL} ELSE 0 END), 0) AS stock_take,
-        COALESCE(SUM(CASE WHEN ${IS_WASTE_SQL} AND NOT ${IS_MANUFACTURING_WASTE_SQL} THEN abs(${DERIVED_VALUE_SQL}) ELSE 0 END), 0) AS wastage,
+        COALESCE(SUM(CASE WHEN ${IS_WASTE_SQL} AND NOT ${IS_MANUFACTURING_WASTE_SQL} AND NOT ${IS_PRODUCT_WASTAGE_SQL} THEN abs(${DERIVED_VALUE_SQL}) ELSE 0 END), 0) AS wastage,
         COALESCE(SUM(CASE WHEN ${IS_MANUFACTURING_WASTE_SQL} THEN abs(${TXN_VALUE_SQL}) ELSE 0 END), 0) AS manufacturing_wastage,
         COALESCE(SUM(CASE WHEN ${IS_ADJUST_SQL} THEN abs(${DERIVED_VALUE_SQL}) ELSE 0 END), 0) AS adjustment,
         COALESCE(SUM(CASE WHEN NOT ${IS_ACCOUNTING_ONLY_SQL} THEN ${CLASS_VALUE_SQL} ELSE 0 END), 0) AS net_value
@@ -7691,13 +7714,25 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
         AND date(sm.occurred_at) BETWEEN date(?${fromIndex}) AND date(?${toIndex})`
   ).bind(...movementBinds).first());
 
+  const productWastageRow = objectValue(await env.DB.prepare(
+    `SELECT
+        COALESCE(SUM(abs(al.quantity_delta * COALESCE(NULLIF(al.unit_cost, 0), NULLIF(si.unit_cost, 0), 0))), 0) AS product_wastage
+       FROM adjustment_lines al
+       JOIN adjustments a ON a.id = al.adjustment_id AND a.workspace_id = al.workspace_id
+       LEFT JOIN stock_items si ON si.id = al.stock_item_id AND si.workspace_id = al.workspace_id
+      WHERE al.workspace_id = ?1 ${adjustmentLocationClause}
+        AND lower(COALESCE(a.adjustment_type, '')) = 'wastage'
+        AND date(a.occurred_at) BETWEEN date(?${fromIndex}) AND date(?${toIndex})`
+  ).bind(...movementBinds).first());
+
+  const productWastage = numberValue(productWastageRow.product_wastage, 0);
   const movementTotals = {
     grv: numberValue(totalsRow.grv, 0),
     creditNote: numberValue(totalsRow.credit_note, 0),
     sale: numberValue(totalsRow.sale, 0),
     adjustment: numberValue(totalsRow.adjustment, 0),
     stockTake: numberValue(totalsRow.stock_take, 0),
-    wastage: numberValue(totalsRow.wastage, 0),
+    wastage: numberValue(totalsRow.wastage, 0) + productWastage,
     manufacturingWastage: numberValue(totalsRow.manufacturing_wastage, 0),
     netValue: numberValue(totalsRow.net_value, 0)
   };
@@ -7714,13 +7749,26 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
   const dailyRows = await env.DB.prepare(
     `SELECT date(sm.occurred_at) AS day,
             COALESCE(SUM(CASE WHEN ${IS_SALE_SQL} THEN abs(${TXN_VALUE_SQL}) ELSE 0 END), 0) AS cos,
-            COALESCE(SUM(CASE WHEN ${IS_WASTE_SQL} AND NOT ${IS_MANUFACTURING_WASTE_SQL} THEN abs(${DERIVED_VALUE_SQL}) ELSE 0 END), 0) AS waste,
+            COALESCE(SUM(CASE WHEN ${IS_WASTE_SQL} AND NOT ${IS_MANUFACTURING_WASTE_SQL} AND NOT ${IS_PRODUCT_WASTAGE_SQL} THEN abs(${DERIVED_VALUE_SQL}) ELSE 0 END), 0) AS waste,
             COALESCE(SUM(CASE WHEN ${IS_MANUFACTURING_WASTE_SQL} THEN abs(${TXN_VALUE_SQL}) ELSE 0 END), 0) AS manuf_waste,
             COALESCE(SUM(CASE WHEN NOT ${IS_ACCOUNTING_ONLY_SQL} THEN ${CLASS_VALUE_SQL} ELSE 0 END), 0) AS net
        FROM stock_movements sm
        LEFT JOIN stock_items si ON si.id = sm.stock_item_id AND si.workspace_id = sm.workspace_id
       WHERE sm.workspace_id = ?1 ${movementLocationClause ? 'AND sm.location_id = ?2' : ''}
         AND date(sm.occurred_at) BETWEEN date(?${fromIndex}) AND date(?${toIndex})
+      GROUP BY day
+      ORDER BY day ASC`
+  ).bind(...movementBinds).all();
+  const productWastageDaily = await env.DB.prepare(
+    `SELECT
+        date(a.occurred_at) AS day,
+        COALESCE(SUM(abs(al.quantity_delta * COALESCE(NULLIF(al.unit_cost, 0), NULLIF(si.unit_cost, 0), 0))), 0) AS waste
+       FROM adjustment_lines al
+       JOIN adjustments a ON a.id = al.adjustment_id AND a.workspace_id = al.workspace_id
+       LEFT JOIN stock_items si ON si.id = al.stock_item_id AND si.workspace_id = al.workspace_id
+      WHERE al.workspace_id = ?1 ${adjustmentLocationClause}
+        AND lower(COALESCE(a.adjustment_type, '')) = 'wastage'
+        AND date(a.occurred_at) BETWEEN date(?${fromIndex}) AND date(?${toIndex})
       GROUP BY day
       ORDER BY day ASC`
   ).bind(...movementBinds).all();
@@ -7746,6 +7794,12 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
     bucket.waste += numberValue(row.waste, 0);
     bucket.manufWaste += numberValue(row.manuf_waste, 0);
     bucket.net += numberValue(row.net, 0);
+  }
+  for (const entry of productWastageDaily.results || []) {
+    const row = objectValue(entry);
+    const bucket = dayBuckets.get(text(row.day));
+    if (!bucket) continue;
+    bucket.waste += numberValue(row.waste, 0);
   }
   // End-of-day stock value reconstructed backward from the current valuation.
   const stockValueByDay = new Array(days.length).fill(0);

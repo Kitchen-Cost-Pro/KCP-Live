@@ -651,17 +651,20 @@ function buildPurchaseOrderRows(source, context) {
 }
 
 function reportActor(log = {}) {
-  return String(
-    log.createdByName ||
-    log.submittedByName ||
-    log.savedByName ||
-    log.userName ||
-    log.displayName ||
-    log.createdByEmail ||
-    log.userEmail ||
-    log.user ||
-    ''
-  ).trim();
+  const candidates = [
+    log.createdByName,
+    log.submittedByName,
+    log.savedByName,
+    log.userName,
+    log.displayName,
+    log.createdByEmail,
+    log.userEmail,
+    log.user
+  ];
+  const resolved = candidates
+    .map((value) => String(value || '').trim())
+    .find((value) => value && !['system', 'manual'].includes(value.toLowerCase()));
+  return resolved || '';
 }
 
 function resolveReportActor(context, log = {}, fallback = '') {
