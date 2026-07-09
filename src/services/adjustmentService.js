@@ -107,7 +107,7 @@ function normalizeAdjustmentPayload(payload = {}) {
     locationId: String(payload.locationId || '').trim(),
     locationName: String(payload.locationName || '').trim(),
     note: String(payload.note || '').trim(),
-    wasteReason: String(payload.wasteReason || '').trim(),
+    wasteReason: mode === 'remove' ? String(payload.wasteReason || '').trim() : '',
     items: (payload.items || []).map((item) => ({
       stockItemId: String(item.stockItemId || item.itemId || item.ingId || '').trim(),
       stockItemName: String(item.stockItemName || item.itemName || item.name || '').trim(),

@@ -6,5 +6,10 @@
 export function isWastageAdjustment(log = {}) {
   const mode = String(log.mode || log.adjustmentType || log.adjustment_type || '').toLowerCase();
   const note = String(log.note || log.notes || log.reason || '').toLowerCase();
-  return mode === 'wastage' || Boolean(log.wasteReason || log.waste_reason) || note.includes('waste') || note.includes('wastage');
+  
+  if (mode === 'add' || mode === 'override') {
+    return false;
+  }
+  
+  return mode === 'wastage' || mode === 'remove' || Boolean(log.wasteReason || log.waste_reason) || note.includes('waste') || note.includes('wastage');
 }

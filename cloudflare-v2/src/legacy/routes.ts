@@ -6334,9 +6334,9 @@ export async function getManufacturingBatches(request: Request, env: Env, auth: 
       note: text(raw.note),
       components: arrayValue(raw.components),
       createdBy: text(record.created_by || raw.createdBy),
-      createdByName: text(record.created_by_name || raw.createdByName),
+      createdByName: text(record.created_by_name || raw.createdByName || record.created_by || raw.createdBy),
       createdByEmail: text(record.created_by_email || raw.createdByEmail),
-      user: text(record.created_by_name || raw.createdByName || record.created_by_email || raw.createdByEmail)
+      user: text(record.created_by_name || raw.createdByName || record.created_by_email || raw.createdByEmail || record.created_by || raw.createdBy)
     };
   });
   return json(request, env, { ok: true, batches });
@@ -6490,7 +6490,7 @@ export async function postManufacturingBatch(request: Request, env: Env, auth: A
     createdBy: auth.uid
   };
   await attachActorInfo(env, workspaceId, [normalized]);
-  normalized.createdByName = normalized.created_by_name;
+  normalized.createdByName = normalized.created_by_name || normalized.created_by_email || auth.uid;
   normalized.createdByEmail = normalized.created_by_email;
   normalized.user = normalized.created_by_name || normalized.created_by_email || auth.uid;
 
@@ -7618,8 +7618,7 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
     OR lower(sm.movement_type) LIKE '%wastage%'
     OR lower(sm.movement_type) = 'manufacturing_wastage'
     OR (lower(sm.movement_type) LIKE '%adjust%' AND (
-         lower(COALESCE(json_extract(sm.metadata_json, '$.mode'), '')) = 'wastage'
-         OR COALESCE(json_extract(sm.metadata_json, '$.wasteReason'), '') != ''
+         lower(COALESCE(json_extract(sm.metadata_json, '$.mode'), '')) IN ('wastage', 'remove')
        ))
   )`;
   const IS_SALE_SQL = `lower(sm.movement_type) LIKE '%sale%'`;
