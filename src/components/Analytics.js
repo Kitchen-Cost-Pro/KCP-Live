@@ -3,7 +3,6 @@ import '../styles/analytics-modern.css';
 import { renderLoadingPanel } from './LoadingPanel.js';
 import { buildAnalyticsReport, customReportSources, reportCatalog } from '../services/analyticsService.js';
 import { exportObjectRows } from '../services/exportService.js';
-import { planReportConfigWithAi } from '../services/reportConfigService.js';
 import { ACTION_PERMISSION_MAP, hasPermission, hasLocationAccess, normalizeRoleName } from '../services/roleService.js';
 import { todayLocal } from '../utils/date.js';
 import { renderModifierGpReportDetailView, renderModifierSummaryReportDetailView, buildModifierGpExportRows, buildModifierSummaryExportRows } from './SalesReports.js';
@@ -52,7 +51,7 @@ const REPORT_CATEGORIES = [
     tone: 'purple',
     icon: 'chart',
     description: 'Forecasting, volatility, variance and custom insights.',
-    reports: ['custom_report', 'forecast', 'volatility', 'variance', 'waste_pareto']
+    reports: ['forecast', 'volatility', 'variance', 'waste_pareto']
   }
 ];
 
@@ -87,7 +86,7 @@ const HUB_REPORT_GROUPS = [
     subtitle: 'High-level insights and key reports for decision makers.',
     tone: 'purple',
     icon: 'star',
-    reports: ['custom_report', 'forecast', 'volatility', 'variance', 'waste_pareto']
+    reports: ['forecast', 'volatility', 'variance', 'waste_pareto']
   }
 ];
 
@@ -5447,23 +5446,12 @@ function bindAnalyticsEvents(view, { filters, reportData, workspaceId = '', pdfB
       customSetupOpen: filters.customSetupOpen === true,
       openDropdown: ''
     });
-    let suggestion;
-    try {
-      suggestion = await planReportConfigWithAi(workspaceId, prompt);
-      suggestion.customReportAiStatus = suggestion.customReportAiSource === 'gemini' ? 'planned' : 'fallback';
-      suggestion.customReportAiMessage = suggestion.customReportAiMessage || (suggestion.customReportAiSource === 'gemini'
-        ? 'Gemini selected the report source, columns, chart, and grouping.'
-        : 'Gemini is not configured, so the local planner built this report.');
-    } catch (error) {
-      suggestion = {
-        ...buildCustomReportFromPrompt(prompt, reportData),
-        customReportAiStatus: 'fallback',
-        customReportAiSource: 'local',
-        customReportAiMessage: error?.message
-          ? `Gemini planner was unavailable, so the local planner built this report. ${error.message}`
-          : 'Gemini planner was unavailable, so the local planner built this report.'
-      };
-    }
+    const suggestion = {
+      ...buildCustomReportFromPrompt(prompt, reportData),
+      customReportAiStatus: 'fallback',
+      customReportAiSource: 'local',
+      customReportAiMessage: 'Local planner built this report.'
+    };
     onAnalyticsFilterChange?.({
       ...suggestion,
       customReportPrompt: prompt,

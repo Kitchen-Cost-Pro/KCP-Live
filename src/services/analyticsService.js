@@ -30,7 +30,6 @@ const analyticsNodes = [
 ];
 
 export const reportCatalog = [
-  { id: 'custom_report', title: 'Custom Report Builder', group: 'Advanced', description: 'Build custom reports from available business datasets.', columns: ['Product Category', 'Region', 'Sales Rep', 'Sum of Sales Amount', 'Sum of Profit', 'Count of Orders'] },
   { id: 'stock', title: 'Stock On Hand', group: 'Inventory', description: 'Current stock balances and ex-VAT value.', columns: ['Item', 'Category', 'Location', 'On Hand', 'Unit', 'UOM Config', 'UOM 1 Name', 'UOM 1 Ratio', 'UOM 1 Barcode', 'UOM 2 Name', 'UOM 2 Ratio', 'UOM 2 Barcode', 'UOM 3 Name', 'UOM 3 Ratio', 'UOM 3 Barcode', 'Unit Cost', 'Stock Value'] },
   { id: 'movement', title: 'Stock Movement', group: 'Inventory', description: 'Purchases, usage, manufacturing output, wastage, adjustments, and transfers by item.', columns: ['Item', 'Category', 'Unit', 'Purchases', 'Sales Usage', 'Manufactured', 'Wastage', 'Adjustments', 'Transfers Net', 'Net Qty'] },
   { id: 'low_stock', title: 'Low Stock Alerts', group: 'Inventory', description: 'Items below low-stock threshold or par.', columns: ['Item', 'Category', 'Unit', 'Low Locations', 'Total Current Stock', 'Total Threshold', 'Total Variance', 'Total Deficit Value'] },

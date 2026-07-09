@@ -51,7 +51,9 @@ import {
 } from './services/exportService.js';
 import { dashboardTileKeys, subscribeDashboardTiles } from './services/dashboardTileService.js';
 import { subscribeAnalyticsWorkspace } from './services/analyticsService.js';
-import { deleteReportConfig, fetchReportConfigs, saveReportConfig } from './services/reportConfigService.js';
+const fetchReportConfigs = () => Promise.resolve([]);
+const saveReportConfig = (workspaceId, config) => Promise.resolve(config);
+const deleteReportConfig = () => Promise.resolve();
 import { fetchSystemBroadcast } from './services/systemBroadcastService.js';
 import { DEFAULT_STOCK_LOCATION_ID, DEFAULT_STOCK_LOCATION_NAME } from './services/locationModel.js';
 import {

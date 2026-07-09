@@ -1,6 +1,6 @@
 const API_ORIGIN = 'https://kcp-api-v2.adminkitchencostpro.workers.dev';
 const API_URL = new URL(API_ORIGIN);
-const STOCK_TAKE_SERVICE_CHUNK = '/assets/stockTakeService-DjT9a_of.js';
+const STOCK_TAKE_SERVICE_CHUNK = '/assets/stockTakeService-Btn6Oihk.js';
 
 export default {
   async fetch(request, env) {

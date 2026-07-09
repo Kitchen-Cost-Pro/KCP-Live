@@ -85,7 +85,6 @@ import {
   getProducts,
   getPurchaseOrders,
   getReportingSource,
-  getReportConfigs,
   getSiteConfiguration,
   getSuppliers,
   getStockItems,
@@ -104,7 +103,6 @@ import {
   deleteLocationRoute,
   deleteProductRoute,
   deletePurchaseOrderRoute,
-  deleteReportConfig,
   deleteWorkspaceMemberRoute,
   deleteWorkspaceRoleRoute,
   deleteStockTakeDraftRoute,
@@ -121,7 +119,6 @@ import {
   patchLocation,
   patchProduct,
   patchPurchaseOrder,
-  patchReportConfig,
   patchSupplier,
   patchYocoModifierRecipe,
   patchStockItem,
@@ -130,7 +127,6 @@ import {
   patchWorkspaceSettingsRoute,
   patchStockLevel,
   postExternalTransfer,
-  postReportConfigAiPlan,
   postGmailConnectStart,
   postGmailDisconnect,
   postGmailSendSupplierEmail,
@@ -147,7 +143,6 @@ import {
   postProductImport,
   postPurchaseOrder,
   postPurchaseOrderBulkDelete,
-  postReportConfig,
   postSyncDefaultSiteName,
   postSupplier,
   postSupplierBulkDelete,
@@ -705,27 +700,6 @@ export async function dispatchWorkspaceRoute(
 
   if (request.method === 'GET' && resource === 'reporting-source') {
     return getReportingSource(request, env, auth, workspaceId);
-  }
-
-  if (request.method === 'GET' && resource === 'report-configs') {
-    return getReportConfigs(request, env, auth, workspaceId);
-  }
-
-  if (request.method === 'POST' && resource === 'report-configs') {
-    return postReportConfig(request, env, auth, workspaceId);
-  }
-
-  if (request.method === 'POST' && resource === 'report-configs/ai-plan') {
-    return postReportConfigAiPlan(request, env, auth, workspaceId);
-  }
-
-  const reportConfigMatch = resource.match(/^report-configs\/([^/]+)$/);
-  if ((request.method === 'PATCH' || request.method === 'PUT') && reportConfigMatch) {
-    return patchReportConfig(request, env, auth, workspaceId, reportConfigMatch[1]);
-  }
-
-  if (request.method === 'DELETE' && reportConfigMatch) {
-    return deleteReportConfig(request, env, auth, workspaceId, reportConfigMatch[1]);
   }
 
   if (request.method === 'GET' && resource === 'adjustments') {
