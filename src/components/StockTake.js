@@ -1262,19 +1262,15 @@ function getTemplateSelectionOptions(stockItems = [], scope = 'category', query 
 }
 
 function isPhysicalStockItem(item = {}) {
-  if (item.isStocked === false) return false;
   // Sub recipes are made in-house and are not counted in stock takes.
   if (item.isSubRecipe === true) return false;
   const type = String(item.itemType || item.stockItemType || item.specificationType || '')
     .trim()
     .toLowerCase()
     .replace(/[\s-]+/g, '_');
-  if (['recipe_source', 'non_stock', 'virtual', 'sub_recipe'].includes(type)) return false;
+  if (['virtual', 'sub_recipe'].includes(type)) return false;
   const category = String(item.category || '').toLowerCase();
-  return !category.includes('recipe source') &&
-    !category.includes('non-stock') &&
-    !category.includes('non stock') &&
-    !category.includes('virtual') &&
+  return !category.includes('virtual') &&
     !category.includes('sub recipe') &&
     !category.includes('sub-recipe');
 }

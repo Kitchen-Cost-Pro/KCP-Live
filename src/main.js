@@ -5815,6 +5815,10 @@ function addStockRecipeLine(itemId) {
     showStockToast('Stock item could not be found.', 'error');
     return;
   }
+  if (isNonStockRecipeIngredient(ingredient)) {
+    showStockToast('Non-stock items can be counted, but they cannot be assigned as recipe ingredients.', 'warning');
+    return;
+  }
 
   const recipe = normalizeStockDraftRecipe(current.recipe);
   if (recipe.some((line) => String(line.ingId) === ingredientId)) return;
@@ -5837,6 +5841,16 @@ function addStockRecipeLine(itemId) {
     }
   };
   renderApp();
+}
+
+function isNonStockRecipeIngredient(item = {}) {
+  const type = String(item.itemType || item.stockItemType || item.specificationType || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_');
+  if (['recipe_source', 'non_stock', 'virtual'].includes(type)) return true;
+  const category = String(item.category || '').toLowerCase();
+  return category.includes('recipe source') || category.includes('non-stock') || category.includes('non stock') || category.includes('virtual');
 }
 
 function removeStockRecipeLine(index) {
@@ -5978,6 +5992,7 @@ function updateStockDraftField(field, value) {
     nextItem.isManufactured = nextType === 'manufactured';
     if (nextType !== 'sub_recipe') nextItem.isSubRecipe = false;
     if (nextType === 'sub_recipe') nextItem.isSubRecipe = true;
+    nextItem.isStocked = nextType !== 'sub_recipe';
   }
 
   if (key === 'cost') {
@@ -14944,7 +14959,7 @@ function getStockTakeScopedItems() {
   const draft = hydrateStockTakeDraft(appState.stockTake.draftSession, appState.stockTake.locations || []);
   const scope = String(draft.templateScope || '').trim();
   const selections = new Set((draft.templateSelections || []).map(String));
-  return (appState.stockTake.stockItems || []).filter((item) => {
+  return (appState.stockTake.stockItems || []).filter(isStockTakeCountableItem).filter((item) => {
     if (draft.sessionMode === 'template' && scope === 'category' && selections.size) {
       return selections.has(String(item.category || '').trim());
     }
@@ -14960,6 +14975,7 @@ function getStockTakeTemplateItems(template, stockItems = []) {
   const scope = String(template.scope || '').trim() === 'items' ? 'items' : 'category';
   const selections = new Set((template.selections || []).map(String));
   return (stockItems || [])
+    .filter(isStockTakeCountableItem)
     .filter((item) => {
       if (!selections.size) return true;
       if (scope === 'items') return selections.has(String(item.id || ''));
@@ -14967,6 +14983,17 @@ function getStockTakeTemplateItems(template, stockItems = []) {
     })
     .slice()
     .sort((left, right) => String(left.name || '').localeCompare(String(right.name || '')));
+}
+
+function isStockTakeCountableItem(item = {}) {
+  if (item.isSubRecipe === true) return false;
+  const type = String(item.itemType || item.stockItemType || item.specificationType || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_');
+  if (['sub_recipe', 'subrecipe'].includes(type)) return false;
+  const category = String(item.category || '').toLowerCase();
+  return !category.includes('sub recipe') && !category.includes('sub-recipe');
 }
 
 function getStockTakeTemplateLocationIds(template = {}) {
@@ -15830,21 +15857,32 @@ async function exportStockTakeTemplatePdf(templateId) {
   const exportLocationIds = locationIds.length ? locationIds : [appState.stockTake.locations?.[0]?.id || 'main'];
   const locationNames = exportLocationIds.map((locationId) => getLocationNameById(appState.stockTake.locations || [], locationId, 'Main Store'));
   const scopedItems = getStockTakeTemplateItems(template, appState.stockTake.stockItems || []);
-  const rows = [
-    ['Template', 'Location', 'Category', 'Item', 'Unit', 'System Qty', 'Count'],
-    ...exportLocationIds.flatMap((locationId) => {
-      const locationName = getLocationNameById(appState.stockTake.locations || [], locationId, 'Main Store');
-      return scopedItems.map((item) => [
-        template.name,
-        locationName,
-        item.category || '',
-        item.name || '',
-        item.unit || 'ea',
-        formatStockTakeNumber(getLocationStock(item, locationId)),
-        ''
-      ]);
-    })
-  ];
+  const rows = [['Location', 'Category', 'Item', 'Base UOM', 'UOM Guide', 'Count']];
+  exportLocationIds.forEach((locationId, locationIndex) => {
+    const locationName = getLocationNameById(appState.stockTake.locations || [], locationId, 'Main Store');
+    let lastCategory = '';
+    scopedItems
+      .slice()
+      .sort((left, right) => {
+        const categoryCompare = String(left.category || '').localeCompare(String(right.category || ''));
+        if (categoryCompare !== 0) return categoryCompare;
+        return String(left.name || '').localeCompare(String(right.name || ''));
+      })
+      .forEach((item) => {
+        const category = String(item.category || 'General').trim() || 'General';
+        if (lastCategory && lastCategory !== category) rows.push(['', '', '', '', '', '']);
+        lastCategory = category;
+        rows.push([
+          locationName,
+          category,
+          item.name || '',
+          item.unit || 'ea',
+          formatStockItemUomConfigSummary(item) || `Count in ${item.unit || 'ea'}`,
+          ''
+        ]);
+      });
+    if (locationIndex < exportLocationIds.length - 1) rows.push(['', '', '', '', '', '']);
+  });
 
   try {
     await exportAoaRows({
@@ -15870,7 +15908,7 @@ async function exportStockTakeCountTemplate(format = 'csv') {
   const columns = getStockTakeCountTemplateColumns();
   const rows = [];
   locations.forEach((location) => {
-    (appState.stockTake.stockItems || []).forEach((item) => {
+    (appState.stockTake.stockItems || []).filter(isStockTakeCountableItem).forEach((item) => {
       rows.push(buildStockTakeCountTemplateRow({
         item,
         location,
@@ -15909,7 +15947,6 @@ function getStockTakeCountTemplateColumns() {
     'Location',
     'Category',
     'Base_UOM',
-    'System_Qty',
     'Base_Count',
     'UOM1_Name',
     'UOM1_Qty_Per_Base',
@@ -15936,7 +15973,6 @@ function buildStockTakeCountTemplateRow({ item = {}, location = {}, locations = 
     Location: location.name || location.displayName || 'Main Store',
     Category: item.category || item.inventoryCategory || '',
     Base_UOM: item.unit || 'ea',
-    System_Qty: systemQty,
     Base_Count: '',
     UOM1_Name: uomConfigs[0]?.customUom || '',
     UOM1_Qty_Per_Base: uomConfigs[0]?.ratio || '',
@@ -15947,8 +15983,8 @@ function buildStockTakeCountTemplateRow({ item = {}, location = {}, locations = 
     UOM3_Name: uomConfigs[2]?.customUom || '',
     UOM3_Qty_Per_Base: uomConfigs[2]?.ratio || '',
     UOM3_Count: '',
-    Total_Count_Base_UOM: createStockTakeFormulaValue(format, `IFERROR(N(F${rowNumber})+(N(H${rowNumber})*N(I${rowNumber}))+(N(K${rowNumber})*N(L${rowNumber}))+(N(N${rowNumber})*N(O${rowNumber})),0)`),
-    Variance: createStockTakeFormulaValue(format, `IFERROR(P${rowNumber}-E${rowNumber},0)`),
+    Total_Count_Base_UOM: createStockTakeFormulaValue(format, `IFERROR(N(E${rowNumber})+(N(G${rowNumber})*N(H${rowNumber}))+(N(J${rowNumber})*N(K${rowNumber}))+(N(M${rowNumber})*N(N${rowNumber})),0)`),
+    Variance: createStockTakeFormulaValue(format, `IFERROR(O${rowNumber}-${systemQty || 0},0)`),
     Notes: '',
     'Item_ID/SKU': item.id || item.sku || item.name || '',
     Location_ID: location.id || ''
@@ -20690,12 +20726,12 @@ function mapLegacyStockRows(rows = []) {
       report.errors.push(createImportError('ERR_CAT_MAPPING', rowNumber, 'Category could not be determined.'));
       return null;
     }
-    // Track_Inventory is now derived from Item_Type: Recipe Source → false, all others → true.
-    // If the column exists in older files, honour it only for Standard items (backward compat).
+    // Track_Inventory is retained only as legacy input help. Non-stock items can also hold
+    // stock on hand, so Recipe Source rows now default to tracked inventory as well.
     const trackInventoryRaw = norm(getColumn(row, 'Track_Inventory', 'Track Inventory', 'TrackInventory', 'Is_Stocked', 'Is Stocked', 'Stocked'));
     const trackInventory = trackInventoryRaw
       ? (parseStrictBoolean(trackInventoryRaw, true) ?? true)
-      : normalizedItemType !== 'recipe_source';
+      : true;
     const costRaw = getColumn(row, 'Cost_Ex_VAT', 'Cost Ex VAT', 'Ex_VAT_Cost', 'Cost', 'Price');
     const thresholdRaw = getColumn(row, 'Low_Stock_Threshold', 'Threshold', 'MinStock');
     const openingStockRaw = getColumn(row, 'Opening_Stock', 'Opening Stock');
@@ -20757,7 +20793,7 @@ function mapLegacyStockRows(rows = []) {
       cost,
       stockAdjustmentIgnored: stockAdjustmentProvided,
       isManufactured: normalizedItemType === 'manufactured',
-      isStocked: normalizedItemType === 'recipe_source' ? false : true,
+      isStocked: normalizedItemType === 'sub_recipe' ? false : trackInventory,
       isSubRecipe: normalizedItemType === 'sub_recipe',
       itemType: normalizedItemType,
       vatEnabled,

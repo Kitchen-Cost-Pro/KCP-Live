@@ -348,7 +348,7 @@ function bindStockEvents(view, stock, onStockFilterChange, onStockAction) {
 	      itemType,
 	      isSubRecipe: itemType === 'sub_recipe',
 	      isManufactured: itemType === 'manufactured',
-	      isStocked: itemType !== 'recipe_source',
+	      isStocked: itemType !== 'sub_recipe',
 	      recipe,
 	      uomConfigurations
 	    });
@@ -563,7 +563,7 @@ function renderStockBody(stock, items, pagedItems, paging, filters, selectedIds)
 function renderStockRow(item, locationId, locations = [], selected = false) {
   const onHand = locationId ? getLocationStock(item, locationId, locations) : Number(item.stock || 0);
   const itemType = getStockItemType(item);
-  const isPhysicalStock = itemType !== 'recipe_source';
+  const isPhysicalStock = itemType !== 'sub_recipe';
   const isLow = isPhysicalStock && onHand < Number(item.lowStockThreshold || 5);
   const barcodeLabel = parseBarcodeValues(item.barcodes ?? item.barcode ?? item.Barcodes ?? item.Barcode).join(', ') || 'No barcode';
 
@@ -573,9 +573,9 @@ function renderStockRow(item, locationId, locations = [], selected = false) {
       <div>
         <h2>
           ${escapeHtml(getStockItemDisplayName(item))}
-	          ${itemType === 'sub_recipe' ? '<em class="stockModule__pill stockModule__pill--purple" title="Sub-Recipe: used as a nested ingredient in other recipes. Stock is not tracked directly.">Sub-Recipe</em>' : ''}
+	          ${itemType === 'sub_recipe' ? '<em class="stockModule__pill stockModule__pill--purple" title="Sub-Recipe: used as a nested ingredient in other recipes. It can hold stock on hand, but it is excluded from stock counts, low-stock alerts, and routing.">Sub-Recipe</em>' : ''}
 	          ${itemType === 'manufactured' ? '<em class="stockModule__pill stockModule__pill--amber" title="Prep / Manufactured: produced in batches and tracked as its own stock item.">Prep</em>' : ''}
-	          ${itemType === 'recipe_source' ? '<em class="stockModule__pill stockModule__pill--purple" title="Non-stock item — used for packaging and consumables like take-away containers, bags, or wrapping. Cost is tracked but stock levels are not.">Non Stock</em>' : ''}
+	          ${itemType === 'recipe_source' ? '<em class="stockModule__pill stockModule__pill--purple" title="Non-stock item — used for packaging and consumables like take-away containers, bags, or wrapping. It can carry stock on hand and be counted, but it cannot be assigned as a recipe ingredient.">Non Stock</em>' : ''}
           ${item.vatEnabled === false ? '<em class="stockModule__pill stockModule__pill--amber">NO VAT</em>' : '<em class="stockModule__pill stockModule__pill--green">VAT</em>'}
           ${isLow ? '<em class="stockModule__pill stockModule__pill--red">LOW</em>' : ''}
         </h2>
@@ -850,7 +850,7 @@ function renderStockRecipeScreen(item = {}, stockItems = []) {
   const helper = itemType === 'sub_recipe'
     ? 'These ingredients deplete when a menu item uses this sub-recipe.'
     : itemType === 'recipe_source'
-      ? 'These ingredients deplete when a linked menu item is sold. This item is not counted as physical stock.'
+      ? 'These ingredients deplete when a linked menu item is sold. This item can still hold stock on hand and be included in stock counts.'
     : 'These ingredients deplete when a manufacturing batch is posted. Sales deduct the finished prep item.';
 
   return `
@@ -1119,9 +1119,9 @@ function updateRecipePerUnitHints(view) {
 
 const SPEC_CARD_DESCRIPTIONS = {
   standard: 'Tracks physical stock. Use for ingredients, beverages, and any item whose quantity you count and deplete.',
-  sub_recipe: 'A nested component built from other stock items. Used inside other recipes — not counted as physical stock itself.',
+  sub_recipe: 'A nested component built from other stock items. Used inside other recipes and may hold stock on hand, but it is excluded from stock counts, low-stock alerts, and routing.',
   manufactured: 'Produced in batches from ingredients. The finished prep item is tracked as its own stock unit.',
-  recipe_source: 'Non-stock item for packaging and consumables like take-away containers, bags, or wrapping. Cost is tracked but stock levels are not counted.',
+  recipe_source: 'Non-stock item for packaging and consumables like take-away containers, bags, or wrapping. It may hold stock on hand and be counted, but it cannot be used as a recipe ingredient.',
 };
 
 function renderSpecificationCard(value, title, selectedType) {

@@ -361,7 +361,7 @@ function normalizeCloudflareStockItem(row = {}) {
 	    balances,
 	    itemType: row.item_type || row.itemType || raw.itemType,
 	    isStocked: row.is_stocked === undefined && raw.isStocked === undefined
-	      ? !['non_stock', 'recipe_source', 'virtual'].includes(String(row.item_type || row.itemType || raw.itemType || '').trim().toLowerCase().replace(/[\s-]+/g, '_'))
+	      ? !['sub_recipe', 'virtual'].includes(String(row.item_type || row.itemType || raw.itemType || '').trim().toLowerCase().replace(/[\s-]+/g, '_'))
 	      : Number(row.is_stocked ?? (raw.isStocked === false ? 0 : 1)) !== 0,
 	    source: 'Live stock'
 	  });
@@ -523,7 +523,7 @@ export function normalizeIngredient(key, item = {}) {
     yieldBatch: parseDecimal(item.yieldBatch ?? item.yieldQty, 1),
     uomConfigurations: normalizeUomConfigurations(item.uomConfigurations || item.uomConfig || item.uom_configuration || item.uomConversions || item.uomConversion),
     itemType,
-    isStocked: item.isStocked !== false && itemType !== 'recipe_source',
+    isStocked: itemType !== 'sub_recipe' && item.isStocked !== false,
     isSubRecipe,
     isManufactured
   };
@@ -568,16 +568,16 @@ function normalizeStockPayload(item = {}) {
 	      ? normalizeStockRecipe(item.recipe)
 	      : [],
 	    itemType,
-	    isStocked: isRecipeSource ? false : item.isStocked !== false,
+	    isStocked: !isSubRecipe && item.isStocked !== false,
 	    isSubRecipe,
 	    isManufactured
 	  };
 
-	  if (hasStock && !isRecipeSource) {
+	  if (hasStock) {
 	    payload.stock = Number(item.stock || 0) || 0;
 	  }
 
-	  if (!isRecipeSource && item.balances && typeof item.balances === 'object') {
+	  if (item.balances && typeof item.balances === 'object') {
 	    payload.balances = item.balances;
 	  }
 

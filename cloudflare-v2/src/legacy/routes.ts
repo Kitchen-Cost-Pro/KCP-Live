@@ -69,11 +69,16 @@ function isNonStockItemType(itemType: string) {
 function stockItemIsStocked(row: Record<string, unknown>) {
   const raw = objectValue(jsonParse(row.raw_json));
   const itemType = normalizeItemType(row.item_type || raw.itemType || raw.type, 'raw');
+  if (['sub_recipe', 'virtual'].includes(itemType)) return false;
+  if (itemType === 'recipe_source' || itemType === 'non_stock') return true;
   if (row.is_stocked !== undefined && row.is_stocked !== null) return Number(row.is_stocked) !== 0;
   if (raw.isStocked !== undefined) return raw.isStocked !== false;
   if (raw.is_stocked !== undefined) return Number(raw.is_stocked) !== 0;
-  return !isNonStockItemType(itemType);
+  return true;
 }
+
+const STOCKED_ITEM_SQL = `COALESCE(stock_items.item_type, json_extract(stock_items.raw_json, '$.itemType'), '') NOT IN ('sub_recipe', 'virtual')`;
+const STOCKED_ITEM_ALIAS_SQL = (alias: string) => `COALESCE(${alias}.item_type, json_extract(${alias}.raw_json, '$.itemType'), '') NOT IN ('sub_recipe', 'virtual')`;
 
 function normalizeUomConfigurations(value: unknown) {
   const rows = Array.isArray(value)
@@ -231,7 +236,7 @@ function normalizeStockItemPayload(raw: Record<string, unknown>) {
   );
   const explicitStocked = merged.isStocked ?? merged.is_stocked;
   const isStocked = explicitStocked === undefined || explicitStocked === null
-    ? !isNonStockItemType(itemType)
+    ? !['sub_recipe', 'virtual'].includes(itemType)
     : (explicitStocked === false || Number(explicitStocked) === 0 ? 0 : 1);
   const unit = text(merged.unit || merged.uom, 'ea');
   const barcodes = Array.isArray(merged.barcodes)
@@ -550,8 +555,28 @@ function normalizeStockRecipeLines(recipe: unknown[]) {
     .filter((line) => line.stockItemId && line.quantity > 0);
 }
 
+async function assertRecipeIngredientIdsAllowed(env: Env, workspaceId: string, recipeLines: Array<{ stockItemId: string }>) {
+  const ids = [...new Set(recipeLines.map((line) => text(line.stockItemId)).filter(Boolean))];
+  if (!ids.length) return;
+  const placeholders = ids.map((_, index) => `?${index + 2}`).join(', ');
+  const rows = await env.DB.prepare(
+    `SELECT id, name, item_type, raw_json
+       FROM stock_items
+      WHERE workspace_id = ?1
+        AND id IN (${placeholders})`
+  ).bind(workspaceId, ...ids).all<Record<string, unknown>>();
+  const disallowed = (rows.results || []).find((row) => {
+    const itemType = normalizeItemType(row.item_type || objectValue(jsonParse(row.raw_json)).itemType, 'raw');
+    return ['recipe_source', 'non_stock', 'virtual'].includes(itemType);
+  });
+  if (disallowed) {
+    throw new Error(`${text(disallowed.name || disallowed.id)} is a non-stock item and cannot be assigned as a recipe ingredient.`);
+  }
+}
+
 async function saveProductRecipe(env: Env, workspaceId: string, productId: string, recipe: unknown[]) {
   const recipeLines = normalizeProductRecipeLines(recipe);
+  await assertRecipeIngredientIdsAllowed(env, workspaceId, recipeLines);
   const existingRecipe = await env.DB.prepare(
     `SELECT id
        FROM recipes
@@ -648,6 +673,7 @@ async function updateProductsUsingRecipeSource(env: Env, workspaceId: string, st
 
 async function saveYocoModifierRecipe(env: Env, workspaceId: string, ownerId: string, recipe: unknown[], linkedProductId?: string) {
   const recipeLines = normalizeProductRecipeLines(recipe);
+  await assertRecipeIngredientIdsAllowed(env, workspaceId, recipeLines);
   const nextLinkedProductId = linkedProductId === undefined ? undefined : routeText(linkedProductId);
   const existingRecipe = await env.DB.prepare(
     `SELECT id, linked_product_id
@@ -722,6 +748,7 @@ async function saveStockItemRecipe(env: Env, workspaceId: string, stockItemId: s
   if (!['manufactured', 'sub_recipe', 'recipe_source', 'non_stock', 'virtual'].includes(item.itemType)) return;
 
   const recipeLines = normalizeStockRecipeLines(arrayValue(raw.recipe));
+  await assertRecipeIngredientIdsAllowed(env, workspaceId, recipeLines);
   const existingRecipe = await env.DB.prepare(
     `SELECT id
        FROM recipes
@@ -3083,8 +3110,8 @@ export async function getStockItems(request: Request, env: Env, auth: AuthContex
   }
 
 	  const locationSelect = locationId
-	    ? `CASE WHEN COALESCE(si.is_stocked, 1) = 0 THEN 0 ELSE COALESCE((SELECT quantity FROM stock_balances sb WHERE sb.workspace_id = si.workspace_id AND sb.stock_item_id = si.id AND sb.location_id = ?${binds.length + 1}), 0) END`
-	    : `CASE WHEN COALESCE(si.is_stocked, 1) = 0 THEN 0 ELSE COALESCE((SELECT SUM(quantity) FROM stock_balances sb WHERE sb.workspace_id = si.workspace_id AND sb.stock_item_id = si.id), 0) END`;
+	    ? `COALESCE((SELECT quantity FROM stock_balances sb WHERE sb.workspace_id = si.workspace_id AND sb.stock_item_id = si.id AND sb.location_id = ?${binds.length + 1}), 0)`
+	    : `COALESCE((SELECT SUM(quantity) FROM stock_balances sb WHERE sb.workspace_id = si.workspace_id AND sb.stock_item_id = si.id), 0)`;
   if (locationId) binds.push(locationId);
 
   binds.push(limit, offset);
@@ -3113,7 +3140,6 @@ export async function getStockItems(request: Request, env: Env, auth: AuthContex
 	            FROM stock_balances sb
 	           WHERE sb.workspace_id = si.workspace_id
 	             AND sb.stock_item_id = si.id
-	             AND COALESCE(si.is_stocked, 1) = 1
 	        ), '{}') AS balances_json
        FROM stock_items si
       WHERE ${filters.join(' AND ')}
@@ -4061,7 +4087,6 @@ export async function patchStockLevel(request: Request, env: Env, auth: AuthCont
 	      LIMIT 1`
 	  ).bind(workspaceId, stockItemId).first<Record<string, unknown>>();
 	  if (!stockItem) return error(request, env, 404, 'Stock item was not found.');
-	  if (!stockItemIsStocked(stockItem)) return error(request, env, 400, 'Non-stock recipe source items do not carry physical stock on hand.');
 	  const now = nowIso();
   await env.DB.batch([
     env.DB.prepare(
@@ -4396,7 +4421,7 @@ export async function postAdjustment(request: Request, env: Env, auth: AuthConte
 	        WHERE workspace_id = ?1
 	          AND id = ?2
 	          AND active = 1
-	          AND COALESCE(is_stocked, 1) = 1
+	          AND ${STOCKED_ITEM_SQL}
 	        LIMIT 1`
     ).bind(workspaceId, stockItemId).first<Record<string, unknown>>();
     if (!stockItem) return error(request, env, 404, `${text(rawLine.stockItemName || stockItemId)} could not be found.`);
@@ -4873,7 +4898,7 @@ export async function postPurchaseOrder(request: Request, env: Env, auth: AuthCo
 	          WHERE workspace_id = ?1
 	            AND id = ?2
 	            AND active = 1
-	            AND COALESCE(is_stocked, 1) = 1
+	            AND ${STOCKED_ITEM_SQL}
 	          LIMIT 1`
 	      ).bind(workspaceId, stockItemId).first<{ id: string }>()
 	      : null;
@@ -5313,7 +5338,7 @@ export async function postGoodsReceipt(request: Request, env: Env, auth: AuthCon
 	        WHERE workspace_id = ?1
 	          AND id = ?2
 	          AND active = 1
-	          AND COALESCE(is_stocked, 1) = 1
+	          AND ${STOCKED_ITEM_SQL}
 	        LIMIT 1`
     ).bind(workspaceId, stockItemId).first<Record<string, unknown>>();
     if (!stockItem) return error(request, env, 404, `${text(line.stockItemName || stockItemId)} could not be found.`);
@@ -5598,7 +5623,7 @@ export async function postCreditNote(request: Request, env: Env, auth: AuthConte
 	        WHERE workspace_id = ?1
 	          AND id = ?2
 	          AND active = 1
-	          AND COALESCE(is_stocked, 1) = 1
+	          AND ${STOCKED_ITEM_SQL}
 	        LIMIT 1`
     ).bind(workspaceId, stockItemId).first<Record<string, unknown>>();
     if (!stockItem) return error(request, env, 404, `${text(line.stockItemName || stockItemId)} could not be found.`);
@@ -5903,7 +5928,7 @@ export async function postStockTake(request: Request, env: Env, auth: AuthContex
 	        WHERE workspace_id = ?1
 	          AND id = ?2
 	          AND active = 1
-	          AND COALESCE(is_stocked, 1) = 1
+	          AND ${STOCKED_ITEM_SQL}
 	        LIMIT 1`
     ).bind(workspaceId, line.stockItemId).first<Record<string, unknown>>();
     if (!stockItem) continue;
@@ -6092,7 +6117,7 @@ export async function patchStockTake(request: Request, env: Env, auth: AuthConte
 	        WHERE workspace_id = ?1
 	          AND id = ?2
 	          AND active = 1
-	          AND COALESCE(is_stocked, 1) = 1
+	          AND ${STOCKED_ITEM_SQL}
 	        LIMIT 1`
     ).bind(workspaceId, stockItemId).first<Record<string, unknown>>();
     if (!stockItem) continue;
@@ -6361,7 +6386,7 @@ export async function postManufacturingBatch(request: Request, env: Env, auth: A
       WHERE workspace_id = ?1
         AND id = ?2
         AND active = 1
-        AND COALESCE(is_stocked, 1) = 1
+        AND ${STOCKED_ITEM_SQL}
       LIMIT 1`
   ).bind(workspaceId, manufacturedItemId).first<Record<string, unknown>>();
   if (!manufactured) return error(request, env, 404, 'Manufactured item could not be found.');
@@ -6399,7 +6424,7 @@ export async function postManufacturingBatch(request: Request, env: Env, auth: A
 	        WHERE workspace_id = ?1
 	          AND id = ?2
 	          AND active = 1
-	          AND COALESCE(is_stocked, 1) = 1
+	          AND ${STOCKED_ITEM_SQL}
 	        LIMIT 1`
     ).bind(workspaceId, line.ingId).first<Record<string, unknown>>();
     if (!component) return error(request, env, 404, 'One of the blueprint ingredients could not be found.');
@@ -6974,7 +6999,7 @@ export async function postInternalTransfer(request: Request, env: Env, auth: Aut
         WHERE workspace_id = ?1
           AND id = ?2
           AND active = 1
-          AND COALESCE(is_stocked, 1) = 1
+          AND ${STOCKED_ITEM_SQL}
         LIMIT 1`
     ).bind(workspaceId, stockItemId).first<Record<string, unknown>>();
     if (!stockItem) return error(request, env, 404, `${text(rawLine.stockItemName || stockItemId)} could not be found.`);
@@ -7186,7 +7211,7 @@ export async function postExternalTransfer(request: Request, env: Env, auth: Aut
         WHERE workspace_id = ?1
           AND id = ?2
           AND active = 1
-          AND COALESCE(is_stocked, 1) = 1
+          AND ${STOCKED_ITEM_SQL}
         LIMIT 1`
     ).bind(workspaceId, stockItemId).first<Record<string, unknown>>();
     if (!stockItem) return error(request, env, 404, `${text(rawLine.stockItemName || stockItemId)} could not be found.`);
@@ -7352,7 +7377,7 @@ export async function acceptExternalTransfer(request: Request, env: Env, auth: A
             WHERE workspace_id = ?1
               AND id = ?2
               AND active = 1
-              AND COALESCE(is_stocked, 1) = 1
+              AND ${STOCKED_ITEM_SQL}
             LIMIT 1`
         ).bind(workspaceId, targetStockItemId).first<Record<string, unknown>>()
         : null;
@@ -7363,7 +7388,7 @@ export async function acceptExternalTransfer(request: Request, env: Env, auth: A
              FROM stock_items
             WHERE workspace_id = ?1
               AND active = 1
-              AND COALESCE(is_stocked, 1) = 1
+              AND ${STOCKED_ITEM_SQL}
               AND lower(trim(name)) = lower(trim(?2))
               AND lower(trim(category)) = lower(trim(?3))
               AND lower(trim(unit)) = lower(trim(?4))
@@ -7575,7 +7600,7 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
        JOIN stock_items si ON si.id = sb.stock_item_id AND si.workspace_id = sb.workspace_id
 	      WHERE sb.workspace_id = ?1 ${locationClause}
 	        AND si.active = 1
-	        AND COALESCE(si.is_stocked, 1) = 1`
+	        AND ${STOCKED_ITEM_ALIAS_SQL('si')}`
   ).bind(...balanceBinds).first();
 
   const movementBinds = locationId ? [workspaceId, locationId, from, to] : [workspaceId, from, to];
@@ -7754,7 +7779,7 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
        LEFT JOIN locations l ON l.id = sb.location_id AND l.workspace_id = sb.workspace_id
 	      WHERE sb.workspace_id = ?1 ${locationId ? 'AND sb.location_id = ?2' : ''}
 	        AND si.active = 1
-	        AND COALESCE(si.is_stocked, 1) = 1
+	        AND ${STOCKED_ITEM_ALIAS_SQL('si')}
         AND sb.quantity <= si.threshold_qty
       ORDER BY deficitValue DESC, si.name ASC
       LIMIT 100`
@@ -9322,7 +9347,7 @@ export async function postYocoWebhook(request: Request, env: Env, workspaceId: s
     // Process any order.returns entries (stock restorations from physical item returns).
     // Uses the same dedup-signature system so re-delivery of the same webhook is safe.
     const orderHasReturns = getOrderReturns(order).length > 0;
-    const returnsResult = (isReturn || isRefund || orderHasReturns)
+    const returnsResult = (isReturn || (!isRefund && orderHasReturns))
       ? await processYocoOrderReturns(env, workspaceId, order, {
           eventType,
           overrideBehavior: isRefund && refundBehavior !== 'return' ? refundBehavior : undefined

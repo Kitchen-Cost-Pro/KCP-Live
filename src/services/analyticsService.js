@@ -52,7 +52,7 @@ export const reportCatalog = [
   { id: 'sync_log', title: 'Sales Sync Log', group: 'Operations', description: 'Sales import summaries.', columns: ['Date', 'Time', 'Product', 'Product Status', 'Location', 'Qty Sold', 'COS Impact', 'Source'] },
   { id: 'sales_error_log', title: 'Sales Error Log', group: 'Operations', description: 'Sales import exceptions.', columns: ['Date', 'Time', 'Type', 'Product', 'Location', 'Reason', 'Detail'] },
   { id: 'activity_log', title: 'Detailed Activity Log', group: 'Operations', description: 'Unified inventory activity stream.', columns: ['Date', 'Time', 'Type', 'Location', 'User', 'Action', 'Summary'] },
-  { id: 'payments', title: 'Payments Report', group: 'Operations', description: 'Consolidated payment tender summary by POS source. Gross is VAT-inclusive takings; Net is revenue excluding VAT. Both exclude tips (tips shown separately).', columns: ['POS Source', 'Tender', 'Location', 'Orders', 'Gross Sales', 'Tips', 'Refunds', 'Tax Amount', 'Orders With Tip', 'Taxed Orders', 'No Tax Orders', 'Net'] },
+  { id: 'payments', title: 'Payments Report', group: 'Operations', description: 'Consolidated payment tender summary by POS source. Gross is total takings including tips; Tips remain broken out separately; Net is revenue excluding VAT and tips after refunds.', columns: ['POS Source', 'Tender', 'Location', 'Orders', 'Gross Sales', 'Tips', 'Refunds', 'Tax Amount', 'Orders With Tip', 'Taxed Orders', 'No Tax Orders', 'Net'] },
   { id: 'modifier_gp_detail', title: 'Modifier GP Tracking', group: 'Sales', description: 'Track GP impact of modifier combinations attached to each main product.', columns: ['Date', 'Time', 'Main Product Sold', 'Modifier Item', 'Modifier Combination', 'Qty Sold', 'Main Product Selling', 'Modifier Selling', 'Main Selling Recipe Cost', 'Modifier Cost', 'Total Selling', 'Total Cost', 'GP Main %', 'GP Combined %', 'Additional GP %'] },
   { id: 'modifier_gp_summary', title: 'Modifier Summary Report', group: 'Sales', description: 'Summarise modifier sales, cost, and GP independent of main product GP tracking.', columns: ['Date', 'Time', 'Sale ID / Order ID', 'Main Product Sold', 'Modifier Item', 'Modifier Category', 'Qty Sold', 'Modifier Selling', 'Modifier Cost', 'Modifier GP', 'Modifier GP %', 'Status'] },
   { id: 'forecast', title: 'Stock-Out Forecast', group: 'Advanced', description: 'Predict items likely to run out based on current stock and consumption trends.', columns: ['Item', 'Category', 'Location', 'Unit', 'Current Stock', 'Avg Daily Usage', 'Days of Cover', 'Predicted Stock-out Date', 'Risk Level', 'Suggested Reorder Qty', 'Action'] },
@@ -402,18 +402,18 @@ function resolveUserLabel(context, ...candidates) {
 }
 
 // Stock On Hand should list only physically stock-tracked inventory. Exclude
-// recipe-only items, sub-recipes/prep recipes and non-stock-tracked items so the
-// report (and its value) matches the Dashboard + low-stock email, which filter
-// on is_stocked. Mirrors exportService.getStockExportItemType classification.
+// sub-recipes/virtual items. Non-stock items may still carry stock on hand and
+// should remain visible in stock/count reporting.
 function isStockOnHandItem(item = {}) {
-  if (item.isStocked === false || item.is_stocked === false || Number(item.is_stocked) === 0) return false;
   const explicit = String(item.itemType || item.stockItemType || item.specificationType || '')
     .trim().toLowerCase().replace(/[\s-]+/g, '_');
-  if (['recipe_source', 'non_stock', 'virtual', 'sub_recipe', 'subrecipe'].includes(explicit)) return false;
+  if (['recipe_source', 'non_stock'].includes(explicit)) return true;
+  if (item.isStocked === false || item.is_stocked === false || Number(item.is_stocked) === 0) return false;
+  if (['virtual', 'sub_recipe', 'subrecipe'].includes(explicit)) return false;
   if (item.isSubRecipe === true) return false;
   const category = String(item.category || '').toLowerCase();
-  if (category.includes('recipe source') || category.includes('non-stock') || category.includes('non stock') ||
-      category.includes('sub recipe') || category.includes('sub-recipe')) return false;
+  if (category.includes('recipe source') || category.includes('non-stock') || category.includes('non stock')) return true;
+  if (category.includes('virtual') || category.includes('sub recipe') || category.includes('sub-recipe')) return false;
   return true;
 }
 
@@ -564,6 +564,7 @@ function buildMovementRows(source, context) {
 function buildLowStockRows(source, context) {
   return source.ingredients.flatMap((item) => {
     if (isArchived(item)) return [];
+    if (!isLowStockEligibleItem(item)) return [];
     const threshold = resolveLowStockThreshold(item);
     return reportLowStockLocationBalances(item, context).map(({ locationId, qty: stock }) => {
       const variance = Number(stock || 0) - threshold;
@@ -598,7 +599,7 @@ function buildGrvRows(source, context) {
     Location: log.locationName || locationName(context, logLocationId(log), 'Multiple'),
     Items: String(toArray(log.items).length),
     'Total Ex': currency(log.totalEx ?? sumItems(log.items, 'lineTotalEx')),
-    User: reportActor(log),
+    User: resolveReportActor(context, log),
     Action: 'View',
     _search: `${log.supplier || ''} ${log.invoice || ''}`
   })).filter((row) => passesReportFilters(row, context));
@@ -615,7 +616,7 @@ function buildCreditNoteRows(source, context) {
     Location: log.locationName || locationName(context, logLocationId(log), 'Multiple'),
     Items: String(toArray(log.items).length),
     'Total Ex': currency(reportTotalEx(log)),
-    User: reportActor(log),
+    User: resolveReportActor(context, log),
     Action: 'View',
     _search: `${log.supplier || ''} ${log.reference || ''}`
   })).filter((row) => passesReportFilters(row, context));
@@ -642,7 +643,7 @@ function buildPurchaseOrderRows(source, context) {
       Location: order.targetLocationName || locationName(context, order.targetLocation || order.locationId, 'Main Store'),
       Items: String(toArray(order.items).length),
       'Total Ex': currency(order.totalEx ?? sumItems(order.items)),
-      User: reportActor(order),
+      User: resolveReportActor(context, order),
       Action: 'View',
       _search: `${order.supplierName || ''} ${reference}`
     };
@@ -658,13 +659,27 @@ function reportActor(log = {}) {
     log.displayName ||
     log.createdByEmail ||
     log.userEmail ||
-    log.createdBy ||
     log.user ||
-    log.actorUid ||
-    log.actor ||
-    log.postedBy ||
     ''
   ).trim();
+}
+
+function resolveReportActor(context, log = {}, fallback = '') {
+  const explicit = reportActor(log);
+  if (explicit) return explicit;
+  return resolveUserLabel(
+    context,
+    log.createdBy,
+    log.created_by,
+    log.actorUid,
+    log.actor_uid,
+    log.userId,
+    log.savedByUserId,
+    log.postedBy,
+    log.submittedBy,
+    log.userEmail,
+    log.createdByEmail
+  ) || fallback;
 }
 
 function buildSupplierRows(source, context) {
@@ -1318,7 +1333,7 @@ function buildAdjustmentRows(source, context) {
     return {
       Date: displayDate(logDate(log)),
       Time: displayTime(timestamp),
-      User: log.user || log.createdByName || log.createdByEmail || log.createdBy || '',
+      User: resolveReportActor(context, log),
       Item: log.stockItemName || log.itemName || item.name || '',
       Category: log.category || item.category || 'General',
       Location: log.locationName || locationName(context, logLocationId(log), ''),
@@ -1342,7 +1357,7 @@ function buildStockTakeRows(source, context) {
       Date: displayDate(logDate(log)),
       Time: displayTime(reportTimestamp(log)),
       Location: log.locationName || locationName(context, logLocationId(log), ''),
-      User: reportActor(log),
+      User: resolveReportActor(context, log),
       'Items Counted': String(items.length),
       'Variance Lines': String(items.filter((item) => Number(item.variance || 0) !== 0).length),
       'Net Impact': currency(impact),
@@ -1489,7 +1504,7 @@ function buildManufacturingRows(source, context) {
     return {
       Date: displayDate(logDate(log)),
       Time: displayTime(reportTimestamp(log)),
-      User: reportActor(log) || 'Unknown',
+      User: resolveReportActor(context, log, 'Unknown'),
       Item: log.itemName || log.stockItemName || log.manufacturedItemName || context.ingredientMap.get(String(log.itemId || log.manufacturedItemId))?.name || '',
       Type: 'Manufactured / Prep',
       Location: log.locationName || locationName(context, logLocationId(log), ''),
@@ -1510,7 +1525,7 @@ function buildTransferRows(source, context) {
     return toArray(log.items).map((line) => ({
       Date: displayDate(timestamp || logDate(log)),
       Time: displayTime(timestamp),
-      User: log.user || log.createdByName || log.createdByEmail || log.createdBy || '',
+      User: resolveReportActor(context, log),
       Item: line.stockItemName || line.itemName || line.name || context.ingredientMap.get(String(line.stockItemId || line.itemId || line.id))?.name || '',
       From: log.fromLocationName || log.fromName || locationName(context, transferFromId(log), ''),
       To: log.toLocationName || log.toName || locationName(context, transferToId(log), ''),
@@ -1602,7 +1617,6 @@ function buildOpsOverviewRows(source, context) {
 function buildOpsCategoryOverviewRows(source, context) {
   // Per-item building blocks (each already respects the active location/date filters).
   const stockRows = buildStockRows(source, { ...context, query: '' });
-  const movement = new Map(buildMovementRows(source, { ...context, query: '' }).map((row) => [row.Item, row]));
   const theoretical = buildTheoreticalUsage(source, context);
 
   // Show the location (not the site). When a location filter is active, show that location's name;
@@ -1622,7 +1636,17 @@ function buildOpsCategoryOverviewRows(source, context) {
   const ensureDetail = (group, item) => {
     const id = String(item.id || item.stockItemId || item.name || '').trim();
     if (!group.detail.has(id)) {
-      group.detail.set(id, { name: item.name || 'Unnamed Item', unit: item.unit || item.uom || '', closing: 0, purchases: 0, cosActual: 0, cosTheoretical: 0 });
+      group.detail.set(id, {
+        name: item.name || 'Unnamed Item',
+        unit: item.unit || item.uom || '',
+        closing: 0,
+        purchases: 0,
+        cosActual: 0,
+        cosTheoretical: 0,
+        countVariance: 0,
+        manualAdjustments: 0,
+        wastage: 0
+      });
     }
     return group.detail.get(id);
   };
@@ -1637,25 +1661,25 @@ function buildOpsCategoryOverviewRows(source, context) {
     if (item) ensureDetail(group, item).closing += value;
   });
 
-  // Purchases and actual / theoretical cost of sales per ingredient. Exclude
-  // sub-recipes/non-stocked items: their consumption is already captured via the
-  // exploded base ingredients, so counting them here would double count.
-  source.ingredients.filter(isStockOnHandItem).forEach((item) => {
+  const metricsByItemId = buildOpsCategoryItemMetrics(source, context);
+
+  // Purchases, adjustments, wastage, count variance, and actual / theoretical cost of sales
+  // per ingredient. Exclude sub-recipes so nested consumption is not double counted.
+  source.ingredients.filter(isOpsReportEligibleItem).forEach((item) => {
     const group = ensureCategory(item.category);
-    const cost = Number(item.cost || item.unitCost || 0) || 0;
-    const move = movement.get(item.name) || {};
-    const purchaseValue = Number(move.Purchases || 0) * cost;
-    const actualUsage = Number(move['Sales Usage'] || 0) + Number(move.Wastage || 0);
+    const metrics = metricsByItemId.get(String(item.id)) || {};
     const theoreticalUsage = Number(theoretical.get(String(item.id)) || 0);
-    const cosActualValue = actualUsage * cost;
-    const cosTheoreticalValue = theoreticalUsage * cost;
-    group.purchases += purchaseValue;
-    group.cosActual += cosActualValue;
+    const cosTheoreticalValue = theoreticalUsage * (Number(item.cost || item.unitCost || 0) || 0);
+    group.purchases += Number(metrics.purchases || 0);
+    group.cosActual += Number(metrics.cosActual || 0);
     group.cosTheoretical += cosTheoreticalValue;
     const detail = ensureDetail(group, item);
-    detail.purchases += purchaseValue;
-    detail.cosActual += cosActualValue;
+    detail.purchases += Number(metrics.purchases || 0);
+    detail.cosActual += Number(metrics.cosActual || 0);
     detail.cosTheoretical += cosTheoreticalValue;
+    detail.countVariance += Number(metrics.countVariance || 0);
+    detail.manualAdjustments += Number(metrics.manualAdjustments || 0);
+    detail.wastage += Number(metrics.wastage || 0);
   });
 
   const query = String(context.query || '').trim().toLowerCase();
@@ -1664,8 +1688,22 @@ function buildOpsCategoryOverviewRows(source, context) {
     .filter((group) => !query || group.category.toLowerCase().includes(query))
     .sort((left, right) => left.category.localeCompare(right.category))
     .map((group) => {
-      // Theoretical Consumption = Opening + Purchases - Closing  →  Opening = Closing + Consumption - Purchases.
-      const opening = group.closing + group.cosTheoretical - group.purchases;
+      const detailRows = [...group.detail.values()]
+        .sort((left, right) => String(left.name).localeCompare(String(right.name)))
+        .map((detail) => {
+          const opening = detail.closing - detail.purchases - detail.manualAdjustments - detail.countVariance + detail.wastage + detail.cosActual;
+          return {
+            Item: detail.name,
+            Unit: detail.unit,
+            'Opening Stock Value': currency(opening),
+            Purchases: currency(detail.purchases),
+            'Closing Stock Value': currency(detail.closing),
+            'COS Actual': currency(detail.cosActual),
+            'COS Theoretical': currency(detail.cosTheoretical),
+            'COS Difference': currency(detail.cosActual - detail.cosTheoretical)
+          };
+        });
+      const opening = detailRows.reduce((sum, detail) => sum + parseCurrencyValue(detail['Opening Stock Value']), 0);
       return {
         'Inventory Category': group.category,
         Locations: locationLabel,
@@ -1676,18 +1714,7 @@ function buildOpsCategoryOverviewRows(source, context) {
         'COS Theoretical': currency(group.cosTheoretical),
         'COS Difference': currency(group.cosActual - group.cosTheoretical),
         _category: group.category,
-        _detailRows: [...group.detail.values()]
-          .sort((left, right) => String(left.name).localeCompare(String(right.name)))
-          .map((detail) => ({
-            Item: detail.name,
-            Unit: detail.unit,
-            'Opening Stock Value': currency(detail.closing + detail.cosTheoretical - detail.purchases),
-            Purchases: currency(detail.purchases),
-            'Closing Stock Value': currency(detail.closing),
-            'COS Actual': currency(detail.cosActual),
-            'COS Theoretical': currency(detail.cosTheoretical),
-            'COS Difference': currency(detail.cosActual - detail.cosTheoretical)
-          }))
+        _detailRows: detailRows
       };
     });
 }
@@ -1717,18 +1744,7 @@ function buildOpsCategoryDetailRows(source, context) {
 }
 
 function buildOpsDashboardRows(source, context) {
-  const metrics = calculateDashboardMetrics(source, context.endDate).summary || {};
-  const combinedMetrics = {
-    'Purchases Ex': metrics.purchases?.value || currency(0),
-    'Opening Stock': metrics.openingStock?.value || currency(0),
-    'Closing Stock': metrics.closingStock?.value || currency(0),
-    'Cost Of Sales': metrics.costOfSales?.value || currency(0),
-    'Count Variance': metrics.countVariance?.value || currency(0),
-    'Manual Adjustments': metrics.manualAdjustments?.value || currency(0),
-    Wastage: metrics.wastage?.value || currency(0)
-  };
-
-  return opsDashboardLocations(context).map((location) => {
+  const rows = opsDashboardLocations(context).map((location) => {
     const locationId = String(location.id || '').trim();
     const locationContext = { ...context, locationId };
     const purchases = opsDashboardPurchases(source, context, locationId);
@@ -1748,10 +1764,32 @@ function buildOpsDashboardRows(source, context) {
       'Count Variance': currency(countVariance),
       'Manual Adjustments': currency(manualAdjustments),
       Wastage: currency(wastage),
-      _locationId: locationId,
-      _combinedMetrics: combinedMetrics
+      _locationId: locationId
     };
   }).filter((row) => passesReportFilters(row, context));
+
+  const combinedMetrics = rows.reduce((totals, row) => ({
+    'Purchases Ex': currency(parseCurrencyValue(totals['Purchases Ex']) + parseCurrencyValue(row['Purchases Ex'])),
+    'Opening Stock': currency(parseCurrencyValue(totals['Opening Stock']) + parseCurrencyValue(row['Opening Stock'])),
+    'Closing Stock': currency(parseCurrencyValue(totals['Closing Stock']) + parseCurrencyValue(row['Closing Stock'])),
+    'Cost Of Sales': currency(parseCurrencyValue(totals['Cost Of Sales']) + parseCurrencyValue(row['Cost Of Sales'])),
+    'Count Variance': currency(parseCurrencyValue(totals['Count Variance']) + parseCurrencyValue(row['Count Variance'])),
+    'Manual Adjustments': currency(parseCurrencyValue(totals['Manual Adjustments']) + parseCurrencyValue(row['Manual Adjustments'])),
+    Wastage: currency(parseCurrencyValue(totals.Wastage) + parseCurrencyValue(row.Wastage))
+  }), {
+    'Purchases Ex': currency(0),
+    'Opening Stock': currency(0),
+    'Closing Stock': currency(0),
+    'Cost Of Sales': currency(0),
+    'Count Variance': currency(0),
+    'Manual Adjustments': currency(0),
+    Wastage: currency(0)
+  });
+
+  return rows.map((row) => ({
+    ...row,
+    _combinedMetrics: combinedMetrics
+  }));
 }
 
 function opsDashboardLocations(context = {}) {
@@ -2133,12 +2171,9 @@ function buildPaymentRows(source, context) {
       };
       const allocatedTip = tip * share;
       const allocatedTax = tax * share;
-      // Tips are a pass-through to staff, not revenue — exclude them from Gross/Net
-      // and report them in their own column. Everything else is on a tips-excluded basis.
-      const saleExclTips = Math.max(0, amount - allocatedTip);
       current.orders += 1;
-      current.gross += refund ? 0 : saleExclTips;
-      current.refunds += refund ? saleExclTips : 0;
+      current.gross += refund ? 0 : amount;
+      current.refunds += refund ? amount : 0;
       current.tips += refund ? -allocatedTip : allocatedTip;
       current.tax += refund ? -allocatedTax : allocatedTax;
       current.withTip += allocatedTip > 0 ? 1 : 0;
@@ -2149,10 +2184,9 @@ function buildPaymentRows(source, context) {
   });
 
   return [...groups.values()].map((row) => {
-    // Net = revenue EXCLUSIVE of VAT: (Gross excl tips − Refunds) − Tax (the VAT portion).
-    // We intentionally do NOT expose a VAT-inclusive "Net" — Net always means ex-VAT.
+    // Gross includes tips. Net remains sales ex-VAT, so subtract refunds, tips, and the VAT portion.
     const netAfterRefunds = row.gross - row.refunds;
-    const netExVat = netAfterRefunds - row.tax;
+    const netExVat = netAfterRefunds - row.tips - row.tax;
     return {
       'POS Source': row['POS Source'],
       Tender: row.Tender,
@@ -2407,7 +2441,7 @@ function buildWasteParetoRows(source, context) {
     const category = String(log.category || item.category || 'General').trim() || 'General';
     const locationLabel = locationName(context, logLocationId(log), context.defaultLocationName || DEFAULT_STOCK_LOCATION_NAME);
     const timestamp = log.createdAt || log.timestamp || log.date || '';
-    const user = reportActor(log) || 'Unknown';
+    const user = resolveReportActor(context, log, 'Unknown');
     const qtyValue = Math.abs(Number(log.qty ?? log.quantity ?? log.impactQty ?? 0));
     // Distinguish the two adjustment-based wastage sources: the dedicated product/menu-item wastage
     // flow (postWastageAdjustment) always writes adjustment_type='wastage' → mode==='wastage';
@@ -2447,7 +2481,7 @@ function buildWasteParetoRows(source, context) {
     const category = String(log.category || log.itemCategory || 'Manufacturing').trim() || 'Manufacturing';
     const locationLabel = locationName(context, logLocationId(log), context.defaultLocationName || DEFAULT_STOCK_LOCATION_NAME);
     const timestamp = log.createdAt || log.timestamp || log.postedAt || log.date || '';
-    const user = reportActor(log) || 'Unknown';
+    const user = resolveReportActor(context, log, 'Unknown');
     const unit = log.unit || log.uom || '';
     const key = `Manufacture Wastage::${reason}::${user}`;
     const current = reasons.get(key) || { reason, incidents: 0, loss: 0, locations: new Set(), users: new Set(), categoryLoss: new Map(), locationLoss: new Map(), events: [] };
@@ -2807,6 +2841,96 @@ function deriveCostImpact(qty, unitCost, storedImpact) {
   return Number.isFinite(stored) ? Math.abs(stored) : 0;
 }
 
+function buildOpsCategoryItemMetrics(source, context) {
+  const metrics = new Map();
+  const ensure = (itemId) => {
+    const key = String(itemId || '').trim();
+    if (!key) return null;
+    if (!metrics.has(key)) {
+      metrics.set(key, {
+        purchases: 0,
+        cosActual: 0,
+        countVariance: 0,
+        manualAdjustments: 0,
+        wastage: 0
+      });
+    }
+    return metrics.get(key);
+  };
+
+  source.logs_grv
+    .filter((log) => inDateRange(logDate(log), context))
+    .forEach((log) => {
+      toArray(log.items).forEach((line) => {
+        if (!matchesLocationId(context, lineLocationId(line, log))) return;
+        const itemId = String(line.itemId || line.stockItemId || line.id || '').trim();
+        const target = ensure(itemId);
+        if (!target) return;
+        target.purchases += sumItems([line], 'lineTotalEx');
+      });
+    });
+
+  source.logs_cn
+    .filter((log) => inDateRange(logDate(log), context))
+    .forEach((log) => {
+      toArray(log.items).forEach((line) => {
+        if (!matchesLocationId(context, lineLocationId(line, log))) return;
+        const itemId = String(line.itemId || line.stockItemId || line.id || '').trim();
+        const target = ensure(itemId);
+        if (!target) return;
+        target.purchases -= sumItems([line], 'lineTotalEx');
+      });
+    });
+
+  source.logs_sales
+    .filter((log) => inDateRange(logDate(log), context))
+    .forEach((log) => {
+      saleMovementLines(log).forEach((line) => {
+        if (!matchesLocationId(context, lineLocationId(line, log))) return;
+        const target = ensure(stockMovementItemId(line));
+        if (!target) return;
+        target.cosActual += Math.abs(saleLineCostImpact(line, log, context.ingredientMap));
+      });
+    });
+
+  source.logs_stocktakes
+    .filter((log) => inDateRange(logDate(log), context))
+    .forEach((log) => {
+      toArray(log.items).forEach((line) => {
+        if (!matchesLocationId(context, lineLocationId(line, log))) return;
+        const target = ensure(line.id || line.itemId || line.stockItemId);
+        if (!target) return;
+        target.countVariance += opsDashboardLineImpact(line, context);
+      });
+    });
+
+  source.logs_adj
+    .filter((log) => inDateRange(logDate(log), context))
+    .forEach((log) => {
+      if (!matchesLocationId(context, logLocationId(log))) return;
+      const itemId = String(log.stockItemId || log.itemId || '').trim();
+      const target = ensure(itemId);
+      if (!target) return;
+      const item = context.ingredientMap.get(itemId) || {};
+      const qty = Number(log.impactQty ?? log.qty ?? 0);
+      const unitCost = Number(item.cost || 0) || 0;
+      const derived = (qty !== 0 && unitCost > 0) ? qty * unitCost : Number(log.impactEx || 0);
+      if (isWastageAdjustmentLog(log)) target.wastage += Math.abs(Number.isFinite(derived) ? derived : 0);
+      else target.manualAdjustments += Number.isFinite(derived) ? derived : 0;
+    });
+
+  source.logs_mfg
+    .filter((log) => inDateRange(logDate(log), context))
+    .forEach((log) => {
+      if (!matchesLocationId(context, logLocationId(log))) return;
+      const target = ensure(log.itemId || log.manufacturedItemId || log.stockItemId);
+      if (!target) return;
+      target.wastage += getManufacturingWastageValue(log);
+    });
+
+  return metrics;
+}
+
 function saleLineCostImpact(line = {}, log = {}, ingredientMap = null) {
   const lineKey = saleProductKey(line, log);
   const movementTotal = saleMovementLines(log)
@@ -2920,6 +3044,21 @@ function passesCommon(row, context) {
     }
   }
   return passesSearch(row, context);
+}
+
+function isLowStockEligibleItem(item = {}) {
+  if (item.isSubRecipe === true) return false;
+  const explicit = String(item.itemType || item.stockItemType || item.specificationType || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_');
+  if (['sub_recipe', 'subrecipe'].includes(explicit)) return false;
+  const category = String(item.category || '').toLowerCase();
+  return !category.includes('sub recipe') && !category.includes('sub-recipe');
+}
+
+function isOpsReportEligibleItem(item = {}) {
+  return !isArchived(item) && isLowStockEligibleItem(item);
 }
 
 function passesReportFilters(row, context, locationKeys = ['Location']) {
