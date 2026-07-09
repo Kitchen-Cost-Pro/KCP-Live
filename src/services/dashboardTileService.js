@@ -136,7 +136,9 @@ async function fetchDashboardTiles(workspaceId, { range = '7', siteId = '' } = {
     costOfSales: serverSummary.costOfSales || metricValue(costOfSales, 'currency'),
     countVariance: serverSummary.countVariance || metricValue(countVariance, 'currency'),
     manualAdjustments: serverSummary.manualAdjustments || metricValue(manualAdjustments, 'currency'),
-    wastage: normalizeAbsoluteMetric(serverSummary.wastage, wastage),
+    // Prefer the reconciled tile total built from movementTotals so product wastage
+    // adjustments and manufacturing wastage are both reflected consistently here.
+    wastage: metricValue(Math.abs(wastage), 'currency'),
     manufacturingWastage: normalizeAbsoluteMetric(serverSummary.manufacturingWastage, movementTotals.manufacturingWastage),
     lowStockCount: serverSummary.lowStockCount || metricValue(lowStockItemCount, 'number'),
     gpPercentage: serverSummary.gpPercentage || metricValue(averageGp, 'percent'),
