@@ -6306,14 +6306,16 @@ export async function getManufacturingBatches(request: Request, env: Env, auth: 
         mb.raw_json,
         mb.created_at
        FROM manufacturing_batches mb
-       LEFT JOIN stock_items si ON si.id = mb.stock_item_id AND si.workspace_id = mb.workspace_id
-       LEFT JOIN locations l ON l.id = mb.location_id AND l.workspace_id = mb.workspace_id
+        LEFT JOIN stock_items si ON si.id = mb.stock_item_id AND si.workspace_id = mb.workspace_id
+        LEFT JOIN locations l ON l.id = mb.location_id AND l.workspace_id = mb.workspace_id
       WHERE mb.workspace_id = ?1
       ORDER BY mb.posted_at DESC
       LIMIT ?2`
   ).bind(workspaceId, limit).all();
-  const batches = (rows.results || []).map((row) => {
-    const record = row as Record<string, unknown>;
+  const rowsResults = (rows.results || []) as Record<string, unknown>[];
+  await attachActorInfo(env, workspaceId, rowsResults);
+  const batches = rowsResults.map((row) => {
+    const record = row;
     const raw = objectValue(jsonParse(record.raw_json));
     return {
       ...raw,
@@ -6330,7 +6332,11 @@ export async function getManufacturingBatches(request: Request, env: Env, auth: 
       locationId: text(raw.locationId || record.location_id),
       locationName: text(raw.locationName || record.location_display_name || record.location_name),
       note: text(raw.note),
-      components: arrayValue(raw.components)
+      components: arrayValue(raw.components),
+      createdBy: text(record.created_by || raw.createdBy),
+      createdByName: text(record.created_by_name || raw.createdByName),
+      createdByEmail: text(record.created_by_email || raw.createdByEmail),
+      user: text(record.created_by_name || raw.createdByName || record.created_by_email || raw.createdByEmail)
     };
   });
   return json(request, env, { ok: true, batches });
@@ -6458,7 +6464,7 @@ export async function postManufacturingBatch(request: Request, env: Env, auth: A
   const producedValue = producedQty * actualUnitCost;
   const wastageQty = Math.max(expectedQty - producedQty, 0);
   const wastageValue = wastageQty * expectedUnitCost;
-  const normalized = {
+  const normalized: Record<string, any> = {
     id: batchId,
     timestamp: postedAt,
     date: text(payload.date || postedAt).slice(0, 10),
@@ -6479,8 +6485,14 @@ export async function postManufacturingBatch(request: Request, env: Env, auth: A
     siteId: text(payload.siteId),
     siteName: text(payload.siteName),
     note: text(payload.note),
-    components
+    components,
+    created_by: auth.uid,
+    createdBy: auth.uid
   };
+  await attachActorInfo(env, workspaceId, [normalized]);
+  normalized.createdByName = normalized.created_by_name;
+  normalized.createdByEmail = normalized.created_by_email;
+  normalized.user = normalized.created_by_name || normalized.created_by_email || auth.uid;
 
   statements.unshift(
     env.DB.prepare(
@@ -7603,6 +7615,7 @@ export async function getDashboard(request: Request, env: Env, auth: AuthContext
   // 'remove' or negative qty is a MANUAL adjustment, NOT wastage.
   const IS_WASTE_SQL = `(
     lower(sm.movement_type) LIKE '%waste%'
+    OR lower(sm.movement_type) LIKE '%wastage%'
     OR lower(sm.movement_type) = 'manufacturing_wastage'
     OR (lower(sm.movement_type) LIKE '%adjust%' AND (
          lower(COALESCE(json_extract(sm.metadata_json, '$.mode'), '')) = 'wastage'

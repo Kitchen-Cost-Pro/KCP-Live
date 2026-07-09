@@ -757,6 +757,7 @@ export default {
     try {
       return await handle(request, env);
     } catch (cause) {
+      console.error('FETCH ERROR:', cause);
       // Map auth/permission errors thrown by handlers (requireAuth/requireAdmin/scoped) to 401 so the
       // frontend treats them as "not signed in" rather than a server error. Mirrors legacy behaviour.
       const raw = cause instanceof Error ? cause.message : 'Internal error.';

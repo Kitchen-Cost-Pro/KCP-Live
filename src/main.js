@@ -17287,7 +17287,7 @@ function createEmptyAdjustmentDraft(seed = {}) {
     locationId: 'main',
     locationName: 'Main Store',
     note: '',
-    wasteReason: 'Other',
+    wasteReason: '',
     items: [],
     ...seed
   };

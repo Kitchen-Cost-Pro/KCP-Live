@@ -1011,7 +1011,7 @@ function createEmptyDraft() {
     locationId: 'main',
     locationName: 'Main Store',
     note: '',
-    wasteReason: 'Other',
+    wasteReason: '',
     items: []
   };
 }
