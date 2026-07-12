@@ -19,6 +19,16 @@ test('bulk transfer template save cannot be submitted twice while pending', () =
   const handler = section(mainSource, 'async function saveTransferTemplateDraft()', 'async function deleteTransferTemplateEntry');
   assert.match(handler, /actionStatus === 'saving-template'\) return/);
   assert.match(handler, /showTransferToast\(message, 'error'\)/);
+  assert.match(handler, /pendingFocusField = null/);
+  assert.match(handler, /document\.activeElement\.blur\(\)/);
+  assert.ok(
+    handler.indexOf('pendingFocusField = null') < handler.indexOf("actionStatus: 'saving-template'"),
+    'template form focus must be released before the saving render'
+  );
+  assert.ok(
+    handler.match(/pendingFocusField = null/g)?.length >= 3,
+    'focus must also be released before success and error completion renders'
+  );
 
   const builder = section(transferComponentSource, 'function renderTransferTemplateBuilder', 'function bindTransferEvents');
   assert.match(builder, /const isSaving = transfers\.actionStatus === 'saving-template'/);

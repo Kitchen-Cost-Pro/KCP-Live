@@ -11404,6 +11404,15 @@ async function saveTransferTemplateDraft() {
       unit: item.unit || ''
     }));
 
+  // Typing in the template name/notes stores a pending focus snapshot. The first save render can
+  // otherwise restore that text-field focus, after which renderApp() intentionally suppresses the
+  // success render and leaves the user looking at a permanent "Saving..." button even though the
+  // API has committed the template. Release both the live and queued focus before starting.
+  pendingFocusField = null;
+  if (typeof document !== 'undefined' && document.activeElement && typeof document.activeElement.blur === 'function') {
+    document.activeElement.blur();
+  }
+
   appState.transfers = {
     ...appState.transfers,
     actionStatus: 'saving-template',
@@ -11430,6 +11439,13 @@ async function saveTransferTemplateDraft() {
       items: saved.items || selectedItems
     };
     const withoutOld = (appState.transfers.templates || []).filter((t) => String(t.id) !== String(savedTemplate.id));
+    // Force the completion render even if the user clicked back into the name or notes field while
+    // the network request was pending. Otherwise renderApp() will intentionally defer the route
+    // change and the completed save still looks frozen.
+    pendingFocusField = null;
+    if (typeof document !== 'undefined' && document.activeElement && typeof document.activeElement.blur === 'function') {
+      document.activeElement.blur();
+    }
     appState.transfers = {
       ...appState.transfers,
       templates: [...withoutOld, savedTemplate].sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''))),
@@ -11446,6 +11462,11 @@ async function saveTransferTemplateDraft() {
     showTransferToast('Transfer template saved.', 'success');
   } catch (error) {
     const message = error.message || 'Could not save transfer template.';
+    // Error feedback must also replace the saving state immediately instead of waiting for blur.
+    pendingFocusField = null;
+    if (typeof document !== 'undefined' && document.activeElement && typeof document.activeElement.blur === 'function') {
+      document.activeElement.blur();
+    }
     appState.transfers = {
       ...appState.transfers,
       actionStatus: '',
