@@ -8,7 +8,7 @@
   flex-direction: column;
   border-right: 1px solid var(--border-subtle);
   background:
-    linear-gradient(180deg, color-mix(in srgb, var(--restaurant-theme-panel) 96%, var(--surface-primary)), color-mix(in srgb, var(--surface-primary) 96%, var(--bg-primary)));
+    linear-gradient(180deg, color-mix(in srgb, var(--restaurant-theme-panel) 72%, var(--surface-primary)), color-mix(in srgb, var(--surface-primary) 48%, transparent));
   color: var(--text-main);
   box-shadow: var(--shadow-soft);
   backdrop-filter: blur(16px);

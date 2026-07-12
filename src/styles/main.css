@@ -10,8 +10,8 @@
   color-scheme: light;
   --bg-primary: #f2f5f9;
   --bg-secondary: #e8eef5;
-  --surface-primary: rgba(255, 255, 255, 0.97);
-  --surface-secondary: rgba(248, 250, 252, 0.94);
+  --surface-primary: rgba(255, 255, 255, 0.92);
+  --surface-secondary: rgba(248, 250, 252, 0.84);
   --surface-elevated: #ffffff;
   --border-subtle: #d7e0ea;
   --border-strong: #b8c5d3;
@@ -36,11 +36,11 @@
   --skeleton-b: #f8fafc;
   --restaurant-theme-background-image: none;
   --restaurant-theme-background-position: center;
-  --restaurant-theme-overlay: rgba(242, 245, 249, 0.82);
-  --restaurant-theme-panel: rgba(255, 255, 255, 0.94);
-  --restaurant-theme-page-tint: rgba(242, 245, 249, 0.94);
-  --restaurant-theme-page-tint-soft: rgba(242, 245, 249, 0.86);
-  --surface-glass-blur: 14px;
+  --restaurant-theme-overlay: rgba(242, 245, 249, 0.08);
+  --restaurant-theme-panel: rgba(255, 255, 255, 0.62);
+  --restaurant-theme-page-tint: rgba(242, 245, 249, 0.68);
+  --restaurant-theme-page-tint-soft: rgba(242, 245, 249, 0.40);
+  --surface-glass-blur: 10px;
 }
 
 :root[data-theme="dark"] {
@@ -73,16 +73,16 @@
   --skeleton-b: #2a3a50;
   --bg-primary: #0F1319;
   --bg-secondary: #181E26;
-  --surface-primary: rgba(24, 30, 38, 0.97);
-  --surface-secondary: rgba(20, 26, 34, 0.93);
+  --surface-primary: rgba(24, 30, 38, 0.92);
+  --surface-secondary: rgba(20, 26, 34, 0.82);
   --surface-elevated: #1d2530;
   --border-subtle: rgba(255, 255, 255, 0.12);
   --border-strong: rgba(255, 255, 255, 0.24);
-  --restaurant-theme-overlay: rgba(15, 19, 25, 0.84);
-  --restaurant-theme-panel: rgba(24, 30, 38, 0.94);
-  --restaurant-theme-page-tint: rgba(15, 19, 25, 0.92);
-  --restaurant-theme-page-tint-soft: rgba(15, 19, 25, 0.82);
-  --surface-glass-blur: 16px;
+  --restaurant-theme-overlay: rgba(15, 19, 25, 0.12);
+  --restaurant-theme-panel: rgba(24, 30, 38, 0.58);
+  --restaurant-theme-page-tint: rgba(15, 19, 25, 0.66);
+  --restaurant-theme-page-tint-soft: rgba(15, 19, 25, 0.40);
+  --surface-glass-blur: 12px;
   --bg-card: #181E26;
   --bg-elev: #1E2530;
   --hair: rgba(255, 255, 255, 0.08);

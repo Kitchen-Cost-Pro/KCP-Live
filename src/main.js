@@ -10594,9 +10594,9 @@ function applyRestaurantGlassSurfaces() {
   const computed = getComputedStyle(root);
   const isDark = appState.theme === 'dark';
   const surfaceAlphas = [
-    ['--surface-primary', isDark ? 0.97 : 0.98],
-    ['--surface-secondary', isDark ? 0.93 : 0.95],
-    ['--surface-elevated', isDark ? 0.99 : 1]
+    ['--surface-primary', isDark ? 0.92 : 0.92],
+    ['--surface-secondary', isDark ? 0.82 : 0.84],
+    ['--surface-elevated', isDark ? 0.97 : 0.98]
   ];
 
   surfaceAlphas.forEach(([name, alpha]) => {
@@ -10605,11 +10605,11 @@ function applyRestaurantGlassSurfaces() {
     if (glassColor) root.style.setProperty(name, glassColor);
   });
 
-  root.style.setProperty('--restaurant-theme-overlay', isDark ? 'rgba(15, 19, 25, 0.84)' : 'rgba(242, 245, 249, 0.82)');
-  root.style.setProperty('--restaurant-theme-panel', isDark ? 'rgba(24, 30, 38, 0.94)' : 'rgba(255, 255, 255, 0.94)');
-  root.style.setProperty('--restaurant-theme-page-tint', isDark ? 'rgba(15, 19, 25, 0.92)' : 'rgba(242, 245, 249, 0.94)');
-  root.style.setProperty('--restaurant-theme-page-tint-soft', isDark ? 'rgba(15, 19, 25, 0.82)' : 'rgba(242, 245, 249, 0.86)');
-  root.style.setProperty('--surface-glass-blur', isDark ? '16px' : '14px');
+  root.style.setProperty('--restaurant-theme-overlay', isDark ? 'rgba(15, 19, 25, 0.12)' : 'rgba(242, 245, 249, 0.08)');
+  root.style.setProperty('--restaurant-theme-panel', isDark ? 'rgba(24, 30, 38, 0.58)' : 'rgba(255, 255, 255, 0.62)');
+  root.style.setProperty('--restaurant-theme-page-tint', isDark ? 'rgba(15, 19, 25, 0.66)' : 'rgba(242, 245, 249, 0.68)');
+  root.style.setProperty('--restaurant-theme-page-tint-soft', isDark ? 'rgba(15, 19, 25, 0.40)' : 'rgba(242, 245, 249, 0.40)');
+  root.style.setProperty('--surface-glass-blur', isDark ? '12px' : '10px');
 }
 
 function toAlphaColor(colorValue = '', alpha = 1) {
