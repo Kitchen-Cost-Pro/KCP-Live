@@ -17,9 +17,9 @@
   z-index: 0;
   pointer-events: auto;
   background:
-    radial-gradient(circle at 22% 18%, rgba(96, 165, 250, 0.08), transparent 34%),
-    linear-gradient(90deg, var(--restaurant-theme-overlay) 0%, color-mix(in srgb, var(--restaurant-theme-overlay) 38%, transparent) 54%, rgba(2, 6, 23, 0.12) 100%),
-    linear-gradient(180deg, rgba(2, 6, 23, 0), rgba(2, 6, 23, 0.18)),
+    radial-gradient(circle at 22% 18%, color-mix(in srgb, var(--accent-blue) 8%, transparent), transparent 34%),
+    linear-gradient(180deg, var(--restaurant-theme-page-tint), var(--restaurant-theme-page-tint-soft)),
+    linear-gradient(90deg, var(--restaurant-theme-overlay) 0%, color-mix(in srgb, var(--restaurant-theme-overlay) 88%, transparent) 58%, var(--restaurant-theme-overlay) 100%),
     var(--restaurant-theme-background-image),
     linear-gradient(180deg, var(--bg-primary), var(--bg-secondary));
   background-position: center, center, center, var(--restaurant-theme-background-position), center;
@@ -76,7 +76,8 @@
   height: 100%;
   overflow-y: auto;
   background:
-    linear-gradient(180deg, var(--restaurant-theme-page-tint), var(--restaurant-theme-page-tint-soft));
+    linear-gradient(180deg, var(--restaurant-theme-page-tint), var(--restaurant-theme-page-tint-soft)),
+    var(--bg-primary);
   /* backdrop-filter intentionally removed — applying it here creates a new containing
      block for position:fixed descendants in Chrome/Safari, which breaks modal positioning. */
 }

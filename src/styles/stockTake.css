@@ -1870,10 +1870,10 @@
 
 .stockTakeLocationExportRow {
   width: 100%;
-  border: 1px solid rgba(15, 23, 42, 0.1);
+  border: 1px solid var(--border-subtle);
   border-radius: 16px;
   padding: 0.85rem 1rem;
-  background: #fff;
+  background: var(--surface-elevated);
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -1889,11 +1889,11 @@
 }
 
 .stockTakeLocationExportRow strong {
-  color: #0f172a;
+  color: var(--text-main);
 }
 
 .stockTakeLocationExportRow span {
-  color: #64748b;
+  color: var(--text-muted);
   font-size: 0.82rem;
 }
 

@@ -1,13 +1,16 @@
 {
-  "name": "kcp-live-converted",
-  "version": "0.1.0",
+  "name": "kcp-live",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite --host localhost",
+    "dev:worker": "npm --prefix cloudflare-v2 run dev",
     "test": "node --test \"src/**/*.test.js\"",
     "build": "vite build && node scripts/copy-admin-route.mjs",
     "preview": "vite preview --host 127.0.0.1",
+    "typecheck:worker": "npm --prefix cloudflare-v2 run typecheck",
+    "deploy:worker": "npm --prefix cloudflare-v2 run deploy",
     "check:hardening": "npm test && npm run build && npm --prefix cloudflare-v2 run check:deploy"
   },
   "dependencies": {
@@ -20,5 +23,6 @@
   },
   "devDependencies": {
     "vite": "^6.4.3"
-  }
+  },
+  "description": "Kitchen Cost Pro Cloudflare production application"
 }

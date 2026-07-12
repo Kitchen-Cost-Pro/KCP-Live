@@ -2237,8 +2237,8 @@
 .stockModule__locationCostingSummary div {
   padding: 0.7rem;
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.74);
-  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: var(--surface-secondary);
+  border: 1px solid var(--border-subtle);
 }
 
 .stockModule__locationCostingSummary span {
@@ -2257,9 +2257,9 @@
 
 .stockModule__costingPreviewTable {
   overflow: auto;
-  border: 1px solid rgba(148, 163, 184, 0.24);
+  border: 1px solid var(--border-subtle);
   border-radius: 14px;
-  background: #fff;
+  background: var(--surface-elevated);
 }
 
 .stockModule__costingPreviewTable table {

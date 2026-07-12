@@ -64,6 +64,7 @@ import {
   historicalTransactionReference,
   resolveTransactionReferences,
 } from "./transaction-references";
+import { resolveLocationDisplayName } from "./location-display";
 // @ts-ignore Shared unit-aware Yoco Money conversion. Money objects are minor units; normalized scalars are major units.
 import { yocoMoneyToMajor } from "../../../src/modules/reporting/engine/yocoFinancials.js";
 
@@ -3169,7 +3170,16 @@ export async function getLocations(
       .all();
   }
 
-  return json(request, env, { ok: true, locations: rows.results || [] });
+  const locations = (rows.results || []).map((row: Record<string, unknown>) => {
+    const resolvedName = resolveLocationDisplayName(row);
+    return {
+      ...row,
+      name: resolvedName,
+      display_name: resolvedName,
+    };
+  });
+
+  return json(request, env, { ok: true, locations });
 }
 
 export async function postLocation(

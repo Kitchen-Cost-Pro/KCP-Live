@@ -8,16 +8,16 @@
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   color-scheme: light;
-  --bg-primary: #f6f8fb;
-  --bg-secondary: #eef3f8;
-  --surface-primary: rgba(255, 255, 255, 0.88);
-  --surface-secondary: rgba(248, 250, 252, 0.78);
+  --bg-primary: #f2f5f9;
+  --bg-secondary: #e8eef5;
+  --surface-primary: rgba(255, 255, 255, 0.97);
+  --surface-secondary: rgba(248, 250, 252, 0.94);
   --surface-elevated: #ffffff;
-  --border-subtle: #e2e8f0;
-  --border-strong: #cbd5e1;
+  --border-subtle: #d7e0ea;
+  --border-strong: #b8c5d3;
   --text-main: #0f172a;
-  --text-muted: #64748b;
-  --text-soft: #94a3b8;
+  --text-muted: #4f6075;
+  --text-soft: #718096;
   --accent-blue: #0099e0;
   --accent-indigo: #4f46e5;
   --accent-cyan: #0891b2;
@@ -36,11 +36,11 @@
   --skeleton-b: #f8fafc;
   --restaurant-theme-background-image: none;
   --restaurant-theme-background-position: center;
-  --restaurant-theme-overlay: rgba(246, 248, 251, 0.04);
-  --restaurant-theme-panel: rgba(255, 255, 255, 0.42);
-  --restaurant-theme-page-tint: rgba(246, 248, 251, 0.58);
-  --restaurant-theme-page-tint-soft: rgba(246, 248, 251, 0.34);
-  --surface-glass-blur: 8px;
+  --restaurant-theme-overlay: rgba(242, 245, 249, 0.82);
+  --restaurant-theme-panel: rgba(255, 255, 255, 0.94);
+  --restaurant-theme-page-tint: rgba(242, 245, 249, 0.94);
+  --restaurant-theme-page-tint-soft: rgba(242, 245, 249, 0.86);
+  --surface-glass-blur: 14px;
 }
 
 :root[data-theme="dark"] {
@@ -53,8 +53,8 @@
   --border-subtle: #243449;
   --border-strong: #3a4b62;
   --text-main: #e5edf7;
-  --text-muted: #9fb0c6;
-  --text-soft: #6f829a;
+  --text-muted: #b6c2d1;
+  --text-soft: #8796aa;
   --accent-blue: #38bdf8;
   --accent-indigo: #818cf8;
   --accent-cyan: #22d3ee;
@@ -73,16 +73,16 @@
   --skeleton-b: #2a3a50;
   --bg-primary: #0F1319;
   --bg-secondary: #181E26;
-  --surface-primary: rgba(24, 30, 38, 0.90);
-  --surface-secondary: rgba(24, 30, 38, 0.72);
-  --surface-elevated: #181E26;
-  --border-subtle: rgba(255, 255, 255, 0.08);
-  --border-strong: rgba(255, 255, 255, 0.18);
-  --restaurant-theme-overlay: rgba(15, 19, 25, 0.04);
-  --restaurant-theme-panel: rgba(24, 30, 38, 0.34);
-  --restaurant-theme-page-tint: rgba(15, 19, 25, 0.54);
-  --restaurant-theme-page-tint-soft: rgba(15, 19, 25, 0.28);
-  --surface-glass-blur: 10px;
+  --surface-primary: rgba(24, 30, 38, 0.97);
+  --surface-secondary: rgba(20, 26, 34, 0.93);
+  --surface-elevated: #1d2530;
+  --border-subtle: rgba(255, 255, 255, 0.12);
+  --border-strong: rgba(255, 255, 255, 0.24);
+  --restaurant-theme-overlay: rgba(15, 19, 25, 0.84);
+  --restaurant-theme-panel: rgba(24, 30, 38, 0.94);
+  --restaurant-theme-page-tint: rgba(15, 19, 25, 0.92);
+  --restaurant-theme-page-tint-soft: rgba(15, 19, 25, 0.82);
+  --surface-glass-blur: 16px;
   --bg-card: #181E26;
   --bg-elev: #1E2530;
   --hair: rgba(255, 255, 255, 0.08);
@@ -160,6 +160,34 @@ button,
 input,
 select {
   font: inherit;
+}
+
+
+button,
+input,
+select,
+textarea {
+  color: var(--text-main);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-soft);
+  opacity: 1;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent-blue) 72%, transparent);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent-blue) 28%, transparent);
+  color: var(--text-main);
 }
 
 .kcpLoadingPanel {

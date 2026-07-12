@@ -2573,9 +2573,9 @@
 }
 
 .mfgTypeSegment button.is-selected {
-  background: #fff;
-  color: #0f172a;
-  box-shadow: 0 6px 14px rgba(15, 23, 42, 0.08);
+  background: var(--surface-elevated);
+  color: var(--text-main);
+  box-shadow: var(--shadow-soft);
 }
 
 .mfgFilterStack {

@@ -7,6 +7,7 @@ import {
   normalizeStockRouting
 } from './locationModel.js';
 import { getLocationStock } from '../utils/stockBalances.js';
+import { resolveLocationDisplayName } from '../utils/locationDisplayName.js';
 
 export function subscribeLocationsWorkspace(workspaceId, { onSnapshot, onError } = {}) {
   const workspaceKey = String(workspaceId || '').trim();
@@ -64,6 +65,16 @@ export async function fetchLocationsWorkspace(workspaceId) {
     },
     updatedAt: new Date().toISOString()
   };
+}
+
+export async function fetchWorkspaceLocationOptions(workspaceId) {
+  const workspaceKey = String(workspaceId || '').trim();
+  if (!workspaceKey) throw new Error('Workspace id is required for locations.');
+
+  const response = await callCloudflareWorkspaceRoute(workspaceKey, 'locations');
+  return (response.locations || [])
+    .map((row) => normalizeCloudflareLocation(row, {}))
+    .filter((location) => location.id && location.active !== false);
 }
 
 export async function migrateSitesAndStockLocations(workspaceId) {
@@ -158,12 +169,21 @@ function normalizeLocationKey(value = '') {
 
 function normalizeCloudflareLocation(row = {}, settings = {}) {
   const id = String(row.id || row.locationId || '').trim();
-  const canonicalName = String(row.name || row.external_name || row.externalName || 'Location').trim();
-  const displayName = String(row.display_name || row.displayName || '').trim();
+  const raw = parseJsonObject(row.raw_json || row.rawJson);
+  const isDefault = Number(row.is_default || row.isDefault || 0) === 1 || id === DEFAULT_STOCK_LOCATION_ID;
+  const resolvedName = resolveLocationDisplayName({ ...raw, ...row, id, isDefault });
+  const canonicalName = resolveLocationDisplayName({
+    ...raw,
+    ...row,
+    id,
+    displayName: '',
+    display_name: '',
+    isDefault
+  }, resolvedName);
+  const displayName = resolvedName;
   const externalName = String(row.external_name || row.externalName || '').trim();
   const kind = String(row.kind || row.type || (Number(row.is_default || row.isDefault || 0) === 1 ? 'storage' : 'selling')).trim();
   const stockRouting = parseJsonObject(row.stock_routing_json || row.stockRoutingJson || row.stockRouting);
-  const raw = parseJsonObject(row.raw_json || row.rawJson);
   const taxInfo = normalizeLocationTaxInfo(raw.taxInfo || raw.siteTaxInfo || row.taxInfo || {});
   const siteInfo = normalizeLocationSiteInfo(raw.siteInfo || raw.site_info || row.siteInfo || {});
 
@@ -175,7 +195,7 @@ function normalizeCloudflareLocation(row = {}, settings = {}) {
     siteName: getDefaultFallbackSiteName(settings),
     name: canonicalName,
     customName: displayName && displayName !== canonicalName ? displayName : '',
-    displayName: displayName || canonicalName,
+    displayName,
     externalName,
     code: String(row.code || '').trim(),
     type: kind,
@@ -188,8 +208,8 @@ function normalizeCloudflareLocation(row = {}, settings = {}) {
     yocoLocationId: String(row.external_location_id || row.externalLocationId || '').trim(),
     yocoStoreLocationId: String(row.external_location_id || row.externalLocationId || '').trim(),
     active: row.active !== false && Number(row.active ?? 1) !== 0,
-    isDefault: Number(row.is_default || row.isDefault || 0) === 1 || id === DEFAULT_STOCK_LOCATION_ID,
-    systemLocked: Number(row.is_default || row.isDefault || 0) === 1 || id === DEFAULT_STOCK_LOCATION_ID,
+    isDefault,
+    systemLocked: isDefault,
     createdAt: row.created_at || row.createdAt || '',
     updatedAt: row.updated_at || row.updatedAt || ''
   };

@@ -2,6 +2,7 @@ import type { Env, AuthContext } from './types';
 import { postWorkspaceChat } from './chat-routes';
 import { requireAuth } from './auth';
 import { corsHeaders, error, json } from './http';
+import { ensureWorkspaceLocationNames } from './location-display';
 import {
   getAuthInvitation,
   getAuthMe,
@@ -532,6 +533,8 @@ export async function dispatchWorkspaceRoute(
   workspaceId: string,
   resource: string
 ): Promise<Response> {
+  await ensureWorkspaceLocationNames(env, workspaceId);
+
   if (request.method === 'GET' && resource === 'report-saved-views') return getReportSavedViews(request, env, auth, workspaceId);
   if (request.method === 'POST' && resource === 'report-saved-views') return postReportSavedView(request, env, auth, workspaceId);
   const savedViewMatch = routePattern(resource, /^report-saved-views\/([^/]+)$/);

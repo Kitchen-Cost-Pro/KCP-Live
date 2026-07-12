@@ -1,5 +1,11 @@
 import styles from './styles/dashboard.module.css';
-import { getDashboardDateRange, loadDashboardReportingModel } from './dashboardData.js';
+import {
+  getDashboardDateRange,
+  loadDashboardReportingModel,
+  reconcileDashboardLocationNames
+} from './dashboardData.js';
+import { fetchWorkspaceLocationOptions } from './services/locationService.js';
+import { mergeCanonicalLocations } from './utils/locationDisplayName.js';
 
 const DASHBOARD_CACHE_TTL = 60_000;
 const dashboardCache = new Map();
@@ -48,7 +54,8 @@ export function renderDashboard({ state = {}, onNavigate, onStockFilterChange, o
     to: initialRange.to,
     calendarOpen: false,
     calendarCursor: startOfCalendarMonth(initialRange.from),
-    pendingRangeStart: ''
+    pendingRangeStart: '',
+    notificationsOpen: false
   };
 
   renderLoading(view, workspaceName);
@@ -95,18 +102,24 @@ export function renderDashboard({ state = {}, onNavigate, onStockFilterChange, o
     if (entry?.promise) return entry.promise;
     if (entry?.model && Date.now() - entry.loadedAt < DASHBOARD_CACHE_TTL) return entry.model;
 
-    const promise = loadDashboardReportingModel({
-      workspaceId: workspaceKey,
-      filters: {
-        from: dashboardUi.from,
-        to: dashboardUi.to,
-        locationId: dashboardUi.locationId
-      },
-      services: { reporting: {} }
-    })
-      .then((model) => {
-        dashboardCache.set(key, { model, loadedAt: Date.now(), promise: null });
-        return model;
+    const stateLocations = getKnownStateLocations(state);
+    const promise = Promise.all([
+      loadDashboardReportingModel({
+        workspaceId: workspaceKey,
+        filters: {
+          from: dashboardUi.from,
+          to: dashboardUi.to,
+          locationId: dashboardUi.locationId
+        },
+        services: { reporting: {} }
+      }),
+      fetchWorkspaceLocationOptions(workspaceKey).catch(() => stateLocations)
+    ])
+      .then(([model, fetchedLocations]) => {
+        const canonicalLocations = mergeCanonicalLocations(stateLocations, fetchedLocations);
+        const resolvedModel = reconcileDashboardLocationNames(model, canonicalLocations);
+        dashboardCache.set(key, { model: resolvedModel, loadedAt: Date.now(), promise: null });
+        return resolvedModel;
       })
       .catch((error) => {
         dashboardCache.delete(key);
@@ -119,6 +132,20 @@ export function renderDashboard({ state = {}, onNavigate, onStockFilterChange, o
   view.__dashboardRefresh = () => loadModel(true);
   view.__dashboardApplyFilters = () => loadModel(false);
   return view;
+}
+
+function getKnownStateLocations(state = {}) {
+  return mergeCanonicalLocations(
+    state.locations?.items,
+    state.stock?.locations,
+    state.stockTake?.locations,
+    state.transfers?.locations,
+    state.purchaseOrders?.locations,
+    state.grv?.locations,
+    state.creditNotes?.locations,
+    state.adjustments?.locations,
+    state.manufacturing?.locations
+  );
 }
 
 function getDashboardCacheKey(workspaceId, ui = {}) {
@@ -314,6 +341,7 @@ function renderModel(view, ui, context) {
   syncInventoryLocation(ui, model);
   const inventoryAlerts = getScopedInventoryAlerts(ui);
   const criticalCount = inventoryAlerts.criticalCount;
+  const attentionCount = inventoryAlerts.criticalCount + inventoryAlerts.lowCount;
   const alertNames = inventoryAlerts.criticalNames.join(', ');
   const currentTheme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
   const selectedLocation = ui.locationOptions.find((location) => location.id === ui.locationId);
@@ -334,10 +362,13 @@ function renderModel(view, ui, context) {
             <input type="search" value="${escapeAttribute(ui.search)}" placeholder="Search SKU or item…" aria-label="Search dashboard stock items" data-dashboard-search>
           </label>
           <button type="button" class="${styles.iconButton}" aria-label="Refresh dashboard" title="Refresh dashboard" data-dashboard-refresh>${icon('refresh', 15)}</button>
-          <button type="button" class="${styles.iconButton}" aria-label="Review critical stock" title="Review critical stock" data-dashboard-alert-button>
-            ${icon('bell', 15)}
-            ${criticalCount ? `<span class="${styles.notificationDot}"></span>` : ''}
-          </button>
+          <div class="${styles.notificationWrap}" data-dashboard-notification-wrap>
+            <button type="button" class="${styles.iconButton} ${ui.notificationsOpen ? styles.iconButtonActive : ''}" aria-label="Open stock notifications" title="Stock notifications" aria-expanded="${ui.notificationsOpen}" aria-controls="dashboard-stock-notifications" data-dashboard-alert-button>
+              ${icon('bell', 15)}
+              ${attentionCount ? `<span class="${styles.notificationCount}">${attentionCount > 99 ? '99+' : attentionCount}</span>` : ''}
+            </button>
+            <div id="dashboard-stock-notifications" class="${styles.notificationMenu}" data-dashboard-notification-menu ${ui.notificationsOpen ? '' : 'hidden'}></div>
+          </div>
           <button type="button" class="${styles.iconButton}" aria-label="Switch to ${currentTheme === 'dark' ? 'light' : 'dark'} mode" title="Switch to ${currentTheme === 'dark' ? 'light' : 'dark'} mode" data-dashboard-theme-toggle>${icon(currentTheme === 'dark' ? 'sun' : 'moon', 15)}</button>
           <button type="button" class="${styles.iconButton}" aria-label="Open business settings" title="Open business settings" data-dashboard-settings>${icon('settings', 15)}</button>
         </div>
@@ -429,7 +460,7 @@ function renderModel(view, ui, context) {
   `;
 
   bindDashboardEvents(view, ui, context);
-  renderInventoryAlert(view, ui);
+  renderInventoryAlert(view, ui, context);
   renderTrendChart(view, ui);
   renderSupplierChart(view, model);
   renderInventory(view, ui, context);
@@ -562,8 +593,14 @@ function bindDashboardEvents(view, ui, context) {
     button.setAttribute('title', `Switch to ${nextTheme} mode`);
   }, { signal });
   view.querySelector('[data-dashboard-settings]')?.addEventListener('click', () => context.onNavigate?.('settings-business'), { signal });
-  view.querySelector('[data-dashboard-alert-button]')?.addEventListener('click', () => {
-    view.querySelector('[data-dashboard-alert]')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  view.querySelector('[data-dashboard-alert-button]')?.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    closeMenus('');
+    ui.calendarOpen = false;
+    ui.pendingRangeStart = '';
+    ui.notificationsOpen = !ui.notificationsOpen;
+    renderNotificationCenter(view, ui, context);
   }, { signal });
   view.querySelector('[data-dashboard-review-stock]')?.addEventListener('click', () => {
     const panel = view.querySelector('[data-dashboard-inventory-panel]');
@@ -581,7 +618,12 @@ function bindDashboardEvents(view, ui, context) {
       return;
     }
     if (event.target.closest('[data-dashboard-custom-select]')) return;
+    if (event.target.closest('[data-dashboard-notification-wrap]')) return;
     closeMenus('');
+    if (ui.notificationsOpen) {
+      ui.notificationsOpen = false;
+      renderNotificationCenter(view, ui, context);
+    }
     if (ui.calendarOpen) {
       ui.calendarOpen = false;
       ui.pendingRangeStart = '';
@@ -591,6 +633,10 @@ function bindDashboardEvents(view, ui, context) {
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return;
     closeMenus('');
+    if (ui.notificationsOpen) {
+      ui.notificationsOpen = false;
+      renderNotificationCenter(view, ui, context);
+    }
     if (ui.calendarOpen) {
       ui.calendarOpen = false;
       ui.pendingRangeStart = '';
@@ -599,9 +645,8 @@ function bindDashboardEvents(view, ui, context) {
   }, { signal });
 }
 
-function renderInventoryAlert(view, ui) {
+function renderInventoryAlert(view, ui, context) {
   const root = view.querySelector('[data-dashboard-alert]');
-  const bell = view.querySelector('[data-dashboard-alert-button]');
   if (!root) return;
   const alerts = getScopedInventoryAlerts(ui);
   const criticalCount = alerts.criticalCount;
@@ -617,12 +662,116 @@ function renderInventoryAlert(view, ui) {
     </p>
     ${criticalCount ? '<button type="button" data-dashboard-review-stock>Review stock</button>' : ''}
   `;
-  if (bell) {
-    bell.innerHTML = `${icon('bell', 15)}${criticalCount ? `<span class="${styles.notificationDot}"></span>` : ''}`;
-  }
   root.querySelector('[data-dashboard-review-stock]')?.addEventListener('click', () => {
-    root.closest(`.${styles.body}`)?.querySelector('[data-dashboard-inventory-panel]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    reviewDashboardStock(view, ui, context, { criticalOnly: true });
   });
+  renderNotificationCenter(view, ui, context);
+}
+
+function renderNotificationCenter(view, ui, context) {
+  const wrap = view.querySelector('[data-dashboard-notification-wrap]');
+  const bell = view.querySelector('[data-dashboard-alert-button]');
+  const menu = view.querySelector('[data-dashboard-notification-menu]');
+  if (!wrap || !bell || !menu) return;
+
+  const scopedItems = getScopedInventoryItems(ui);
+  const criticalItems = scopedItems.filter((item) => item.status === 'critical');
+  const lowItems = scopedItems.filter((item) => item.status === 'low');
+  const attentionItems = [...criticalItems, ...lowItems].slice(0, 8);
+  const count = criticalItems.length + lowItems.length;
+  const locationName = getInventoryLocationOptions(ui.model).find((location) => location.id === ui.inventoryLocationId)?.name || 'Selected location';
+
+  bell.classList.toggle(styles.iconButtonActive, ui.notificationsOpen);
+  bell.setAttribute('aria-expanded', String(ui.notificationsOpen));
+  bell.setAttribute('aria-label', count ? `Open ${count} stock notification${count === 1 ? '' : 's'}` : 'Open stock notifications');
+  bell.innerHTML = `${icon('bell', 15)}${count ? `<span class="${styles.notificationCount}">${count > 99 ? '99+' : count}</span>` : ''}`;
+  menu.hidden = !ui.notificationsOpen;
+  if (!ui.notificationsOpen) return;
+
+  menu.innerHTML = `
+    <div class="${styles.notificationHeader}">
+      <div>
+        <strong>Stock notifications</strong>
+        <span>${escapeHtml(locationName)}</span>
+      </div>
+      <button type="button" class="${styles.notificationClose}" aria-label="Close stock notifications" data-dashboard-notification-close>${icon('x', 14)}</button>
+    </div>
+    ${count ? `
+      <div class="${styles.notificationSummary}">
+        <span class="${styles.notificationSummaryCritical}">${criticalItems.length} critical</span>
+        <span class="${styles.notificationSummaryLow}">${lowItems.length} low stock</span>
+      </div>
+      <div class="${styles.notificationList}">
+        ${attentionItems.map((item) => notificationItem(item)).join('')}
+      </div>
+      ${count > attentionItems.length ? `<p class="${styles.notificationMore}">+${count - attentionItems.length} more item${count - attentionItems.length === 1 ? '' : 's'}</p>` : ''}
+      <div class="${styles.notificationActions}">
+        <button type="button" data-dashboard-notification-review>Review on dashboard</button>
+        <button type="button" data-dashboard-notification-open-stock>Open Stock Items ${icon('arrowRight', 12)}</button>
+      </div>
+    ` : `
+      <div class="${styles.notificationEmpty}">
+        ${icon('check', 20)}
+        <strong>All clear</strong>
+        <span>No critical or low-stock items at this location.</span>
+      </div>
+    `}
+  `;
+
+  menu.querySelector('[data-dashboard-notification-close]')?.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    ui.notificationsOpen = false;
+    renderNotificationCenter(view, ui, context);
+    bell.focus();
+  });
+  menu.querySelector('[data-dashboard-notification-review]')?.addEventListener('click', () => {
+    ui.notificationsOpen = false;
+    renderNotificationCenter(view, ui, context);
+    reviewDashboardStock(view, ui, context);
+  });
+  menu.querySelector('[data-dashboard-notification-open-stock]')?.addEventListener('click', () => {
+    ui.notificationsOpen = false;
+    context.onStockFilterChange?.({ query: '' });
+    context.onNavigate?.('ingredients');
+  });
+  menu.querySelectorAll('[data-dashboard-notification-item]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const itemName = String(button.dataset.itemName || '');
+      ui.notificationsOpen = false;
+      context.onStockFilterChange?.({ query: itemName });
+      context.onNavigate?.('ingredients');
+    });
+  });
+}
+
+function notificationItem(item = {}) {
+  const status = statusPresentation(item.status);
+  const stockText = `${quantity(item.qty)} / ${quantity(item.reorder)} ${item.baseUom || ''}`.trim();
+  return `
+    <button type="button" class="${styles.notificationItem}" data-dashboard-notification-item data-item-name="${escapeAttribute(item.name)}">
+      <span class="${styles.notificationItemIcon}" style="--notification-tone:${status.color}">${icon(item.status === 'critical' ? 'alert' : 'trendDown', 13)}</span>
+      <span class="${styles.notificationItemCopy}">
+        <strong>${escapeHtml(item.name)}</strong>
+        <small>${escapeHtml(stockText)}${item.supplier ? ` · ${escapeHtml(item.supplier)}` : ''}</small>
+      </span>
+      <span class="${styles.notificationItemStatus}" style="--notification-tone:${status.color}">${escapeHtml(status.label)}</span>
+    </button>
+  `;
+}
+
+function reviewDashboardStock(view, ui, context, { criticalOnly = false } = {}) {
+  const panel = view.querySelector('[data-dashboard-inventory-panel]');
+  ui.search = '';
+  ui.category = 'All';
+  ui.sortCol = 'status';
+  ui.sortDir = 'desc';
+  ui.visibleRows = 75;
+  renderInventory(view, ui, context);
+  const search = view.querySelector('[data-dashboard-search]');
+  if (search) search.value = '';
+  panel?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (criticalOnly) panel?.setAttribute('data-dashboard-reviewing', 'critical');
 }
 
 function renderTrendChart(view, ui) {
@@ -755,7 +904,7 @@ function renderInventory(view, ui, context) {
       ui.category = 'All';
       ui.visibleRows = 75;
       renderInventory(view, ui, context);
-      renderInventoryAlert(view, ui);
+      renderInventoryAlert(view, ui, context);
     });
   });
 
@@ -979,7 +1128,8 @@ function icon(name, size = 16) {
     chevronDown: '<path d="m6 9 6 6 6-6"/>',
     chevronLeft: '<path d="m15 18-6-6 6-6"/>',
     chevronRight: '<path d="m9 18 6-6-6-6"/>',
-    info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/>'
+    info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/>',
+    x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>'
   };
   return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.info}</svg>`;
 }

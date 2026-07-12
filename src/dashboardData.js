@@ -1,4 +1,10 @@
 import { runReport } from './modules/reporting/index.js';
+import {
+  buildLocationNameIndex,
+  mergeCanonicalLocations,
+  normalizeLocationReference,
+  resolveLocationDisplayName
+} from './utils/locationDisplayName.js';
 
 const MAX_REPORT_PAGES = 10;
 const LEDGER_PAGE_SIZE = 2000;
@@ -238,6 +244,63 @@ export function buildDashboardModel({
     supplierMode,
     suppliers,
     inventoryItems
+  };
+}
+
+export function reconcileDashboardLocationNames(model = {}, canonicalLocations = []) {
+  const canonical = mergeCanonicalLocations(canonicalLocations);
+  if (!canonical.length) return model;
+
+  const { byReference } = buildLocationNameIndex(canonical);
+  const resolveName = (id = '', currentName = '') => {
+    const exact = String(id || '').trim();
+    const current = String(currentName || '').trim();
+    const match = byReference.get(exact) || byReference.get(normalizeLocationReference(exact));
+    if (match) return match.name;
+    const nameMatch = byReference.get(current) || byReference.get(normalizeLocationReference(current));
+    if (nameMatch) return nameMatch.name;
+    return resolveLocationDisplayName({ id: exact, name: current }, current || 'Location');
+  };
+
+  const inventoryItems = asArray(model.inventoryItems).map((item) => {
+    const locationName = resolveName(item.locationId, item.locationName);
+    return {
+      ...item,
+      locationName,
+      locations: asArray(item.locations).length
+        ? asArray(item.locations).map((name) => resolveName(item.locationId, name))
+        : [locationName]
+    };
+  });
+
+  const inventoryLocations = mergeCanonicalLocations(
+    canonical,
+    asArray(model.inventoryLocations).map((location) => ({
+      ...location,
+      name: resolveName(location.id, location.name),
+      displayName: resolveName(location.id, location.name)
+    }))
+  ).map((location) => ({ id: location.id, name: location.name }));
+
+  const locations = mergeCanonicalLocations(
+    canonical,
+    asArray(model.locations).map((location) => ({
+      ...location,
+      name: resolveName(location.id, location.name),
+      displayName: resolveName(location.id, location.name)
+    }))
+  ).map((location) => ({ id: location.id, name: location.name }));
+
+  const criticalItems = inventoryItems.filter((item) => item.status === 'critical');
+  return {
+    ...model,
+    locations,
+    inventoryLocations,
+    inventoryItems,
+    alerts: {
+      ...(model.alerts || {}),
+      criticalNames: criticalItems.slice(0, 3).map((item) => item.locationName ? `${item.name} — ${item.locationName}` : item.name)
+    }
   };
 }
 
