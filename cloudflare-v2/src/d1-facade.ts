@@ -113,7 +113,22 @@ export class FacadeDatabase {
   execScript(script: string): void {
     for (const raw of splitSqlStatements(script)) {
       const statement = raw.trim();
-      if (statement) this.sql.exec(statement);
+      if (!statement) continue;
+      try {
+        this.sql.exec(statement);
+      } catch (cause) {
+        // Durable Object migrations may be interrupted after one statement in a multi-statement
+        // migration has already committed. On the next request SQLite then reports a duplicate
+        // column for the statement that did succeed, which previously prevented that workspace
+        // from ever completing the remaining migration statements. Treat only this known,
+        // idempotent ALTER TABLE ADD COLUMN case as already applied; every other SQL error remains
+        // fatal so genuine schema problems are never hidden.
+        const message = String((cause as Error)?.message || cause || '');
+        const isAddColumn = /^ALTER\s+TABLE\s+[^\s]+\s+ADD\s+COLUMN\s+/i.test(statement);
+        const isDuplicateColumn = /duplicate column name|already exists/i.test(message);
+        if (isAddColumn && isDuplicateColumn) continue;
+        throw cause;
+      }
     }
   }
 }

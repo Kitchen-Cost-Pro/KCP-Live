@@ -33,7 +33,11 @@ export async function fetchCreditNotesWorkspace(workspaceId) {
 
   const [creditNoteResponse, grvState, stockState, supplierState, locationResponse, siteResponse] = await Promise.all([
     callCloudflareWorkspaceRoute(workspaceKey, 'credit-notes', { query: { limit: 500 } }),
-    fetchGrvWorkspace(workspaceKey),
+    fetchGrvWorkspace(workspaceKey).catch((error) => ({
+      status: 'ready',
+      receipts: [],
+      historyError: String(error?.message || 'Could not load GRV history.')
+    })),
     fetchStock(workspaceKey),
     fetchSuppliers(workspaceKey),
     callCloudflareWorkspaceRoute(workspaceKey, 'locations'),

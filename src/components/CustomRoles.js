@@ -323,10 +323,14 @@ function buildPermissionGroups() {
     },
     {
       label: 'Reporting & Analysis',
-      description: 'Analytics and uploaded operational reporting.',
+      description: 'Operational reports, ledger views, exports, and reporting dashboards.',
       permissions: [
-        bySection('analytics'),
-        bySection('sales-sync')
+        bySection('reporting'),
+        { permissionId: ACTION_PERMISSION_MAP.saveWorkspaceReportViews, label: 'Save Workspace Report Views' },
+        { permissionId: ACTION_PERMISSION_MAP.scheduleReports, label: 'Schedule Reports' },
+        { permissionId: ACTION_PERMISSION_MAP.emailReports, label: 'Email Reports' },
+        { permissionId: ACTION_PERMISSION_MAP.manageReportSchedules, label: 'Manage All Report Schedules' },
+        { permissionId: ACTION_PERMISSION_MAP.deleteReportSchedules, label: 'Delete Report Schedules' }
       ]
     },
     {
@@ -416,8 +420,7 @@ function toPermissionLabel(sectionId) {
     'stock-count': 'Stock Take',
     locations: 'Locations',
     'mfg-products': 'Manufacturing',
-    analytics: 'Analytics',
-    'sales-sync': 'Sales Sync',
+    reporting: 'Reporting',
     integrations: 'Integrations',
     'user-management': 'User Management',
     'custom-roles': 'Roles & Permissions',

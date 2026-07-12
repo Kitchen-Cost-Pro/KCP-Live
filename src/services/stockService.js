@@ -145,7 +145,7 @@ export async function resetStockTotals(workspaceId, options = {}) {
   const workspaceKey = String(workspaceId || '').trim();
   if (!workspaceKey) throw new Error('Workspace id is required to reset stock totals.');
 
-  const result = await callCloudflareWorkspaceRoute(workspaceKey, 'stock-items/reset-reporting', {
+  const result = await callCloudflareWorkspaceRoute(workspaceKey, 'stock-items/reset-dashboard', {
     method: 'POST',
     payload: {
       includeStockOnHand: true,
@@ -159,9 +159,27 @@ export async function resetStockTotals(workspaceId, options = {}) {
   };
 }
 
-export async function resetWorkspaceReporting(workspaceId, options = {}) {
+export async function resetWorkspaceDashboardHistory(workspaceId, options = {}) {
   const workspaceKey = String(workspaceId || '').trim();
-  if (!workspaceKey) throw new Error('Workspace id is required to reset reporting.');
+  if (!workspaceKey) throw new Error('Workspace id is required to reset dashboard history.');
+
+  const result = await callCloudflareWorkspaceRoute(workspaceKey, 'stock-items/reset-dashboard', {
+    method: 'POST',
+    payload: { includeStockOnHand: options.includeStockOnHand === true }
+  });
+
+  return {
+    mode: result.mode || (options.includeStockOnHand === true ? 'dashboard_stock' : 'dashboard'),
+    resetAt: result.resetAt || new Date().toISOString(),
+    boundaryMode: true,
+    stockResetCount: Number(result.stockResetCount || 0)
+  };
+}
+
+
+export async function resetWorkspaceReportingHistory(workspaceId, options = {}) {
+  const workspaceKey = String(workspaceId || '').trim();
+  if (!workspaceKey) throw new Error('Workspace id is required to reset reporting data.');
 
   const result = await callCloudflareWorkspaceRoute(workspaceKey, 'stock-items/reset-reporting', {
     method: 'POST',
@@ -341,6 +359,7 @@ function normalizeCloudflareLocation(row = {}) {
 function normalizeCloudflareStockItem(row = {}) {
   const raw = parseJsonObject(row.raw_json || row.rawJson);
   const balances = parseBalancesJson(row.balances_json || row.balancesJson || row.balances);
+  const locationCosts = parseLocationCostsJson(row.location_costs_json || row.locationCostsJson || row.locationCosts || row.location_prices_json || raw.locationCosts || raw.locationPrices);
   const stock = Object.keys(balances).length
     ? sumBalances(balances)
     : Number(row.on_hand ?? row.onHand ?? row.stock ?? 0) || 0;
@@ -357,14 +376,23 @@ function normalizeCloudflareStockItem(row = {}) {
     parLevel: Number(row.par_level_qty ?? row.parLevelQty ?? 0) || 0,
     yieldFactor: Number(row.yield_pct ?? row.yieldPct ?? raw.yieldFactor ?? 100) || 100,
     yieldBatch: parseDecimal(row.batch_yield ?? row.batchYield ?? raw.yieldBatch, 1) || 1,
-	    stock,
-	    balances,
-	    itemType: row.item_type || row.itemType || raw.itemType,
-	    isStocked: row.is_stocked === undefined && raw.isStocked === undefined
-	      ? !['sub_recipe', 'virtual'].includes(String(row.item_type || row.itemType || raw.itemType || '').trim().toLowerCase().replace(/[\s-]+/g, '_'))
-	      : Number(row.is_stocked ?? (raw.isStocked === false ? 0 : 1)) !== 0,
-	    source: 'Live stock'
-	  });
+    stock,
+    balances,
+    locationCosts,
+    locationPrices: locationCosts,
+    itemType: row.item_type || row.itemType || raw.itemType,
+    isStocked: resolveIsStocked(row.item_type || row.itemType || raw.itemType, row.is_stocked, raw.isStocked),
+    source: 'Live stock'
+  });
+}
+
+function resolveIsStocked(itemTypeValue, rowStocked, rawStocked) {
+  const itemType = String(itemTypeValue || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (['sub_recipe', 'subrecipe', 'virtual'].includes(itemType)) return false;
+  if (['recipe_source', 'non_stock'].includes(itemType)) return true;
+  if (rowStocked !== undefined && rowStocked !== null) return Number(rowStocked) !== 0;
+  if (rawStocked !== undefined && rawStocked !== null) return rawStocked !== false && Number(rawStocked) !== 0;
+  return true;
 }
 
 function parseJsonObject(value) {
@@ -391,6 +419,35 @@ function parseBalancesJson(value) {
   }
 }
 
+function parseLocationCostsJson(value) {
+  if (!value) return {};
+  if (typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([locationId, entry]) => {
+        const row = entry && typeof entry === 'object' ? entry : { price: entry };
+        return [String(locationId), {
+          cost: Number(row.cost ?? row.unitCost ?? row.price ?? 0) || 0,
+          unitCost: Number(row.unitCost ?? row.cost ?? row.price ?? 0) || 0,
+          price: Number(row.price ?? row.cost ?? row.unitCost ?? 0) || 0,
+          updatedAt: row.updatedAt || row.updated_at || ''
+        }];
+      }).filter(([locationId]) => locationId)
+    );
+  }
+  try {
+    return parseLocationCostsJson(JSON.parse(String(value || '{}')));
+  } catch {
+    return {};
+  }
+}
+
+function mergeLocationCostMaps(primary = {}, duplicate = {}) {
+  return {
+    ...(duplicate && typeof duplicate === 'object' ? duplicate : {}),
+    ...(primary && typeof primary === 'object' ? primary : {})
+  };
+}
+
 function mergeCloudflareStockItems(legacyItems = [], cloudflareItems = []) {
   const cloudflareById = new Map((cloudflareItems || []).map((item) => [String(item.id), item]));
   const cloudflareByKey = new Map((cloudflareItems || []).map((item) => [stockMergeKey(item), item]));
@@ -406,7 +463,9 @@ function mergeCloudflareStockItems(legacyItems = [], cloudflareItems = []) {
       lowStockThreshold: Number(live.lowStockThreshold ?? item.lowStockThreshold ?? 5) || 5,
       parLevel: Number(live.parLevel ?? item.parLevel ?? 0) || 0,
       stock: Number(live.stock ?? item.stock ?? 0) || 0,
-      balances: live.balances && Object.keys(live.balances).length ? live.balances : item.balances || {}
+      balances: live.balances && Object.keys(live.balances).length ? live.balances : item.balances || {},
+      locationCosts: live.locationCosts && Object.keys(live.locationCosts).length ? live.locationCosts : item.locationCosts || item.locationPrices || {},
+      locationPrices: live.locationPrices && Object.keys(live.locationPrices).length ? live.locationPrices : item.locationPrices || item.locationCosts || {}
     };
   });
 
@@ -486,23 +545,28 @@ function mergeDuplicateStockItems(primary = {}, duplicate = {}) {
     duplicateCount: Math.max(Number(primary.duplicateCount || 1), 1) + Math.max(Number(duplicate.duplicateCount || 1), 1),
     stock,
     onHand: stock,
-    balances: hasBalances ? balances : (primary.balances || duplicate.balances || {})
+    balances: hasBalances ? balances : (primary.balances || duplicate.balances || {}),
+    locationCosts: mergeLocationCostMaps(primary.locationCosts || primary.locationPrices, duplicate.locationCosts || duplicate.locationPrices),
+    locationPrices: mergeLocationCostMaps(primary.locationPrices || primary.locationCosts, duplicate.locationPrices || duplicate.locationCosts)
   };
 }
 
 export function normalizeIngredient(key, item = {}) {
   const itemWithoutLocationPrices = { ...item };
-  ['location' + 'Prices', 'location' + 'Pricing', 'prices' + 'ByLocation'].forEach((field) => {
+  ['location' + 'Pricing', 'prices' + 'ByLocation'].forEach((field) => {
     delete itemWithoutLocationPrices[field];
   });
-  const balances = item.balances && typeof item.balances === 'object' ? item.balances : {};
-  const stock = Object.keys(balances).length
-    ? Object.values(balances).reduce((sum, value) => sum + (Number(value) || 0), 0)
-    : Number(item.stock || 0);
-  const barcodes = parseBarcodeValues(item);
+  const rawBalances = item.balances && typeof item.balances === 'object' ? item.balances : {};
   const itemType = normalizeStockItemType(item);
   const isSubRecipe = itemType === 'sub_recipe';
   const isManufactured = itemType === 'manufactured';
+  const balances = isSubRecipe ? {} : rawBalances;
+  const stock = isSubRecipe
+    ? 0
+    : Object.keys(balances).length
+      ? Object.values(balances).reduce((sum, value) => sum + (Number(value) || 0), 0)
+      : Number(item.stock || 0);
+  const barcodes = parseBarcodeValues(item);
   const name = item.name || item.ingredientName || 'Unnamed Stock Item';
 
   return {
@@ -523,7 +587,7 @@ export function normalizeIngredient(key, item = {}) {
     yieldBatch: parseDecimal(item.yieldBatch ?? item.yieldQty, 1),
     uomConfigurations: normalizeUomConfigurations(item.uomConfigurations || item.uomConfig || item.uom_configuration || item.uomConversions || item.uomConversion),
     itemType,
-    isStocked: itemType !== 'sub_recipe' && item.isStocked !== false,
+    isStocked: itemType === 'sub_recipe' ? false : itemType === 'recipe_source' ? true : item.isStocked !== false,
     isSubRecipe,
     isManufactured
   };
@@ -549,9 +613,12 @@ function normalizeStockPayload(item = {}) {
 	    category += ' - Raw Materials';
 	  }
 
+  const sku = String(item.sku || item.SKU || item.skuCode || item.stockCode || item.itemCode || item.customSku || item.code || '').trim();
+
   const payload = {
     id,
     name,
+    sku,
     category: category || 'General - Raw Materials',
     unit: String(item.unit || item.uom || 'ea').trim() || 'ea',
     cost: Number(item.cost || 0) || 0,
@@ -568,18 +635,18 @@ function normalizeStockPayload(item = {}) {
 	      ? normalizeStockRecipe(item.recipe)
 	      : [],
 	    itemType,
-	    isStocked: !isSubRecipe && item.isStocked !== false,
+    isStocked: isSubRecipe ? false : isRecipeSource ? true : item.isStocked !== false,
 	    isSubRecipe,
 	    isManufactured
 	  };
 
-	  if (hasStock) {
-	    payload.stock = Number(item.stock || 0) || 0;
-	  }
+  if (!isSubRecipe && hasStock) {
+    payload.stock = Number(item.stock || 0) || 0;
+  }
 
-	  if (item.balances && typeof item.balances === 'object') {
-	    payload.balances = item.balances;
-	  }
+  if (!isSubRecipe && item.balances && typeof item.balances === 'object') {
+    payload.balances = item.balances;
+  }
 
   return payload;
 }
@@ -611,31 +678,31 @@ function normalizeSubRecipeCategory(category = '') {
 }
 
 function normalizeStockItemType(item = {}) {
-	  const explicit = String(item.itemType || item.stockItemType || item.specificationType || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
-	  if (
-	    ['recipe_source', 'non_stock', 'virtual'].includes(explicit) ||
-	    item.isStocked === false ||
-	    String(item.category || '').toLowerCase().includes('recipe source') ||
-	    String(item.category || '').toLowerCase().includes('non-stock') ||
-	    String(item.category || '').toLowerCase().includes('non stock') ||
-	    String(item.category || '').toLowerCase().includes('virtual')
-	  ) {
-	    return 'recipe_source';
-	  }
+  const explicit = String(item.itemType || item.stockItemType || item.specificationType || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  const category = String(item.category || '').toLowerCase();
   if (
     ['sub_recipe', 'subrecipe'].includes(explicit) ||
     parseBooleanFlag(item.isSubRecipe ?? item.SubRecipe, false) ||
-    String(item.category || '').toLowerCase().includes('sub recipe') ||
-    String(item.category || '').toLowerCase().includes('sub-recipe')
+    category.includes('sub recipe') ||
+    category.includes('sub-recipe')
   ) {
     return 'sub_recipe';
   }
   if (
     ['manufactured', 'prep', 'prepared', 'manufactured_item'].includes(explicit) ||
     parseBooleanFlag(item.isManufactured ?? item.Manufactured ?? item.manufactured ?? item.MFG, false) ||
-    String(item.category || '').toLowerCase().includes('manufactured')
+    category.includes('manufactured')
   ) {
     return 'manufactured';
+  }
+  if (
+    ['recipe_source', 'non_stock', 'virtual'].includes(explicit) ||
+    category.includes('recipe source') ||
+    category.includes('non-stock') ||
+    category.includes('non stock') ||
+    category.includes('virtual')
+  ) {
+    return 'recipe_source';
   }
   return 'standard';
 }

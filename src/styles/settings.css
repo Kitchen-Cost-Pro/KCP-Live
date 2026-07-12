@@ -1449,3 +1449,57 @@ html.ui-scale-large {
     padding: 20px;
   }
 }
+
+.settingsRoutingTags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin: 0.3rem 0;
+}
+
+.settingsRoutingTags span {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.16rem 0.42rem;
+  border-radius: 999px;
+  background: rgba(14, 165, 233, 0.12);
+  color: #0369a1;
+  font-size: 0.64rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+}
+
+.settingsRoutingTags span {
+  background: color-mix(in srgb, var(--accent-blue) 14%, transparent);
+  color: var(--accent-blue);
+}
+
+.settingsRoutingTag--raw,
+.settingsRoutingTag--standard {
+  background: color-mix(in srgb, var(--accent-blue) 14%, transparent) !important;
+  color: var(--accent-blue) !important;
+}
+
+.settingsRoutingTag--prep,
+.settingsRoutingTag--manufacturing {
+  background: color-mix(in srgb, var(--accent-amber) 18%, transparent) !important;
+  color: var(--accent-amber) !important;
+}
+
+/* Final routing tag scope: only RAW / PREP are surfaced in settings routing, with RAW in yellow */
+.settingsRoutingTags span.settingsRoutingTag--raw {
+  border: 1px solid rgba(251, 191, 36, 0.48) !important;
+  background: rgba(217, 119, 6, 0.26) !important;
+  color: #facc15 !important;
+}
+
+.settingsRoutingTags span.settingsRoutingTag--prep {
+  border: 1px solid rgba(168, 85, 247, 0.42) !important;
+  background: rgba(126, 34, 206, 0.28) !important;
+  color: #ddd6fe !important;
+}
+
+.settingsRoutingTags span.settingsRoutingTag--standard,
+.settingsRoutingTags span.settingsRoutingTag--manufacturing {
+  display: none !important;
+}

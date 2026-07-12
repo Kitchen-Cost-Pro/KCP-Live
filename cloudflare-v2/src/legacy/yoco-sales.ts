@@ -1,4 +1,7 @@
 import type { Env, DbLike, DbStatementLike } from './types';
+import { fallbackStockItemUnitCost } from './inventory-costing';
+// @ts-ignore Shared Yoco Money converter: Money objects are minor units; normalized scalars remain major units.
+import { yocoMoneyToMajor } from '../../../src/modules/reporting/engine/yocoFinancials.js';
 
 type Row = Record<string, unknown>;
 
@@ -48,6 +51,12 @@ interface StockBalanceRow extends Row {
   stock_item_id: string;
   location_id: string;
   quantity?: number;
+}
+
+interface StockItemLocationPriceRow extends Row {
+  stock_item_id: string;
+  location_id: string;
+  price?: number;
 }
 
 interface RecipeRow extends Row {
@@ -106,7 +115,7 @@ export interface YocoProcessResult {
 
 // How stock should behave when a Yoco refund reason is present.
 // 'return'  → restore stock to inventory (default)
-// 'wastage' → do NOT restore stock; record as wastage movement for reporting
+// 'wastage' -> do NOT restore stock; record as wastage movement for dashboards
 // 'skip'    → no stock change and no movement record
 export type RefundReturnBehavior = 'return' | 'wastage' | 'skip';
 
@@ -179,28 +188,15 @@ function jsonString(value: unknown) {
 // Unified stock valuation unit cost — mirrors the frontend getStockValuationUnitCost.
 // The stock_items.unit_cost column is frequently 0 for items priced only via their
 // last purchase; the real cost lives in raw_json. Using this everywhere a movement's
-// value_delta is written (wastage, manual adjustments) keeps Dashboard/report values
+// value_delta is written (wastage, manual adjustments) keeps Dashboard values
 // non-zero for last-purchase-priced items.
 export function stockValuationUnitCost(item: Partial<StockItemRow> | undefined | null) {
-  if (!item) return 0;
-  const column = numberValue(item.unit_cost, 0);
-  if (column > 0) return column;
-  const raw = jsonParse(item.raw_json);
-  return numberValue(
-    raw.lastPurchasePrice ?? raw.lastPurchaseCost ?? raw.latestPurchasePrice ?? raw.costEx ?? raw.cost,
-    0
-  );
+  return fallbackStockItemUnitCost((item || undefined) as Row | undefined, 0);
 }
 
 function moneyToMajor(value: unknown) {
-  if (value && typeof value === 'object') {
-    const obj = value as Row;
-    if (typeof obj.amount === 'number') return obj.amount / 100;
-    if (typeof obj.value === 'number') return obj.value / 100;
-  }
-  if (typeof value === 'number') return Math.abs(value) > 999 ? value / 100 : value;
-  const number = Number(value || 0);
-  return Math.abs(number) > 999 ? number / 100 : number;
+  const amount = yocoMoneyToMajor(value, { scalarUnit: 'major', absolute: false });
+  return Number.isFinite(amount) ? amount : 0;
 }
 
 function objectValue(value: unknown) {
@@ -555,9 +551,10 @@ function resolveSourceLocation(
   return routed || sellingLocation;
 }
 
-function findSellingLocation(locations: LocationRow[], order: Row, line: Row) {
+function findSellingLocation(locations: LocationRow[], order: Row, line: Row, fallbackLocation: LocationRow | null = null) {
   const yocoId = orderLocationId(order, line);
   const normalized = normalizeText(yocoId);
+  if (!yocoId && fallbackLocation) return fallbackLocation;
   const match = locations.find((location) => [
     location.id,
     location.external_location_id,
@@ -565,7 +562,7 @@ function findSellingLocation(locations: LocationRow[], order: Row, line: Row) {
     location.name,
     location.display_name
   ].some((value) => text(value) === yocoId || normalizeText(value) === normalized));
-  return match || locations.find((location) => location.is_default === 1) || locations[0] || null;
+  return match || fallbackLocation || locations.find((location) => location.is_default === 1) || locations[0] || null;
 }
 
 function findProduct(products: ProductRow[], line: Row) {
@@ -770,6 +767,7 @@ async function componentMovementExists(
   env: Env,
   workspaceId: string,
   orderId: string,
+  mode: 'sale' | 'refund',
   component: SaleComponent,
   effectiveProduct: ProductRow | null
 ) {
@@ -779,6 +777,7 @@ async function componentMovementExists(
   const currentModifierId = component.modifier ? modifierId(component.modifier) : '';
   const currentModifierVariantId = component.modifier ? productModifierVariantId(component.modifier, component.modifierCatalog || null) : '';
   const checks = [
+    mode ? metadataFieldFragment('mode', mode) : '',
     componentType ? metadataFieldFragment('componentType', componentType) : '',
     componentType === 'modifier' && component.parentLineId ? metadataFieldFragment('parentLineId', component.parentLineId) : '',
     componentType === 'modifier' && currentModifierId ? metadataFieldFragment('modifierId', currentModifierId) : '',
@@ -1063,6 +1062,7 @@ export async function processYocoOrder(
     products,
     stockItems,
     stockBalances,
+    stockItemLocationPrices,
     recipes,
     recipeLines,
     modifierGroups
@@ -1071,6 +1071,7 @@ export async function processYocoOrder(
     allRows<ProductRow>(env.DB.prepare('SELECT * FROM products WHERE workspace_id = ?1 AND active = 1').bind(workspaceId)),
     allRows<StockItemRow>(env.DB.prepare('SELECT * FROM stock_items WHERE workspace_id = ?1 AND active = 1').bind(workspaceId)),
     allRows<StockBalanceRow>(env.DB.prepare('SELECT stock_item_id, location_id, quantity FROM stock_balances WHERE workspace_id = ?1').bind(workspaceId)),
+    allRows<StockItemLocationPriceRow>(env.DB.prepare('SELECT stock_item_id, location_id, price FROM stock_item_location_prices WHERE workspace_id = ?1').bind(workspaceId)).catch(() => []),
     allRows<RecipeRow>(env.DB.prepare('SELECT * FROM recipes WHERE workspace_id = ?1 AND active = 1').bind(workspaceId)),
     allRows<RecipeLineRow>(env.DB.prepare('SELECT * FROM recipe_lines WHERE workspace_id = ?1').bind(workspaceId)),
     allRows<YocoModifierGroupRow>(
@@ -1082,6 +1083,10 @@ export async function processYocoOrder(
   const stockBalanceByKey = new Map(stockBalances.map((balance) => [
     `${text(balance.stock_item_id)}:${text(balance.location_id)}`,
     numberValue(balance.quantity, 0)
+  ]));
+  const locationCostByKey = new Map(stockItemLocationPrices.map((row) => [
+    `${text(row.stock_item_id)}:${text(row.location_id)}`,
+    numberValue(row.price, 0)
   ]));
   const productsById = new Map(products.map((product) => [text(product.id), product]));
   const modifierCatalogue = buildModifierCatalogue(modifierGroups);
@@ -1113,11 +1118,11 @@ export async function processYocoOrder(
     : text(order.closed_at || order.created_at || order.updated_at || new Date().toISOString());
   const statements: DbStatementLike[] = [];
   const existingOrder = await env.DB.prepare(
-    `SELECT id
+    `SELECT id, location_id
        FROM yoco_orders
       WHERE workspace_id = ?1 AND yoco_order_id = ?2 AND order_type = ?3
       LIMIT 1`
-  ).bind(workspaceId, orderId, mode).first<{ id: string }>();
+  ).bind(workspaceId, orderId, mode).first<{ id: string; location_id?: string | null }>();
   const existingSignatureRows = await allRows<{ signature_hash: string }>(
     env.DB.prepare(
       `SELECT signature_hash
@@ -1134,6 +1139,9 @@ export async function processYocoOrder(
   let skippedDuplicates = 0;
   const orderSellingLocations = new Set<string>();
   const pendingBalanceDeltas = new Map<string, number>();
+  const existingSellingLocation = existingOrder?.location_id
+    ? locations.find((location) => text(location.id) === text(existingOrder.location_id)) || null
+    : null;
 
   statements.push(env.DB.prepare(
     `INSERT INTO yoco_orders
@@ -1167,7 +1175,7 @@ export async function processYocoOrder(
     const baseQuantitySold = lineQuantity(line);
     if (baseQuantitySold <= 0) continue;
 
-    const sellingLocation = findSellingLocation(locations, order, line);
+    const sellingLocation = findSellingLocation(locations, order, line, existingSellingLocation);
     if (!sellingLocation) throw new Error('No selling/default location is configured for this workspace.');
     orderSellingLocations.add(text(sellingLocation.id));
 
@@ -1202,14 +1210,12 @@ export async function processYocoOrder(
 	      const recipe = productRecipe || recipeSourceStockItemRecipe || linkedProductRecipes[0] || manualModifierRecipe;
       const effectiveProduct = product || linkedProducts[0] || null;
       const signaturePaymentPart = mode === 'refund' ? `refund_${refundIndex}` : paymentId;
-      const rawSignature = `yoco:${mode}:${orderId}:${signaturePaymentPart}:${component.lineId}:${text(sellingLocation.id)}:${quantitySold}`;
+      const rawSignature = `yoco:${mode}:${orderId}:${signaturePaymentPart}:${component.lineId}:${quantitySold}`;
       const signatureHash = await hash(rawSignature);
-      if (existingSignatureHashes.has(signatureHash)) {
-        const hasMovement = await componentMovementExists(env, workspaceId, orderId, component, effectiveProduct);
-        if (hasMovement) {
-          skippedDuplicates += 1;
-          continue;
-        }
+      const hasExistingMovement = await componentMovementExists(env, workspaceId, orderId, mode, component, effectiveProduct);
+      if (existingSignatureHashes.has(signatureHash) || hasExistingMovement) {
+        skippedDuplicates += 1;
+        continue;
       }
 
       const sourceLocationIds = new Set<string>();
@@ -1236,7 +1242,10 @@ export async function processYocoOrder(
           // For 'wastage' behavior: item is damaged, don't restore stock — deduct direction like a sale
           const isWastageBehavior = mode === 'refund' && returnBehavior === 'wastage';
           const deltaQty = quantitySold * depletion.quantity * (mode === 'refund' && !isWastageBehavior ? 1 : -1);
-          const unitCost = numberValue(depletion.stockItem.unit_cost, 0);
+          const locationCostKey = `${text(depletion.stockItem.id)}:${sourceLocationId}`;
+          const unitCost = locationCostByKey.has(locationCostKey)
+            ? numberValue(locationCostByKey.get(locationCostKey), 0)
+            : stockValuationUnitCost(depletion.stockItem);
           const movementId = id('mov');
           const balanceKey = `${text(depletion.stockItem.id)}:${sourceLocationId}`;
           let availableBefore: number | null = null;
@@ -1290,14 +1299,15 @@ export async function processYocoOrder(
             stockCategory: text(depletion.stockItem.category),
             recipeLineId: text(depletion.recipeLine.id),
             stockAvailableBefore: availableBefore,
-            insufficientStock
+            insufficientStock,
+            valuationCostSource: locationCostByKey.has(locationCostKey) ? 'location' : 'stock_item_fallback'
           };
 
           statements.push(env.DB.prepare(
             `INSERT INTO stock_movements
               (id, workspace_id, stock_item_id, location_id, movement_type, document_type, document_id,
-               source_location_id, quantity_delta, unit_cost, value_delta, occurred_at, metadata_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'yoco_order', ?6, ?7, ?8, ?9, ?10, ?11, ?12)`
+               source_location_id, quantity_delta, unit_cost, value_delta, occurred_at, created_by, metadata_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'yoco_order', ?6, ?7, ?8, ?9, ?10, ?11, 'yoco', ?12, datetime('now'))`
           ).bind(
             movementId,
             workspaceId,

@@ -57,8 +57,8 @@ function createOrgTransferHandlers({ admin, rtdb, requireSuperUser }) {
         return;
       }
 
-      if (method === 'GET' && path === '/reports/corporate') {
-        response.json(await getCorporateReport(auth.uid, request.query || {}));
+      if (method === 'GET' && path === '/corporate/overview') {
+        response.json(await getCorporateOverview(auth.uid, request.query || {}));
         return;
       }
 
@@ -352,7 +352,7 @@ function createOrgTransferHandlers({ admin, rtdb, requireSuperUser }) {
     return { status: 'posted', transfer_id: transferId, transfer_type: 'external', items_moved: movedItems.length };
   }
 
-  async function getCorporateReport(uid, query = {}) {
+  async function getCorporateOverview(uid, query = {}) {
     const corpId = requireString(query.corp_id || query.corpId, 'corp_id is required.');
     const registry = await loadRegistry();
     const siteIds = Object.entries(registry)

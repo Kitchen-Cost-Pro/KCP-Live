@@ -65,7 +65,6 @@ D1 is the operational source of truth for migrated modules, including:
 - purchase orders and operational receipt state
 - GRV, credit note, adjustment, transfer, stocktake, manufacturing, and sales logs
 - dashboard metrics and snapshots
-- custom report configs
 - workspace settings
 - team membership and custom roles
 
@@ -111,8 +110,6 @@ Stock item UOM configuration:
 ```text
 stock_items/{stockItemId}/uomConfigurations[]
 ```
-
-Each custom UOM stores a display name, ratio back to the base inventory UOM, and optional barcode. PO, GRV, stock take, scanner, import, and reporting flows should convert custom UOM counts back to base UOM for stock on hand.
 
 ### Price Overrides
 
@@ -208,8 +205,6 @@ Functions own:
 
 Yoco locations are imported into KCP selling locations. Re-sync logic should match/update imported records instead of duplicating them.
 
-Yoco menu categories are not the stock-routing source of truth. Stock routing uses the internal inventory category on stock items plus the selling location's `stockRouting` configuration. Yoco category mapping may be used for reporting/translation.
-
 Secrets:
 
 ```text
@@ -234,16 +229,10 @@ Opening Stock + Purchases - Closing Stock = Theoretical Consumption
 
 Opening stock is a period anchor, closing stock is an end-of-period anchor, and movement values are summed inside the selected range.
 
-### Custom Reports
-
-Custom report configs are saved report definitions, not static mock reports. Save should persist the configuration, close the builder, and add/update the saved reports dashboard. Save & Preview should persist the configuration and open a read-only report preview.
-
 The current builder save controls are form submit buttons handled by document-level capture handlers in `src/main.js`; avoid changing them back to nested click-only handlers.
 
 Reset actions:
 
-- Reset Reporting clears reporting/dashboard/log totals without deleting products, recipes, stock items, or item costings.
-- Reset Reporting + Stock Values also clears stock-on-hand balances per location while preserving products, recipes, stock items, and costings.
 - Destructive reset actions require exact typed confirmation in the UI.
 - Reset implementations should avoid excessive fan-out writes that trigger too many Functions.
 
@@ -275,7 +264,6 @@ Public registration creates pending state:
 
 Admin approval is handled by:
 
-- `../public/KCP Admin ConsoleByYOCO.html`
 
 Invitations are reserved for registration/workspace approval flows, not normal in-app user additions.
 
@@ -354,7 +342,6 @@ Short term: use Functions for:
 Medium term: migrate high-volume data paths to the Cloudflare Worker/D1 model:
 
 - dashboard aggregation
-- reports
 - sales/Yoco order ingestion
 - stock movement ledger
 - stock balances by location

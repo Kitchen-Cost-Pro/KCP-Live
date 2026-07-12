@@ -8,7 +8,10 @@ import {
   patchAdminWorkspaceSettings,
   getAdminOrgSites,
   postAdminSaveOrgGroup,
-  postAdminUnlinkOrgSite
+  postAdminUnlinkOrgSite,
+  getAdminAuditLogs,
+  requireAdmin,
+  writeAdminAuditEvent
 } from './legacy/admin-routes';
 import type { AdminTenantSummary } from './legacy/admin-routes';
 import { dispatchCentralRoute } from './legacy/index';
@@ -29,6 +32,87 @@ function centralLegacyEnv(env: Env): LegacyEnv {
  */
 async function dispatchCentral(request: Request, env: Env, url: URL): Promise<Response | null> {
   const lenv = centralLegacyEnv(env);
+
+  // Admin workspace actions are mixed-plane: authentication/auditing live in CENTRAL_DB while
+  // Yoco, stock, webhook and low-stock data live in the workspace Durable Object. Never allow
+  // these routes to fall through to the legacy central dispatcher, where tenant-table queries fail.
+  const adminWorkspaceYocoM = url.pathname.match(/^\/api\/admin\/workspaces\/([^/]+)\/yoco\/([^/]+)$/);
+  if (adminWorkspaceYocoM) {
+    const workspaceId = decodeURIComponent(adminWorkspaceYocoM[1]);
+    const action = decodeURIComponent(adminWorkspaceYocoM[2]);
+    const allowedGetActions = new Set(['status', 'events']);
+    const allowedPostActions = new Set(['connect', 'disconnect', 'sync-catalogue', 'sync-sales', 'reconcile-sales', 'reset-webhook']);
+    if ((request.method === 'GET' && allowedGetActions.has(action)) || (request.method === 'POST' && allowedPostActions.has(action))) {
+      const adminSession = await requireAdmin(request, lenv);
+      const auth = adminAuthContext(adminSession);
+      const resource = `admin-yoco/${action}`;
+      const response = await forwardToWorkspaceDO(request, env, workspaceId, resource, auth);
+      if (request.method === 'POST' && response.ok) {
+        await writeAdminAuditEvent(
+          lenv,
+          { uid: auth.uid, email: auth.email },
+          `yoco.${action}`,
+          workspaceId,
+          { workspaceId }
+        );
+      }
+      return response;
+    }
+  }
+
+  const adminWorkspaceActionM = url.pathname.match(/^\/api\/admin\/workspaces\/([^/]+)\/actions\/([^/]+)$/);
+  if (adminWorkspaceActionM && request.method === 'POST') {
+    const workspaceId = decodeURIComponent(adminWorkspaceActionM[1]);
+    const action = decodeURIComponent(adminWorkspaceActionM[2]);
+    if (action === 'send-low-stock-email') {
+      const adminSession = await requireAdmin(request, lenv);
+      const auth = adminAuthContext(adminSession);
+      const response = await forwardToWorkspaceDO(request, env, workspaceId, `admin-action/${action}`, auth);
+      if (response.ok) {
+        await writeAdminAuditEvent(
+          lenv,
+          { uid: auth.uid, email: auth.email },
+          `workspace.${action}`,
+          workspaceId,
+          { workspaceId }
+        );
+      }
+      return response;
+    }
+  }
+
+  // Audit events are split between CENTRAL_DB (admin actions) and each tenant DO (workspace actions).
+  if (request.method === 'GET' && url.pathname === '/api/admin/audit-logs') {
+    return getAdminAuditLogs(request, lenv, async (limit) => {
+      const workspaceRows = await env.CENTRAL_DB.prepare(
+        `SELECT id, name FROM workspaces WHERE status = 'active' ORDER BY id`
+      ).all<{ id: string; name: string }>();
+      const workspaces = workspaceRows.results || [];
+      const results = await fanOutWorkspaceDOs(
+        env,
+        workspaces.map((row) => String(row.id)),
+        'admin-audit-events',
+        { uid: 'admin-audit', email: '' }
+      );
+      const nameMap = new Map(workspaces.map((row) => [String(row.id), String(row.name || row.id)]));
+      return results.flatMap((result) => {
+        const rows = Array.isArray((result.data as any)?.rows) ? (result.data as any).rows : [];
+        return rows.slice(0, limit).map((row: any) => ({
+          ...row,
+          workspace_id: result.workspaceId,
+          workspace_name: nameMap.get(result.workspaceId) || result.workspaceId
+        }));
+      });
+    });
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/admin/maintenance/integrity') {
+    return getAdminIntegrityReport(request, env, lenv);
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/admin/maintenance/repair') {
+    return postAdminIntegrityRepair(request, env, lenv);
+  }
 
   const approveM = url.pathname.match(/^\/api\/admin\/registration-requests\/([^/]+)\/approve$/);
   if (request.method === 'POST' && approveM) {
@@ -110,6 +194,220 @@ async function dispatchCentral(request: Request, env: Env, url: URL): Promise<Re
   return dispatchCentralRoute(request, lenv);
 }
 
+function adminAuthContext(adminSession: Awaited<ReturnType<typeof requireAdmin>>): AuthContext {
+  return {
+    uid: text(adminSession.auth?.uid || adminSession.admin?.id || 'admin'),
+    email: text(adminSession.admin?.email || adminSession.auth?.email || '')
+  };
+}
+
+async function getAdminIntegrityReport(request: Request, env: Env, lenv: LegacyEnv): Promise<Response> {
+  const adminSession = await requireAdmin(request, lenv);
+  if (!adminSession.admin?.isSuper) return json(request, env, { ok: false, error: 'Superuser only.' }, 403);
+
+  const [memberLinks, adminLinks, ownerless, workspaceRows] = await Promise.all([
+    env.CENTRAL_DB.prepare(
+      `SELECT wm.id, wm.workspace_id, wm.email, wm.auth_uid, au.id AS expected_uid
+         FROM workspace_members wm
+         LEFT JOIN app_users au ON lower(au.email) = lower(wm.email)
+        WHERE wm.status = 'active'
+          AND (au.id IS NULL OR wm.auth_uid IS NULL OR wm.auth_uid != au.id)`
+    ).all<any>(),
+    env.CENTRAL_DB.prepare(
+      `SELECT ad.id, ad.email, ad.auth_uid, au.id AS expected_uid
+         FROM admin_users ad
+         LEFT JOIN app_users au ON lower(au.email) = lower(ad.email)
+        WHERE ad.status = 'active'
+          AND (au.id IS NULL OR ad.auth_uid IS NULL OR ad.auth_uid != au.id)`
+    ).all<any>(),
+    env.CENTRAL_DB.prepare(
+      `SELECT w.id, w.name
+         FROM workspaces w
+        WHERE w.status = 'active'
+          AND NOT EXISTS (
+            SELECT 1 FROM workspace_members wm
+             WHERE wm.workspace_id = w.id AND wm.status = 'active' AND wm.role_key = 'owner'
+          )`
+    ).all<any>(),
+    env.CENTRAL_DB.prepare(
+      `SELECT id, name FROM workspaces WHERE status = 'active' ORDER BY id`
+    ).all<{ id: string; name: string }>()
+  ]);
+
+  const workspaces = workspaceRows.results || [];
+  const summaries = await fanOutWorkspaceDOs(
+    env,
+    workspaces.map((row) => String(row.id)),
+    'admin-summary',
+    adminAuthContext(adminSession)
+  );
+  const nameMap = new Map(workspaces.map((row) => [String(row.id), String(row.name || row.id)]));
+  const issues: Array<Record<string, unknown>> = [];
+
+  for (const row of memberLinks.results || []) {
+    issues.push({
+      severity: row.expected_uid ? 'warning' : 'error',
+      code: row.expected_uid ? 'MEMBER_UID_MISMATCH' : 'MEMBER_USER_MISSING',
+      workspaceId: row.workspace_id,
+      email: row.email,
+      message: row.expected_uid
+        ? `Member identity link is stale for ${row.email}.`
+        : `Active workspace member ${row.email} has no app_users record.`
+    });
+  }
+  for (const row of adminLinks.results || []) {
+    issues.push({
+      severity: row.expected_uid ? 'warning' : 'error',
+      code: row.expected_uid ? 'ADMIN_UID_MISMATCH' : 'ADMIN_USER_MISSING',
+      email: row.email,
+      message: row.expected_uid
+        ? `Admin identity link is stale for ${row.email}.`
+        : `Active admin ${row.email} has no app_users record.`
+    });
+  }
+  for (const row of ownerless.results || []) {
+    issues.push({
+      severity: 'error',
+      code: 'WORKSPACE_OWNER_MISSING',
+      workspaceId: row.id,
+      message: `${row.name || row.id} has no active owner membership.`
+    });
+  }
+  for (const result of summaries) {
+    const data = result.data as any;
+    if (!data?.ok) {
+      issues.push({
+        severity: 'error',
+        code: 'TENANT_UNREACHABLE',
+        workspaceId: result.workspaceId,
+        message: `${nameMap.get(result.workspaceId) || result.workspaceId} tenant database did not respond.`
+      });
+      continue;
+    }
+    if (!data.settings?.raw_json) {
+      issues.push({
+        severity: 'warning',
+        code: 'WORKSPACE_SETTINGS_MISSING',
+        workspaceId: result.workspaceId,
+        message: `${nameMap.get(result.workspaceId) || result.workspaceId} has no workspace settings baseline.`
+      });
+    }
+    if (Number(data.metrics?.locationCount || 0) < 1) {
+      issues.push({
+        severity: 'error',
+        code: 'WORKSPACE_LOCATION_MISSING',
+        workspaceId: result.workspaceId,
+        message: `${nameMap.get(result.workspaceId) || result.workspaceId} has no active location.`
+      });
+    }
+  }
+
+  return json(request, env, {
+    ok: true,
+    checkedAt: new Date().toISOString(),
+    workspaceCount: workspaces.length,
+    issueCount: issues.length,
+    issues
+  });
+}
+
+async function postAdminIntegrityRepair(request: Request, env: Env, lenv: LegacyEnv): Promise<Response> {
+  const adminSession = await requireAdmin(request, lenv);
+  if (!adminSession.admin?.isSuper) return json(request, env, { ok: false, error: 'Superuser only.' }, 403);
+  const now = new Date().toISOString();
+
+  const createdUsers = await env.CENTRAL_DB.prepare(
+    `INSERT INTO app_users (id, email, display_name, status, created_at, updated_at)
+     SELECT 'user_' || lower(hex(randomblob(16))), source.email, source.display_name, 'active', ?1, ?1
+       FROM (
+         SELECT lower(email) AS email, COALESCE(NULLIF(display_name, ''), lower(email)) AS display_name
+           FROM admin_users
+          WHERE status = 'active'
+         UNION
+         SELECT lower(email) AS email, COALESCE(NULLIF(display_name, ''), lower(email)) AS display_name
+           FROM workspace_members
+          WHERE status = 'active'
+       ) source
+      WHERE source.email != ''
+        AND NOT EXISTS (SELECT 1 FROM app_users au WHERE lower(au.email) = source.email)`
+  ).bind(now).run();
+
+  const members = await env.CENTRAL_DB.prepare(
+      `UPDATE workspace_members
+          SET auth_uid = (SELECT au.id FROM app_users au WHERE lower(au.email) = lower(workspace_members.email) LIMIT 1),
+              updated_at = ?1
+        WHERE status = 'active'
+          AND EXISTS (SELECT 1 FROM app_users au WHERE lower(au.email) = lower(workspace_members.email))
+          AND (auth_uid IS NULL OR auth_uid != (SELECT au.id FROM app_users au WHERE lower(au.email) = lower(workspace_members.email) LIMIT 1))`
+    ).bind(now).run();
+  const admins = await env.CENTRAL_DB.prepare(
+      `UPDATE admin_users
+          SET auth_uid = (SELECT au.id FROM app_users au WHERE lower(au.email) = lower(admin_users.email) LIMIT 1),
+              updated_at = ?1
+        WHERE status = 'active'
+          AND EXISTS (SELECT 1 FROM app_users au WHERE lower(au.email) = lower(admin_users.email))
+          AND (auth_uid IS NULL OR auth_uid != (SELECT au.id FROM app_users au WHERE lower(au.email) = lower(admin_users.email) LIMIT 1))`
+    ).bind(now).run();
+  const owners = await env.CENTRAL_DB.prepare(
+      `UPDATE workspaces
+          SET owner_uid = (
+                SELECT COALESCE(wm.auth_uid, au.id)
+                  FROM workspace_members wm
+                  LEFT JOIN app_users au ON lower(au.email) = lower(wm.email)
+                 WHERE wm.workspace_id = workspaces.id
+                   AND wm.status = 'active'
+                   AND wm.role_key = 'owner'
+                 ORDER BY wm.created_at
+                 LIMIT 1
+              ),
+              updated_at = ?1
+        WHERE status = 'active'
+          AND EXISTS (
+                SELECT 1 FROM workspace_members wm
+                 WHERE wm.workspace_id = workspaces.id
+                   AND wm.status = 'active'
+                   AND wm.role_key = 'owner'
+              )
+          AND COALESCE(owner_uid, '') != COALESCE((
+                SELECT COALESCE(wm.auth_uid, au.id, '')
+                  FROM workspace_members wm
+                  LEFT JOIN app_users au ON lower(au.email) = lower(wm.email)
+                 WHERE wm.workspace_id = workspaces.id
+                   AND wm.status = 'active'
+                   AND wm.role_key = 'owner'
+                 ORDER BY wm.created_at
+                 LIMIT 1
+              ), '')`
+    ).bind(now).run();
+  const workspaceRows = await env.CENTRAL_DB.prepare(
+    `SELECT id FROM workspaces WHERE status = 'active' ORDER BY id`
+  ).all<{ id: string }>();
+
+  const auth = adminAuthContext(adminSession);
+  const tenantResults = await Promise.all((workspaceRows.results || []).map(async (row) => ({
+    workspaceId: String(row.id),
+    result: await callWorkspaceDO(env, String(row.id), 'admin-action/repair-baseline', auth, 'POST', {})
+  })));
+  const tenantChanges = tenantResults.reduce((sum, row) => sum + Number((row.result as any)?.changes || 0), 0);
+
+  const result = {
+    appUsersCreated: Number(createdUsers.meta?.changes || 0),
+    memberIdentityLinks: Number(members.meta?.changes || 0),
+    adminIdentityLinks: Number(admins.meta?.changes || 0),
+    workspaceOwnerLinks: Number(owners.meta?.changes || 0),
+    tenantBaselines: tenantChanges,
+    tenantFailures: tenantResults.filter((row) => !(row.result as any)?.ok).map((row) => row.workspaceId)
+  };
+  await writeAdminAuditEvent(
+    lenv,
+    { uid: auth.uid, email: auth.email },
+    'maintenance.integrity-repair',
+    'central-and-tenants',
+    result
+  );
+  return json(request, env, { ok: true, repairedAt: now, ...result });
+}
+
 /** Seed a newly-approved workspace's DO with its tenant baseline (settings + default location). */
 async function provisionWorkspaceTenant(env: Env, workspaceId: string, siteName: string): Promise<void> {
   const now = new Date().toISOString();
@@ -143,7 +441,7 @@ function corsHeaders(request: Request, env: Env): Record<string, string> {
   const ok = allowed.some((a) => a === origin || (a.includes('*') && matchWildcard(a, origin)));
   return {
     'Access-Control-Allow-Origin': ok ? origin : allowed[0] || '*',
-    'Access-Control-Allow-Methods': 'GET,POST,PATCH,DELETE,OPTIONS',
+    'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type,Authorization',
     'Access-Control-Max-Age': '86400',
     Vary: 'Origin'
@@ -238,21 +536,22 @@ async function forwardToWorkspaceDO(
 ): Promise<Response> {
   const id = env.WORKSPACE.idFromName(workspaceId);
   const stub = env.WORKSPACE.get(id);
-  const forwarded = new Request(request.url, {
-    method: request.method,
-    headers: new Headers(request.headers),
-    body: request.method === 'GET' || request.method === 'HEAD' ? undefined : request.body
-  });
-  forwarded.headers.set('x-kcp-workspace', workspaceId);
-  forwarded.headers.set('x-kcp-resource', resource);
-  forwarded.headers.set('x-kcp-auth', JSON.stringify(auth));
+  const headers = new Headers(request.headers);
+  headers.set('x-kcp-workspace', workspaceId);
+  headers.set('x-kcp-resource', resource);
+  headers.set('x-kcp-auth', JSON.stringify(auth));
+
+  // Construct from the Request itself so the runtime tees the body stream. Passing request.body
+  // directly transfers the original stream to the Durable Object; Miniflare/Workers then fails while
+  // draining the outer request after a JSON-reading action (for example Yoco disconnect/connect).
+  const forwarded = new Request(request, { headers });
   return stub.fetch(forwarded);
 }
 
 /**
  * Fan-out primitive: synthesize an internal request to ANY workspace's DO for a given resource and
  * return its parsed JSON. Used by cross-workspace reads (linked-transfer profiles, org/corp
- * consolidated reports, admin overview) that must run in the front Worker where env.WORKSPACE lives.
+ * consolidated overview data, admin overview) that must run in the front Worker where env.WORKSPACE lives.
  */
 async function callWorkspaceDO(
   env: Env,
@@ -762,7 +1061,7 @@ export default {
       // frontend treats them as "not signed in" rather than a server error. Mirrors legacy behaviour.
       const raw = cause instanceof Error ? cause.message : 'Internal error.';
       const status = /token|access|permission|denied|sign in|session|expired/i.test(raw) ? 401 : 500;
-      const message = /token|session|expired|access|permission|denied|invalid|required|not found|sign in|password|email/i.test(raw)
+      const message = /token|session|expired|access|permission|denied|invalid|required|not found|sign in|password|email|already exists|duplicate|unique/i.test(raw)
         ? raw
         : 'Something went wrong. Please try again.';
       return json(request, env, { ok: false, error: message }, status);
@@ -780,10 +1079,14 @@ export default {
     const ids = (list.results || []).map((r) => String(r.id)).filter(Boolean);
     console.log(`[low-stock-cron] evaluating ${ids.length} active workspaces`);
     await Promise.all(
-      ids.map((id) =>
+      ids.flatMap((id) => [
         callWorkspaceDO(env, id, 'admin-action/low-stock-due', { uid: 'system', email: '' }, 'POST', {})
-          .catch((cause) => { console.error(`[low-stock-cron] ws=${id} failed: ${cause}`); return null; })
-      )
+          .catch((cause) => { console.error(`[low-stock-cron] ws=${id} failed: ${cause}`); return null; }),
+        callWorkspaceDO(env, id, 'admin-action/report-schedules-due', { uid: 'system', email: '' }, 'POST', {})
+          .catch((cause) => { console.error(`[report-schedule-cron] ws=${id} failed: ${cause}`); return null; }),
+        callWorkspaceDO(env, id, 'admin-action/yoco-webhook-health', { uid: 'system', email: '' }, 'POST', {})
+          .catch((cause) => { console.error(`[yoco-webhook-health-cron] ws=${id} failed: ${cause}`); return null; })
+      ])
     );
   }
 };

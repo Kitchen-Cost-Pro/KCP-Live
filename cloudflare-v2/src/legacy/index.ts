@@ -64,6 +64,7 @@ import {
 } from './admin-routes';
 import {
   getDashboard,
+  getDashboardSource,
   getAdjustments,
   getWastageAdjustments,
   getCreditNotes,
@@ -76,6 +77,8 @@ import {
   patchAdminWorkspaceSettingsDO,
   adminYocoActionDO,
   adminYocoStatusDO,
+  adminYocoEventsDO,
+  adminAuditEventsDO,
   adminActionDO,
   adminOrgFieldsDO,
   adminUnlinkOrgDO,
@@ -84,7 +87,6 @@ import {
   getManufacturingBatches,
   getProducts,
   getPurchaseOrders,
-  getReportingSource,
   getSiteConfiguration,
   getSuppliers,
   getStockItems,
@@ -154,8 +156,9 @@ import {
   postStockBulkDelete,
   postStockCategoryAction,
   postStockImport,
+  postStockLocationCostsImport,
   postStockItem,
-  postStockResetReporting,
+  postStockResetDashboardHistory,
   postStockTake,
   postStockTakeDraft,
   postStockTakeTemplate,
@@ -167,6 +170,40 @@ import {
   postYocoWebhook
 } from './routes';
 import { sendWorkspaceLowStockNow } from './low-stock-email';
+import {
+  getDetailedActivityReport,
+  getLedgerIntegrityAudit,
+  getInventoryAuditReport,
+  getMenuRecipeHealthReport,
+  getModifierSalesReport,
+  getSaleStockUsageReport,
+  getSalesFinancialReport,
+  getStockControlReport,
+  getStockTakeAuditReport,
+  postLedgerIntegrityBackfill
+} from './reporting-routes';
+import {
+  getStockOnHandReport,
+  getPurchaseOrdersReport,
+  getGrvLogReport,
+  getCreditNotesReport,
+  getManufacturingTransactionsReport,
+  getStockTransferTransactionsReport
+} from './reporting-phase21-routes';
+import { getTransactionDetailReport } from './transaction-detail-routes';
+import {
+  deleteReportSavedView,
+  deleteReportSchedule,
+  getReportSavedViews,
+  getReportSchedules,
+  postReportSavedView,
+  postReportSchedule,
+  postReportTestEmail,
+  postRunDueReportSchedules,
+  postRunReportScheduleNow,
+  putReportSavedView,
+  putReportSchedule
+} from './report-scheduling-routes';
 
 function routePattern(pathname: string, pattern: RegExp) {
   return pathname.match(pattern);
@@ -213,11 +250,16 @@ export async function dispatchCentralRoute(request: Request, env: Env): Promise<
 
   if (request.method === 'GET' && url.pathname === '/api/auth/security-config') {
     const siteKey = String(env.TURNSTILE_SITE_KEY || '').trim();
+    const secretConfigured = Boolean(String(env.TURNSTILE_SECRET_KEY || '').trim());
+    const siteKeyConfigured = Boolean(siteKey);
     return json(request, env, {
       ok: true,
       turnstile: {
         siteKey,
-        enabled: Boolean(siteKey && String(env.TURNSTILE_SECRET_KEY || '').trim()),
+        enabled: siteKeyConfigured && secretConfigured,
+        configured: siteKeyConfigured && secretConfigured,
+        siteKeyConfigured,
+        secretConfigured,
         mode: String(env.APP_TURNSTILE_MODE || 'enforce').trim().toLowerCase() || 'enforce'
       },
     });
@@ -270,11 +312,17 @@ export async function dispatchCentralRoute(request: Request, env: Env): Promise<
   if (request.method === 'GET' && url.pathname === '/api/admin/security-config') {
     const siteKey = String(env.ADMIN_TURNSTILE_SITE_KEY || env.TURNSTILE_SITE_KEY || '').trim();
     const secretKey = String(env.ADMIN_TURNSTILE_SECRET_KEY || env.TURNSTILE_SECRET_KEY || '').trim();
+    const siteKeyConfigured = Boolean(siteKey);
+    const secretConfigured = Boolean(secretKey);
     return json(request, env, {
       ok: true,
       turnstile: {
         siteKey,
-        enabled: Boolean(siteKey && secretKey)
+        enabled: siteKeyConfigured && secretConfigured,
+        configured: siteKeyConfigured && secretConfigured,
+        siteKeyConfigured,
+        secretConfigured,
+        mode: String(env.ADMIN_TURNSTILE_MODE || 'enforce').trim().toLowerCase() || 'enforce'
       }
     });
   }
@@ -484,6 +532,95 @@ export async function dispatchWorkspaceRoute(
   workspaceId: string,
   resource: string
 ): Promise<Response> {
+  if (request.method === 'GET' && resource === 'report-saved-views') return getReportSavedViews(request, env, auth, workspaceId);
+  if (request.method === 'POST' && resource === 'report-saved-views') return postReportSavedView(request, env, auth, workspaceId);
+  const savedViewMatch = routePattern(resource, /^report-saved-views\/([^/]+)$/);
+  if (savedViewMatch && request.method === 'PUT') return putReportSavedView(request, env, auth, workspaceId, decodeURIComponent(savedViewMatch[1]));
+  if (savedViewMatch && request.method === 'DELETE') return deleteReportSavedView(request, env, auth, workspaceId, decodeURIComponent(savedViewMatch[1]));
+
+  if (request.method === 'GET' && resource === 'report-schedules') return getReportSchedules(request, env, auth, workspaceId);
+  if (request.method === 'POST' && resource === 'report-schedules') return postReportSchedule(request, env, auth, workspaceId);
+  const scheduleRunMatch = routePattern(resource, /^report-schedules\/([^/]+)\/run-now$/);
+  if (scheduleRunMatch && request.method === 'POST') return postRunReportScheduleNow(request, env, auth, workspaceId, decodeURIComponent(scheduleRunMatch[1]));
+  const scheduleMatch = routePattern(resource, /^report-schedules\/([^/]+)$/);
+  if (scheduleMatch && request.method === 'PUT') return putReportSchedule(request, env, auth, workspaceId, decodeURIComponent(scheduleMatch[1]));
+  if (scheduleMatch && request.method === 'DELETE') return deleteReportSchedule(request, env, auth, workspaceId, decodeURIComponent(scheduleMatch[1]));
+  if (request.method === 'POST' && resource === 'reports/send-test-email') return postReportTestEmail(request, env, auth, workspaceId);
+  if (request.method === 'POST' && resource === 'admin-action/report-schedules-due') return postRunDueReportSchedules(request, env, auth, workspaceId);
+  const transactionDetailMatch = routePattern(resource, /^reports\/transactions\/([^/]+)$/);
+  if (transactionDetailMatch && request.method === 'GET') {
+    return getTransactionDetailReport(request, env, auth, workspaceId, decodeURIComponent(transactionDetailMatch[1]));
+  }
+
+  if (request.method === 'GET' && resource === 'reports/detailed-activity') {
+    return getDetailedActivityReport(request, env, auth, workspaceId);
+  }
+
+  if (request.method === 'GET' && resource === 'reports/stock-take-audit') {
+    return getStockTakeAuditReport(request, env, auth, workspaceId);
+  }
+
+
+  if (request.method === 'GET' && resource === 'reports/sales-financial') {
+    return getSalesFinancialReport(request, env, auth, workspaceId);
+  }
+
+  if (request.method === 'GET' && resource === 'reports/sale-stock-usage') {
+    return getSaleStockUsageReport(request, env, auth, workspaceId, 'all');
+  }
+
+  if (request.method === 'GET' && resource === 'reports/modifier-usage') {
+    return getSaleStockUsageReport(request, env, auth, workspaceId, 'modifier');
+  }
+
+  if (request.method === 'GET' && resource === 'reports/modifier-sales') {
+    return getModifierSalesReport(request, env, auth, workspaceId);
+  }
+
+  if (request.method === 'GET' && resource === 'reports/menu-recipe-health') {
+    return getMenuRecipeHealthReport(request, env, auth, workspaceId);
+  }
+
+  if (request.method === 'GET' && resource === 'reports/stock-control') {
+    return getStockControlReport(request, env, auth, workspaceId);
+  }
+
+  if (request.method === 'GET' && resource === 'reports/stock-on-hand') {
+    return getStockOnHandReport(request, env, auth, workspaceId);
+  }
+
+  if (request.method === 'GET' && resource === 'reports/purchase-orders') {
+    return getPurchaseOrdersReport(request, env, auth, workspaceId);
+  }
+
+  if (request.method === 'GET' && resource === 'reports/grv-log') {
+    return getGrvLogReport(request, env, auth, workspaceId);
+  }
+
+  if (request.method === 'GET' && resource === 'reports/credit-notes') {
+    return getCreditNotesReport(request, env, auth, workspaceId);
+  }
+
+  if (request.method === 'GET' && resource === 'reports/manufacturing-transactions') {
+    return getManufacturingTransactionsReport(request, env, auth, workspaceId);
+  }
+
+  if (request.method === 'GET' && resource === 'reports/stock-transfer-transactions') {
+    return getStockTransferTransactionsReport(request, env, auth, workspaceId);
+  }
+
+  if (request.method === 'GET' && resource === 'reports/inventory-audit') {
+    return getInventoryAuditReport(request, env, auth, workspaceId);
+  }
+
+  if (request.method === 'GET' && resource === 'reports/ledger-integrity/audit') {
+    return getLedgerIntegrityAudit(request, env, auth, workspaceId);
+  }
+
+  if (request.method === 'POST' && resource === 'reports/ledger-integrity/backfill') {
+    return postLedgerIntegrityBackfill(request, env, auth, workspaceId);
+  }
+
   if (request.method === 'GET' && resource === 'locations') {
     return getLocations(request, env, auth, workspaceId);
   }
@@ -580,6 +717,12 @@ export async function dispatchWorkspaceRoute(
   if (request.method === 'GET' && resource === 'admin-yoco/status') {
     return adminYocoStatusDO(request, env, auth, workspaceId);
   }
+  if (request.method === 'GET' && resource === 'admin-yoco/events') {
+    return adminYocoEventsDO(request, env, auth, workspaceId);
+  }
+  if (request.method === 'GET' && resource === 'admin-audit-events') {
+    return adminAuditEventsDO(request, env, auth, workspaceId);
+  }
   const adminYocoM = resource.match(/^admin-yoco\/([^/]+)$/);
   if (request.method === 'POST' && adminYocoM) {
     return adminYocoActionDO(request, env, auth, workspaceId, adminYocoM[1]);
@@ -662,12 +805,16 @@ export async function dispatchWorkspaceRoute(
     return postStockImport(request, env, auth, workspaceId);
   }
 
+  if (request.method === 'POST' && resource === 'stock-items/location-costs/import') {
+    return postStockLocationCostsImport(request, env, auth, workspaceId);
+  }
+
   if (request.method === 'POST' && resource === 'stock-items/bulk-delete') {
     return postStockBulkDelete(request, env, auth, workspaceId);
   }
 
-  if (request.method === 'POST' && resource === 'stock-items/reset-reporting') {
-    return postStockResetReporting(request, env, auth, workspaceId);
+  if (request.method === 'POST' && (resource === 'stock-items/reset-dashboard' || resource === 'stock-items/reset-reporting')) {
+    return postStockResetDashboardHistory(request, env, auth, workspaceId);
   }
 
   const stockLevelMatch = resource.match(/^stock-items\/([^/]+)\/stock-level$/);
@@ -698,9 +845,10 @@ export async function dispatchWorkspaceRoute(
     return getDashboard(request, env, auth, workspaceId);
   }
 
-  if (request.method === 'GET' && resource === 'reporting-source') {
-    return getReportingSource(request, env, auth, workspaceId);
+  if (request.method === 'GET' && resource === 'dashboard-source') {
+    return getDashboardSource(request, env, auth, workspaceId);
   }
+
 
   if (request.method === 'GET' && resource === 'adjustments') {
     return getAdjustments(request, env, auth, workspaceId);
@@ -921,9 +1069,9 @@ export default {
       return await handle(request, env);
     } catch (cause) {
       const raw = cause instanceof Error ? cause.message : 'Internal error.';
-      const isUserFacing = /token|session|expired|access|permission|denied|invalid|required|not found|sign in|password|email/i.test(raw);
+      const isUserFacing = /token|session|expired|access|permission|denied|invalid|required|not found|sign in|password|email|already exists|duplicate|unique/i.test(raw);
       const message = isUserFacing ? raw : 'Something went wrong. Please try again.';
-      const status = /token|access|permission|denied|sign in/i.test(raw) ? 401 : 500;
+      const status = /permission|denied|access to this workspace/i.test(raw) ? 403 : /token|session|expired|sign in/i.test(raw) ? 401 : 500;
       return error(request, env, status, message);
     }
   },

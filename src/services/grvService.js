@@ -28,14 +28,18 @@ export async function fetchGrvWorkspace(workspaceId) {
   const workspaceKey = String(workspaceId || '').trim();
   if (!workspaceKey) throw new Error('Workspace id is required for GRV entries.');
 
-  const [receiptResponse, purchaseOrderState] = await Promise.all([
-    callCloudflareWorkspaceRoute(workspaceKey, 'grvs', { query: { limit: 500 } }),
+  const [receiptResult, purchaseOrderState] = await Promise.all([
+    callCloudflareWorkspaceRoute(workspaceKey, 'grvs', { query: { limit: 500 } })
+      .then((response) => ({ ok: true, response }))
+      .catch((error) => ({ ok: false, error, response: { receipts: [] } })),
     fetchPurchaseOrdersWorkspace(workspaceKey)
   ]);
 
+  const receiptResponse = receiptResult.response || { receipts: [] };
+
   return {
     status: 'ready',
-    source: 'Live GRV entries',
+    source: receiptResult.ok ? 'Live GRV entries' : 'Live GRV entries - history unavailable',
     receipts: sortReceipts(normalizeGoodsReceipts(receiptResponse.receipts || [])),
     orders: sortOrders(normalizePurchaseOrders(purchaseOrderState.orders || [])),
     suppliers: sortByName(purchaseOrderState.suppliers || []),
@@ -43,13 +47,14 @@ export async function fetchGrvWorkspace(workspaceId) {
     sites: sortByName(purchaseOrderState.sites || []),
     locations: sortByName(purchaseOrderState.locations || []),
     loaded: {
-      receipts: true,
+      receipts: Boolean(receiptResult.ok),
       orders: true,
       suppliers: true,
       stockItems: true,
       sites: true,
       locations: true
     },
+    historyError: receiptResult.ok ? '' : String(receiptResult.error?.message || 'Could not load GRV history.'),
     updatedAt: new Date().toISOString()
   };
 }
@@ -102,6 +107,8 @@ function normalizeGoodsReceipt(id, item = {}) {
     locationId: String(item.locationId || item.targetLocation || '').trim(),
     locationName: String(item.locationName || item.targetLocationName || '').trim(),
     notes: String(item.notes || '').trim(),
+    overrideCostPrice: item.overrideCostPrice !== false,
+    costingMethod: normalizeCostingMethod(item.costingMethod || item.costing_method),
     status: item.status || 'finalized',
     totalEx,
     sourceDisplay,
@@ -111,6 +118,11 @@ function normalizeGoodsReceipt(id, item = {}) {
     items: items.map(normalizeReceiptLine).filter((line) => line.stockItemId),
     type: item.type || (item.sourcePoId ? 'PO_GRV' : 'MANUAL_GRV')
   };
+}
+
+function normalizeCostingMethod(value) {
+  const method = String(value || 'last').trim().toLowerCase();
+  return method === 'wac' || method === 'weighted_average' || method === 'weighted_average_cost' ? 'wac' : 'last';
 }
 
 function normalizeReceiptPayload(receipt = {}) {
@@ -133,6 +145,8 @@ function normalizeReceiptPayload(receipt = {}) {
     submittedByName: String(receipt.submittedByName || receipt.userName || '').trim(),
     pricesIncludeVat: receipt.pricesIncludeVat === true,
     splitByLocation: receipt.splitByLocation === true,
+    overrideCostPrice: receipt.overrideCostPrice !== false,
+    costingMethod: normalizeCostingMethod(receipt.costingMethod || receipt.costing_method),
     items: (receipt.items || [])
       .map((line) => normalizeReceiptLine(line, { defaultLocationId, defaultLocationName }))
       .filter((line) => line.stockItemId && Number(line.receivedQty || 0) > 0)

@@ -5,14 +5,17 @@ function text(value: unknown, fallback = '') {
 }
 
 function signatureValues(header: string) {
-  return text(header)
-    .split(/[,\s]+/)
-    .map((part) => {
-      if (part.startsWith('sha256=')) return part.slice('sha256='.length);
-      if (part.startsWith('v1=')) return part.slice('v1='.length);
-      return part;
+  const raw = text(header);
+  if (!raw) return [];
+  return raw
+    .split(/\s+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const commaIndex = entry.indexOf(',');
+      const value = commaIndex >= 0 ? entry.slice(commaIndex + 1) : entry;
+      return value.replace(/^(?:sha256=|v1=)/i, '').trim();
     })
-    .map((part) => part.trim())
     .filter(Boolean);
 }
 
@@ -26,42 +29,70 @@ function base64SecretBytes(value: string) {
   }
 }
 
-function secretCandidates(secret: string) {
+function standardWebhookSecret(secret: string) {
+  const value = text(secret);
+  if (!value) return null;
+  if (!value.startsWith('whsec_')) return null;
+  return base64SecretBytes(value.slice('whsec_'.length));
+}
+
+function fallbackSecretCandidates(secret: string) {
   const value = text(secret);
   if (!value) return [];
   const candidates: Array<string | Uint8Array> = [value];
   if (value.startsWith('whsec_')) {
     const afterPrefix = value.slice('whsec_'.length);
-    const afterLastUnderscore = value.slice(value.lastIndexOf('_') + 1);
     const decoded = base64SecretBytes(afterPrefix);
     if (decoded) candidates.unshift(decoded);
     candidates.push(afterPrefix);
-    if (afterLastUnderscore !== afterPrefix) candidates.push(afterLastUnderscore);
   }
   return candidates.filter((candidate, index) => (
     typeof candidate !== 'string' || candidates.findIndex((entry) => entry === candidate) === index
   ));
 }
 
-export async function verifyYocoWebhook(rawBody: string, headers: Headers, webhookSecret: string) {
+function uniqueSecrets(secrets: string | string[]) {
+  return (Array.isArray(secrets) ? secrets : [secrets])
+    .map((secret) => text(secret))
+    .filter((secret, index, list) => Boolean(secret) && list.indexOf(secret) === index);
+}
+
+export async function verifyYocoWebhook(rawBody: string, headers: Headers, webhookSecrets: string | string[]) {
   const signatureHeader = text(headers.get('webhook-signature') || headers.get('svix-signature'));
   const webhookId = text(headers.get('webhook-id') || headers.get('svix-id'));
   const webhookTimestamp = text(headers.get('webhook-timestamp') || headers.get('svix-timestamp'));
-  if (!signatureHeader || !webhookSecret) return false;
+  const provided = signatureValues(signatureHeader);
+  const secrets = uniqueSecrets(webhookSecrets);
+  if (!signatureHeader || !provided.length || !secrets.length) return false;
 
-  const signedBodies = [
+  // Yoco documents the Standard Webhooks v1 format: signed content is
+  // webhook-id + '.' + webhook-timestamp + '.' + the raw request body, and the
+  // whsec_ prefix is removed before base64-decoding the HMAC key.
+  if (webhookId && webhookTimestamp) {
+    const signedContent = `${webhookId}.${webhookTimestamp}.${rawBody}`;
+    for (const secret of secrets) {
+      const decodedSecret = standardWebhookSecret(secret);
+      if (!decodedSecret) continue;
+      const expected = await hmacSha256Base64(decodedSecret, signedContent);
+      if (provided.some((signature) => timingSafeEqual(expected, signature))) return true;
+    }
+  }
+
+  // Compatibility fallback for older/staged tenants that may have saved a raw
+  // signing key or received an older non-standard signature header. Standard
+  // Yoco deliveries are accepted by the branch above.
+  const fallbackBodies = [
     webhookId && webhookTimestamp ? `${webhookId}.${webhookTimestamp}.${rawBody}` : '',
     rawBody
   ].filter(Boolean);
-  const provided = signatureValues(signatureHeader);
-
-  for (const secret of secretCandidates(webhookSecret)) {
-    for (const body of signedBodies) {
-      const base64 = await hmacSha256Base64(secret, body);
-      const hex = await hmacSha256Hex(secret, body);
-      const expected = [base64, hex, `sha256=${base64}`, `sha256=${hex}`];
-      if (provided.some((sig) => expected.some((candidate) => timingSafeEqual(candidate, sig)))) {
-        return true;
+  for (const secret of secrets) {
+    for (const candidateSecret of fallbackSecretCandidates(secret)) {
+      for (const body of fallbackBodies) {
+        const base64 = await hmacSha256Base64(candidateSecret, body);
+        const hex = await hmacSha256Hex(candidateSecret, body);
+        if (provided.some((sig) => timingSafeEqual(base64, sig) || timingSafeEqual(hex, sig))) {
+          return true;
+        }
       }
     }
   }

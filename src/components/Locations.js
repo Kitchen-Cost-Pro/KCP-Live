@@ -2,7 +2,7 @@ import '../styles/locations.css';
 import '../styles/fieldHelp.css';
 import { bindFieldHelpTooltips, renderFieldHelpLabel } from './fieldHelp.js';
 import { renderLoadingPanel } from './LoadingPanel.js';
-import { isStockCountableItem } from '../services/stockCountEligibility.js';
+import { isStockRoutingEligibleItem, normalizeStockItemType } from '../services/stockCountEligibility.js';
 
 export function renderLocations({ state, onLocationFilterChange, onLocationAction = {} } = {}) {
   const locations = state.locations || {};
@@ -379,7 +379,7 @@ function renderCreateForm(draft, actionStatus, context = {}) {
         <div>
           <p>Storage Location</p>
           <h2>Add Storage Location</h2>
-          <span>Create a storage location for stock receiving, routing, transfers, and reporting.</span>
+          <span>Create a storage location for stock receiving, routing, transfers, and exports.</span>
         </div>
       </header>
 
@@ -445,13 +445,13 @@ function renderLocationFields(location, mode, context = {}) {
 
   return `
     <label class="locationsModalField">
-      ${renderFieldHelpLabel(isYocoManaged ? 'Custom Display Name' : 'Location Name', isYocoManaged ? 'This label is used inside KCP. The official Yoco location name is preserved for future syncs.' : 'The location name staff will see across stock movements and reports.')}
+      ${renderFieldHelpLabel(isYocoManaged ? 'Custom Display Name' : 'Location Name', isYocoManaged ? 'This label is used inside KCP. The official Yoco location name is preserved for future syncs.' : 'The location name staff will see across stock movements and exports.')}
       <input type="text" value="${escapeAttribute(displayName || '')}" placeholder="E.g. Kloof Street" ${fieldAttribute}="name" data-focus-key="${prefix}-name" />
       ${isYocoManaged ? `<span class="locationsFieldHint">Yoco official name: ${escapeHtml(officialName || location.name || '')}</span>` : ''}
       ${showOfficialName ? `<span class="locationsFieldHint">Showing in KCP as: ${escapeHtml(displayName)}</span>` : ''}
     </label>
     <label class="locationsModalField">
-      ${renderFieldHelpLabel('Code', 'Optional short code for compact reporting and exports.')}
+      ${renderFieldHelpLabel('Code', 'Optional short code for compact exports and screens.')}
       <input type="text" value="${escapeAttribute(location.code || '')}" placeholder="E.g. KLOOF" ${fieldAttribute}="code" data-focus-key="${prefix}-code" />
     </label>
     <label class="locationsModalField locationsModalField--wide">
@@ -792,6 +792,7 @@ function renderRoutingBucket(bucket, mode) {
 
 function renderRoutingChip(category, { mode = 'draft', isSelf = false } = {}) {
   const categoryNames = category.categoryNames || [category.name].filter(Boolean);
+  const tags = Array.isArray(category.tags) ? category.tags : [];
   const categorySummary = categoryNames.length
     ? categoryNames.slice(0, 3).join(', ') + (categoryNames.length > 3 ? ` +${categoryNames.length - 3}` : '')
     : '';
@@ -803,12 +804,15 @@ function renderRoutingChip(category, { mode = 'draft', isSelf = false } = {}) {
       tabindex="0"
       data-location-routing-chip
       data-location-routing-category="${escapeAttribute(category.routeKey)}"
-      data-location-routing-search="${escapeAttribute(`${category.name} ${categorySummary}`)}"
+      data-location-routing-search="${escapeAttribute(`${category.name} ${categorySummary} ${tags.join(' ')}`)}"
       aria-label="Drag ${escapeAttribute(category.name)} routing category"
     >
       <i>${icon('box')}</i>
-      <strong>${escapeHtml(category.name)}</strong>
-      ${categorySummary && categorySummary !== category.name ? `<span>${escapeHtml(categorySummary)}</span>` : ''}
+      <div class="locationsRoutingChipMain">
+        <strong>${escapeHtml(category.name)}</strong>
+        ${categorySummary && categorySummary !== category.name ? `<span>${escapeHtml(categorySummary)}</span>` : ''}
+        ${tags.length ? `<div class="locationsRoutingTags">${tags.map((tag) => `<span class="locationsRoutingTag--${escapeAttribute(normalizeRoutingTagClass(tag))}">${escapeHtml(tag)}</span>`).join('')}</div>` : ''}
+      </div>
       ${isSelf ? `<em>${formatNumber(category.itemCount || 0)}</em>` : `
         <button
           type="button"
@@ -862,7 +866,7 @@ function getLocationRoutingCategories(state = {}) {
     {};
   const categories = new Map();
   stockItems.forEach((item = {}) => {
-    if (!isStockCountableItem(item)) return;
+    if (!isStockRoutingEligibleItem(item)) return;
     const name = normalizeStockCategoryName(item.category || 'General');
     const mapped = getMappedRoutingLabel(name, routingMap);
     const routeKey = mapped || name;
@@ -871,18 +875,40 @@ function getLocationRoutingCategories(state = {}) {
       routeKey,
       name: routeKey,
       categoryNames: [],
-      itemCount: 0
+      itemCount: 0,
+      tags: []
     };
     const categoryNames = current.categoryNames.includes(name)
       ? current.categoryNames
       : [...current.categoryNames, name];
+    const tags = mergeRoutingTags(current.tags, getRoutingCategoryTags(item, name));
     categories.set(routeKey, {
       ...current,
       categoryNames,
-      itemCount: current.itemCount + 1
+      itemCount: current.itemCount + 1,
+      tags
     });
   });
   return [...categories.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+
+function getRoutingCategoryTags(item = {}, categoryName = '') {
+  const type = normalizeStockItemType(item);
+  const text = String(categoryName || item.category || '').toLowerCase();
+  const tags = [];
+  if (type === 'manufactured' || text.includes('prep') || text.includes('manufactur')) tags.push('PREP');
+  if (type === 'standard' || text.includes('raw') || text.includes('material')) tags.push('RAW');
+  if (!tags.length) tags.push(type === 'manufactured' ? 'PREP' : 'RAW');
+  return [...new Set(tags)];
+}
+
+function mergeRoutingTags(existing = [], next = []) {
+  return [...new Set([...(existing || []), ...(next || [])])].filter(Boolean);
+}
+
+function normalizeRoutingTagClass(tag = '') {
+  return String(tag || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'standard';
 }
 
 function getMappedRoutingLabel(categoryName = '', routingMap = {}) {

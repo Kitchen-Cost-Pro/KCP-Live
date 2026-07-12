@@ -21,7 +21,7 @@ new account — it can never overwrite the current deployment.
 
 ## Status
 Phase 1 (foundation) — facade + DO + front router + central schema, proven with a sample domain
-slice. Remaining phases (port all domains, external-transfer/org-report re-architecture, data
+slice. Remaining phases (port all domains, external-transfer/org overview re-architecture, data
 migration tool) tracked in `../.claude/plans/`.
 
 ## Local dev / deploy

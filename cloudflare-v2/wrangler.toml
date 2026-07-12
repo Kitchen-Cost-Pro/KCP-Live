@@ -6,6 +6,15 @@ name = "kcp-api-v2"
 main = "src/index.ts"
 compatibility_date = "2026-05-23"
 
+
+# Shared report export modules live one directory above this Worker package.
+# Pin their bare imports to this package's dependencies so `npm run deploy` works
+# before the frontend/root `npm install` step.
+[alias]
+xlsx = "./node_modules/xlsx/xlsx.mjs"
+jspdf = "./node_modules/jspdf/dist/jspdf.es.min.js"
+jspdf-autotable = "./node_modules/jspdf-autotable/dist/jspdf.plugin.autotable.mjs"
+
 # --- Durable Objects: one WorkspaceDO (SQLite) per workspace -------------------------------------
 [[durable_objects.bindings]]
 name = "WORKSPACE"
@@ -31,7 +40,7 @@ database_id = "279a7882-ca9d-4bae-b308-e47fe6d24071"
 
 [vars]
 ENVIRONMENT = "production"
-ALLOWED_ORIGINS = "http://localhost:5173,http://localhost:5174,http://localhost:5175,http://127.0.0.1:5173,https://kcp-live.pages.dev,https://*.kcp-live.pages.dev"
+ALLOWED_ORIGINS = "http://localhost:*,http://127.0.0.1:*,https://kcp-live.pages.dev,https://*.kcp-live.pages.dev"
 ADMIN_BOOTSTRAP_EMAILS = "superuser@yoco.com"
 APP_BASE_URL = "https://kcp-live.pages.dev"
 # Point integration callbacks/webhooks at the NEW worker:

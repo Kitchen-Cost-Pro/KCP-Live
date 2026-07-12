@@ -28,7 +28,7 @@ them, so extracting handler-by-handler just drags the whole file along. Port the
    `getUserAllowedLocationIds` (auth.ts) and `getWorkspaceActorRole` (routes.ts:1341) read
    `workspaces`/`workspace_members`/`admin_users`. Point THESE queries at `env.CENTRAL_DB` (the DO's
    Env already binds it). Everything else stays `env.DB`.
-3. **Cross-workspace handlers** (external transfers, org/corp consolidated reporting) → Phase 3
+3. **Cross-workspace handlers** (external transfers, org/corp consolidated overview data) → Phase 3
    (central `external_transfers` outbox + fan-out). Do not port them into the DO as-is.
 
 ## Concrete steps
@@ -45,7 +45,7 @@ them, so extracting handler-by-handler just drags the whole file along. Port the
 4. In the DO (`workspace-do.ts`/`tenant-router.ts`), replace the proof-router with the **tenant subset
    of the dispatch switch** from `cloudflare/src/index.ts:448+` (locations, stock, products, recipes,
    suppliers, PO, GRV, adjustments, local transfers, stocktake, manufacturing, credit notes, yoco
-   catalogue, reports), calling the copied handlers with `env.DB`=facade.
+   catalogue, overview data), calling the copied handlers with `env.DB`=facade.
 5. In the front Worker, keep central routes (`/api/auth/*`, `/api/admin/*`, workspace create/list,
    member/role/access) against `CENTRAL_DB`.
 6. Typecheck; then smoke-test each feature slice locally exactly like the suppliers proof
@@ -194,14 +194,14 @@ env.WORKSPACE). Consumers to wire:
   resource `transfer-profile`. Front worker intercepts `linked-transfer-profiles`: discover peers
   (org/corp from CENTRAL_DB workspaces + source's linkedSites via `callWorkspaceDO(source,'settings')`),
   `fanOutWorkspaceDOs(peers,'transfer-profile')`, merge + apply sourceLink overrides. Return {ok, profiles}.
-- **getAdminOverview / org-corp consolidated reports** (admin portal — secondary): getAdminOverview
+- **getAdminOverview / org-corp consolidated overview data** (admin portal — secondary): getAdminOverview
   (admin-routes.ts:983) currently one query JOINs workspaces+workspace_settings+stock_items+locations
   across ALL workspaces + a yoco_connections aggregate. Fan-out plan: (1) add a tenant `admin-stats`
   resource returning per-workspace counts (stock_item_count, location_count, vat_rate, yoco
   items/locations) from local env.DB; (2) move getAdminOverview to the front worker: central reads
   (workspaces, registration_requests, members, invitations, admins) straight from CENTRAL_DB, then
   `fanOutWorkspaceDOs(allWorkspaceIds, 'admin-stats')` and merge stats into the workspace map. Log
-  partial failures; never silently drop a member. Same pattern for org/corp consolidated reports.
+  partial failures; never silently drop a member. Same pattern for org/corp consolidated overview data.
   PROVEN reference implementation: getLinkedTransferProfilesFanOut + getSelfTransferProfile.
 - **Admin per-workspace ops** (workspace settings GET/PATCH, Yoco connect/sync): front worker forwards
   to that one workspace's DO via forwardToWorkspaceDO (they act on one tenant's tables), rather than

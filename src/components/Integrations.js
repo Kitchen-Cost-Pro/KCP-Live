@@ -239,7 +239,7 @@ function bindIntegrationEvents(view) {
 
   view.querySelector('[data-yoco-sync-sales]')?.addEventListener('click', async () => {
     await runYocoAction(view, 'Syncing Yoco sales...', async () => {
-      const result = await syncYocoSales(view.dataset.workspaceId || '');
+      const result = await syncYocoSales(view.dataset.workspaceId || '', { resetWebhook: true });
       setYocoSummary(view, result);
       setYocoModalStatus(view, 'Yoco sales sync complete.', 'success');
     });
@@ -247,7 +247,7 @@ function bindIntegrationEvents(view) {
 
   view.querySelector('[data-yoco-sync-catalogue]')?.addEventListener('click', async () => {
     await runYocoAction(view, 'Syncing Yoco catalogue...', async () => {
-      const result = await syncYocoCatalogue(view.dataset.workspaceId || '');
+      const result = await syncYocoCatalogue(view.dataset.workspaceId || '', { resetWebhook: true });
       setYocoSummary(view, result);
       setYocoModalStatus(view, 'Yoco catalogue sync complete.', 'success');
     });

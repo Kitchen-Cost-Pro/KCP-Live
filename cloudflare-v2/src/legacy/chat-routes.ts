@@ -3,6 +3,8 @@ import { AuthContext } from './types';
 import { error, json } from './http';
 import { getYocoApiKey } from './yoco-service';
 import { listOrders, listRefunds } from './yoco-client';
+// @ts-ignore Shared unit-aware Yoco Money conversion for assistant sales/refund summaries.
+import { yocoMoneyToMajor } from '../../../src/modules/reporting/engine/yocoFinancials.js';
 const text = (v: unknown): string => String(v ?? '').trim();
 const numberValue = (v: unknown, fallback: number): number => { const n = Number(v); return Number.isFinite(n) ? n : fallback; };
 
@@ -87,7 +89,7 @@ The Dashboard gives a live overview of your workspace: low stock alerts, recent 
 ### Adjustments
 - **What it is**: Manually increase or decrease stock for reasons not covered by GRV or transfers — waste, spoilage, breakage, complimentary items, recipe testing.
 - **Create an adjustment**: Adjustments → "+ New Adjustment" → select stock item → choose location → enter quantity (positive = add, negative = remove) → reason → Save.
-- **Best practice**: Always add a reason (e.g. "Wastage — expired milk") so reports are meaningful.
+- **Best practice**: Always add a reason (e.g. "Wastage — expired milk") so dashboard views are meaningful.
 
 ### Transfers
 - **What it is**: Move stock from one location to another (e.g. Main Store → Kitchen, Bar top-up).
@@ -114,17 +116,17 @@ The Dashboard gives a live overview of your workspace: low stock alerts, recent 
 - **Batch**: Run a batch to deduct raw ingredients from stock and add the manufactured output.
 - **Use case**: A restaurant that makes its own stocks, spice blends, or portioned proteins uses Manufacturing to track true input costs.
 
-### Reports & Analytics
-- **Stock Movement Report**: Shows every stock movement (GRVs, adjustments, transfers, sales deductions) for any period and item.
-- **GP Report**: Theoretical GP% per product based on recipe cost vs selling price. Filter by category or date range.
-- **Sales Report**: Revenue and quantity sold per product, synced from Yoco.
-- **Low Stock Report**: All items currently below threshold.
-- **Location filter**: Most reports can be filtered by location for a specific store or area view.
+### Dashboard & Insights
+- **Stock Movement View**: Shows stock movement activity from GRVs, adjustments, transfers, and sales deductions.
+- **GP View**: Shows theoretical GP% per product based on recipe cost vs selling price.
+- **Sales View**: Shows revenue and quantity sold per product synced from Yoco.
+- **Low Stock View**: Shows items currently below threshold.
+- **Location filter**: Most dashboard views can be filtered by location for a specific store or area view.
 
 ### Integrations
 - **Yoco**: Connect your Yoco account via API key (Integrations → Yoco). Once connected, the menu catalogue syncs automatically and sales data flows in via webhooks in real time.
 - **Sync catalogue**: If menu items are missing after connecting, trigger a manual catalogue sync from Integrations → Yoco → Sync Catalogue.
-- **Webhooks**: KCP registers a Yoco webhook automatically on connect. Sales update stock levels and analytics without any manual action.
+- **Webhooks**: KCP registers a Yoco webhook automatically on connect. Sales update stock levels and dashboard summaries without any manual action.
 
 ### Settings
 - **Business info**: Update your workspace name, address, and VAT number.
@@ -139,9 +141,9 @@ The Dashboard gives a live overview of your workspace: low stock alerts, recent 
 
 ## Rules:
 - ALWAYS call the correct tool. NEVER guess, invent, or assume any numbers.
-- NEVER explain which tool you are going to use. Just call it silently and report the results directly.
+- NEVER explain which tool you are going to use. Just call it silently and return the results directly.
 - NEVER say "I would use the X tool" or "The X tool returns...". Just show the data.
-- Only report what the tool returns. If it returns empty, say so in one sentence.
+- Only return what the tool returns. If it returns empty, say so in one sentence.
 - For sales/revenue questions → use get_monthly_sales (Yoco). Do NOT use KCP stock tools for sales.
 - For stock/inventory/recipe questions → use KCP tools. Do NOT use Yoco tools for stock.
 - Currency is South African Rand (R). GP% = (Selling Price − Ingredient Cost) ÷ Selling Price × 100.
@@ -585,8 +587,8 @@ async function executeTool(
         }) as Array<Record<string, unknown>>;
         if (!refunds.length) return `No refunds found for ${year}-${String(month).padStart(2, '0')}.`;
         const toMajor = (v: unknown): number => {
-          if (v && typeof v === 'object') { const o = v as Record<string, unknown>; if (typeof o.amount === 'number') return o.amount / 100; if (typeof o.value === 'number') return o.value / 100; }
-          const n = Number(v || 0); return Math.abs(n) > 999 ? n / 100 : n;
+          const amount = yocoMoneyToMajor(v, { scalarUnit: 'major', absolute: false });
+          return Number.isFinite(amount) ? amount : 0;
         };
         const getAmt = (o: Record<string, unknown>) => toMajor((o.amounts as Record<string,unknown>)?.net_amount || o.total_price || o.amount || 0);
         const total = refunds.reduce((s, r) => s + getAmt(r), 0);
@@ -620,13 +622,8 @@ async function executeTool(
         }) as Array<Record<string, unknown>>;
         if (!orders.length) return `No completed Yoco orders found for ${year}-${String(month).padStart(2, '0')}.`;
         const toMajor = (v: unknown): number => {
-          if (v && typeof v === 'object') {
-            const obj = v as Record<string, unknown>;
-            if (typeof obj.amount === 'number') return obj.amount / 100;
-            if (typeof obj.value === 'number') return obj.value / 100;
-          }
-          const n = Number(v || 0);
-          return Math.abs(n) > 999 ? n / 100 : n;
+          const amount = yocoMoneyToMajor(v, { scalarUnit: 'major', absolute: false });
+          return Number.isFinite(amount) ? amount : 0;
         };
         const getOrderTotal = (o: Record<string, unknown>): number => {
           const amounts = o.amounts as Record<string, unknown> | undefined;

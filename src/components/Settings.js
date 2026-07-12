@@ -156,11 +156,11 @@ export function renderSettings({ state, onSettingsAction = {} } = {}) {
 
               <div class="settingsSnapshotNote settingsSnapshotNote--danger">
                 <strong>Super User Reset Tools</strong>
-                <p>Use reporting reset to clear dashboard/report history. Use stock reset when this store needs all selling-location stock on hand set to zero. Products, recipes, stock items, and item costings are preserved.</p>
+                <p>Use reporting reset to clear reporting ledger/history data. Use reporting + stock reset when this store also needs all selling-location stock on hand set to zero. Products, recipes, stock items, and item costings are preserved.</p>
                 <div class="settingsResetActionGrid">
                   <button type="button" class="settingsSecondaryButton settingsSecondaryButton--warning" data-settings-reset-reporting ${isResetting ? 'disabled' : ''}>
                     ${icon('database')}
-                    <span>${isResetting ? 'Resetting...' : 'Reset Reporting Only'}</span>
+                    <span>${isResetting ? 'Resetting...' : 'Reset Reporting'}</span>
                   </button>
                   <button type="button" class="settingsDangerButton" data-settings-reset-reporting-stock ${isResetting ? 'disabled' : ''}>
                     ${icon('trash')}
@@ -325,7 +325,7 @@ function renderStockRoutingPanel(draft = {}, state = {}) {
         ${quickLabels.map((label) => `<span>${escapeHtml(label)}</span>`).join('')}
       </div>
 
-      <p class="settingsRoutingMicrocopy">Yoco category mapping remains available for sales reporting consistency, but depletion is controlled from stock categories.</p>
+      <p class="settingsRoutingMicrocopy">Yoco category mapping remains available for sales routing consistency, but depletion is controlled from stock categories.</p>
     </section>
   `;
 }
@@ -361,6 +361,7 @@ function renderStockRoutingModal(draft = {}, state = {}) {
                 <div>
                   <small>Internal Stock Category</small>
                   <strong>${escapeHtml(category.name)}</strong>
+                  ${category.tags?.length ? `<div class="settingsRoutingTags">${category.tags.map((tag) => `<span class="settingsRoutingTag--${escapeAttribute(normalizeSettingsRoutingTagClass(tag))}">${escapeHtml(tag)}</span>`).join('')}</div>` : ''}
                   ${category.itemCount ? `<em>${escapeHtml(String(category.itemCount))} stock items</em>` : ''}
                 </div>
                 <div class="settingsRoutingSelector" role="group" aria-label="Routing label for ${escapeAttribute(category.name)}">
@@ -399,13 +400,27 @@ function getStockCategories(state = {}, draft = {}) {
   const map = new Map();
   loadedCategories.forEach((category) => {
     const name = normalizeStockCategoryName(category.name || category.id || category.rawCategory || '');
-    if (name) map.set(name, { id: name, name, itemCount: Number(category.itemCount || 0) || 0 });
+    if (name) map.set(name, { id: name, name, itemCount: Number(category.itemCount || 0) || 0, tags: getSettingsRoutingTags(category.rawCategory || category.name || name) });
   });
   Object.entries(draft.stockCategoryRoutingMap || {}).forEach(([id]) => {
     const name = normalizeStockCategoryName(id);
-    if (name && !map.has(name)) map.set(name, { id: name, name, itemCount: 0 });
+    if (name && !map.has(name)) map.set(name, { id: name, name, itemCount: 0, tags: getSettingsRoutingTags(name) });
   });
   return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+
+function getSettingsRoutingTags(categoryName = '') {
+  const text = String(categoryName || '').toLowerCase();
+  const tags = [];
+  if (text.includes('prep') || text.includes('manufactur')) tags.push('PREP');
+  if (text.includes('raw') || text.includes('material')) tags.push('RAW');
+  if (!tags.length) tags.push('RAW');
+  return [...new Set(tags)];
+}
+
+function normalizeSettingsRoutingTagClass(tag = '') {
+  return String(tag || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'standard';
 }
 
 function getRoutingLabelForStockCategory(category = {}, categoryMap = {}) {
@@ -909,8 +924,7 @@ function bindSettingsEvents(view, onSettingsAction, draft = {}, settingsState = 
     button.addEventListener('click', () => onSettingsAction.onSaveAppearance?.());
   });
   view.querySelector('[data-settings-go-live]')?.addEventListener('click', () => {
-    const confirmed = window.confirm('Once live, completed Yoco sales will start depleting stock. Continue?');
-    if (confirmed) onSettingsAction.onGoLive?.();
+    onSettingsAction.onGoLive?.();
   });
   view.querySelector('[data-settings-export]')?.addEventListener('click', () => onSettingsAction.onExportSnapshot?.());
   view.querySelector('[data-settings-reset-reporting]')?.addEventListener('click', () => onSettingsAction.onRequestResetTotals?.('reporting'));
@@ -1071,11 +1085,11 @@ function renderResetTotalsDialog(settingsState = {}) {
   const resetMode = typeof settingsState.confirmResetTotals === 'object'
     ? settingsState.confirmResetTotals.mode
     : 'reporting_stock';
-  const includesStock = resetMode === 'reporting_stock';
-  const title = includesStock ? 'Reset Reporting + Stock On Hand' : 'Reset Reporting Only';
+  const includesStock = resetMode === 'reporting_stock' || resetMode === 'dashboard_stock';
+  const title = includesStock ? 'Reset Reporting + Stock On Hand' : 'Reset Reporting';
   const copy = includesStock
-    ? 'This clears report/dashboard history and sets stock on hand to zero for every selling location in this profile. Products, recipes, stock item master data, and stock item costings are kept.'
-    : 'This clears report/dashboard history, sales signatures, dashboard summaries, and reporting totals for this profile. Stock on hand, products, recipes, stock item master data, and costings are kept.';
+    ? 'This clears reporting ledger/history data and sets stock on hand to zero for every selling location in this profile. Products, recipes, stock item master data, and stock item costings are kept.'
+    : 'This clears reporting ledger/history data, movement history, sales signatures, and operational reporting documents for this profile. Stock on hand, products, recipes, stock item master data, and costings are kept.';
   const confirmLabel = includesStock ? 'Reset Reporting and Stock Values' : 'Reset Reporting';
   const typedValue = String(settingsState.confirmResetTotals.confirmText || '');
   const canProceed = typedValue === confirmLabel && settingsState.actionStatus !== 'resetting';

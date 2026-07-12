@@ -1,7 +1,9 @@
+const VITE_ENV = import.meta.env || {};
+
 export const CLOUDFLARE_API_URL = String(
-  import.meta.env.VITE_CLOUDFLARE_API_URL ||
-  import.meta.env.VITE_KCP_API_BASE_URL ||
-  (import.meta.env.DEV ? 'http://127.0.0.1:8787' : '')
+  VITE_ENV.VITE_CLOUDFLARE_API_URL ||
+  VITE_ENV.VITE_KCP_API_BASE_URL ||
+  (VITE_ENV.DEV ? 'http://127.0.0.1:8787' : '')
 ).replace(/\/+$/, '');
 
 export const CLOUD_SESSION_STORAGE_KEY = 'kcp:cloud-session:v1';
@@ -16,11 +18,17 @@ export function getCloudSession() {
 }
 
 export function setCloudSession(session) {
+  const previousToken = String(getCloudSession()?.token || '').trim();
+  const nextToken = String(session?.token || '').trim();
   try {
-    if (session?.token) window.localStorage.setItem(CLOUD_SESSION_STORAGE_KEY, JSON.stringify(session));
+    if (nextToken) window.localStorage.setItem(CLOUD_SESSION_STORAGE_KEY, JSON.stringify(session));
     else window.localStorage.removeItem(CLOUD_SESSION_STORAGE_KEY);
   } catch {
     // localStorage can be unavailable in private contexts; callers still receive the session object.
+  }
+  if (previousToken !== nextToken) {
+    clearApiCache();
+    clearUnsupportedWorkspaceRouteCache();
   }
 }
 
@@ -65,9 +73,11 @@ export async function callCloudflareRoute(path, {
 
   const requestMethod = String(method || 'GET').toUpperCase();
 
-  // Serve/dedupe GETs from the short-lived cache (keyed by full path+query).
-  if (requestMethod === 'GET') {
-    const cacheKey = url.pathname + url.search;
+  // Serve/dedupe ordinary GETs from the short-lived cache. Cache entries are scoped to
+  // the authenticated session so one signed-in user's workspace or permission response can
+  // never be reused for another user in the same browser. Access management is always fresh.
+  if (requestMethod === 'GET' && !requiresFreshGet(url.pathname)) {
+    const cacheKey = `${getTokenCacheScope(token)}:${url.pathname}${url.search}`;
     const now = Date.now();
     const cached = apiGetCache.get(cacheKey);
     if (cached && cached.expires > now) return cached.promise;
@@ -125,6 +135,16 @@ async function executeRequest(url, requestMethod, payload, token, headers) {
     throw new Error(result.message || result.error || `Live data request failed (${response.status}).`);
   }
   return result;
+}
+
+function requiresFreshGet(pathname = '') {
+  return /\/access-management$/.test(String(pathname || ''));
+}
+
+function getTokenCacheScope(token = '') {
+  // This map is memory-only and never logged. Using the complete session token avoids any
+  // possibility of two authenticated users sharing a cache entry through a hash collision.
+  return String(token || 'anonymous');
 }
 
 export async function callCloudflareWorkspaceRoute(workspaceId, resource, {

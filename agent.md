@@ -53,7 +53,6 @@ Implemented views/modules:
 - Stock Take
 - Locations
 - Manufacturing
-- Reports
 - Integrations
 - User Management
 - Roles/custom permissions
@@ -66,7 +65,6 @@ Implemented supporting features:
 - CSV/XLSX/PDF export utilities
 - Yoco integration drawer and status handling
 - Stock item UOM configuration, including up to three custom UOMs and per-UOM barcodes
-- Custom Report Builder and Saved Reports dashboard flows
 - Worker-backed admin console hosted on Cloudflare Pages
 - Pending registration flow
 - Temporary admin-token bridge until Worker-issued admin session bootstrap is implemented
@@ -82,7 +80,6 @@ Cloudflare Worker API <-> D1
 Important point:
 
 - Normal app operations should be moving toward Worker endpoints and D1 reads/writes.
-- Workers are now the intended server authority layer for admin, Yoco, reporting, and privileged operational flows.
 
 See:
 
@@ -130,7 +127,6 @@ Important files:
 
 - Public account/workspace registration creates a pending signup request.
 - It does not create active workspace access immediately.
-- Approval happens in `../public/KCP Admin ConsoleByYOCO.html`.
 - Welcome/password setup handling is initiated from admin approval.
 
 ### User Management
@@ -178,20 +174,13 @@ Important files:
 - Overrides are stored under `locationPrices[locationId]`.
 - Edit modals should let the user select a selling location and view/edit that location's price override.
 
-### Dashboard and Reporting
-
 - Dashboard date ranges use accounting anchors:
   - opening stock at period start
   - closing stock at period end
   - activity summed inside the range
 - Theoretical Consumption = Opening Stock + Purchases - Closing Stock.
 - Backend summary nodes are used to reduce dashboard load lag.
-- Reports should use live Cloudflare/D1 data, show newest records first, and avoid mock/session data.
-- Custom report Save closes the builder and adds/updates the report on the dashboard. Save & Preview saves, adds/updates, and opens read-only preview for the saved report.
-- Custom report builder save controls are real form submit buttons handled at document capture level; avoid reverting them to nested click-only handlers.
-- Saved custom reports support search/sort/grid/list/status/favourite/preview/edit, sharing/scheduling, exports, filters, governance, templates, alerts, charts, drill-down, and pivot-style grouping where implemented.
 - Low-stock summary emails are scheduled per workspace and sent to members tagged for low-stock alerts.
-- Reset Reporting and Reset Reporting + Stock Values require exact typed confirmation before execution.
 
 ### Menu Catalogue Delete
 
@@ -246,15 +235,12 @@ Firestore rules still need deeper membership hardening for full production confi
 - Function inventory is not fully reconciled with the live Firebase project.
 - `firebase-functions` package should eventually be upgraded carefully.
 - Vite build succeeds but warns about large chunks.
-- Admin console lives outside the Vite app bundle, so deploying `KCP-LIVE-CONVERTED` hosting does not automatically deploy changes to `public/KCP Admin ConsoleByYOCO.html`.
 - Import screens should show loading while processing; stock/supplier/stock-count templates are now client-friendly and UOM-aware.
 - UI patterns to preserve: custom dropdowns where native selects clip or contrast badly, bottom-center fixed toasts with border/accent status colors, viewport-current delete confirmations, and minimized nested modal scrollbars.
 
 ## 9. Recommended Next Steps
 
 1. Add observability around remaining RTDB listeners and high-download paths.
-2. Design the Cloudflare D1 schema for stock items, locations, movement ledger, Yoco orders, recipes, and reports.
-3. Scaffold a Cloudflare Worker API for dashboard/report reads and Yoco webhook ingestion.
 4. Harden Firestore workspace membership checks for the current live system while migration is underway.
 5. Reconcile legacy remote Cloud Functions with local source only if paid Firebase infrastructure remains in use.
 6. Add automated tests for high-risk stock/accounting logic.

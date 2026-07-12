@@ -1,7 +1,11 @@
 import type { Env, DbLike, DbStatementLike } from './types';
+// @ts-ignore Shared Yoco Money converter: Money objects are minor units; normalized scalars remain major units.
+import { yocoMoneyToMajor } from '../../../src/modules/reporting/engine/yocoFinancials.js';
 import { decryptText, encryptText } from './crypto';
 import {
+  YocoApiError,
   createWebhookSubscription,
+  deleteWebhookSubscription,
   fetchOrder,
   fetchModifierGroup,
   listItemBrands,
@@ -10,9 +14,9 @@ import {
   listItemsForLocation,
   listLocations,
   listModifierGroups,
+  listWebhookSubscriptions,
   listOrders,
   listRefunds,
-  updateWebhookSubscription,
   yocoFetch
 } from './yoco-client';
 import { processYocoOrder } from './yoco-sales';
@@ -50,14 +54,8 @@ async function runD1Batches(db: DbLike, statements: DbStatementLike[], size = 50
 }
 
 function moneyToMajor(value: unknown) {
-  if (value && typeof value === 'object') {
-    const obj = value as Row;
-    if (typeof obj.amount === 'number') return obj.amount / 100;
-    if (typeof obj.value === 'number') return obj.value / 100;
-  }
-  if (typeof value === 'number') return Math.abs(value) > 999 ? value / 100 : value;
-  const number = Number(value || 0);
-  return Math.abs(number) > 999 ? number / 100 : number;
+  const amount = yocoMoneyToMajor(value, { scalarUnit: 'major', absolute: false });
+  return Number.isFinite(amount) ? amount : 0;
 }
 
 function normalizeName(row: Row, fallback = 'Yoco Item') {
@@ -304,6 +302,92 @@ function webhookBaseUrl(env: Env) {
   return text(env.YOCO_WEBHOOK_BASE_URL).replace(/\/$/, '');
 }
 
+function subscriptionId(subscription: Row) {
+  return text(subscription.id || subscription.subscription_id || subscription.subscriptionId || subscription.webhook_id || subscription.webhookId);
+}
+
+function subscriptionSecret(subscription: Row) {
+  return text(subscription.secret || subscription.webhook_secret || subscription.webhookSecret || subscription.signing_secret || subscription.signingSecret);
+}
+
+const YOCO_WEBHOOK_EVENT_TYPES = ['payment.created', 'payment.refunded'];
+const WEBHOOK_PREVIOUS_SECRET_GRACE_MS = 24 * 60 * 60 * 1000;
+
+type YocoSyncOptions = { full?: boolean; sinceIso?: string; resetWebhook?: boolean };
+
+function expectedWebhookUrl(env: Env, workspaceId: string) {
+  const baseUrl = webhookBaseUrl(env);
+  return baseUrl ? `${baseUrl}/webhooks/yoco/${encodeURIComponent(workspaceId)}` : '';
+}
+
+function webhookNeedsReset(connection: Row | null | undefined, expectedUrl: string) {
+  if (!expectedUrl) return false;
+  if (!text(connection?.webhook_id) || !text(connection?.webhook_secret)) return true;
+  if (text(connection?.webhook_url) !== expectedUrl) return true;
+  const lastError = text(connection?.last_error).toLowerCase();
+  return /webhook|signature|stale|secret/.test(lastError);
+}
+
+async function createYocoWebhookWithFallback(env: Env, apiKey: string, webhookUrl: string) {
+  const name = 'Kitchen Cost Pro Cloudflare Webhook';
+  const attempts = [
+    // Official Yoco API shape: notification_url + explicit event_types.
+    { event_types: YOCO_WEBHOOK_EVENT_TYPES, name, notification_url: webhookUrl },
+    // Alternate shape accepted by some Standard Webhooks based Yoco endpoints.
+    { event_types: YOCO_WEBHOOK_EVENT_TYPES, name, url: webhookUrl },
+    // Legacy fallback kept so older tenant keys do not fail setup unexpectedly.
+    { name, notification_url: webhookUrl },
+    { name, url: webhookUrl }
+  ];
+  let lastError: unknown = null;
+  for (const body of attempts) {
+    try {
+      const subscription = await createWebhookSubscription(env, apiKey, body) as Row;
+      const idValue = subscriptionId(subscription);
+      const secretValue = subscriptionSecret(subscription);
+      if (!idValue || !secretValue) {
+        throw new Error('Yoco webhook subscription response did not include both id and secret.');
+      }
+      return { subscription, body };
+    } catch (caught) {
+      lastError = caught;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError || 'Yoco webhook subscription failed.'));
+}
+
+
+function subscriptionEnabled(subscription: Row) {
+  if (subscription.enabled === false || subscription.is_enabled === false || subscription.active === false) return false;
+  const status = text(subscription.status || subscription.state).toLowerCase();
+  return !['disabled', 'inactive', 'deleted', 'archived'].includes(status);
+}
+
+async function deleteActiveYocoWebhookSubscriptions(env: Env, apiKey: string) {
+  const subscriptions = await listWebhookSubscriptions(env, apiKey) as Row[];
+  const active = subscriptions.filter((subscription) => subscriptionId(subscription) && subscriptionEnabled(subscription));
+  const deleted: string[] = [];
+  const failed: string[] = [];
+  for (const subscription of active) {
+    const idValue = subscriptionId(subscription);
+    try {
+      await deleteWebhookSubscription(env, apiKey, idValue);
+      deleted.push(idValue);
+    } catch (caught) {
+      if (caught instanceof YocoApiError && caught.status === 404) {
+        deleted.push(idValue);
+        continue;
+      }
+      const message = caught instanceof Error ? caught.message : String(caught || 'Unknown delete error');
+      failed.push(`${idValue}: ${message}`);
+    }
+  }
+  if (failed.length) {
+    throw new Error(`Could not delete ${failed.length} Yoco webhook subscription(s): ${failed.slice(0, 3).join('; ')}`);
+  }
+  return { deletedCount: deleted.length, deletedIds: deleted };
+}
+
 export async function getYocoConnection(env: Env, workspaceId: string) {
   return env.DB.prepare(
     `SELECT *
@@ -329,24 +413,19 @@ export async function connectYoco(env: Env, workspaceId: string, apiKey: string)
   await yocoFetch(env, cleanKey, '/v1/locations/', { params: { limit: 1 } });
 
   const encrypted = await encryptText(env, cleanKey);
-  const baseUrl = webhookBaseUrl(env);
+  const webhookUrl = expectedWebhookUrl(env, workspaceId);
   let webhookEnabled = false;
   let webhookId = '';
   let webhookSecret = '';
   let webhookError = '';
-  let webhookUrl = '';
 
-  if (baseUrl) {
-    webhookUrl = `${baseUrl}/webhooks/yoco/${encodeURIComponent(workspaceId)}`;
+  if (webhookUrl) {
     try {
-      const subscription = await createWebhookSubscription(env, cleanKey, {
-        event_types: ['payment.created', 'payment.refunded'],
-        name: 'Kitchen Cost Pro Cloudflare Webhook',
-        notification_url: webhookUrl
-      }) as Row;
+      await deleteActiveYocoWebhookSubscriptions(env, cleanKey);
+      const { subscription } = await createYocoWebhookWithFallback(env, cleanKey, webhookUrl);
       webhookEnabled = true;
-      webhookId = text(subscription.id || subscription.subscription_id);
-      webhookSecret = text(subscription.secret || subscription.webhook_secret);
+      webhookId = subscriptionId(subscription);
+      webhookSecret = subscriptionSecret(subscription);
     } catch (caught) {
       webhookError = caught instanceof Error ? caught.message : String(caught);
     }
@@ -365,6 +444,9 @@ export async function connectYoco(env: Env, workspaceId: string, apiKey: string)
        webhook_id = excluded.webhook_id,
        webhook_secret = excluded.webhook_secret,
        webhook_url = excluded.webhook_url,
+       webhook_previous_id = NULL,
+       webhook_previous_secret = NULL,
+       webhook_previous_until = NULL,
        connection_active = 1,
        last_error = excluded.last_error,
        disconnected_at = NULL,
@@ -380,6 +462,72 @@ export async function connectYoco(env: Env, workspaceId: string, apiKey: string)
   };
 }
 
+export async function resetYocoWebhook(env: Env, workspaceId: string, apiKeyOverride = '') {
+  const connection = await getYocoConnection(env, workspaceId);
+  const apiKey = text(apiKeyOverride) || await getYocoApiKey(env, workspaceId);
+  const webhookUrl = expectedWebhookUrl(env, workspaceId);
+  if (!webhookUrl) throw new Error('YOCO_WEBHOOK_BASE_URL is not configured.');
+  const previousWebhookId = text(connection?.webhook_id);
+  const previousWebhookSecret = text(connection?.webhook_secret);
+
+  // Manual sync is the source of truth for Yoco webhooks. Delete every active
+  // subscription on the Yoco account first, then create a fresh LIVE subscription
+  // with the one-time secret returned by the official creation endpoint.
+  const deletionResult = await deleteActiveYocoWebhookSubscriptions(env, apiKey);
+
+  const { subscription } = await createYocoWebhookWithFallback(env, apiKey, webhookUrl);
+  const webhookId = subscriptionId(subscription);
+  const webhookSecret = subscriptionSecret(subscription);
+  const previousUntil = previousWebhookSecret
+    ? new Date(Date.now() + WEBHOOK_PREVIOUS_SECRET_GRACE_MS).toISOString()
+    : null;
+  await env.DB.prepare(
+    `UPDATE yoco_connections
+        SET webhook_id = ?2,
+            webhook_secret = ?3,
+            webhook_url = ?4,
+            webhook_previous_id = ?5,
+            webhook_previous_secret = ?6,
+            webhook_previous_until = ?7,
+            connection_active = 1,
+            status = 'connected',
+            last_error = '',
+            updated_at = datetime('now')
+      WHERE workspace_id = ?1`
+  ).bind(
+    workspaceId,
+    webhookId,
+    webhookSecret,
+    webhookUrl,
+    previousWebhookId || null,
+    previousWebhookSecret || null,
+    previousUntil
+  ).run();
+  return {
+    webhookEnabled: true,
+    webhookId,
+    webhookUrl,
+    replacedWebhookId: previousWebhookId,
+    deletedSubscriptionCount: deletionResult.deletedCount,
+    deletedSubscriptionIds: deletionResult.deletedIds
+  };
+}
+
+export async function ensureYocoWebhook(env: Env, workspaceId: string, apiKeyOverride = '') {
+  const connection = await getYocoConnection(env, workspaceId);
+  const webhookUrl = expectedWebhookUrl(env, workspaceId);
+  if (!webhookUrl) throw new Error('YOCO_WEBHOOK_BASE_URL is not configured.');
+  if (!webhookNeedsReset(connection, webhookUrl)) {
+    return {
+      webhookEnabled: true,
+      webhookId: text(connection?.webhook_id),
+      webhookUrl,
+      replacedWebhookId: ''
+    };
+  }
+  return resetYocoWebhook(env, workspaceId, apiKeyOverride);
+}
+
 export async function disconnectYoco(env: Env, workspaceId: string) {
   const connection = await getYocoConnection(env, workspaceId);
   const encrypted = text(connection?.api_key_encrypted);
@@ -388,7 +536,7 @@ export async function disconnectYoco(env: Env, workspaceId: string) {
   if (encrypted && webhookId) {
     try {
       const apiKey = await decryptText(env, encrypted);
-      await updateWebhookSubscription(env, apiKey, webhookId, { enabled: false });
+      await deleteActiveYocoWebhookSubscriptions(env, apiKey);
     } catch (caught) {
       disconnectError = caught instanceof Error ? caught.message : String(caught);
     }
@@ -402,6 +550,9 @@ export async function disconnectYoco(env: Env, workspaceId: string) {
             webhook_id = NULL,
             webhook_secret = NULL,
             webhook_url = NULL,
+            webhook_previous_id = NULL,
+            webhook_previous_secret = NULL,
+            webhook_previous_until = NULL,
             last_error = ?3,
             disconnected_at = ?2,
             updated_at = ?2
@@ -410,8 +561,19 @@ export async function disconnectYoco(env: Env, workspaceId: string) {
   return { disconnected: true, webhookDisabled: !disconnectError, disconnectError };
 }
 
-export async function syncYocoCatalogue(env: Env, workspaceId: string) {
+export async function syncYocoCatalogue(env: Env, workspaceId: string, options: YocoSyncOptions = {}) {
   const apiKey = await getYocoApiKey(env, workspaceId);
+  if (options.resetWebhook === true) {
+    await resetYocoWebhook(env, workspaceId, apiKey).catch(async (caught) => {
+      await env.DB.prepare(`UPDATE yoco_connections SET last_error = ?2, updated_at = datetime('now') WHERE workspace_id = ?1`)
+        .bind(workspaceId, caught instanceof Error ? caught.message : String(caught)).run();
+    });
+  } else {
+    await ensureYocoWebhook(env, workspaceId, apiKey).catch(async (caught) => {
+      await env.DB.prepare(`UPDATE yoco_connections SET last_error = ?2, updated_at = datetime('now') WHERE workspace_id = ?1`)
+        .bind(workspaceId, caught instanceof Error ? caught.message : String(caught)).run();
+    });
+  }
   const [locations, categories, brands, items] = await Promise.all([
     listLocations(env, apiKey),
     listItemCategories(env, apiKey).catch(() => []),
@@ -973,8 +1135,19 @@ async function recordYocoSyncError(env: Env, workspaceId: string, details: {
   ).run();
 }
 
-export async function syncYocoSales(env: Env, workspaceId: string, options: { full?: boolean; sinceIso?: string } = {}) {
+export async function syncYocoSales(env: Env, workspaceId: string, options: YocoSyncOptions = {}) {
   const apiKey = await getYocoApiKey(env, workspaceId);
+  if (options.resetWebhook === true) {
+    await resetYocoWebhook(env, workspaceId, apiKey).catch(async (caught) => {
+      await env.DB.prepare(`UPDATE yoco_connections SET last_error = ?2, updated_at = datetime('now') WHERE workspace_id = ?1`)
+        .bind(workspaceId, caught instanceof Error ? caught.message : String(caught)).run();
+    });
+  } else {
+    await ensureYocoWebhook(env, workspaceId, apiKey).catch(async (caught) => {
+      await env.DB.prepare(`UPDATE yoco_connections SET last_error = ?2, updated_at = datetime('now') WHERE workspace_id = ?1`)
+        .bind(workspaceId, caught instanceof Error ? caught.message : String(caught)).run();
+    });
+  }
   const connection = await getYocoConnection(env, workspaceId);
   const now = nowIso();
   // An explicit `sinceIso` (e.g. "last 14 days" from the admin console) overrides the stored

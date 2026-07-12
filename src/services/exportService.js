@@ -148,9 +148,9 @@ function splitSupplierAddressForExport(supplier = {}) {
 function getStockExportItemType(item = {}) {
   const explicit = String(item.itemType || item.stockItemType || item.specificationType || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
   const category = String(item.category || '').toLowerCase();
-  if (['recipe_source', 'non_stock', 'virtual'].includes(explicit) || item.isStocked === false || category.includes('recipe source') || category.includes('non-stock') || category.includes('non stock')) return 'Non Stock';
   if (['sub_recipe', 'subrecipe'].includes(explicit) || item.isSubRecipe === true || category.includes('sub recipe') || category.includes('sub-recipe')) return 'Sub-Recipe';
   if (['manufactured', 'prep', 'prepared', 'manufactured_item'].includes(explicit) || item.isManufactured === true || category.includes('manufactured')) return 'Manufactured';
+  if (['recipe_source', 'non_stock', 'virtual'].includes(explicit) || category.includes('recipe source') || category.includes('non-stock') || category.includes('non stock') || category.includes('virtual')) return 'Non Stock';
   return 'Standard';
 }
 
@@ -328,7 +328,7 @@ export async function exportObjectRows({
       await downloadWorkbookXlsx(filename, [
         { name: 'Summary', rows: buildSummarySheetAoa(effectiveSummary) },
         {
-          name: sheetName || 'Main Report',
+          name: sheetName || 'Main Export',
           rows: buildMainReportAoa(normalized, columns),
           ...(xlsxOptions.mainSheet || xlsxOptions)
         },
@@ -341,7 +341,15 @@ export async function exportObjectRows({
   }
 
   if (format === 'pdf') {
-    await downloadPdf(filename, { title, subtitle, rows: normalized, columns, summaryRows: effectiveSummary, branding });
+    await downloadPdf(filename, {
+      title,
+      subtitle,
+      rows: normalized,
+      columns,
+      summaryRows: effectiveSummary,
+      branding,
+      detailTables: detail.map((sheet) => ({ title: sheet.name, headers: sheet.columns, rows: sheet.rows }))
+    });
     return;
   }
 
@@ -366,9 +374,9 @@ function normalizeSummaryRows(rows = []) {
     .filter((row) => String(row.label ?? '').trim());
 }
 
-function buildDefaultSummaryRows({ title = 'Report', subtitle = '', rowCount = 0 } = {}) {
+function buildDefaultSummaryRows({ title = 'Export', subtitle = '', rowCount = 0 } = {}) {
   return [
-    { label: 'Report', value: title || 'Report' },
+    { label: 'Export', value: title || 'Export' },
     ...(subtitle ? [{ label: 'Description', value: subtitle }] : []),
     { label: 'Rows', value: rowCount },
     { label: 'Generated', value: new Date().toLocaleString('en-ZA') }
@@ -394,7 +402,7 @@ function buildSeparatedExportAoa(summaryRows = [], rows = [], columns = []) {
   return [
     ...buildSummarySheetAoa(summaryRows),
     [],
-    ['Main Report'],
+    ['Main Export'],
     columns,
     ...rows.map((row) => columns.map((column) => row?.[column] ?? ''))
   ];
@@ -558,7 +566,9 @@ export async function exportAoaRows({
   subtitle,
   rows,
   headerRowIndex = 8,
-  branding = {}
+  branding = {},
+  orientation = 'portrait',
+  tableOptions = {}
 }) {
   if (format === 'xlsx') {
     await downloadAoaXlsx(filename, rows, sheetName);
@@ -566,7 +576,7 @@ export async function exportAoaRows({
   }
 
   if (format === 'pdf') {
-    await downloadAoaPdf(filename, { title, subtitle, rows, headerRowIndex, branding });
+    await downloadAoaPdf(filename, { title, subtitle, rows, headerRowIndex, branding, orientation, tableOptions });
     return;
   }
 

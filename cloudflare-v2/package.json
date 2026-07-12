@@ -6,11 +6,19 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "deploy:dry": "wrangler deploy --dry-run",
+    "check:deploy": "npm run typecheck && npm run deploy:dry",
+    "turnstile:secrets": "wrangler secret list --format json"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260523.0",
+    "@cloudflare/workers-types": "5.20260710.1",
     "typescript": "^5.8.3",
-    "wrangler": "^4.17.0"
+    "wrangler": "4.110.0"
+  },
+  "dependencies": {
+    "jspdf": "^4.2.1",
+    "jspdf-autotable": "^5.0.7",
+    "xlsx": "npm:@e965/xlsx@^0.20.3"
   }
 }

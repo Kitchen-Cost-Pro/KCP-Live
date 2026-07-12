@@ -273,7 +273,7 @@ async function getLowStockRows(env: Env, workspaceId: string) {
   // is at/below the item threshold. Previously this GROUP BY si.id collapsed every
   // location into one row (with names concatenated and a 'Main Store' fallback), so
   // the email never reflected which location was actually short. INNER JOIN on
-  // stock_balances mirrors the on-screen per-location report, which only surfaces an
+  // stock_balances mirrors the on-screen per-location stock view, which only surfaces an
   // item at a location where it actually holds a balance.
   const rows = await env.DB.prepare(
     `SELECT

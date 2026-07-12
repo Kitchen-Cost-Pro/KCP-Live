@@ -30,8 +30,10 @@ export function getEmailKey(email = '') {
   return String(email || '').trim().toLowerCase().replace(/\./g, '_');
 }
 
-export async function getAuthSecurityConfig() {
-  const result = await callCloudflareRoute('api/auth/security-config');
+export async function getAuthSecurityConfig({ force = false } = {}) {
+  const result = await callCloudflareRoute('api/auth/security-config', {
+    query: force ? { refresh: Date.now() } : undefined
+  });
   return result.turnstile || {};
 }
 

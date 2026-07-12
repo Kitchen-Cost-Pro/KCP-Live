@@ -1960,3 +1960,201 @@
     grid-template-columns: 1fr;
   }
 }
+
+.locationsRoutingTags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-top: 0.25rem;
+}
+
+.locationsRoutingTags span {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.16rem 0.42rem;
+  border-radius: 999px;
+  background: rgba(14, 165, 233, 0.12);
+  color: #0369a1;
+  font-size: 0.64rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+}
+
+/* Compact routing category chips with stock-item style tags */
+.locationsRoutingChip,
+.locationsRoutingChip--mapped {
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 46px;
+}
+
+.locationsRoutingChipMain {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.locationsRoutingChipMain strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.locationsRoutingChipMain > span {
+  grid-column: auto;
+  margin-top: 0;
+  font-size: 0.68rem;
+  color: #93a2be;
+}
+
+.locationsRoutingTags {
+  grid-column: auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 0;
+}
+
+.locationsRoutingTags span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 18px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 0.58rem;
+  font-weight: 950;
+  letter-spacing: 0.08em;
+  line-height: 1;
+}
+
+.locationsRoutingTag--raw,
+.locationsRoutingTag--standard {
+  background: color-mix(in srgb, #38bdf8 14%, transparent);
+  color: #38bdf8;
+}
+
+.locationsRoutingTag--prep,
+.locationsRoutingTag--manufacturing {
+  background: color-mix(in srgb, #f59e0b 18%, transparent);
+  color: #fbbf24;
+}
+
+.locationsRoutingChip em {
+  grid-column: auto;
+  grid-row: auto;
+  align-self: center;
+  justify-self: end;
+}
+
+/* Routing chip colour audit: restore readable stock-item-style tag colours */
+.locationsRoutingChip {
+  border-color: rgba(76, 104, 148, 0.62);
+  background: linear-gradient(180deg, rgba(26, 43, 70, 0.96), rgba(13, 27, 48, 0.98));
+}
+
+.locationsRoutingChip strong {
+  color: #f8fbff;
+  font-weight: 950;
+}
+
+.locationsRoutingChipMain > span {
+  color: #aebbd0;
+}
+
+.locationsRoutingTags span {
+  border: 1px solid transparent;
+  text-shadow: none;
+}
+
+.locationsRoutingTag--raw {
+  border-color: rgba(45, 212, 191, 0.32);
+  background: rgba(17, 142, 107, 0.22);
+  color: #5eead4;
+}
+
+.locationsRoutingTag--standard {
+  border-color: rgba(56, 189, 248, 0.32);
+  background: rgba(14, 116, 144, 0.24);
+  color: #7dd3fc;
+}
+
+.locationsRoutingTag--prep {
+  border-color: rgba(251, 191, 36, 0.36);
+  background: rgba(217, 119, 6, 0.24);
+  color: #fcd34d;
+}
+
+.locationsRoutingTag--manufacturing {
+  border-color: rgba(168, 85, 247, 0.34);
+  background: rgba(126, 34, 206, 0.24);
+  color: #d8b4fe;
+}
+
+.locationsRoutingChip em {
+  border: 1px solid rgba(34, 197, 94, 0.34);
+  background: rgba(16, 185, 129, 0.22);
+  color: #86efac;
+}
+
+/* Final routing chip colour audit: make tag colours win over generic chip span rules */
+.locationsRoutingChip .locationsRoutingTags span {
+  grid-column: auto !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  width: auto !important;
+  margin: 0 !important;
+  min-height: 18px !important;
+  border: 1px solid transparent !important;
+  border-radius: 999px !important;
+  padding: 2px 7px !important;
+  font-size: 0.58rem !important;
+  font-weight: 950 !important;
+  line-height: 1 !important;
+  letter-spacing: 0.08em !important;
+  text-transform: uppercase !important;
+  white-space: nowrap !important;
+}
+
+.locationsRoutingChip .locationsRoutingTags span.locationsRoutingTag--raw {
+  border-color: rgba(45, 212, 191, 0.36) !important;
+  background: rgba(20, 184, 166, 0.2) !important;
+  color: #67e8f9 !important;
+}
+
+.locationsRoutingChip .locationsRoutingTags span.locationsRoutingTag--standard {
+  border-color: rgba(56, 189, 248, 0.38) !important;
+  background: rgba(14, 116, 144, 0.28) !important;
+  color: #7dd3fc !important;
+}
+
+.locationsRoutingChip .locationsRoutingTags span.locationsRoutingTag--prep {
+  border-color: rgba(251, 191, 36, 0.4) !important;
+  background: rgba(217, 119, 6, 0.28) !important;
+  color: #fde68a !important;
+}
+
+.locationsRoutingChip .locationsRoutingTags span.locationsRoutingTag--manufacturing {
+  border-color: rgba(168, 85, 247, 0.4) !important;
+  background: rgba(126, 34, 206, 0.3) !important;
+  color: #e9d5ff !important;
+}
+
+/* Final routing tag scope: routing categories only show RAW / PREP, with RAW in yellow */
+.locationsRoutingChip .locationsRoutingTags span.locationsRoutingTag--raw {
+  border-color: rgba(251, 191, 36, 0.48) !important;
+  background: rgba(217, 119, 6, 0.26) !important;
+  color: #facc15 !important;
+}
+
+.locationsRoutingChip .locationsRoutingTags span.locationsRoutingTag--prep {
+  border-color: rgba(168, 85, 247, 0.42) !important;
+  background: rgba(126, 34, 206, 0.28) !important;
+  color: #ddd6fe !important;
+}
+
+.locationsRoutingChip .locationsRoutingTags span.locationsRoutingTag--standard,
+.locationsRoutingChip .locationsRoutingTags span.locationsRoutingTag--manufacturing {
+  display: none !important;
+}

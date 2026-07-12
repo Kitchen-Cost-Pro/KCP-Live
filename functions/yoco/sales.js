@@ -191,7 +191,7 @@ async function processYocoOrder(admin, dataPath, order = {}, options = {}) {
 
       const product = findProduct(products, line);
       const productName = product?.name || getLineName(line) || 'Yoco Item';
-      const reportingRoutingLabel = resolveProductRoutingLabel(product, settings);
+      const stockRoutingLabel = resolveProductRoutingLabel(product, settings);
       const lineId = getLineId(line, order);
       const yocoVariantId = getLineVariantId(line);
       const paymentOrRefundId = mode === 'refund'
@@ -212,8 +212,8 @@ async function processYocoOrder(admin, dataPath, order = {}, options = {}) {
         productName,
         yocoItemId: getLineItemId(line),
         yocoVariantId,
-        routingLabel: reportingRoutingLabel,
-        reportingRoutingLabel,
+        routingLabel: stockRoutingLabel,
+        stockRoutingLabel,
         quantity: mode === 'refund' ? -quantity : quantity,
         totalIncl: moneyToMajor(line.total_price || line.net_amount || 0) * (mode === 'refund' ? -1 : 1),
         locationId: sellingLocation.id,
@@ -246,14 +246,14 @@ async function processYocoOrder(admin, dataPath, order = {}, options = {}) {
           locationId: sellingLocation.id,
           sellingLocationId: sellingLocation.id,
           sourceLocationId: '',
-          routingLabel: reportingRoutingLabel
+          routingLabel: stockRoutingLabel
         }));
         newSignatures[signatureHash] = buildSignatureMeta(rawSignature, now);
         return;
       }
 
       // Workspace hasn't clicked "Go Live" in Business Settings yet — record the sale for
-      // reporting but skip depleting stock until onboarding is confirmed complete. Run
+      // dashboards but skip depleting stock until onboarding is confirmed complete. Run
       // functions/scripts/backfillStockDepletionEnabled.js BEFORE this deploys so existing
       // live workspaces (which have no stockDepletionEnabled value yet) aren't gated off.
       if (settings.stockDepletionEnabled !== true) {
@@ -347,7 +347,7 @@ async function processYocoOrder(admin, dataPath, order = {}, options = {}) {
           recipeSourceItemId: recipeLine.sourceRecipeItemId || '',
           recipeSourceItemName: recipeLine.sourceRecipeItemName || '',
           recipeSourceType: recipeLine.sourceRecipeType || '',
-          reportingRoutingLabel,
+          stockRoutingLabel,
           stockCategory: ingredient.category || '',
           locId: decrementLocation.id,
           locName: decrementLocation.name,

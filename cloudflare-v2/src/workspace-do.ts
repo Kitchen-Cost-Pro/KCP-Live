@@ -22,11 +22,12 @@ export class WorkspaceDO extends DurableObject<Env> {
     this.db = new FacadeDatabase(ctx.storage.sql, ctx.storage);
     // Apply pending migrations before serving any request.
     ctx.blockConcurrencyWhile(async () => {
-      this.migrate(ctx.storage.sql);
+      this.migrate(ctx.storage);
     });
   }
 
-  private migrate(sql: SqlStorage): void {
+  private migrate(storage: DurableObjectStorage): void {
+    const sql = storage.sql;
     sql.exec(
       `CREATE TABLE IF NOT EXISTS _kcp_schema (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL)`
     );
@@ -35,14 +36,16 @@ export class WorkspaceDO extends DurableObject<Env> {
       | undefined;
     let applied = row ? Number(row.version) : 0;
     for (let i = applied; i < TENANT_MIGRATIONS.length; i += 1) {
-      this.db.execScript(TENANT_MIGRATIONS[i]);
-      applied = i + 1;
+      storage.transactionSync(() => {
+        this.db.execScript(TENANT_MIGRATIONS[i]);
+        applied = i + 1;
+        sql.exec(
+          `INSERT INTO _kcp_schema (id, version) VALUES (1, ?1)
+           ON CONFLICT(id) DO UPDATE SET version = excluded.version`,
+          applied
+        );
+      });
     }
-    sql.exec(
-      `INSERT INTO _kcp_schema (id, version) VALUES (1, ?1)
-       ON CONFLICT(id) DO UPDATE SET version = excluded.version`,
-      applied
-    );
   }
 
   async fetch(request: Request): Promise<Response> {

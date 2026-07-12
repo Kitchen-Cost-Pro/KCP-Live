@@ -1204,12 +1204,16 @@
 }
 
 .purchaseOrdersModule__lineUom .purchaseOrdersModule__dropdownMenu {
+  position: fixed;
   left: 0;
   right: auto;
-  top: auto;
-  bottom: calc(100% + 8px);
+  top: 0;
+  bottom: auto;
   min-width: min(260px, 72vw);
-  z-index: 90;
+  max-height: min(320px, calc(100vh - 24px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  z-index: 1400;
 }
 
 .purchaseOrdersModule__line input[readonly] {
@@ -1239,9 +1243,13 @@
 }
 
 .purchaseOrdersModule__lineLocation .purchaseOrdersModule__dropdownMenu {
-  top: auto;
-  bottom: calc(100% + 8px);
-  z-index: 90;
+  position: fixed;
+  top: 0;
+  bottom: auto;
+  max-height: min(320px, calc(100vh - 24px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  z-index: 1400;
 }
 
 .purchaseOrdersModule__toast {
@@ -1395,3 +1403,41 @@
 .po-locationCardName { flex: 1; font-size: 0.95rem; font-weight: 500; color: var(--color-text, #e2e8f0); }
 .po-locationCardCheck { color: var(--color-accent, #3b82f6); flex-shrink: 0; }
 .po-locationModalEmpty { padding: 1.5rem; text-align: center; color: var(--color-text-muted, #94a3b8); font-size: 0.9rem; }
+
+.purchaseOrdersModule__searchShell {
+  position: relative;
+}
+
+.purchaseOrdersModule__searchShell input {
+  padding-right: 56px;
+}
+
+.purchaseOrdersModule__searchShell button {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  width: 36px;
+  height: 36px;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--surface-primary);
+  color: var(--accent-blue);
+  cursor: pointer;
+}
+
+.purchaseOrdersModule__searchShell button:hover:not(:disabled) {
+  background: var(--surface-soft);
+}
+
+.purchaseOrdersModule__searchShell button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.purchaseOrdersModule__searchShell button svg {
+  width: 17px;
+  height: 17px;
+}

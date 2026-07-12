@@ -9,6 +9,8 @@ let authTurnstileToken = '';
 let authTurnstileConfigLoaded = false;
 let authTurnstileConfigPromise = null;
 let authTurnstileLoadTimer = null;
+let authTurnstileConfigError = null;
+let authTurnstileConfigurationIssue = '';
 
 export function renderLogin({
   authState = {},
@@ -220,21 +222,41 @@ function getAuthTurnstileElements(root = document) {
 function bootAuthTurnstile(root) {
   const { retry } = getAuthTurnstileElements(root);
   retry?.addEventListener('click', () => reloadAuthTurnstile(root));
-  loadAuthTurnstileConfig(root).catch(() => markAuthTurnstileUnavailable(root));
+  loadAuthTurnstileConfig(root).catch((error) => {
+    markAuthTurnstileUnavailable(
+      root,
+      error?.message
+        ? `Security configuration could not load: ${error.message}`
+        : 'Security configuration could not load. Check the API connection, then retry.'
+    );
+  });
 }
 
-async function loadAuthTurnstileConfig(root) {
+async function loadAuthTurnstileConfig(root, { force = false } = {}) {
+  if (force) {
+    authTurnstileConfigLoaded = false;
+    authTurnstileConfigPromise = null;
+    authTurnstileConfigError = null;
+    authTurnstileConfigurationIssue = '';
+  }
+
   if (!authTurnstileConfigLoaded) {
-    authTurnstileConfigPromise ||= getAuthSecurityConfig()
+    authTurnstileConfigPromise ||= getAuthSecurityConfig({ force })
       .then((config = {}) => {
         authTurnstileSiteKey = String(config.siteKey || '').trim();
         authTurnstileEnabled = Boolean(config.enabled && authTurnstileSiteKey);
+        authTurnstileConfigurationIssue = authTurnstileSiteKey && !authTurnstileEnabled
+          ? 'Turnstile is configured with a site key, but the Worker secret is missing. Set TURNSTILE_SECRET_KEY and redeploy.'
+          : '';
+        authTurnstileConfigError = null;
         authTurnstileConfigLoaded = true;
         return config;
       })
       .catch((error) => {
-        authTurnstileConfigLoaded = true;
+        authTurnstileConfigLoaded = false;
         authTurnstileEnabled = false;
+        authTurnstileConfigError = error;
+        authTurnstileConfigPromise = null;
         throw error;
       });
     await authTurnstileConfigPromise;
@@ -262,7 +284,13 @@ function renderAuthTurnstile(root = document) {
   const { panel, widget, status, retry } = getAuthTurnstileElements(root);
   if (!panel || !widget) return;
   if (!authTurnstileEnabled || !authTurnstileSiteKey) {
-    panel.hidden = true;
+    if (authTurnstileConfigurationIssue || authTurnstileConfigError) {
+      panel.hidden = false;
+      if (status) status.textContent = authTurnstileConfigurationIssue || 'Security configuration could not load.';
+      retry?.classList.add(styles.isVisible);
+    } else {
+      panel.hidden = true;
+    }
     return;
   }
 
@@ -316,7 +344,7 @@ function markAuthTurnstileUnavailable(root, message = 'Security check could not 
   window.KCP_APP_TURNSTILE_LOAD_FAILED = true;
   authTurnstileToken = '';
   const { panel, status, retry } = getAuthTurnstileElements(root);
-  if (panel && authTurnstileEnabled) panel.hidden = false;
+  if (panel) panel.hidden = false;
   if (status) status.textContent = message;
   retry?.classList.add(styles.isVisible);
 }
@@ -329,6 +357,19 @@ function reloadAuthTurnstile(root = document) {
   if (widget) widget.innerHTML = '';
   if (status) status.textContent = 'Security check loading...';
   retry?.classList.remove(styles.isVisible);
+
+  if (!authTurnstileConfigLoaded || authTurnstileConfigError || authTurnstileConfigurationIssue) {
+    loadAuthTurnstileConfig(root, { force: true }).catch((error) => {
+      markAuthTurnstileUnavailable(
+        root,
+        error?.message
+          ? `Security configuration could not load: ${error.message}`
+          : 'Security configuration could not load. Check the API connection, then retry.'
+      );
+    });
+    return;
+  }
+
   renderAuthTurnstile(root);
 }
 

@@ -173,7 +173,7 @@ async function fetchCloudflareDashboardSource(workspaceId) {
     manufacturingResponse,
     transferResponse,
     dashboardResponse,
-    reportingResponse
+    dashboardActivityResponse
   ] = await Promise.all([
     callCloudflareWorkspaceRoute(workspaceId, 'settings'),
     callCloudflareWorkspaceRoute(workspaceId, 'locations'),
@@ -181,7 +181,7 @@ async function fetchCloudflareDashboardSource(workspaceId) {
     callCloudflareWorkspaceRoute(workspaceId, 'products', { query: { limit: 500 } }),
     callCloudflareWorkspaceRoute(workspaceId, 'suppliers', { query: { limit: 500 } }),
     callCloudflareWorkspaceRoute(workspaceId, 'purchase-orders', { query: { limit: 500 } }),
-    callCloudflareWorkspaceRoute(workspaceId, 'grvs', { query: { limit: 500 } }),
+    callCloudflareWorkspaceRoute(workspaceId, 'grvs', { query: { limit: 500 } }).catch(() => ({})),
     callCloudflareWorkspaceRoute(workspaceId, 'credit-notes', { query: { limit: 500 } }),
     callCloudflareWorkspaceRoute(workspaceId, 'adjustments', { query: { limit: 500 } }),
     callOptionalCloudflareWorkspaceRoute(workspaceId, 'wastage-adjustments', { query: { limit: 500 }, fallback: {} }),
@@ -190,7 +190,7 @@ async function fetchCloudflareDashboardSource(workspaceId) {
     callCloudflareWorkspaceRoute(workspaceId, 'manufacturing-batches', { query: { limit: 500 } }),
     callCloudflareWorkspaceRoute(workspaceId, 'transfers', { query: { limit: 500 } }),
     callCloudflareWorkspaceRoute(workspaceId, 'dashboard'),
-    callCloudflareWorkspaceRoute(workspaceId, 'reporting-source', { query: { limit: DASHBOARD_LOG_LIMIT } })
+    callCloudflareWorkspaceRoute(workspaceId, 'dashboard-source', { query: { limit: DASHBOARD_LOG_LIMIT } })
   ]);
 
   return normalizeDashboardSource({
@@ -211,14 +211,14 @@ async function fetchCloudflareDashboardSource(workspaceId) {
       ...normalizeWastageResponse(wastageResponse)
     ]),
     logs_stocktakes: stockTakeResponse.stockTakes || stockTakeResponse.items || [],
-    logs_inventory_audit: reportingResponse.logs_inventory_audit || [],
+    logs_inventory_audit: dashboardActivityResponse.logs_inventory_audit || [],
     logs_mfg: manufacturingResponse.batches || manufacturingResponse.manufacturingBatches || manufacturingResponse.items || [],
     logs_transfers: [
       ...(transferResponse.transfers || []),
       ...(transferResponse.externalTransfers || [])
     ],
-    logs_sales: reportingResponse.logs_sales || [],
-    logs_sales_errors: reportingResponse.logs_sales_errors || [],
+    logs_sales: dashboardActivityResponse.logs_sales || [],
+    logs_sales_errors: dashboardActivityResponse.logs_sales_errors || [],
     logs_snapshots: [],
     sessionOpeningStock: {}
   });

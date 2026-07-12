@@ -56,6 +56,7 @@ async function fetchDashboardTiles(workspaceId, { range = '7', siteId = '' } = {
 
   const [
     dashboardResponse,
+    reportingLedgerResponse,
     stockResponse,
     productResponse,
     supplierResponse,
@@ -67,6 +68,7 @@ async function fetchDashboardTiles(workspaceId, { range = '7', siteId = '' } = {
     siteResponse
   ] = await Promise.all([
     callCloudflareWorkspaceRoute(workspaceId, 'dashboard', { query }),
+    callCloudflareWorkspaceRoute(workspaceId, 'reports/detailed-activity', { query: { ...query, limit: 5000 } }).catch(() => ({ rows: [] })),
     callCloudflareWorkspaceRoute(workspaceId, 'stock-items', { query: { limit: 500, ...(locationId ? { locationId } : {}) } }),
     callCloudflareWorkspaceRoute(workspaceId, 'products', { query: { limit: 500 } }),
     callCloudflareWorkspaceRoute(workspaceId, 'suppliers', { query: { limit: 500 } }),
@@ -89,16 +91,22 @@ async function fetchDashboardTiles(workspaceId, { range = '7', siteId = '' } = {
   const siteName = siteResponse.siteConfiguration?.site_name || siteResponse.siteConfiguration?.siteName || '';
   const valuation = dashboardResponse.valuation || {};
   const movements = dashboardResponse.movements || [];
-  const movementTotals = dashboardResponse.movementTotals && typeof dashboardResponse.movementTotals === 'object'
-    ? normalizeMovementTotals(dashboardResponse.movementTotals)
-    : summarizeMovements(movements);
+  const reportingLedgerRows = toArray(reportingLedgerResponse?.rows);
+  const reportingLedgerSummary = summarizeReportingLedgerForDashboard(reportingLedgerRows);
+  const movementTotals = reportingLedgerRows.length
+    ? reportingLedgerSummary.movementTotals
+    : (dashboardResponse.movementTotals && typeof dashboardResponse.movementTotals === 'object'
+      ? normalizeMovementTotals(dashboardResponse.movementTotals)
+      : summarizeMovements(movements));
   const stockValue = numberValue(valuation.stock_value, sumStockValue(stockItems));
-  const purchases = movementTotals.grv + movementTotals.creditNote;
-  const costOfSales = Math.abs(movementTotals.sale);
+  const purchases = movementTotals.grv + movementTotals.purchaseOrderReceive + movementTotals.creditNote;
+  const costOfSales = Math.abs(movementTotals.sale + movementTotals.modifierUsage);
   const manualAdjustments = movementTotals.adjustment;
   const countVariance = movementTotals.stockTake;
   const wastage = Math.abs(movementTotals.wastage + movementTotals.manufacturingWastage);
-  const openingStock = stockValue + costOfSales - purchases - manualAdjustments - countVariance + wastage;
+  const openingStock = Number.isFinite(Number(movementTotals.netValue))
+    ? stockValue - numberValue(movementTotals.netValue, 0)
+    : stockValue + costOfSales - purchases - manualAdjustments - countVariance + wastage;
   const serverSummary = normalizeMetricMap(dashboardResponse.summary || {});
   const serverInsights = dashboardResponse.insights && typeof dashboardResponse.insights === 'object' ? dashboardResponse.insights : {};
   const rawLowStockRows = toArray(serverInsights.lowStockRows).length
@@ -129,20 +137,20 @@ async function fetchDashboardTiles(workspaceId, { range = '7', siteId = '' } = {
     : buildPendingExternalTransferRows(transfers);
 
   const summary = {
-    stockValue: serverSummary.stockValue || metricValue(stockValue, 'currency'),
-    totalStockValue: serverSummary.totalStockValue || metricValue(stockValue, 'currency'),
-    openingStock: serverSummary.openingStock || metricValue(openingStock, 'currency'),
-    closingStock: serverSummary.closingStock || metricValue(stockValue, 'currency'),
-    costOfSales: serverSummary.costOfSales || metricValue(costOfSales, 'currency'),
-    countVariance: serverSummary.countVariance || metricValue(countVariance, 'currency'),
-    manualAdjustments: serverSummary.manualAdjustments || metricValue(manualAdjustments, 'currency'),
-    // Prefer the reconciled tile total built from movementTotals so product wastage
-    // adjustments and manufacturing wastage are both reflected consistently here.
+    stockValue: metricValue(stockValue, 'currency'),
+    totalStockValue: metricValue(stockValue, 'currency'),
+    openingStock: metricValue(openingStock, 'currency'),
+    closingStock: metricValue(stockValue, 'currency'),
+    purchases: metricValue(purchases, 'currency'),
+    costOfSales: metricValue(costOfSales, 'currency'),
+    countVariance: metricValue(countVariance, 'currency'),
+    manualAdjustments: metricValue(manualAdjustments, 'currency'),
     wastage: metricValue(Math.abs(wastage), 'currency'),
-    manufacturingWastage: normalizeAbsoluteMetric(serverSummary.manufacturingWastage, movementTotals.manufacturingWastage),
+    manufacturingWastage: metricValue(Math.abs(numberValue(movementTotals.manufacturingWastage, 0)), 'currency'),
     lowStockCount: serverSummary.lowStockCount || metricValue(lowStockItemCount, 'number'),
     gpPercentage: serverSummary.gpPercentage || metricValue(averageGp, 'percent'),
-    averageGp: serverSummary.averageGp || metricValue(averageGp, 'percent')
+    averageGp: serverSummary.averageGp || metricValue(averageGp, 'percent'),
+    __source: reportingLedgerRows.length ? 'detailed-activity-reporting-ledger' : 'dashboard-endpoint-fallback'
   };
 
   const insights = {
@@ -200,6 +208,61 @@ async function fetchDashboardTiles(workspaceId, { range = '7', siteId = '' } = {
   };
 }
 
+
+function summarizeReportingLedgerForDashboard(rows = []) {
+  const totals = {
+    grv: 0,
+    purchaseOrderReceive: 0,
+    creditNote: 0,
+    sale: 0,
+    modifierUsage: 0,
+    adjustment: 0,
+    stockTake: 0,
+    wastage: 0,
+    manufacturingWastage: 0,
+    netValue: 0
+  };
+
+  toArray(rows).forEach((row = {}) => {
+    const source = normalizeDashboardSource(row.source || row.sourceType || row.movementType || row.movement_type);
+    const value = numberValue(row.movementValue ?? row.value_delta ?? row.valueDelta, 0);
+    const absValue = Math.abs(value);
+    if (source.includes('purchaseorderreceive')) totals.purchaseOrderReceive += value;
+    else if (isDashboardPurchase(source)) totals.grv += value;
+    else if (source.includes('creditnote')) totals.creditNote += value;
+    else if (source.includes('modifierusage')) totals.modifierUsage += absValue;
+    else if (source.includes('saleusage') || source.includes('salesusage')) totals.sale += absValue;
+    else if (source.includes('stocktake')) totals.stockTake += value;
+    else if (source.includes('manufacturingwastage') || source.includes('manufacturingwaste')) totals.manufacturingWastage += absValue;
+    else if (source.includes('wastage') || source.includes('wasteadjustment') || source.includes('manualwastage')) totals.wastage += absValue;
+    else if (source.includes('manualadjustment') || source === 'adjustment' || source.includes('systemcorrection') || source.includes('manufacturingcorrection')) totals.adjustment += value;
+
+    if (!isAccountingOnlyDashboardRow(row, source)) {
+      totals.netValue += value;
+    }
+  });
+
+  return { movementTotals: totals };
+}
+
+function normalizeDashboardSource(value = '') {
+  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function isDashboardPurchase(source = '') {
+  return source === 'grv' || source.includes('goodsreceived') || source.includes('purchase') && !source.includes('credit');
+}
+
+function isAccountingOnlyDashboardRow(row = {}, source = '') {
+  const metadata = parseJsonObject(row.metadata_json || row.metadataJson || row.raw?.metadata || row.raw?.movement?.metadata_json || row.raw?.movement?.metadataJson);
+  return source.includes('manufacturingwastage')
+    || source.includes('manufacturingwaste')
+    || metadata.accountingOnly === true
+    || metadata.accountingOnly === 'true'
+    || metadata.dashboardOnly === true
+    || metadata.dashboardOnly === 'true';
+}
+
 function summarizeMovements(movements = []) {
   const totals = {
     grv: 0,
@@ -241,12 +304,15 @@ function normalizeMetricMap(source = {}) {
 function normalizeMovementTotals(source = {}) {
   return {
     grv: numberValue(source.grv, 0),
+    purchaseOrderReceive: numberValue(source.purchaseOrderReceive ?? source.purchase_order_receive, 0),
     creditNote: numberValue(source.creditNote ?? source.credit_note, 0),
     sale: numberValue(source.sale, 0),
+    modifierUsage: numberValue(source.modifierUsage ?? source.modifier_usage, 0),
     adjustment: numberValue(source.adjustment, 0),
     stockTake: numberValue(source.stockTake ?? source.stock_take, 0),
     wastage: numberValue(source.wastage, 0),
-    manufacturingWastage: numberValue(source.manufacturingWastage ?? source.manufacturing_wastage, 0)
+    manufacturingWastage: numberValue(source.manufacturingWastage ?? source.manufacturing_wastage, 0),
+    netValue: numberValue(source.netValue ?? source.net_value, NaN)
   };
 }
 

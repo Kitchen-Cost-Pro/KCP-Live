@@ -14,6 +14,133 @@ const modifierStatusOptions = [
   { value: 'unlinked', label: 'Unlinked' }
 ];
 
+function getAccessibleSellingLocationOptions(locations = [], access = {}) {
+  const active = (locations || []).filter((location) => location?.active !== false);
+  const selling = (active.length ? active : locations).filter((location) => {
+    const type = String(location.kind || location.type || location.locationType || 'selling').trim().toLowerCase();
+    return type === 'selling' || type === 'sale' || type === 'sales' || type === '';
+  });
+  const base = selling.length ? selling : active.length ? active : locations;
+  const filtered = filterLocationsByAccess(base, access);
+  return [...(filtered.length ? filtered : base)]
+    .map((location) => ({
+      value: String(location.id || location.locationId || '').trim(),
+      label: String(location.displayName || location.name || location.locationName || location.id || '').trim()
+    }))
+    .filter((option) => option.value)
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
+function filterLocationsByAccess(locations = [], access = {}) {
+  if (access.currentIsSuperUser === true || access.currentIsKcpSuperUser === true) return locations;
+  let filtered = locations;
+  const roleLocations = access.roleDefinition?.locations || access.currentRoleDefinition?.locations || [];
+  if (Array.isArray(roleLocations) && roleLocations.length && !roleLocations.includes('all')) {
+    const allowed = new Set(roleLocations.map(normalizeLocationKey).filter(Boolean));
+    const next = filtered.filter((location) => locationMatchesLocationKeys(location, allowed));
+    filtered = next.length ? next : filtered;
+  }
+  const userLocations = Array.isArray(access.currentUserLocations) ? access.currentUserLocations : [];
+  if (userLocations.length) {
+    const allowed = new Set(userLocations.map(normalizeLocationKey).filter(Boolean));
+    const next = filtered.filter((location) => locationMatchesLocationKeys(location, allowed));
+    filtered = next.length ? next : filtered;
+  }
+  return filtered;
+}
+
+function locationMatchesLocationKeys(location = {}, keys = new Set()) {
+  if (!keys.size) return true;
+  return [location.id, location.locationId, location.name, location.displayName, location.locationName]
+    .map(normalizeLocationKey)
+    .filter(Boolean)
+    .some((value) => keys.has(value));
+}
+
+function normalizeLocationKey(value = '') {
+  return String(value || '').normalize('NFKC').toLowerCase().replace(/[^a-z0-9]+/g, '').trim();
+}
+
+function resolveActiveLocationId(locationId = '', options = []) {
+  const value = String(locationId || '').trim();
+  if (value && options.some((option) => option.value === value)) return value;
+  return String(options[0]?.value || '');
+}
+
+function applyMenuLocationPrice(item = {}, locationId = '', locationOptions = []) {
+  const entry = locationId ? item.locationPrices?.[locationId] : null;
+  const locationPrice = Number(entry?.sellingPrice ?? entry?.price ?? item.sellingPrice ?? 0) || 0;
+  const locationName = locationOptions.find((option) => option.value === locationId)?.label || '';
+  return {
+    ...item,
+    globalSellingPrice: Number(item.sellingPrice || 0) || 0,
+    sellingPrice: locationPrice,
+    activeLocationId: locationId,
+    activeLocationName: locationName,
+    locationPriceSource: entry ? 'location' : 'global'
+  };
+}
+
+
+function decorateMenuItemsWithModifierLinks(items = [], modifiers = []) {
+  const linkIndex = buildModifierProductLinkIndex(modifiers);
+  return (items || []).map((item) => ({
+    ...item,
+    linkedToModifier: isMenuItemLinkedToModifier(item, linkIndex)
+  }));
+}
+
+function buildModifierProductLinkIndex(modifiers = []) {
+  const ids = new Set();
+  const names = new Set();
+  (modifiers || []).forEach((modifier = {}) => {
+    [
+      ...(Array.isArray(modifier.linkedProductIds) ? modifier.linkedProductIds : []),
+      modifier.linkedProductId,
+      modifier.yocoModifierProductId,
+      modifier.yocoModifierVariantId,
+      modifier.recipeSourceProductId
+    ].map(normalizeLinkToken).filter(Boolean).forEach((value) => ids.add(value));
+    [
+      ...(Array.isArray(modifier.linkedProductNames) ? modifier.linkedProductNames : []),
+      modifier.linkedProductName,
+      modifier.autoLinkedProductName,
+      modifier.yocoModifierProductName
+    ].map(normalizeLinkToken).filter(Boolean).forEach((value) => names.add(value));
+  });
+  return { ids, names };
+}
+
+function isMenuItemLinkedToModifier(item = {}, linkIndex = { ids: new Set(), names: new Set() }) {
+  const idCandidates = [
+    item.id,
+    item.productId,
+    item.yocoItemId,
+    item.yocoVariantId,
+    item.variantId,
+    item.recipeOwnerId,
+    item.sku,
+    item.customSku
+  ].map(normalizeLinkToken).filter(Boolean);
+  if (idCandidates.some((candidate) => linkIndex.ids.has(candidate))) return true;
+  const nameCandidates = [
+    item.name,
+    item.productName,
+    item.yocoItemName,
+    item.yocoModifierProductName
+  ].map(normalizeLinkToken).filter(Boolean);
+  return nameCandidates.some((candidate) => linkIndex.names.has(candidate));
+}
+
+function normalizeLinkToken(value = '') {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^product:/, '')
+    .replace(/^modifier:/, '')
+    .replace(/\s+/g, ' ');
+}
+
 export function renderMenuCatalogue({ state, onFilterChange, onMenuAction = {} } = {}) {
   const menu = state.menu || {};
   const filters = {
@@ -22,16 +149,22 @@ export function renderMenuCatalogue({ state, onFilterChange, onMenuAction = {} }
     catalogueView: 'products',
     category: '',
     status: '',
+    locationId: '',
     page: 1,
     pageSize: 25,
     openDropdown: '',
     ...(menu.filters || {})
   };
   const catalogueView = filters.catalogueView === 'modifiers' ? 'modifiers' : 'products';
-  const allItems = menu.items || [];
   const allModifiers = menu.modifierItems || [];
+  const allItems = decorateMenuItemsWithModifierLinks(menu.items || [], allModifiers);
   const sourceRows = catalogueView === 'modifiers' ? allModifiers : allItems;
-  const items = catalogueView === 'modifiers' ? filterModifiers(sourceRows, filters) : filterItems(sourceRows, filters);
+  const locationOptions = getAccessibleSellingLocationOptions(menu.locations || [], state.access || {});
+  const activeLocationId = catalogueView === 'products' ? resolveActiveLocationId(filters.locationId, locationOptions) : '';
+  const filteredRows = catalogueView === 'modifiers' ? filterModifiers(sourceRows, filters) : filterItems(sourceRows, filters);
+  const items = catalogueView === 'products'
+    ? filteredRows.map((item) => applyMenuLocationPrice(item, activeLocationId, locationOptions))
+    : filteredRows;
   const paging = getPaging(items, filters);
   const pagedItems = items.slice(paging.startIndex, paging.endIndex);
   const selectedIds = new Set((menu.selectedIds || []).map(String));
@@ -77,6 +210,13 @@ export function renderMenuCatalogue({ state, onFilterChange, onMenuAction = {} }
         openDropdown: filters.openDropdown,
         options: categoryOptions
       })}
+      ${catalogueView === 'products' && locationOptions.length ? renderDropdown({
+        id: 'locationId',
+        label: 'Selling Location',
+        value: activeLocationId,
+        openDropdown: filters.openDropdown,
+        options: locationOptions
+      }) : ''}
       ${renderDropdown({
         id: 'status',
         label: 'Status',
@@ -385,7 +525,10 @@ function renderMenuRow(item, isSelected, posLock = {}) {
         <span></span>
       </label>
       <strong>
-        ${escapeHtml(item.name)}
+        <span class="menuCatalogue__nameLine">
+          ${escapeHtml(item.name)}
+          ${renderLinkedToModifierPill(item)}
+        </span>
         <small>${escapeHtml(getMenuItemMeta(item))}</small>
       </strong>
       <span class="menuCatalogue__variantColumn">${renderVariantColumn(item)}</span>
@@ -403,6 +546,11 @@ function renderMenuRow(item, isSelected, posLock = {}) {
   `;
 }
 
+function renderLinkedToModifierPill(item = {}) {
+  if (item.linkedToModifier !== true) return '';
+  return '<em class="menuCatalogue__pill menuCatalogue__pill--modifier" title="This menu product is linked from a product modifier option.">Linked to Modifier</em>';
+}
+
 function renderMenuCard(item) {
   return `
     <article class="menuCatalogue__card">
@@ -410,7 +558,7 @@ function renderMenuCard(item) {
         <span>${escapeHtml(item.category)}</span>
         ${renderStatus(item)}
       </div>
-      <h2>${escapeHtml(item.name)}</h2>
+      <h2>${escapeHtml(item.name)} ${renderLinkedToModifierPill(item)}</h2>
       ${renderVariantBadge(item)}
       ${renderModifierGroupsCell(item)}
       <div class="menuCatalogue__skuCard">SKU <strong>${escapeHtml(getSkuDisplay(item))}</strong></div>

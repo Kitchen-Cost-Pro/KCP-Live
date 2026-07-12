@@ -1115,7 +1115,7 @@ function buildLowStockSummaryEmailMessage({ workspaceName, frequencyLabel, gener
           `).join('')}
         </tbody>
       </table>
-      <p style="color:#475569">The attached PDF includes the full low-stock report.</p>
+      <p style="color:#475569">The attached PDF includes the full low-stock summary.</p>
     </div>
   `;
 

@@ -859,8 +859,6 @@ button[class*="PrimaryButton"],
 button[class*="primaryAction"],
 button.stockTakePrimary,
 button.stockTakeHeroButton,
-button.analyticsHubPrimary,
-button.reportBuilderPrimary,
 #view-grv button.grv-add-primary,
 #view-grv button.grv-commit-primary,
 #view-credit-note button.cn-add-primary,
@@ -884,7 +882,6 @@ button[class*="SecondaryButton"],
 button[class*="GhostButton"],
 button[class*="secondaryAction"],
 button.stockTakeGhost,
-button.reportBuilderSecondary,
 #view-transfers button.transfersGhost,
 #view-adjustments button.adj-secondary,
 #view-credit-note button.cn-secondary,
@@ -903,8 +900,6 @@ button[class*="__primary"]:hover:not(:disabled),
 button[class*="PrimaryButton"]:hover:not(:disabled),
 button[class*="primaryAction"]:hover:not(:disabled),
 button.stockTakePrimary:hover:not(:disabled),
-button.analyticsHubPrimary:hover:not(:disabled),
-button.reportBuilderPrimary:hover:not(:disabled),
 #view-grv button.grv-add-primary:hover:not(:disabled),
 #view-grv button.grv-commit-primary:hover:not(:disabled),
 #view-credit-note button.cn-add-primary:hover:not(:disabled),
@@ -968,4 +963,9 @@ button[class*="ghostIcon"] {
   background: var(--surface-primary);
   border: 1px solid var(--border-subtle);
   box-shadow: none;
+}
+
+/* Main dashboard intentionally blank pending reporting-engine rebuild. */
+.dashboardResetSurface {
+  min-height: 100%;
 }

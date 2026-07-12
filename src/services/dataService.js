@@ -560,6 +560,67 @@ function uniqueSheetName(existingNames = [], baseName = 'Sheet') {
   return sanitizeSheetName(`${safeBase.slice(0, 27)} ${index}`);
 }
 
+
+function pdfTableLayoutOptions(columnCount = 0, options = {}) {
+  const count = Number(columnCount || 0) || 0;
+  const dense = count > 10;
+  const veryDense = count > 14;
+  return {
+    showHead: 'everyPage',
+    tableWidth: 'auto',
+    rowPageBreak: 'avoid',
+    horizontalPageBreak: count > 7,
+    horizontalPageBreakRepeat: count > 3 ? 0 : undefined,
+    horizontalPageBreakBehaviour: 'afterAllRows',
+    styles: {
+      font: 'helvetica',
+      fontSize: veryDense ? 6.2 : dense ? 6.8 : 8,
+      cellPadding: veryDense ? 3 : dense ? 4 : 5,
+      valign: 'middle',
+      overflow: 'linebreak',
+      minCellHeight: veryDense ? 15 : 18,
+      ...(options.styles || {})
+    }
+  };
+}
+
+function pdfCellValue(value) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) return value.map(pdfCellValue).filter(Boolean).join(', ');
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return '';
+    }
+  }
+  return String(value);
+}
+
+function normalizePdfBodyRows(rows = [], headers = []) {
+  const safeHeaders = Array.isArray(headers) ? headers : [];
+  return (Array.isArray(rows) ? rows : []).map((row) => {
+    if (Array.isArray(row)) return row.map(pdfCellValue);
+    return safeHeaders.map((header) => pdfCellValue(row?.[header]));
+  });
+}
+
+function buildPdfColumnStyles(headers = []) {
+  return (Array.isArray(headers) ? headers : []).reduce((styles, header, index) => {
+    const label = String(header || '').toLowerCase();
+    if (/qty|count|cost|price|amount|total|value|vat|variance|stock|par|threshold|percentage|yield|batch/.test(label)) {
+      styles[index] = { halign: 'right' };
+    }
+    if (/name|description|notes|address/.test(label)) {
+      styles[index] = { ...(styles[index] || {}), cellWidth: 'wrap' };
+    }
+    return styles;
+  }, {});
+}
+
 export async function downloadPdf(filename, {
   title = 'KCP Export',
   subtitle = '',
@@ -568,7 +629,8 @@ export async function downloadPdf(filename, {
   summaryRows = [],
   orientation = 'landscape',
   branding = {},
-  tableOptions = {}
+  tableOptions = {},
+  detailTables = []
 } = {}) {
   const [{ jsPDF }, autoTableModule] = await Promise.all([
     import('jspdf'),
@@ -577,8 +639,8 @@ export async function downloadPdf(filename, {
   const autoTable = autoTableModule.default || autoTableModule.autoTable;
   const normalizedRows = Array.isArray(rows) ? rows : [];
   const headers = columns || getHeaders(normalizedRows);
-  const body = normalizedRows.map((row) => headers.map((header) => row?.[header] ?? ''));
-  const doc = new jsPDF({ orientation, unit: 'pt', format: 'a4' });
+  const body = normalizePdfBodyRows(normalizedRows, headers);
+  const doc = new jsPDF({ orientation: headers.length > 7 ? 'landscape' : orientation, unit: 'pt', format: 'a4' });
 
   const header = await renderPdfHeader(doc, { title, subtitle, branding });
   const summary = normalizePdfSummaryRows(summaryRows);
@@ -605,29 +667,69 @@ export async function downloadPdf(filename, {
   doc.setLineWidth(1);
   doc.line(40, tableStartY - 14, doc.internal.pageSize.getWidth() - 40, tableStartY - 14);
 
+  const layout = pdfTableLayoutOptions(headers.length, tableOptions);
   autoTable(doc, {
+    ...layout,
     head: [headers],
     body,
     startY: tableStartY,
     theme: 'grid',
-    styles: {
-      font: 'helvetica',
-      fontSize: 8,
-      cellPadding: 5,
-      valign: 'middle',
-      overflow: 'linebreak'
-    },
     headStyles: {
       fillColor: [37, 99, 235],
       textColor: 255,
-      fontStyle: 'bold'
+      fontStyle: 'bold',
+      ...(tableOptions.headStyles || {})
     },
-    alternateRowStyles: { fillColor: [245, 247, 250] },
-    margin: { left: 40, right: 40 },
-    ...tableOptions
+    alternateRowStyles: { fillColor: [245, 247, 250], ...(tableOptions.alternateRowStyles || {}) },
+    columnStyles: { ...buildPdfColumnStyles(headers), ...(tableOptions.columnStyles || {}) },
+    margin: { left: 40, right: 40, ...(tableOptions.margin || {}) },
+    ...tableOptions,
+    styles: layout.styles
   });
 
+  drawPdfDetailTables(doc, autoTable, detailTables, { margin: 40 });
+
   doc.save(ensureExtension(filename, 'pdf'));
+}
+
+
+function drawPdfDetailTables(doc, autoTable, detailTables = [], { margin = 40 } = {}) {
+  const tables = (Array.isArray(detailTables) ? detailTables : [])
+    .map((table) => ({
+      title: String(table?.title || table?.name || 'Detail').trim(),
+      headers: Array.isArray(table?.headers) ? table.headers : (Array.isArray(table?.columns) ? table.columns : []),
+      rows: Array.isArray(table?.rows) ? table.rows : []
+    }))
+    .filter((table) => table.headers.length && table.rows.length);
+  if (!tables.length) return;
+
+  let cursorY = Number(doc.lastAutoTable?.finalY || 80) + 22;
+  const pageHeight = doc.internal.pageSize.getHeight();
+  tables.forEach((table) => {
+    if (cursorY > pageHeight - 110) {
+      doc.addPage();
+      cursorY = margin;
+    }
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.setTextColor(37, 99, 235);
+    doc.text(table.title.toUpperCase(), margin, cursorY);
+    cursorY += 10;
+    const layout = pdfTableLayoutOptions(table.headers.length, {});
+    autoTable(doc, {
+      ...layout,
+      head: [table.headers],
+      body: normalizePdfBodyRows(table.rows, table.headers),
+      startY: cursorY,
+      theme: 'grid',
+      headStyles: { fillColor: [17, 24, 39], textColor: 255, fontStyle: 'bold' },
+      alternateRowStyles: { fillColor: [248, 250, 252] },
+      columnStyles: buildPdfColumnStyles(table.headers),
+      margin: { left: margin, right: margin },
+      styles: layout.styles
+    });
+    cursorY = Number(doc.lastAutoTable?.finalY || cursorY) + 20;
+  });
 }
 
 function normalizePdfSummaryRows(rows = []) {
@@ -653,38 +755,39 @@ export async function downloadAoaPdf(filename, {
     import('jspdf-autotable')
   ]);
   const autoTable = autoTableModule.default || autoTableModule.autoTable;
-  const doc = new jsPDF({ orientation, unit: 'pt', format: 'a4' });
   const safeRows = Array.isArray(rows) ? rows : [];
   const head = [safeRows[headerRowIndex] || []];
+  const doc = new jsPDF({ orientation: (head[0]?.length || 0) > 7 ? 'landscape' : orientation, unit: 'pt', format: 'a4' });
   const body = safeRows
     .filter((_, index) => index !== headerRowIndex)
     .map((row) => (Array.isArray(row) ? row : [row]));
+  const { ruleColor, ...autoTableOptions } = tableOptions || {};
+  const resolvedRuleColor = Array.isArray(ruleColor) && ruleColor.length >= 3 ? ruleColor : [37, 99, 235];
 
   const header = await renderPdfHeader(doc, { title, subtitle, branding });
-  doc.setDrawColor(37, 99, 235);
+  doc.setDrawColor(resolvedRuleColor[0], resolvedRuleColor[1], resolvedRuleColor[2]);
   doc.setLineWidth(1);
   doc.line(40, header.ruleY, doc.internal.pageSize.getWidth() - 40, header.ruleY);
 
+  const headerCount = head[0]?.length || 0;
+  const layout = pdfTableLayoutOptions(headerCount, autoTableOptions);
   autoTable(doc, {
+    ...layout,
     head,
-    body,
+    body: body.map((row) => Array.isArray(row) ? row.map(pdfCellValue) : [pdfCellValue(row)]),
     startY: header.tableStartY,
     theme: 'grid',
-    styles: {
-      font: 'helvetica',
-      fontSize: 8,
-      cellPadding: 5,
-      valign: 'middle',
-      overflow: 'linebreak'
-    },
     headStyles: {
       fillColor: [37, 99, 235],
       textColor: 255,
-      fontStyle: 'bold'
+      fontStyle: 'bold',
+      ...(autoTableOptions.headStyles || {})
     },
-    alternateRowStyles: { fillColor: [245, 247, 250] },
-    margin: { left: 40, right: 40 },
-    ...tableOptions
+    alternateRowStyles: { fillColor: [245, 247, 250], ...(autoTableOptions.alternateRowStyles || {}) },
+    columnStyles: { ...buildPdfColumnStyles(head[0] || []), ...(autoTableOptions.columnStyles || {}) },
+    margin: { left: 40, right: 40, ...(autoTableOptions.margin || {}) },
+    ...autoTableOptions,
+    styles: layout.styles
   });
 
   doc.save(ensureExtension(filename, 'pdf'));
@@ -704,38 +807,39 @@ export async function buildAoaPdfFile(filename, {
     import('jspdf-autotable')
   ]);
   const autoTable = autoTableModule.default || autoTableModule.autoTable;
-  const doc = new jsPDF({ orientation, unit: 'pt', format: 'a4' });
   const safeRows = Array.isArray(rows) ? rows : [];
   const head = [safeRows[headerRowIndex] || []];
+  const doc = new jsPDF({ orientation: (head[0]?.length || 0) > 7 ? 'landscape' : orientation, unit: 'pt', format: 'a4' });
   const body = safeRows
     .filter((_, index) => index !== headerRowIndex)
     .map((row) => (Array.isArray(row) ? row : [row]));
+  const { ruleColor, ...autoTableOptions } = tableOptions || {};
+  const resolvedRuleColor = Array.isArray(ruleColor) && ruleColor.length >= 3 ? ruleColor : [37, 99, 235];
 
   const header = await renderPdfHeader(doc, { title, subtitle, branding });
-  doc.setDrawColor(37, 99, 235);
+  doc.setDrawColor(resolvedRuleColor[0], resolvedRuleColor[1], resolvedRuleColor[2]);
   doc.setLineWidth(1);
   doc.line(40, header.ruleY, doc.internal.pageSize.getWidth() - 40, header.ruleY);
 
+  const headerCount = head[0]?.length || 0;
+  const layout = pdfTableLayoutOptions(headerCount, autoTableOptions);
   autoTable(doc, {
+    ...layout,
     head,
-    body,
+    body: body.map((row) => Array.isArray(row) ? row.map(pdfCellValue) : [pdfCellValue(row)]),
     startY: header.tableStartY,
     theme: 'grid',
-    styles: {
-      font: 'helvetica',
-      fontSize: 8,
-      cellPadding: 5,
-      valign: 'middle',
-      overflow: 'linebreak'
-    },
     headStyles: {
       fillColor: [37, 99, 235],
       textColor: 255,
-      fontStyle: 'bold'
+      fontStyle: 'bold',
+      ...(autoTableOptions.headStyles || {})
     },
-    alternateRowStyles: { fillColor: [245, 247, 250] },
-    margin: { left: 40, right: 40 },
-    ...tableOptions
+    alternateRowStyles: { fillColor: [245, 247, 250], ...(autoTableOptions.alternateRowStyles || {}) },
+    columnStyles: { ...buildPdfColumnStyles(head[0] || []), ...(autoTableOptions.columnStyles || {}) },
+    margin: { left: 40, right: 40, ...(autoTableOptions.margin || {}) },
+    ...autoTableOptions,
+    styles: layout.styles
   });
 
   const fileName = ensureExtension(filename, 'pdf');

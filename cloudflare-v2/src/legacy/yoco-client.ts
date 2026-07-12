@@ -142,6 +142,13 @@ export const listOrders = (env: Env, apiKey: string, params: Record<string, unkn
 export const listRefunds = (env: Env, apiKey: string, params: Record<string, unknown> = {}) => listAllPages(env, apiKey, '/v1/refunds/', params);
 export const fetchOrder = async (env: Env, apiKey: string, orderId: string) => objectData(await yocoFetch(env, apiKey, `/v1/orders/${encodeURIComponent(orderId)}`));
 
+
+export const listWebhookSubscriptions = (env: Env, apiKey: string) => listAllPages(env, apiKey, '/v1/webhooks/subscriptions/');
+
+export function deleteWebhookSubscription(env: Env, apiKey: string, subscriptionId: string) {
+  return yocoFetch(env, apiKey, `/v1/webhooks/subscriptions/${encodeURIComponent(subscriptionId)}`, { method: 'DELETE' });
+}
+
 export function createWebhookSubscription(env: Env, apiKey: string, body: Record<string, unknown>) {
   return yocoFetch(env, apiKey, '/v1/webhooks/subscriptions/', { method: 'POST', body });
 }
