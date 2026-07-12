@@ -10869,17 +10869,63 @@ export async function postTransferTemplate(
   const template = objectValue(payload.template || payload);
   const templateId = text(template.id) || id("tt");
   const name = text(template.name);
-  const items = arrayValue(template.items)
-    .map(objectValue)
-    .filter((line) => text(line.stockItemId || line.itemId || line.id));
+  const itemIds = [
+    ...new Set(
+      arrayValue(template.items)
+        .map(objectValue)
+        .map((line) => text(line.stockItemId || line.itemId || line.id))
+        .filter(Boolean),
+    ),
+  ];
   if (!name) return error(request, env, 400, "Enter a template name.");
-  if (!items.length)
+  if (!itemIds.length)
     return error(
       request,
       env,
       400,
       "Select at least one stock item for this template.",
     );
+  if (itemIds.length > 5000)
+    return error(
+      request,
+      env,
+      400,
+      "A transfer template can contain at most 5 000 stock items.",
+    );
+
+  const lineRows = itemIds.map((stockItemId, sortOrder) => ({
+    id: id("ttl"),
+    stockItemId,
+    sortOrder,
+  }));
+  const lineRowsJson = JSON.stringify(lineRows);
+
+  // Validate the complete selection before replacing an existing template. This avoids silently
+  // dropping deleted/stale stock IDs and guarantees the subsequent three-statement batch remains
+  // atomic for both D1 and the per-workspace Durable Object SQLite facade.
+  const validation = await env.DB.prepare(
+    `SELECT
+        COUNT(*) AS requested_count,
+        COUNT(si.id) AS valid_count
+       FROM json_each(?2) selected
+       LEFT JOIN stock_items si
+         ON si.id = json_extract(selected.value, '$.stockItemId')
+        AND si.workspace_id = ?1
+        AND si.active = 1`,
+  )
+    .bind(workspaceId, lineRowsJson)
+    .first<{ requested_count?: number; valid_count?: number }>();
+  if (
+    numberValue(validation?.requested_count, 0) !== lineRows.length ||
+    numberValue(validation?.valid_count, 0) !== lineRows.length
+  ) {
+    return error(
+      request,
+      env,
+      400,
+      "One or more selected stock items are no longer available. Refresh the list and try again.",
+    );
+  }
 
   const now = nowIso();
   const statements = [
@@ -10896,25 +10942,32 @@ export async function postTransferTemplate(
         WHERE workspace_id = ?1
           AND transfer_template_id = ?2`,
     ).bind(workspaceId, templateId),
+    env.DB.prepare(
+      `INSERT INTO transfer_template_lines (
+         id,
+         workspace_id,
+         transfer_template_id,
+         stock_item_id,
+         sort_order
+       )
+       SELECT
+         json_extract(selected.value, '$.id'),
+         ?1,
+         ?2,
+         json_extract(selected.value, '$.stockItemId'),
+         CAST(json_extract(selected.value, '$.sortOrder') AS INTEGER)
+       FROM json_each(?3) selected`,
+    ).bind(workspaceId, templateId, lineRowsJson),
   ];
 
-  items.forEach((line, index) => {
-    statements.push(
-      env.DB.prepare(
-        `INSERT INTO transfer_template_lines (id, workspace_id, transfer_template_id, stock_item_id, sort_order)
-       VALUES (?1, ?2, ?3, ?4, ?5)`,
-      ).bind(
-        id("ttl"),
-        workspaceId,
-        templateId,
-        text(line.stockItemId || line.itemId || line.id),
-        index,
-      ),
-    );
-  });
-
   await env.DB.batch(statements);
-  return json(request, env, { ok: true, id: templateId });
+  return json(request, env, {
+    ok: true,
+    id: templateId,
+    createdAt: now,
+    updatedAt: now,
+    itemCount: lineRows.length,
+  });
 }
 
 export async function deleteTransferTemplateRoute(

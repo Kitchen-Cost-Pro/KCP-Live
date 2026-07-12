@@ -11378,6 +11378,11 @@ function useTransferTemplateForBulk(templateId = '') {
 }
 
 async function saveTransferTemplateDraft() {
+  // renderApp() replaces the button node while a save is in progress. Without a state guard a
+  // second click (or rapid double-click) can still start another large write before the disabled
+  // replacement is painted, which previously made bulk template saves appear to hang.
+  if (appState.transfers.actionStatus === 'saving-template') return;
+
   const draft = appState.transfers.templateDraft || createEmptyTransferTemplateDraft();
   const selectedIds = new Set((draft.selectedStockIds || []).map(String));
   const invalidSelected = (appState.transfers.stockItems || [])
@@ -11440,12 +11445,14 @@ async function saveTransferTemplateDraft() {
     renderApp();
     showTransferToast('Transfer template saved.', 'success');
   } catch (error) {
+    const message = error.message || 'Could not save transfer template.';
     appState.transfers = {
       ...appState.transfers,
       actionStatus: '',
-      actionError: error.message || 'Could not save transfer template.'
+      actionError: message
     };
     renderApp();
+    showTransferToast(message, 'error');
   }
 }
 

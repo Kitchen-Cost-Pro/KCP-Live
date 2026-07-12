@@ -400,6 +400,7 @@ function renderTransferTemplateBuilder(transfers = {}, filters = {}) {
   const draft = transfers.templateDraft || createEmptyTransferTemplateDraft();
   const query = String(filters.templateSearch || '').trim().toLowerCase();
   const selectedIds = new Set((draft.selectedStockIds || []).map(String));
+  const isSaving = transfers.actionStatus === 'saving-template';
   const stockItems = (transfers.stockItems || [])
     .filter(isTransferEligibleStockItem)
     .filter((item) => {
@@ -435,8 +436,8 @@ function renderTransferTemplateBuilder(transfers = {}, filters = {}) {
             <strong>${selectedIds.size}</strong>
             <span>selected stock items</span>
           </div>
-          <button type="button" class="transfersPrimary" data-transfer-template-save ${String(draft.name || '').trim() && selectedIds.size ? '' : 'disabled'}>
-            ${transfers.actionStatus === 'saving-template' ? 'Saving...' : 'Save Transfer Template'}
+          <button type="button" class="transfersPrimary" data-transfer-template-save ${String(draft.name || '').trim() && selectedIds.size && !isSaving ? '' : 'disabled'} aria-busy="${isSaving ? 'true' : 'false'}">
+            ${isSaving ? 'Saving...' : 'Save Transfer Template'}
           </button>
         </section>
 
