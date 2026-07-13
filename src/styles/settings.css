@@ -1503,3 +1503,20 @@ html.ui-scale-large {
 .settingsRoutingTags span.settingsRoutingTag--manufacturing {
   display: none !important;
 }
+
+
+/* Phase 47: user-scoped appearance preferences. */
+.settingsPersonalPreferenceRow {
+  display: grid;
+  grid-template-columns: minmax(14rem, 1fr) auto;
+  align-items: end;
+  gap: 1rem;
+  margin-top: 1rem;
+  padding: 1rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: 0.9rem;
+  background: color-mix(in srgb, var(--surface-elevated) 92%, var(--accent-blue));
+}
+.settingsPersonalPreferenceRow label { display: grid; gap: .45rem; min-width: 0; }
+.settingsPersonalPreferenceRow label > span { font-size: .75rem; font-weight: 800; color: var(--text-main); }
+@media (max-width: 720px) { .settingsPersonalPreferenceRow { grid-template-columns: 1fr; } }

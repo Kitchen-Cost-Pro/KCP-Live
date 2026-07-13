@@ -51,15 +51,20 @@ test('scheduled email format selector enables CSV, XLSX, PDF, and report links',
   assert.doesNotMatch(schedulingSource, /coming soon/i);
 });
 
-test('schedule UI and runner support multiple views and one independent output per location', () => {
+test('schedule UI selects reports and views while the runner keeps location output boundaries', () => {
   assert.match(schedulingSource, /data-schedule-pack-open/);
   assert.match(schedulingSource, /data-schedule-pack-picker/);
-  assert.match(schedulingSource, /Select reports and views/);
+  assert.match(schedulingSource, /<strong>Select reports<\/strong>/);
+  assert.match(schedulingSource, /<strong>Reports in pack<\/strong>/);
+  assert.match(schedulingSource, /<strong>Select views<\/strong>/);
+  assert.match(schedulingSource, /data-schedule-report-toggle/);
+  assert.match(schedulingSource, /data-schedule-view-toggle/);
+  assert.match(schedulingSource, /data-report-tooltip/);
   assert.match(schedulingSource, /name="locationSelection"/);
   assert.match(schedulingSource, /Choose All Locations to generate a separate output for every active location/);
   assert.match(schedulingSource, /values\.locations\.map\(\(location\) => `<option/);
   assert.match(workerSource, /const outputCount = items\.length \* locations\.length/);
   assert.match(workerSource, /for \(const location of locations\)/);
   assert.match(workerSource, /buildScheduledAttachments\(schedule\.format, outputs\)/);
-  assert.match(workerSource, /for \(const output of outputs\)/);
+  assert.match(workerSource, /groupScheduledOutputsByReport\(outputs\)/);
 });

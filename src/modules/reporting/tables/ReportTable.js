@@ -5,7 +5,8 @@ import {
   isUserFixableWarning,
   isSystemOwnedReportingWarning,
 } from "../validators/warningCategories.js";
-import { renderTooltipIcon } from "../tooltips/tooltipBuilder.js";
+import { renderColumnTooltipIcon } from "../tooltips/tooltipBuilder.js";
+import { isOrderableStockControlRow } from "../reports/operations/stockControlOrderability.js";
 import { renderReportTotalsRow } from "./ReportTotalsRow.js";
 import { renderSparklineSvg } from "../visuals/ReportSparkline.js";
 import {
@@ -19,6 +20,9 @@ export function renderReportTable(result = {}, options = {}) {
   );
   const rows = toArray(result.rows);
   const selectableRows = options.selectableRows === true;
+  const isRowSelectable = typeof options.isRowSelectable === 'function'
+    ? options.isRowSelectable
+    : () => true;
   const selectedRowKeys = new Set(
     toArray(options.selectedRowKeys).map((value) => text(value)),
   );
@@ -35,7 +39,7 @@ export function renderReportTable(result = {}, options = {}) {
       "Values remain visible so the report is transparent even when no source rows exist.",
   );
   const visibleRowKeys = rows
-    .map((row, index) => getReportRowSelectionKey(row, index))
+    .map((row, index) => isRowSelectable(row, index) ? getReportRowSelectionKey(row, index) : '')
     .filter(Boolean);
   const allVisibleSelected =
     selectableRows &&
@@ -57,7 +61,7 @@ export function renderReportTable(result = {}, options = {}) {
                   const rowKey = getReportRowSelectionKey(row, index);
                   return `
           <tr data-report-row="${escapeHtml(row.id || rowKey || index)}">
-            ${selectableRows ? renderSelectionBodyCell(rowKey, selectedRowKeys.has(rowKey), row, index) : ""}
+            ${selectableRows ? renderSelectionBodyCell(rowKey, selectedRowKeys.has(rowKey), row, index, isRowSelectable(row, index)) : ""}
             ${columns.map((column, columnIndex) => renderBodyCell(row, column, columnIndex, result.warnings, result)).join("")}
           </tr>`;
                 })
@@ -84,7 +88,7 @@ function renderSelectionHeaderCell(
 ) {
   return `
     <th class="reportTable__selectCell reportTable__selectCell--head">
-      <label class="reportSelectionCheckbox" title="Select all visible low-stock items">
+      <label class="reportSelectionCheckbox" title="Select all visible orderable items">
         <input type="checkbox" data-report-select-all ${allVisibleSelected ? "checked" : ""} ${visibleCount ? "" : "disabled"} />
         <span>Select</span>
       </label>
@@ -97,6 +101,7 @@ function renderSelectionBodyCell(
   selected = false,
   row = {},
   index = 0,
+  enabled = true,
 ) {
   const label = text(
     row.itemName ||
@@ -105,11 +110,14 @@ function renderSelectionBodyCell(
       row.name ||
       `row ${index + 1}`,
   );
+  const title = enabled
+    ? `Select ${escapeHtml(label)}`
+    : `${escapeHtml(label)} is manufactured internally and cannot be added to a purchase order`;
   return `
     <td class="reportTable__selectCell">
-      <label class="reportSelectionCheckbox reportSelectionCheckbox--row" title="Select ${escapeHtml(label)}">
-        <input type="checkbox" data-report-select-row="${escapeHtml(rowKey)}" ${selected ? "checked" : ""} />
-        <span class="srOnly">Select ${escapeHtml(label)}</span>
+      <label class="reportSelectionCheckbox reportSelectionCheckbox--row${enabled ? '' : ' is-disabled'}" title="${title}">
+        <input type="checkbox" data-report-select-row="${escapeHtml(rowKey)}" ${selected && enabled ? "checked" : ""} ${enabled ? '' : 'disabled'} />
+        <span class="srOnly">${enabled ? 'Select' : 'Not orderable:'} ${escapeHtml(label)}</span>
       </label>
     </td>
   `;
@@ -133,19 +141,25 @@ export function getReportRowSelectionKey(row = {}, index = 0) {
 }
 
 function renderHeaderCell(column = {}, sort = {}) {
-  const width = column.width
-    ? ` style="width:${escapeHtml(column.width)}"`
-    : "";
-  const className = isTransactionIdColumn(column)
-    ? ' class="reportTable__transactionColumn"'
-    : "";
-  const columnKey = ` data-column-key="${escapeHtml(column.key || "")}"`;
-  const label = `${escapeHtml(column.label || column.key)} ${column.tooltipKey ? renderTooltipIcon(column.tooltipKey) : ""}`;
+  const align = resolveColumnAlign(column);
+  const styleParts = [];
+  if (column.width) styleParts.push(`width:${escapeHtml(column.width)}`);
+  if (align) styleParts.push(`text-align:${escapeHtml(align)}`);
+  const width = styleParts.length ? ` style="${styleParts.join(';')}"` : '';
+  const classes = [
+    isTransactionIdColumn(column) ? 'reportTable__transactionColumn' : '',
+    isNumericColumn(column) ? 'is-numeric' : '',
+    align === 'center' ? 'is-align-center' : '',
+    align === 'right' ? 'is-align-right' : ''
+  ].filter(Boolean).join(' ');
+  const className = classes ? ` class="${escapeHtml(classes)}"` : '';
+  const columnKey = ` data-column-key="${escapeHtml(column.key || '')}"`;
+  const label = `${escapeHtml(column.label || column.key)} ${renderColumnTooltipIcon(column)}`;
   if (column.sortable === false) return `<th${className}${columnKey}${width}>${label}</th>`;
   const active = text(sort?.key) === text(column.key);
-  const direction = active && sort?.direction === "desc" ? "desc" : "asc";
-  const nextDirection = active && direction === "asc" ? "desc" : "asc";
-  const indicator = active ? (direction === "desc" ? " ↓" : " ↑") : "";
+  const direction = active && sort?.direction === 'desc' ? 'desc' : 'asc';
+  const nextDirection = active && direction === 'asc' ? 'desc' : 'asc';
+  const indicator = active ? (direction === 'desc' ? ' ↓' : ' ↑') : '';
   return `<th${className}${columnKey}${width}><button type="button" class="reportTable__sort" data-sort-key="${escapeHtml(column.key)}" data-sort-direction="${escapeHtml(nextDirection)}">${label}${indicator}</button></th>`;
 }
 
@@ -375,11 +389,10 @@ function resolveRowShortcuts(row = {}, result = {}, issueText = "") {
   const lowStockView =
     reportId === "stock_control" &&
     ["item_detail", "reorder_detail", "warnings"].includes(view);
-  const needsReorder =
-    lowStockView &&
-    (safeNumber(row.requiredQty) > 0 ||
-      /low|critical|below par|reorder/.test(haystack));
-  if (needsReorder && (text(row.itemId || row.stockItemId) || itemName)) {
+  const status = text(row.status || row.stockStatus || row.riskStatus).toLowerCase();
+  const isLowStock = row.isLowStock === true || row.lowStock === true || ['low', 'critical', 'below par'].includes(status);
+  const canCreatePurchaseOrder = lowStockView && isLowStock && isOrderableStockControlRow(row);
+  if (canCreatePurchaseOrder && (text(row.itemId || row.stockItemId) || itemName)) {
     shortcuts.push({
       label: "Create PO",
       tone: "po",
@@ -389,8 +402,8 @@ function resolveRowShortcuts(row = {}, result = {}, issueText = "") {
         itemName,
         locationId: text(row.locationId),
         locationName: text(row.locationName),
-        supplierId: text(row.supplierId),
-        supplierName: text(row.supplierName),
+        supplierId: '',
+        supplierName: '',
         requiredQty: safeNumber(row.requiredQty),
         purchaseUom: text(row.purchaseUom || row.baseUom),
         purchaseUomQty: safeNumber(row.purchaseUomQty || row.requiredQty),
@@ -500,6 +513,7 @@ function findRowIssue(row = {}, warnings = []) {
   const rowNames = [
     row.itemName,
     row.menuItemName,
+    row.menuItem,
     row.productName,
     row.inventoryItemName,
     row.inventoryIngredient,
@@ -591,6 +605,7 @@ function aggregateWarningAppliesToRow(warning = {}, row = {}) {
           row.stockItemName ||
           row.productName ||
           row.menuItemName ||
+          row.menuItem ||
           row.inventoryItemName ||
           row.inventoryIngredient ||
           row.name,
@@ -755,6 +770,7 @@ function cleanRowIssueText(warning = {}, row = {}) {
   const rowLabels = [
     row.itemName,
     row.menuItemName,
+    row.menuItem,
     row.productName,
     row.inventoryItemName,
     row.inventoryIngredient,

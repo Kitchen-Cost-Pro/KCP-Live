@@ -449,6 +449,7 @@ function bindStockEvents(view, stock, onStockFilterChange, onStockAction) {
     onStockAction.onSave?.({
       id: form.dataset.stockItemId || undefined,
       name: formData.get('name') ?? currentItem.name ?? '',
+      sku: formData.get('sku') ?? currentItem.sku ?? currentItem.SKU ?? '',
       category: formData.get('category') ?? currentItem.category ?? '',
       unit: selectedUnit,
       cost,
@@ -858,7 +859,7 @@ function renderStockRow(item, locationId, locations = [], selected = false) {
         </h2>
         <p>${escapeHtml(barcodeLabel)}</p>
       </div>
-      <span class="stockModule__sku">${escapeHtml(getStockItemSku(item))}</span>
+      <span class="stockModule__sku">${escapeHtml(formatStockItemSkuProduct(item))}</span>
       <span>${escapeHtml(formatStockCategoryDisplay(item))}</span>
       <strong>${formatCurrency(locationCost)}</strong>
       <strong ${isPhysicalStock ? '' : 'title="Sub-Recipe items do not carry stock-on-hand. Their ingredients are depleted when used in recipes."'}>${isPhysicalStock ? `${onHand.toFixed(3)} ${escapeHtml(item.unit || '')}` : '-'}</strong>
@@ -870,6 +871,12 @@ function renderStockRow(item, locationId, locations = [], selected = false) {
   `;
 }
 
+
+function formatStockItemSkuProduct(item = {}) {
+  const sku = getStockItemSku(item);
+  const name = getStockItemDisplayName(item);
+  return sku ? `${sku} - ${name}` : '—';
+}
 
 function getStockItemSku(item = {}) {
   const explicit = [item.sku, item.SKU, item.skuCode, item.stockCode, item.itemCode, item.customSku, item.code]
@@ -996,9 +1003,13 @@ function renderStockModal(stock, categories = [], uoms = [], locations = [], sto
             </button>
             <div class="stockModule__sectionBody">
               <div class="stockModule__formGrid">
-              <label class="stockModule__span2">
+              <label>
                 <span>Component Name</span>
                 <input name="name" value="${escapeAttribute(displayName || '')}" data-stock-draft-field="name" required />
+              </label>
+              <label>
+                <span>${withInfo('SKU', 'Editable stock keeping unit used for purchasing, imports, and product references.')}</span>
+                <input name="sku" value="${escapeAttribute(getStockItemSku(item))}" data-stock-draft-field="sku" placeholder="E.g. RW-BTL-750" />
               </label>
               <label>
                 <span>${withInfo('Category', 'Controlled category list built from existing stock items to keep spelling consistent.')}</span>
@@ -1119,6 +1130,19 @@ function renderStockModal(stock, categories = [], uoms = [], locations = [], sto
                         ${icon('camera')}
                       </button>
                     </div>
+                  </label>
+                  <label class="stockModule__defaultOrderingUom">
+                    <span>${withInfo('Default ordering UOM', 'Use this custom UOM by default when adding the item to a purchase order, GRV, or credit note. Leave all unticked to use the Base UOM.')}</span>
+                    <span class="stockModule__defaultOrderingUomControl">
+                      <input
+                        type="radio"
+                        name="defaultOrderingUomRow"
+                        value="${rowIndex}"
+                        data-stock-uom-default-ordering
+                        ${row.isDefaultOrdering ? 'checked' : ''}
+                      />
+                      <span>Use by default</span>
+                    </span>
                   </label>
                 </div>
               `).join('')}
@@ -1286,8 +1310,8 @@ function readStockRecipeLinesFromForm(form, currentItem = {}) {
 function getEditableUomConfigurationRows(item = {}, fallbackBaseUom = '') {
   const baseUom = String(fallbackBaseUom || item.unit || item.uom || 'ea').trim() || 'ea';
   const configs = normalizeStockUomConfigurations(item.uomConfigurations || item.uomConfig || item.uom_configuration || item.uomConversions || item.uomConversion);
-  const rows = configs.length ? configs : [{ baseUom, customUom: '', ratio: '', barcode: '' }];
-  while (rows.length < 3) rows.push({ baseUom, customUom: '', ratio: '', barcode: '' });
+  const rows = configs.length ? configs : [{ baseUom, customUom: '', ratio: '', barcode: '', isDefaultOrdering: false }];
+  while (rows.length < 3) rows.push({ baseUom, customUom: '', ratio: '', barcode: '', isDefaultOrdering: false });
   return rows.slice(0, 3).map((row) => ({ ...row, baseUom: row.baseUom || baseUom }));
 }
 
@@ -1306,11 +1330,13 @@ function readStockUomConfigurationsFromForm(form, item = {}, fallbackBaseUom = '
       const customUom = String(row.querySelector('[data-stock-uom-custom]')?.value || '').trim();
       const ratioValue = String(row.querySelector('[data-stock-uom-ratio]')?.value || '').trim();
       const barcode = String(row.querySelector('[data-stock-uom-barcode]')?.value || '').trim();
+      const isDefaultOrdering = Boolean(row.querySelector('[data-stock-uom-default-ordering]')?.checked);
       return {
         baseUom: baseUom || baseFallback,
         customUom,
         ratio: parseNumber(ratioValue),
-        barcode
+        barcode,
+        isDefaultOrdering
       };
     })
     .filter((row) => row.customUom || row.ratio > 0 || row.barcode);
@@ -1325,7 +1351,8 @@ function normalizeStockUomConfigurations(value) {
       const customUom = String(row.customUom || row.custom_uom || row.customUnit || row.orderingUom || '').trim();
       const ratio = parseNumber(row.ratio ?? row.conversionRatio ?? row.unitsPerCustomUnit ?? row.units_per_custom_unit);
       const barcode = parseBarcodeValues(row.barcode || row.barcodes || row.customBarcode || row.customUomBarcode)[0] || '';
-      return { baseUom, customUom, ratio, barcode };
+      const isDefaultOrdering = ['true', '1', 'yes', 'on'].includes(String(row.isDefaultOrdering ?? row.defaultOrdering ?? row.is_default_ordering ?? row.defaultOrderUom ?? '').toLowerCase()) || row.isDefaultOrdering === true || row.defaultOrdering === true;
+      return { baseUom, customUom, ratio, barcode, isDefaultOrdering };
     })
     .filter((entry) => entry.baseUom || entry.customUom || entry.ratio > 0 || entry.barcode);
 }

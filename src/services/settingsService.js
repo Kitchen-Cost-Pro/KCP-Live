@@ -46,12 +46,25 @@ const ARRAY_DEFAULT_KEYS = new Set([
   'logs_snapshots'
 ]);
 
-const LOW_STOCK_EMAIL_FREQUENCIES = new Set(['off', '1_day', '2_day', '1_week', '2_week', '1_month']);
+const PERSONAL_SETTING_KEYS = new Set([
+  'uiScale',
+  'restaurantThemeId',
+  'restaurantBackgroundId',
+  'restaurantBackgroundDataUrl',
+  'restaurantBackgroundName'
+]);
+
 
 export async function getWorkspaceSettingsSnapshot(workspaceId) {
   const workspaceKey = requireWorkspaceId(workspaceId);
-  const response = await callCloudflareWorkspaceRoute(workspaceKey, 'settings');
-  return normalizeSettings(response.settings || {});
+  const [workspaceResponse, personalResponse] = await Promise.all([
+    callCloudflareWorkspaceRoute(workspaceKey, 'settings'),
+    callCloudflareWorkspaceRoute(workspaceKey, 'user-preferences').catch(() => ({ preferences: {} }))
+  ]);
+  return normalizeSettings({
+    ...(workspaceResponse.settings || {}),
+    ...(personalResponse.preferences || {})
+  });
 }
 
 export async function getYocoCategoryOptions(workspaceId) {
@@ -104,14 +117,42 @@ export async function getStockCategoryOptions(workspaceId) {
   return [...categories.values()].sort((left, right) => left.name.localeCompare(right.name));
 }
 
-export async function saveWorkspaceSettings(workspaceId, draft = {}) {
+export async function savePersonalSettings(workspaceId, draft = {}) {
+  const workspaceKey = requireWorkspaceId(workspaceId);
+  const normalized = normalizeSettings(draft);
+  const preferences = Object.fromEntries(
+    Object.entries(normalized).filter(([key]) => PERSONAL_SETTING_KEYS.has(key))
+  );
+  const response = await callCloudflareWorkspaceRoute(workspaceKey, 'user-preferences', {
+    method: 'PATCH',
+    payload: { preferences }
+  });
+  return normalizeSettings({ ...normalized, ...(response.preferences || preferences) });
+}
+
+export async function saveWorkspaceSettings(workspaceId, draft = {}, { includePersonal = false } = {}) {
   const workspaceKey = requireWorkspaceId(workspaceId);
   const nextSettings = normalizeSettings(draft);
-  const response = await callCloudflareWorkspaceRoute(workspaceKey, 'settings', {
-    method: 'PATCH',
-    payload: { settings: nextSettings }
+  const workspaceSettings = {};
+  const personalSettings = {};
+  Object.entries(nextSettings).forEach(([key, value]) => {
+    if (PERSONAL_SETTING_KEYS.has(key)) personalSettings[key] = value;
+    else workspaceSettings[key] = value;
   });
-  return normalizeSettings(response.settings || nextSettings);
+  const workspaceResponse = await callCloudflareWorkspaceRoute(workspaceKey, 'settings', {
+    method: 'PATCH',
+    payload: { settings: workspaceSettings }
+  });
+  const personalResponse = includePersonal
+    ? await callCloudflareWorkspaceRoute(workspaceKey, 'user-preferences', {
+        method: 'PATCH',
+        payload: { preferences: personalSettings }
+      })
+    : { preferences: personalSettings };
+  return normalizeSettings({
+    ...(workspaceResponse.settings || workspaceSettings),
+    ...(personalResponse.preferences || personalSettings)
+  });
 }
 
 export async function exportWorkspaceSnapshot(workspaceId, workspaceName = 'workspace') {
@@ -197,15 +238,6 @@ export function normalizeSettings(value = {}) {
   const vatRate = clampNumber(source.vatRate ?? source.vatPercentage ?? 15, 0, 100, 15);
   const uiScale = String(source.uiScale || 'normal') === 'large' ? 'large' : 'normal';
   const costingMethod = String(source.costingMethod || 'last').toLowerCase() === 'wac' ? 'wac' : 'last';
-  const lowStockEmailFrequency = LOW_STOCK_EMAIL_FREQUENCIES.has(String(source.lowStockEmailFrequency || '').trim())
-    ? String(source.lowStockEmailFrequency || '').trim()
-    : 'off';
-  const lowStockEmailDispatchTime = normalizeTime(
-    source.lowStockEmailDispatchTime ||
-    source.alertDispatchTime ||
-    source.Alert_Dispatch_Time ||
-    '08:00'
-  );
   const yocoStoreLocationsAsStockLocations = source.yocoStoreLocationsAsStockLocations === true ||
     String(source.yocoStoreLocationsAsStockLocations || '').toLowerCase() === 'true';
   const viewingOnly = source.viewingOnly === true || source.viewOnly === true;
@@ -232,8 +264,6 @@ export function normalizeSettings(value = {}) {
     uiScale,
     logoutTimeout,
     costingMethod,
-    lowStockEmailFrequency,
-    lowStockEmailDispatchTime,
     yocoStoreLocationsAsStockLocations,
     yocoCategoryMap,
     stockCategoryRoutingMap,

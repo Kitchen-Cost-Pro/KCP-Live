@@ -188,10 +188,7 @@ export function renderAuthenticatedApp({
   if (broadcastBanner) shell.appendChild(broadcastBanner);
 
   const main = document.createElement('main');
-  const isReportingRoute = ['reporting', 'reporting-scheduling'].includes(state.route?.active);
-  main.className = isReportingRoute
-    ? `${styles.mainPane} ${styles.reportingMainPane}`
-    : styles.mainPane;
+  main.className = styles.mainPane;
   main.dataset.appMain = '';
   main.dataset.activeModule = state.route?.active || 'dashboard';
   main.dataset.workspaceId = String(state.workspace?.id || '');

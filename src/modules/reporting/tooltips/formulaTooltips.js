@@ -158,7 +158,7 @@ export const formulaTooltips = {
   netSales: {
     label: 'Net Sales',
     formula: 'Gross Amount - VAT Amount',
-    description: 'Sales value excluding VAT. Refunds, tips, fees, and payouts remain separate fields.'
+    description: 'Sales value excluding VAT before the separate refund and fee deductions used to calculate payout.'
   },
   grossProfit: {
     label: 'Gross Profit',
@@ -193,8 +193,8 @@ export const formulaTooltips = {
   },
   refunds: {
     label: 'Refunds',
-    formula: 'Refunds reduce recognised sales value',
-    description: 'Refunds remain separate from discounts and payout fees.'
+    formula: 'VAT-exclusive refund value deducted from payout',
+    description: 'Refunds remain separate so payout can be checked as Net Sales + Tips - Refunds - Fees.'
   },
   tips: {
     label: 'Tips',
@@ -208,8 +208,8 @@ export const formulaTooltips = {
   },
   payoutAmount: {
     label: 'Payout Amount',
-    formula: 'Gross Sales - Refunds - Fees + Tips',
-    description: 'Payout amount is not the same as net sales.'
+    formula: 'Net Sales + Tips - Refunds - Fees',
+    description: 'Payout is the VAT-exclusive sales value plus tips, less VAT-exclusive refunds and processing fees.'
   },
   averageTransactionValue: {
     label: 'Average Transaction Value',

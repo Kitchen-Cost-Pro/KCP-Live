@@ -732,7 +732,8 @@ function normalizeUomConfigurations(value = []) {
       const customUom = String(row.customUom || row.custom_uom || row.customUnit || row.orderingUom || '').trim();
       const ratio = parseDecimal(row.ratio ?? row.conversionRatio ?? row.unitsPerCustomUnit ?? row.units_per_custom_unit, 0);
       const barcode = parseBarcodeValues(row.barcode || row.barcodes || row.customBarcode || row.customUomBarcode)[0] || '';
-      return { baseUom, customUom, ratio, barcode };
+      const isDefaultOrdering = ['true', '1', 'yes', 'on'].includes(String(row.isDefaultOrdering ?? row.defaultOrdering ?? row.is_default_ordering ?? row.defaultOrderUom ?? '').toLowerCase()) || row.isDefaultOrdering === true || row.defaultOrdering === true;
+      return { baseUom, customUom, ratio, barcode, isDefaultOrdering };
     })
     .filter((entry) => entry.baseUom && entry.customUom && entry.ratio > 0);
 }

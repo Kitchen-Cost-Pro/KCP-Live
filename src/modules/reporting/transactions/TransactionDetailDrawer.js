@@ -95,7 +95,6 @@ function renderLoadedDetail(overlay, detail = {}, { branding = {}, canExport = t
       </div>` : ""}
     </div>
     ${renderSummaryCards(detail.summaryCards)}
-    ${renderMetadata(detail)}
     <nav class="transactionDetailTabs" aria-label="Transaction detail sections">
       <button type="button" class="is-active" data-transaction-tab="lineItems">Line Items <span>${(detail.lineItems || []).length}</span></button>
       <button type="button" data-transaction-tab="stockMovements">Stock Movements <span>${(detail.stockMovements || []).length}</span></button>
@@ -133,26 +132,6 @@ function renderLoadedDetail(overlay, detail = {}, { branding = {}, canExport = t
 function renderSummaryCards(cards = []) {
   if (!cards.length) return "";
   return `<section class="transactionDetailCards">${cards.map((card) => `<article><span>${escapeHtml(card.label || card.key || "Summary")}</span><strong>${escapeHtml(formatTransactionDetailValue(card.value, card.type))}</strong></article>`).join("")}</section>`;
-}
-
-function renderMetadata(detail = {}) {
-  const rows = [
-    ["Status", detail.status],
-    ["Date and time", detail.occurredAt || detail.createdAt],
-    ["Created by", detail.createdByName || detail.createdBy],
-    ["Committed by", detail.committedBy],
-  ];
-  const metadata = detail.metadata && typeof detail.metadata === "object" ? detail.metadata : {};
-  Object.entries(metadata).forEach(([key, value]) => {
-    if (value === undefined || value === null || value === "" || typeof value === "object") return;
-    rows.push([humanize(key), String(value), key]);
-  });
-  return `<section class="transactionDetailMetadata">${rows.filter(([, value]) => value).map(([label, value, key = ""]) => {
-    const isLinkedTransaction = /transactionReference$/i.test(key) && /^(GRV|CN|MFG|TRF|STK)-/i.test(value);
-    return `<div><span>${escapeHtml(label)}</span>${isLinkedTransaction
-      ? `<button type="button" class="transactionDetailMetadata__link" data-linked-transaction-reference="${escapeHtml(value)}">${escapeHtml(value)}</button>`
-      : `<strong>${escapeHtml(value)}</strong>`}</div>`;
-  }).join("")}</section>`;
 }
 
 function renderLineItems(rows = [], columns = []) {

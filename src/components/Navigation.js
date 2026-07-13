@@ -80,9 +80,7 @@ export function renderNavigation({
   const visibleGroups = filterNavigationGroups(allowedSections);
   const canSwitchWorkspace = (workspaceOptions || []).length > 1;
   const view = document.createElement('aside');
-  view.className = ['reporting', 'reporting-scheduling'].includes(activeSection)
-    ? `${styles.sidebar} ${styles.reportingSidebar}`
-    : styles.sidebar;
+  view.className = styles.sidebar;
   view.dataset.activeSection = activeSection || '';
   // Stable, non-hashed hook so cross-module CSS can recolor the nav per section.
   view.setAttribute('data-app-sidebar', '');

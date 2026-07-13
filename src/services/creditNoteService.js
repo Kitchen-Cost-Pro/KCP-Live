@@ -197,6 +197,8 @@ function normalizeCreditNotePayload(creditNote = {}) {
         baseQuantity: returnedQty * packSize,
         unitCost: parseCreditNoteNumber(item.unitCost ?? item.costEx ?? item.cost ?? item.price, 0) || 0,
         vatEnabled: item.vatEnabled !== false,
+        originalOrderQty: parseCreditNoteNumber(item.originalOrderQty ?? item.maxReturnQty, 0) || 0,
+        maxReturnQty: parseCreditNoteNumber(item.maxReturnQty ?? item.originalOrderQty, 0) || 0,
         locationId: String(item.locationId || creditNote.locationId || '').trim(),
         locationName: String(item.locationName || creditNote.locationName || '').trim()
       };

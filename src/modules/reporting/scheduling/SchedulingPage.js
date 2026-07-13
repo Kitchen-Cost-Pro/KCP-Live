@@ -1,4 +1,5 @@
 import { escapeHtml } from '../engine/formatters.js';
+import { bindReportTooltips } from '../tooltips/tooltipBuilder.js';
 import { enhanceReportingSelects, refreshReportingSelect } from '../ui/customSelect.js';
 import { REPORT_DATE_RANGE_PRESETS } from './dateRangePresets.js';
 import { formatViewLabel, getSchedulableReportCatalog, resolveCatalogReportSelection } from './reportCatalog.js';
@@ -16,13 +17,12 @@ const SCHEDULE_TEMPLATES = [
   {
     id: 'stock_controller',
     title: 'Stock Controller',
-    description: 'Critical stock control and supplier reorder pack.',
+    description: 'Critical stock control and reorder pack.',
     values: {
       name: 'Weekly Stock Control Pack',
       reportItems: [
         { reportId: 'stock_control', viewId: 'location_summary' },
         { reportId: 'stock_control', viewId: 'reorder_detail' },
-        { reportId: 'stock_control', viewId: 'supplier_reorder' }
       ],
       frequency: 'weekly', scheduleDay: '1', scheduleTime: '07:00', dateRangeType: 'last_7_days',
       format: 'csv', sendCondition: 'only_if_low_stock', filters: { onlyBelowPar: 'true' }
@@ -80,6 +80,7 @@ export function renderSchedulingPage({ workspaceId = '', state = {}, canManage =
   root.className = 'reportSchedulingPage';
   const catalog = getSchedulableReportCatalog();
   let workspaceLocations = extractLocations(state);
+  let workspaceUsers = extractWorkspaceUsers(state);
   let allowAllLocations = true;
   let schedulerVersion = '';
   const accessStatus = String(permissions.accessStatus || 'ready');
@@ -260,6 +261,9 @@ export function renderSchedulingPage({ workspaceId = '', state = {}, canManage =
       workspaceLocations = Array.isArray(scheduleResult)
         ? extractLocations(state)
         : mergeLocations(scheduleResult?.locations || []);
+      workspaceUsers = Array.isArray(scheduleResult)
+        ? extractWorkspaceUsers(state)
+        : mergeWorkspaceUsers(scheduleResult?.users || [], extractWorkspaceUsers(state));
       allowAllLocations = scheduleResult?.allowAllLocations !== false;
       schedulerVersion = String(scheduleResult?.schedulerVersion || '');
       const normalizedSavedViews = normalizeSavedViews(savedViewResult.views, catalog);
@@ -284,11 +288,12 @@ export function renderSchedulingPage({ workspaceId = '', state = {}, canManage =
       updateDynamic();
       return;
     }
-    const values = normalizeFormValues(schedule ? toSchedulePayload(schedule, catalog) : (preset || {}), state, catalog, workspaceLocations, allowAllLocations, savedViews);
+    const values = normalizeFormValues(schedule ? toSchedulePayload(schedule, catalog) : (preset || {}), state, catalog, workspaceLocations, allowAllLocations, savedViews, workspaceUsers);
     const overlay = document.createElement('div');
     overlay.className = 'reportModalBackdrop reportScheduleModalBackdrop';
     overlay.innerHTML = renderScheduleModal(values, catalog, savedViews, Boolean(schedule));
     document.body.append(overlay);
+    bindReportTooltips(overlay);
     const form = overlay.querySelector('[data-schedule-form]');
     const packPicker = form.querySelector('[data-schedule-pack-picker]');
     const close = () => overlay.remove();
@@ -340,18 +345,28 @@ export function renderSchedulingPage({ workspaceId = '', state = {}, canManage =
     form.querySelector('[name="frequency"]')?.addEventListener('change', syncFrequency);
 
     form.querySelectorAll('[data-schedule-report-toggle]').forEach((toggle) => toggle.addEventListener('change', () => {
-      const card = toggle.closest('[data-schedule-report-card]');
-      const views = [...card.querySelectorAll('[data-schedule-report-view]')];
-      card.classList.toggle('is-selected', toggle.checked);
-      views.forEach((input) => { input.disabled = !toggle.checked; });
-      if (toggle.checked && !views.some((input) => input.checked)) {
-        const preferred = views.find((input) => input.dataset.defaultView === 'true') || views[0];
-        if (preferred) preferred.checked = true;
-      }
-      if (!toggle.checked) views.forEach((input) => { input.checked = false; });
+      syncReportSelection(form, toggle.dataset.reportId || toggle.value, toggle.checked);
       updateBundleCount(form);
     }));
-    form.querySelectorAll('[data-schedule-report-view]').forEach((view) => view.addEventListener('change', () => updateBundleCount(form)));
+
+    form.querySelectorAll('[data-schedule-report-select-button]').forEach((button) => button.addEventListener('click', () => {
+      const reportId = button.dataset.scheduleReportSelectButton || '';
+      const toggle = [...form.querySelectorAll('[data-schedule-report-toggle]')].find((input) => input.dataset.reportId === reportId);
+      if (!toggle) return;
+      toggle.checked = !toggle.checked;
+      syncReportSelection(form, reportId, toggle.checked);
+      updateBundleCount(form);
+    }));
+    form.querySelectorAll('[data-schedule-report-open]').forEach((button) => button.addEventListener('click', () => {
+      openReportViewPanel(form, button.dataset.scheduleReportOpen || '');
+    }));
+    form.querySelectorAll('[data-schedule-view-close]').forEach((button) => button.addEventListener('click', () => closeReportViewPanel(form)));
+    form.querySelectorAll('[data-schedule-view-toggle]').forEach((toggle) => toggle.addEventListener('change', () => {
+      syncViewSelection(form, toggle.dataset.reportId || '', toggle);
+      updateBundleCount(form);
+    }));
+
+    bindRecipientPicker(form);
 
     form.querySelector('[name="savedViewId"]')?.addEventListener('change', (event) => {
       const selectedId = String(event.currentTarget.value || '');
@@ -389,10 +404,10 @@ export function renderSchedulingPage({ workspaceId = '', state = {}, canManage =
 
     form.querySelector('[data-schedule-test]')?.addEventListener('click', async (event) => {
       event.preventDefault();
-      const payload = readScheduleForm(form, catalog, savedViews);
       const button = event.currentTarget;
       button.disabled = true;
       try {
+        const payload = readScheduleForm(form, catalog, savedViews);
         const result = await sendReportTestEmail(workspaceId, payload);
         showModalMessage(form, `Test email sent${result.filesGenerated ? ` with ${result.filesGenerated} file${result.filesGenerated === 1 ? '' : 's'}` : ''}.`, 'success');
       } catch (cause) {
@@ -442,19 +457,21 @@ function renderScheduleTable(schedules, catalog, { canEdit = false, canRun = fal
             const first = items[0];
             const report = catalog.find((entry) => entry.reportId === first?.reportId);
             const locationDisplay = formatScheduleLocations(schedule, locations);
+            const reportCount = new Set(items.map((item) => item.reportId)).size;
+            const viewCount = items.length;
             return `
               <tr>
                 <td><strong>${escapeHtml(schedule.name)}</strong><span>${escapeHtml(schedule.formatLabel || formatOutputLabel(schedule.format))}</span></td>
-                <td><strong>${escapeHtml(report?.fullTitle || first?.reportId || schedule.reportId)}</strong><span>${escapeHtml(formatViewLabel(first?.viewId || schedule.viewId))}${items.length > 1 ? ` · +${items.length - 1} more` : ''}</span></td>
+                <td><strong>${escapeHtml(report?.fullTitle || first?.reportId || schedule.reportId)}</strong><span>${reportCount} report${reportCount === 1 ? '' : 's'} · ${viewCount} view${viewCount === 1 ? '' : 's'}</span></td>
                 <td><strong>${escapeHtml(locationDisplay.summary)}</strong><span>${escapeHtml(locationDisplay.detail)}</span></td>
                 <td>${escapeHtml(formatFrequency(schedule))}</td>
                 <td>${escapeHtml(formatDateTime(schedule.nextRunAt, schedule.timezone))}<span>${schedule.lastRunAt ? `Last: ${escapeHtml(formatDateTime(schedule.lastRunAt, schedule.timezone))}` : 'Never run'}</span></td>
                 <td>${escapeHtml((schedule.recipients || []).join(', '))}</td>
                 <td><label class="reportScheduleToggle"><input type="checkbox" data-schedule-enabled="${escapeHtml(schedule.id)}" ${schedule.isEnabled ? 'checked' : ''} ${canEdit ? '' : 'disabled'} /><span>${schedule.isEnabled ? 'Enabled' : 'Disabled'}</span></label></td>
-                <td><div class="reportScheduleRowActions">
-                  ${canRun ? `<button type="button" data-schedule-run="${escapeHtml(schedule.id)}">Run now</button>` : ''}
-                  ${canEdit ? `<button type="button" data-schedule-edit="${escapeHtml(schedule.id)}">Edit</button><button type="button" data-schedule-duplicate="${escapeHtml(schedule.id)}">Duplicate</button>` : ''}
-                  ${canDelete ? `<button type="button" data-schedule-delete="${escapeHtml(schedule.id)}">Delete</button>` : ''}
+                <td><div class="reportScheduleRowActions" role="group" aria-label="Actions for ${escapeHtml(schedule.name)}">
+                  ${canRun ? renderScheduleActionButton('run', schedule.id, 'Run now') : ''}
+                  ${canEdit ? `${renderScheduleActionButton('edit', schedule.id, 'Edit schedule')}${renderScheduleActionButton('duplicate', schedule.id, 'Duplicate schedule')}` : ''}
+                  ${canDelete ? renderScheduleActionButton('delete', schedule.id, 'Delete schedule') : ''}
                 </div></td>
               </tr>
             `;
@@ -465,10 +482,27 @@ function renderScheduleTable(schedules, catalog, { canEdit = false, canRun = fal
   `;
 }
 
+function renderScheduleActionButton(action, scheduleId, label) {
+  return `<button type="button" class="reportScheduleIconAction reportScheduleIconAction--${escapeHtml(action)}" data-schedule-${escapeHtml(action)}="${escapeHtml(scheduleId)}" aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}">${scheduleActionIcon(action)}</button>`;
+}
+
+function scheduleActionIcon(action = '') {
+  const icons = {
+    run: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10-6.5z"/></svg>',
+    edit: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 16.5V20h3.5L18.2 9.3l-3.5-3.5L4 16.5Zm16.7-9.7a1 1 0 0 0 0-1.4l-2.1-2.1a1 1 0 0 0-1.4 0l-1.6 1.6 3.5 3.5 1.6-1.6Z"/></svg>',
+    duplicate: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 8h11v11H8zM5 5h11v2H7v9H5z"/></svg>',
+    delete: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h10l-.7 13H7.7L7 7Zm2-3h6l1 1h4v2H4V5h4l1-1Z"/></svg>'
+  };
+  return icons[action] || icons.edit;
+}
+
 function renderScheduleModal(values, catalog, savedViews, editing) {
-  const selectedKeys = new Set(values.reportItems.map((item) => `${item.reportId}::${item.viewId}`));
-  const activeReports = new Set(values.reportItems.map((item) => item.reportId));
-  const catalogGroups = groupCatalog(catalog);
+  const selectedViewsByReport = new Map();
+  for (const item of values.reportItems || []) {
+    if (!selectedViewsByReport.has(item.reportId)) selectedViewsByReport.set(item.reportId, new Set());
+    selectedViewsByReport.get(item.reportId).add(item.viewId);
+  }
+  const activeReports = new Set(selectedViewsByReport.keys());
   return `
     <section class="reportModalCard reportScheduleModal" role="dialog" aria-modal="true" aria-labelledby="schedule-dialog-title">
       <header>
@@ -494,7 +528,7 @@ function renderScheduleModal(values, catalog, savedViews, editing) {
           <section class="reportScheduleFormSection reportScheduleFormSection--pack">
             <header class="reportScheduleFormSection__header">
               <span class="reportScheduleFormSection__step">2</span>
-              <div><span>Report pack</span><strong>Choose the reports and views to deliver</strong></div>
+              <div><span>Report pack</span><strong>Choose reports first, then choose views for each report</strong></div>
             </header>
             <div class="reportSchedulePackSummary">
               <div class="reportSchedulePackSummary__copy">
@@ -502,40 +536,73 @@ function renderScheduleModal(values, catalog, savedViews, editing) {
                 <div class="reportSchedulePackSummary__items" data-schedule-pack-summary></div>
               </div>
               <button type="button" class="reportSchedulePackButton" data-schedule-pack-open>
-                <span>Choose reports &amp; views</span><span aria-hidden="true">→</span>
+                <span>Select reports</span><span aria-hidden="true">→</span>
               </button>
             </div>
 
             <div class="reportSchedulePickerBackdrop" data-schedule-pack-picker hidden>
               <section class="reportSchedulePicker" role="dialog" aria-modal="true" aria-labelledby="schedule-pack-picker-title">
                 <header>
-                  <div><span>Report pack</span><h4 id="schedule-pack-picker-title">Select reports and views</h4><p>Choose one or more views. Each selected view is delivered as its own report output.</p></div>
+                  <div><span>Report pack</span><h4 id="schedule-pack-picker-title">Build the report pack</h4><p>Select reports, review the pack, then choose one or more views within each report.</p></div>
                   <button type="button" data-schedule-pack-close aria-label="Close report selector">×</button>
                 </header>
                 <div class="reportSchedulePicker__body">
+                  <ol class="reportSchedulePickerSteps" aria-label="Report pack selection steps">
+                    <li><span>1</span><strong>Select reports</strong></li>
+                    <li><span>2</span><strong>Reports in pack</strong></li>
+                    <li><span>3</span><strong>Select views</strong></li>
+                  </ol>
                   <section class="reportScheduleBundle">
-                    <div class="reportScheduleBundle__groups">
-                      ${catalogGroups.map((group) => `
-                        <div class="reportScheduleBundle__group">
-                          <h4>${escapeHtml(group.title)}</h4>
-                          ${group.items.map((entry) => {
-                            const reportSelected = activeReports.has(entry.reportId);
-                            return `
-                              <article class="reportScheduleReportCard${reportSelected ? ' is-selected' : ''}" data-schedule-report-card>
-                                <label class="reportScheduleReportCard__title">
-                                  <input type="checkbox" data-schedule-report-toggle value="${escapeHtml(entry.reportId)}" ${reportSelected ? 'checked' : ''} />
-                                  <span><strong>${escapeHtml(entry.title)}</strong><small>${escapeHtml(entry.reportGroupTitle || 'Report')}</small></span>
-                                </label>
-                                <div class="reportScheduleReportCard__views">
-                                  ${entry.views.map((view) => `<label><input type="checkbox" data-schedule-report-view data-report-id="${escapeHtml(entry.reportId)}" data-report-group-id="${escapeHtml(entry.reportGroupId || '')}" data-default-view="${view.value === entry.defaultView ? 'true' : 'false'}" value="${escapeHtml(view.value)}" ${selectedKeys.has(`${entry.reportId}::${view.value}`) ? 'checked' : ''} ${reportSelected ? '' : 'disabled'} /><span>${escapeHtml(view.label)}</span></label>`).join('')}
-                                </div>
-                              </article>
-                            `;
-                          }).join('')}
-                        </div>
-                      `).join('')}
+                    <div class="reportScheduleReportGrid">
+                      ${catalog.map((entry) => {
+                        const selectedViews = selectedViewsByReport.get(entry.reportId) || new Set();
+                        const reportSelected = activeReports.has(entry.reportId);
+                        const defaultView = entry.defaultView || entry.views[0]?.value || '';
+                        return `
+                          <article class="reportScheduleReportCard${reportSelected ? ' is-selected' : ''}" data-schedule-report-card data-report-id="${escapeHtml(entry.reportId)}">
+                            <input
+                              type="checkbox"
+                              class="reportScheduleReportCard__toggle"
+                              data-schedule-report-toggle
+                              data-report-id="${escapeHtml(entry.reportId)}"
+                              data-report-group-id="${escapeHtml(entry.reportGroupId || '')}"
+                              data-default-view="${escapeHtml(defaultView)}"
+                              value="${escapeHtml(entry.reportId)}"
+                              ${reportSelected ? 'checked' : ''}
+                            />
+                            <button type="button" class="reportScheduleReportCard__open" data-schedule-report-open="${escapeHtml(entry.reportId)}" data-report-tooltip="${escapeHtml(entry.tooltip || entry.description || '')}" aria-label="Open views for ${escapeHtml(entry.title)}">
+                              <span><strong>${escapeHtml(entry.title)}</strong><small>${escapeHtml(entry.reportGroupTitle || 'Report')}</small></span>
+                              <span class="reportScheduleReportCard__arrow" aria-hidden="true">→</span>
+                            </button>
+                            <p>${escapeHtml(entry.description || 'Open this report to choose the views included in the pack.')}</p>
+                            <div class="reportScheduleReportCard__selectedViews" data-schedule-selected-views="${escapeHtml(entry.reportId)}">
+                              ${renderSelectedViewChips(entry, selectedViews)}
+                            </div>
+                            <button type="button" class="reportScheduleReportCard__select" data-schedule-report-select-button="${escapeHtml(entry.reportId)}">${reportSelected ? 'Remove from pack' : 'Select report'}</button>
+                          </article>
+                        `;
+                      }).join('')}
                     </div>
                   </section>
+                  ${catalog.map((entry) => {
+                    const selectedViews = selectedViewsByReport.get(entry.reportId) || new Set();
+                    const defaultView = entry.defaultView || entry.views[0]?.value || '';
+                    return `
+                      <section class="reportScheduleViewPanel" data-schedule-view-panel="${escapeHtml(entry.reportId)}" hidden>
+                        <header>
+                          <button type="button" class="reportScheduleViewPanel__back" data-schedule-view-close aria-label="Back to report list">←</button>
+                          <div><span>Choose views</span><h5>${escapeHtml(entry.title)}</h5><p>${escapeHtml(entry.description || 'Select one or more views for this report.')}</p></div>
+                        </header>
+                        <div class="reportScheduleViewPanel__list">
+                          ${entry.views.map((view) => {
+                            const checked = selectedViews.has(view.value) || (!selectedViews.size && view.value === defaultView && activeReports.has(entry.reportId));
+                            return `<label><input type="checkbox" data-schedule-view-toggle data-report-id="${escapeHtml(entry.reportId)}" data-report-group-id="${escapeHtml(entry.reportGroupId || '')}" data-view-id="${escapeHtml(view.value)}" ${checked ? 'checked' : ''} /><span><strong>${escapeHtml(view.label)}</strong><small>Include this view in the ${escapeHtml(entry.title)} attachment.</small></span></label>`;
+                          }).join('')}
+                        </div>
+                        <footer><span data-schedule-view-count="${escapeHtml(entry.reportId)}"></span><button type="button" class="reportModalPrimary" data-schedule-view-close>Save views</button></footer>
+                      </section>
+                    `;
+                  }).join('')}
                 </div>
                 <footer>
                   <span data-schedule-bundle-count></span>
@@ -575,15 +642,23 @@ function renderScheduleModal(values, catalog, savedViews, editing) {
           <section class="reportScheduleFormSection">
             <header class="reportScheduleFormSection__header">
               <span class="reportScheduleFormSection__step">5</span>
-              <div><span>Delivery</span><strong>Set the format, recipients and email content</strong></div>
+              <div><span>Delivery</span><strong>Set the format and recipients</strong></div>
             </header>
             <div class="reportScheduleSectionGrid">
               <label><span>Export format</span><select name="format"><option value="csv" ${values.format === 'csv' ? 'selected' : ''}>CSV attachments</option><option value="xlsx" ${values.format === 'xlsx' ? 'selected' : ''}>XLSX attachments</option><option value="pdf" ${values.format === 'pdf' ? 'selected' : ''}>PDF attachments</option><option value="report_link" ${values.format === 'report_link' ? 'selected' : ''}>Report links only</option></select></label>
               <label><span>Send condition</span><select name="sendCondition">${conditionOptions(values.sendCondition)}</select></label>
               <label data-schedule-threshold><span>Wastage threshold (R)</span><input type="number" min="0" step="0.01" name="wastageThreshold" value="${escapeHtml(String(values.wastageThreshold || ''))}" /></label>
-              <label class="reportScheduleFull"><span>Recipients</span><input name="recipients" value="${escapeHtml(values.recipients.join(', '))}" required placeholder="manager@example.com, owner@example.com" /></label>
-              <label class="reportScheduleFull"><span>Email subject</span><input name="emailSubject" value="${escapeHtml(values.emailSubject)}" placeholder="Kitchen Cost Pro - Weekly Report Pack" /></label>
-              <label class="reportScheduleFull"><span>Email message</span><textarea name="emailMessage" rows="3" placeholder="Your scheduled reports are ready.">${escapeHtml(values.emailMessage)}</textarea></label>
+              <div class="reportScheduleFull reportScheduleRecipientField">
+                <span class="reportScheduleRecipientField__label">Recipients</span>
+                <div class="reportScheduleRecipientPicker" data-schedule-recipient-picker>
+                  <input type="hidden" name="recipients" value="${escapeHtml(values.recipients.join(', '))}" />
+                  <div class="reportScheduleRecipientChips" data-schedule-recipient-chips>${renderRecipientChips(values.recipients)}</div>
+                  <div class="reportScheduleRecipientControls">
+                    <label><span>Existing workspace user</span><select data-schedule-recipient-select><option value="">Select a user to add</option>${values.users.map((user) => `<option value="${escapeHtml(user.email)}">${escapeHtml(user.name)} · ${escapeHtml(user.email)}</option>`).join('')}</select></label>
+                    <label><span>Other email</span><span class="reportScheduleRecipientAdd"><input type="email" data-schedule-recipient-input placeholder="external@example.com" /><button type="button" data-schedule-recipient-add>Add</button></span></label>
+                  </div>
+                </div>
+              </div>
               <label class="reportModalCheck reportScheduleFull"><input type="checkbox" name="isEnabled" ${values.isEnabled ? 'checked' : ''} /> <span>Enable this schedule</span></label>
             </div>
           </section>
@@ -595,19 +670,52 @@ function renderScheduleModal(values, catalog, savedViews, editing) {
   `;
 }
 
+function renderSelectedViewChips(entry = {}, selectedViews = new Set()) {
+  const views = entry.views.filter((view) => selectedViews.has(view.value));
+  if (!views.length) return '<span class="reportScheduleReportCard__noViews">No views selected</span>';
+  return views.map((view) => `<span>${escapeHtml(view.label)}</span>`).join('');
+}
+
+function renderRecipientChips(recipients = []) {
+  if (!recipients.length) return '<span class="reportScheduleRecipientChips__empty">No recipients selected</span>';
+  return recipients.map((email) => `<span class="reportScheduleRecipientChip"><span>${escapeHtml(email)}</span><button type="button" data-schedule-recipient-remove="${escapeHtml(email)}" aria-label="Remove ${escapeHtml(email)}">×</button></span>`).join('');
+}
+
 function readScheduleForm(form, catalog, savedViews = []) {
   const data = new FormData(form);
   const frequency = String(data.get('frequency') || 'weekly');
-  const reportItems = [...form.querySelectorAll('[data-schedule-report-view]:checked')].map((input) => ({
-    reportGroupId: String(input.dataset.reportGroupId || ''),
-    reportId: String(input.dataset.reportId || ''),
-    viewId: String(input.value || ''),
-    savedViewId: '',
-    filters: {},
-    sort: null,
-    visibleColumns: []
-  })).filter((item) => isCatalogViewAvailable(catalog, item.reportId, item.viewId));
-  if (!reportItems.length) throw new Error('Select at least one current report view for this schedule.');
+  const reportItems = [];
+  const seen = new Set();
+
+  [...form.querySelectorAll('[data-schedule-report-toggle]:checked')].forEach((reportToggle) => {
+    const reportId = String(reportToggle.dataset.reportId || reportToggle.value || '');
+    const reportGroupId = String(reportToggle.dataset.reportGroupId || '');
+    const selectedViews = [...form.querySelectorAll(`[data-schedule-view-toggle][data-report-id="${cssEscape(reportId)}"]:checked`)]
+      .map((input) => String(input.dataset.viewId || ''))
+      .filter(Boolean);
+    const viewIds = selectedViews.length
+      ? selectedViews
+      : [String(reportToggle.dataset.defaultView || '')].filter(Boolean);
+
+    viewIds.forEach((viewId) => {
+      const resolved = resolveCatalogReportSelection(catalog, reportId, viewId);
+      if (!resolved) return;
+      const key = `${resolved.reportId}::${resolved.viewId}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      reportItems.push({
+        reportGroupId: reportGroupId || resolved.reportGroupId || '',
+        reportId: resolved.reportId,
+        viewId: resolved.viewId,
+        savedViewId: '',
+        filters: {},
+        sort: null,
+        visibleColumns: []
+      });
+    });
+  });
+
+  if (!reportItems.length) throw new Error('Select at least one current report and one view for this schedule.');
 
   // Saved views are templates only. Snapshot their configuration into the selected report
   // item and never persist a live saved-view reference on the schedule.
@@ -622,7 +730,9 @@ function readScheduleForm(form, catalog, savedViews = []) {
     }
   }
 
-  const recipients = String(data.get('recipients') || '').split(/[;,\n]/).map((entry) => entry.trim()).filter(Boolean);
+  const recipients = uniqueEmails(String(data.get('recipients') || '').split(/[;,\n]/));
+  if (!recipients.length) throw new Error('Add at least one recipient.');
+
   const locationSelection = String(data.get('locationSelection') || '').trim();
   if (!locationSelection) throw new Error('Select a location for this schedule.');
   const locationMode = locationSelection === 'all' ? 'all' : 'selected';
@@ -632,15 +742,21 @@ function readScheduleForm(form, catalog, savedViews = []) {
   try { baseFilters = JSON.parse(String(data.get('filtersJson') || '{}')); } catch { baseFilters = {}; }
   delete baseFilters.locationId;
   delete baseFilters.locationName;
-  const dateRangeType = String(data.get('dateRangeType') || 'last_7_days');
+  const dateRangeType = String(data.get('dateRangeType') || 'today');
   const customFrom = String(data.get('customFrom') || '');
   const customTo = String(data.get('customTo') || '');
   const filters = { ...baseFilters };
   if (dateRangeType === 'custom') {
     if (!customFrom || !customTo) throw new Error('Select both custom dates.');
-    filters.from = customFrom; filters.to = customTo; filters.startDate = customFrom; filters.endDate = customTo;
+    filters.from = customFrom;
+    filters.to = customTo;
+    filters.startDate = customFrom;
+    filters.endDate = customTo;
   } else {
-    delete filters.from; delete filters.to; delete filters.startDate; delete filters.endDate;
+    delete filters.from;
+    delete filters.to;
+    delete filters.startDate;
+    delete filters.endDate;
   }
   const first = reportItems[0];
   const firstCatalog = catalog.find((entry) => entry.reportId === first.reportId);
@@ -662,14 +778,14 @@ function readScheduleForm(form, catalog, savedViews = []) {
     timezone: String(data.get('timezone') || 'Africa/Johannesburg'),
     format: String(data.get('format') || 'report_link'),
     recipients,
-    emailSubject: String(data.get('emailSubject') || '').trim(),
-    emailMessage: String(data.get('emailMessage') || '').trim(),
+    emailSubject: '',
+    emailMessage: '',
     sendCondition: { type: String(data.get('sendCondition') || 'always'), threshold: Number(data.get('wastageThreshold') || 0) || 0 },
     isEnabled: data.get('isEnabled') === 'on'
   };
 }
 
-function normalizeFormValues(values = {}, state = {}, catalog = [], availableLocations = null, allowAllLocations = true, savedViews = []) {
+function normalizeFormValues(values = {}, state = {}, catalog = [], availableLocations = null, allowAllLocations = true, savedViews = [], workspaceUsers = []) {
   const settings = state.settings?.values || state.settings?.draft || {};
   // Once the Worker supplies a location list, it is the permission-filtered source of truth.
   // Do not merge broader app state back into it for location-restricted users.
@@ -685,7 +801,7 @@ function normalizeFormValues(values = {}, state = {}, catalog = [], availableLoc
     name: values.name || '',
     reportItems,
     savedViewId: savedViews.some((view) => view.id === values.savedViewId && isCatalogViewAvailable(catalog, view.reportId, view.viewId)) ? values.savedViewId : '',
-    dateRangeType: values.dateRangeType || 'last_7_days',
+    dateRangeType: values.dateRangeType || 'today',
     customFrom: values.filters?.from || values.filters?.startDate || '',
     customTo: values.filters?.to || values.filters?.endDate || '',
     filters: values.filters || {},
@@ -698,9 +814,10 @@ function normalizeFormValues(values = {}, state = {}, catalog = [], availableLoc
     scheduleTime: values.scheduleTime || '08:00',
     timezone: values.timezone || settings.timezone || 'Africa/Johannesburg',
     format: values.format || 'csv',
-    recipients: Array.isArray(values.recipients) ? values.recipients : [],
-    emailSubject: values.emailSubject || '',
-    emailMessage: values.emailMessage || '',
+    recipients: uniqueEmails(Array.isArray(values.recipients) ? values.recipients : []),
+    users: mergeWorkspaceUsers(workspaceUsers, extractWorkspaceUsers(state)),
+    emailSubject: '',
+    emailMessage: '',
     sendCondition: values.sendCondition?.type || values.sendCondition || 'always',
     wastageThreshold: values.sendCondition?.threshold || 0,
     isEnabled: values.isEnabled !== false,
@@ -747,7 +864,7 @@ function toSchedulePayload(schedule = {}, catalog = []) {
     reportItems,
     savedViewId: '',
     filters: schedule.filters || {},
-    dateRangeType: schedule.dateRangeType || 'custom',
+    dateRangeType: schedule.dateRangeType || 'today',
     locationMode: schedule.locationMode || 'all',
     locationIds: schedule.locationIds || [],
     locationId: schedule.locationId || '',
@@ -757,8 +874,8 @@ function toSchedulePayload(schedule = {}, catalog = []) {
     timezone: schedule.timezone,
     format: schedule.format,
     recipients: schedule.recipients || [],
-    emailSubject: schedule.emailSubject || '',
-    emailMessage: schedule.emailMessage || '',
+    emailSubject: '',
+    emailMessage: '',
     sendCondition: schedule.sendCondition || { type: 'always' },
     isEnabled: schedule.isEnabled
   };
@@ -797,16 +914,6 @@ function isSchedulerVersionCompatible(version = '') {
   return major > 33 || (major === 33 && minor >= 17);
 }
 
-function groupCatalog(catalog = []) {
-  const groups = new Map();
-  catalog.forEach((entry) => {
-    const key = entry.reportGroupId || entry.reportId;
-    if (!groups.has(key)) groups.set(key, { title: entry.reportGroupTitle || entry.title, items: [] });
-    groups.get(key).items.push(entry);
-  });
-  return [...groups.values()];
-}
-
 function selectReportItem(form, reportId, viewId, replace = false) {
   const resolved = resolveCatalogReportSelection(getSchedulableReportCatalog(), reportId, viewId);
   if (!resolved) return false;
@@ -814,38 +921,213 @@ function selectReportItem(form, reportId, viewId, replace = false) {
   viewId = resolved.viewId;
   if (replace) {
     form.querySelectorAll('[data-schedule-report-toggle]').forEach((input) => { input.checked = false; });
-    form.querySelectorAll('[data-schedule-report-view]').forEach((input) => { input.checked = false; input.disabled = true; });
+    form.querySelectorAll('[data-schedule-view-toggle]').forEach((input) => { input.checked = false; });
     form.querySelectorAll('[data-schedule-report-card]').forEach((card) => card.classList.remove('is-selected'));
   }
-  const view = [...form.querySelectorAll('[data-schedule-report-view]')].find((input) => input.dataset.reportId === reportId && input.value === viewId);
-  if (!view) return false;
-  const card = view.closest('[data-schedule-report-card]');
-  const toggle = card.querySelector('[data-schedule-report-toggle]');
+  const toggle = [...form.querySelectorAll('[data-schedule-report-toggle]')].find((input) => input.dataset.reportId === reportId || input.value === reportId);
+  if (!toggle) return false;
   toggle.checked = true;
-  card.classList.add('is-selected');
-  card.querySelectorAll('[data-schedule-report-view]').forEach((input) => { input.disabled = false; });
-  view.checked = true;
+  const viewToggle = [...form.querySelectorAll('[data-schedule-view-toggle]')]
+    .find((input) => input.dataset.reportId === reportId && input.dataset.viewId === viewId);
+  if (viewToggle) viewToggle.checked = true;
+  syncReportSelection(form, reportId, true);
+  updateBundleCount(form);
   return true;
 }
 
+function syncReportSelection(form, reportId, selected) {
+  if (!reportId) return;
+  const reportToggle = [...form.querySelectorAll('[data-schedule-report-toggle]')]
+    .find((input) => input.dataset.reportId === reportId);
+  if (!reportToggle) return;
+  reportToggle.checked = Boolean(selected);
+  const viewToggles = [...form.querySelectorAll('[data-schedule-view-toggle]')]
+    .filter((input) => input.dataset.reportId === reportId);
+  if (selected && !viewToggles.some((input) => input.checked)) {
+    const defaultView = reportToggle.dataset.defaultView || '';
+    const defaultToggle = viewToggles.find((input) => input.dataset.viewId === defaultView) || viewToggles[0];
+    if (defaultToggle) defaultToggle.checked = true;
+  }
+  if (!selected) viewToggles.forEach((input) => { input.checked = false; });
+
+  const card = [...form.querySelectorAll('[data-schedule-report-card]')]
+    .find((entry) => entry.dataset.reportId === reportId);
+  card?.classList.toggle('is-selected', Boolean(selected));
+  const selectButton = card?.querySelector('[data-schedule-report-select-button]');
+  if (selectButton) selectButton.textContent = selected ? 'Remove from pack' : 'Select report';
+}
+
+function syncViewSelection(form, reportId) {
+  if (!reportId) return;
+  const viewToggles = [...form.querySelectorAll('[data-schedule-view-toggle]')]
+    .filter((input) => input.dataset.reportId === reportId);
+  const anySelected = viewToggles.some((input) => input.checked);
+  syncReportSelection(form, reportId, anySelected);
+}
+
+function openReportViewPanel(form, reportId) {
+  const body = form.querySelector('.reportSchedulePicker__body');
+  if (!body || !reportId) return;
+  body.querySelectorAll('[data-schedule-view-panel]').forEach((panel) => {
+    panel.hidden = panel.dataset.scheduleViewPanel !== reportId;
+  });
+  body.classList.add('is-selecting-views');
+  const panel = [...body.querySelectorAll('[data-schedule-view-panel]')]
+    .find((entry) => entry.dataset.scheduleViewPanel === reportId);
+  panel?.querySelector('[data-schedule-view-toggle]')?.focus();
+}
+
+function closeReportViewPanel(form) {
+  const body = form.querySelector('.reportSchedulePicker__body');
+  if (!body) return;
+  body.classList.remove('is-selecting-views');
+  body.querySelectorAll('[data-schedule-view-panel]').forEach((panel) => { panel.hidden = true; });
+}
+
 function updateBundleCount(form) {
-  const selectedViews = [...form.querySelectorAll('[data-schedule-report-view]:checked')];
+  const selectedReports = [...form.querySelectorAll('[data-schedule-report-toggle]:checked')];
+  const selectedReportIds = new Set(selectedReports.map((input) => input.dataset.reportId));
+  const selectedViews = [...form.querySelectorAll('[data-schedule-view-toggle]:checked')]
+    .filter((input) => selectedReportIds.has(input.dataset.reportId));
+  const reports = selectedReports.length;
   const views = selectedViews.length;
-  const reports = new Set(selectedViews.map((input) => input.dataset.reportId)).size;
   const countLabel = `${reports} report${reports === 1 ? '' : 's'} · ${views} view${views === 1 ? '' : 's'}`;
   form.querySelectorAll('[data-schedule-bundle-count]').forEach((slot) => { slot.textContent = countLabel; });
 
+  form.querySelectorAll('[data-schedule-report-card]').forEach((card) => {
+    const reportId = card.dataset.reportId || '';
+    const reportViewToggles = [...form.querySelectorAll('[data-schedule-view-toggle]')]
+      .filter((input) => input.dataset.reportId === reportId && input.checked);
+    const selectedViewsSlot = card.querySelector('[data-schedule-selected-views]');
+    if (selectedViewsSlot) {
+      selectedViewsSlot.innerHTML = reportViewToggles.length
+        ? reportViewToggles.map((input) => {
+          const label = input.closest('label')?.querySelector('strong')?.textContent?.trim() || input.dataset.viewId || 'View';
+          return `<span>${escapeHtml(label)}</span>`;
+        }).join('')
+        : '<span class="reportScheduleReportCard__noViews">No views selected</span>';
+    }
+    const countSlot = [...form.querySelectorAll('[data-schedule-view-count]')]
+      .find((slot) => slot.dataset.scheduleViewCount === reportId);
+    if (countSlot) countSlot.textContent = `${reportViewToggles.length} view${reportViewToggles.length === 1 ? '' : 's'} selected`;
+  });
+
   const summary = form.querySelector('[data-schedule-pack-summary]');
   if (!summary) return;
-  if (!selectedViews.length) {
-    summary.innerHTML = '<span class="reportSchedulePackSummary__empty">No report views selected</span>';
+  if (!selectedReports.length) {
+    summary.innerHTML = '<span class="reportSchedulePackSummary__empty">No reports selected</span>';
     return;
   }
-  summary.innerHTML = selectedViews.slice(0, 5).map((input) => {
-    const reportTitle = input.closest('[data-schedule-report-card]')?.querySelector('.reportScheduleReportCard__title strong')?.textContent?.trim() || input.dataset.reportId || 'Report';
-    const viewTitle = input.closest('label')?.querySelector('span')?.textContent?.trim() || formatViewLabel(input.value);
-    return `<span class="reportSchedulePackChip">${escapeHtml(reportTitle)} · ${escapeHtml(viewTitle)}</span>`;
-  }).join('') + (selectedViews.length > 5 ? `<span class="reportSchedulePackChip reportSchedulePackChip--more">+${selectedViews.length - 5} more</span>` : '');
+  summary.innerHTML = selectedReports.map((input) => {
+    const reportId = input.dataset.reportId || '';
+    const card = input.closest('[data-schedule-report-card]');
+    const reportTitle = card?.querySelector('.reportScheduleReportCard__open strong')?.textContent?.trim() || reportId || 'Report';
+    const reportViewCount = selectedViews.filter((view) => view.dataset.reportId === reportId).length;
+    return `<span class="reportSchedulePackChip">${escapeHtml(reportTitle)} · ${reportViewCount} view${reportViewCount === 1 ? '' : 's'}</span>`;
+  }).join('');
+}
+
+function bindRecipientPicker(form) {
+  const picker = form.querySelector('[data-schedule-recipient-picker]');
+  if (!picker) return;
+  const hidden = picker.querySelector('input[name="recipients"]');
+  const chips = picker.querySelector('[data-schedule-recipient-chips]');
+  const userSelect = picker.querySelector('[data-schedule-recipient-select]');
+  const emailInput = picker.querySelector('[data-schedule-recipient-input]');
+  const addButton = picker.querySelector('[data-schedule-recipient-add]');
+
+  const current = () => uniqueEmails(String(hidden?.value || '').split(/[;,\n]/));
+  const render = (emails) => {
+    const normalized = uniqueEmails(emails);
+    if (hidden) hidden.value = normalized.join(', ');
+    if (chips) chips.innerHTML = renderRecipientChips(normalized);
+  };
+  const add = (email) => {
+    const normalized = String(email || '').trim().toLowerCase();
+    if (!isValidEmail(normalized)) {
+      showModalMessage(form, 'Enter a valid recipient email address.', 'warning');
+      return false;
+    }
+    render([...current(), normalized]);
+    return true;
+  };
+
+  userSelect?.addEventListener('change', () => {
+    if (userSelect.value && add(userSelect.value)) {
+      userSelect.value = '';
+      refreshReportingSelect(userSelect);
+    }
+  });
+  const addCustom = () => {
+    if (add(emailInput?.value || '')) {
+      if (emailInput) emailInput.value = '';
+      emailInput?.focus();
+    }
+  };
+  addButton?.addEventListener('click', addCustom);
+  emailInput?.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    addCustom();
+  });
+  chips?.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-schedule-recipient-remove]');
+    if (!button) return;
+    const remove = String(button.dataset.scheduleRecipientRemove || '').toLowerCase();
+    render(current().filter((email) => email.toLowerCase() !== remove));
+  });
+  render(current());
+}
+
+function isValidEmail(value = '') {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim());
+}
+
+function uniqueEmails(values = []) {
+  const seen = new Set();
+  return values.map((value) => String(value || '').trim()).filter((value) => {
+    if (!isValidEmail(value)) return false;
+    const key = value.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function cssEscape(value = '') {
+  if (globalThis.CSS?.escape) return globalThis.CSS.escape(String(value));
+  return String(value).replace(/(["\\])/g, '\\$1');
+}
+
+function extractWorkspaceUsers(state = {}) {
+  return mergeWorkspaceUsers(
+    state.users?.items,
+    Array.isArray(state.users) ? state.users : [],
+    state.workspace?.users,
+    state.workspace?.members,
+    state.members?.items,
+    Array.isArray(state.members) ? state.members : [],
+    state.userManagement?.users,
+    state.data?.users,
+    state.reporting?.users
+  );
+}
+
+function mergeWorkspaceUsers(...collections) {
+  const seen = new Set();
+  return collections.flatMap((collection) => Array.isArray(collection) ? collection : []).map((user) => {
+    const email = String(user?.email || user?.userEmail || user?.user_email || '').trim();
+    const name = String(user?.displayName || user?.display_name || user?.name || user?.fullName || user?.full_name || email).trim();
+    const status = String(user?.status || user?.membershipStatus || user?.membership_status || 'active').toLowerCase();
+    const active = user?.active !== false && user?.isActive !== false && !['disabled', 'inactive', 'removed', 'deleted'].includes(status);
+    return { email, name: name || email, active };
+  }).filter((user) => {
+    const key = user.email.toLowerCase();
+    if (!user.active || !isValidEmail(user.email) || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).map(({ email, name }) => ({ email, name }))
+    .sort((left, right) => left.name.localeCompare(right.name) || left.email.localeCompare(right.email));
 }
 
 function extractLocations(state = {}) {

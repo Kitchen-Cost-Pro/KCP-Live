@@ -32,10 +32,11 @@ import {
   getWorkspaceSettingsSnapshot,
   importWorkspaceSnapshot,
   normalizeSettings,
+  savePersonalSettings,
   saveWorkspaceSettings
 } from './services/settingsService.js';
 import { ACTION_PERMISSION_MAP, canManagePermissionSets, getAccessRenderRevision, hasPermission, hasSectionAccess, normalizeRoleName, resolveRoleDefinition, toRoleLabel } from './services/roleService.js';
-import { buildSupplierPurchaseOrderPdfFile as buildSupplierPurchaseOrderPdfDocument, buildManufacturingBuilderXlsx, downloadFileBlob, downloadStyledRecipeTemplateXlsx, parseDataFile } from './services/dataService.js';
+import { buildSupplierPurchaseOrderPdfFile as buildSupplierPurchaseOrderPdfDocument, buildManufacturingBuilderXlsx, downloadFileBlob, downloadStyledRecipeTemplateXlsx, downloadStyledStockTemplateXlsx, parseDataFile } from './services/dataService.js';
 import {
   buildMenuCatalogueRows,
   buildGoodsReceiptDocumentRows,
@@ -62,6 +63,11 @@ import {
 } from './themePresets.js';
 import { matchesBarcodeQuery, parseBarcodeValues } from './utils/barcodes.js';
 import { todayLocal } from './utils/date.js';
+import {
+  cleanupAppDropdownPortal,
+  installAppDropdownPortalSystem,
+  scheduleAppDropdownPortalRefresh
+} from './utils/appDropdownPortal.js';
 import { isStockCountableItem, isTransferEligibleStockItem } from './services/stockCountEligibility.js';
 // Canonical per-location balance resolver (same one the Transfers UI uses to show before/after),
 // so the transfer insufficient-stock validation resolves the source balance identically.
@@ -75,6 +81,8 @@ const DRAFT_STORAGE_PREFIX = 'kcp:drafts:v1';
 const ADJUSTMENT_PAGE_SIZE = 25;
 const PERSISTED_ROUTES = ['dashboard', 'products', 'recipes', 'ingredients', 'suppliers', 'purchase-orders', 'grv', 'credit-note', 'adjustments', 'transfers', 'stock-count', 'locations', 'mfg-products', 'reporting', 'reporting-scheduling', 'integrations', 'user-management', 'custom-roles', 'settings', 'settings-business', 'settings-customization'];
 const SETTINGS_ROUTES = ['settings', 'settings-business', 'settings-customization'];
+
+installAppDropdownPortalSystem();
 
 
 function showBrandConfirmDialog({
@@ -5932,6 +5940,16 @@ async function exportStockTemplate(format = 'csv') {
   const timestamp = getExportTimestamp();
 
   try {
+    if (normalizedFormat === 'xlsx') {
+      await downloadStyledStockTemplateXlsx(`kcp-stock-items-template-${timestamp}`, {
+        columns: exportSchemas.stock,
+        rows: buildTemplateRows(exportSchemas.stock),
+        columnWidths: getStockImportTemplateColumnWidths(),
+        maxRows: 250
+      });
+      showStockToast('Stock template exported as XLSX.', 'success');
+      return;
+    }
     await exportObjectRows({
       format: normalizedFormat,
       filename: `kcp-stock-items-template-${timestamp}`,
@@ -5961,6 +5979,7 @@ function getStockImportTemplateColumnWidths() {
     SKU: 18,
     Category: 18,
     Base_UOM: 12,
+    Default_Ordering_UOM: 22,
     Cost_Ex_VAT: 14,
     VAT_Enabled: 14,
     Barcode: 18,
@@ -6122,6 +6141,23 @@ function updateSupplierDraftSilent(updates = {}) {
 function updateSettingsDraftSilent(updates = {}) {
   const draft = appState.settings.draft || {};
   appState.settings = { ...appState.settings, draft: { ...draft, ...updates } };
+}
+
+function updateSettingsTaxFieldSilent(key = '', value = '') {
+  const normalizedKey = String(key || '').trim();
+  if (!normalizedKey) return;
+  const draft = appState.settings.draft || createDefaultSettingsDraft();
+  appState.settings = {
+    ...appState.settings,
+    actionError: '',
+    draft: {
+      ...draft,
+      companyTaxInfo: {
+        ...(draft.companyTaxInfo && typeof draft.companyTaxInfo === 'object' ? draft.companyTaxInfo : {}),
+        [normalizedKey]: value
+      }
+    }
+  };
 }
 
 async function saveSupplier(item) {
@@ -6516,7 +6552,7 @@ function applyPendingReportingPurchaseOrderSeed() {
   });
 
   if (!orderLines.length) {
-    showPurchaseOrderToast(skipped.length ? `No orderable low-stock items were found. ${skipped.slice(0, 3).join(', ')}` : 'No orderable low-stock items were found.', 'error');
+    showPurchaseOrderToast(skipped.length ? `No orderable selected items were found. ${skipped.slice(0, 3).join(', ')}` : 'No orderable selected items were found.', 'error');
     pendingReportingPurchaseOrderSeed = null;
     return false;
   }
@@ -6538,7 +6574,7 @@ function applyPendingReportingPurchaseOrderSeed() {
     draftOrder: {
       id: '',
       poNumber: '',
-      reference: orderLines.length > 1 ? 'Created from Stock Control bulk reorder' : 'Created from Stock Control report',
+      reference: orderLines.length > 1 ? 'Created from Stock Control selection' : 'Created from Stock Control report',
       date: todayLocal(),
       supplierId: inferredSupplierId,
       supplierName: inferredSupplierName,
@@ -6561,7 +6597,7 @@ function applyPendingReportingPurchaseOrderSeed() {
     actionError: '',
     toast: {
       tone: skipped.length ? 'warning' : 'success',
-      message: `${orderLines.length} low-stock item${orderLines.length === 1 ? '' : 's'} added to a purchase order draft.${skipped.length ? ` ${skipped.length} item${skipped.length === 1 ? '' : 's'} skipped.` : ''}`
+      message: `${orderLines.length} selected item${orderLines.length === 1 ? '' : 's'} added to a purchase order draft.${skipped.length ? ` ${skipped.length} item${skipped.length === 1 ? '' : 's'} skipped.` : ''}`
     },
     filters: {
       ...appState.purchaseOrders.filters,
@@ -6578,13 +6614,14 @@ function applyPendingReportingPurchaseOrderSeed() {
 function buildPurchaseOrderLineFromReportingSeed(seed = {}, stockItem = {}, locations = []) {
   const locationId = seed.locationId || getDefaultPurchaseOrderLocationId(null);
   const locationName = seed.locationName || getPurchaseOrderLocationName(locationId, '');
-  const selectedUom = seed.purchaseUom || stockItem.unit || 'ea';
-  const uomSelection = getLineUomSelection(stockItem, selectedUom);
+  const defaultSelection = getDefaultLineUomSelection(stockItem);
+  const selectedUom = seed.purchaseUom || defaultSelection.selectedUom || stockItem.unit || 'ea';
+  const uomSelection = seed.purchaseUom ? getLineUomSelection(stockItem, selectedUom) : defaultSelection;
   const qty = Number(seed.purchaseUomQty || 0) > 0
     ? Number(seed.purchaseUomQty)
     : (uomSelection.ratio ? Number(seed.requiredQty || 0) / uomSelection.ratio : Number(seed.requiredQty || 0));
   const cleanQty = Number.isFinite(qty) && qty > 0 ? Number(qty.toFixed(3)) : 0;
-  const suggestedQty = cleanQty || Math.max(Number(seed.parLevel || 0) - Number(seed.currentStock || 0), 0);
+  const suggestedQty = cleanQty || Math.max(Number(seed.parLevel || 0) - Number(seed.currentStock || 0), 0) || 1;
   return {
     id: stockItem.id,
     stockItemId: stockItem.id,
@@ -6599,8 +6636,8 @@ function buildPurchaseOrderLineFromReportingSeed(seed = {}, stockItem = {}, loca
     targetLocation: locationId,
     locationName,
     targetLocationName: locationName,
-    supplierId: seed.supplierId || stockItem.supplierId || '',
-    supplierName: seed.supplierName || stockItem.supplierName || '',
+    supplierId: seed.supplierId || '',
+    supplierName: seed.supplierName || '',
     reportingContext: {
       parLevel: seed.parLevel,
       currentStock: seed.currentStock,
@@ -6612,7 +6649,7 @@ function buildPurchaseOrderLineFromReportingSeed(seed = {}, stockItem = {}, loca
 
 function buildReportingLowStockPurchaseOrderNotes({ orderLines = [], skipped = [], uniqueLocations = new Set() } = {}) {
   const locationsText = [...uniqueLocations].map((id) => getPurchaseOrderLocationName(id, id)).filter(Boolean).join(', ');
-  const base = `Pre-created from Stock Control report${locationsText ? ` for ${locationsText}` : ''}. Quantities use par level/reorder values from the selected low-stock rows. Review supplier, quantity and cost before saving.`;
+  const base = `Pre-created from selected Stock Control items${locationsText ? ` for ${locationsText}` : ''}. Items are included because they were explicitly selected, even when current stock is above par. Review supplier, quantity, location and cost before saving.`;
   const skippedText = skipped.length ? ` Skipped: ${skipped.slice(0, 5).join(', ')}${skipped.length > 5 ? ` and ${skipped.length - 5} more` : ''}.` : '';
   return `${base}${skippedText}`;
 }
@@ -7167,16 +7204,14 @@ async function buildSupplierPurchaseOrderPdfFile(filename, order = {}, context =
       supplierNotes: siteInfo.supplierNotes
     },
     items: (order.items || []).map((item) => {
-      const packSize = getPurchaseOrderLinePackSize(item);
       return {
         description: item.name || item.stockItemName || '',
-        unit: item.unit || 'EA',
-        packSize: formatDocumentQuantity(packSize),
+        unit: item.selectedUom || item.purchaseUom || item.orderUom || item.unit || 'EA',
         quantity: formatDocumentQuantity(item.qty ?? item.quantity ?? ''),
         notes: item.notes || item.note || 'Confirm availability'
       };
     }),
-    instruction: 'Please confirm receipt of this purchase order. Items must be supplied according to the listed pack size and quantity. Any unavailable items, substitutions, or quantity changes must be confirmed before delivery.'
+    instruction: 'Please confirm receipt of this purchase order. Items must be supplied according to the listed UOM and quantity. Any unavailable items, substitutions, UOM changes, or quantity changes must be confirmed before delivery.'
   });
 }
 
@@ -9010,6 +9045,8 @@ function hydrateCreditNoteFromGrv(receiptId) {
       uomConfigurations: normalizeLineUomConfigurations(line.uomConfigurations || stockItem?.uomConfigurations || stockItem?.uomConfig || stockItem?.uomConversions),
       returnedQty: Number(line.receivedQty ?? line.packQty ?? line.orderedQty ?? 0) || 0,
       packQty: Number(line.receivedQty ?? line.packQty ?? line.orderedQty ?? 0) || 0,
+      originalOrderQty: Number(line.orderedQty ?? line.qty ?? line.quantity ?? line.receivedQty ?? line.packQty ?? 0) || 0,
+      maxReturnQty: Number(line.orderedQty ?? line.qty ?? line.quantity ?? line.receivedQty ?? line.packQty ?? 0) || 0,
       packSize: getPositivePackSizeValue(line.packSize),
       unitCost: Number(line.unitCost || 0) || 0,
       vatEnabled: line.vatEnabled !== false && stockItem?.vatEnabled !== false,
@@ -9384,6 +9421,8 @@ function applyCreditNoteLineDetail() {
       packSize,
       unitCost: Number(entry.unitCost || 0) || 0,
       vatEnabled: entry.vatEnabled !== false,
+      originalOrderQty: Number(entry.originalOrderQty ?? entry.maxReturnQty ?? 0) || 0,
+      maxReturnQty: Number(entry.maxReturnQty ?? entry.originalOrderQty ?? 0) || 0,
       locationId: entry.locationId || detail.locationId || draft.locationId || 'main',
       locationName: entry.locationName || detail.locationName || draft.locationName || 'Main Store'
     };
@@ -9464,6 +9503,27 @@ function removeCreditNoteLine(index) {
   renderApp();
 }
 
+function getCreditNotePurchaseOrderQuantityError(draft = {}) {
+  if (!String(draft.sourcePoId || '').trim()) return '';
+  const totals = new Map();
+  for (const line of draft.items || []) {
+    const stockItemId = resolveStockItemIdFromLine(line);
+    if (!stockItemId) continue;
+    const returnedQty = Number(parseDecimalInputValue(line.returnedQty ?? line.packQty ?? 0)) || 0;
+    const maxReturnQty = Number(line.maxReturnQty ?? line.originalOrderQty ?? 0) || 0;
+    const current = totals.get(stockItemId) || { returnedQty: 0, maxReturnQty: 0, name: line.stockItemName || 'This item' };
+    current.returnedQty += returnedQty;
+    current.maxReturnQty += maxReturnQty;
+    totals.set(stockItemId, current);
+  }
+  for (const entry of totals.values()) {
+    if (entry.maxReturnQty > 0 && entry.returnedQty > entry.maxReturnQty + 0.000001) {
+      return `${entry.name} cannot return more than the original purchase order quantity of ${formatDocumentQuantity(entry.maxReturnQty)}.`;
+    }
+  }
+  return '';
+}
+
 async function saveCreditNoteDraft() {
   const draft = appState.creditNotes.draftNote || createEmptyCreditNoteDraft();
   if (!String(draft.notes || '').trim()) {
@@ -9479,6 +9539,11 @@ async function saveCreditNoteDraft() {
   const creditItems = draft.items || [];
   if (!String(draft.locationId || '').trim() && !creditItems.some((line) => String(line.locationId || '').trim())) {
     showCreditNoteToast('Select a location before committing the credit note.', 'error');
+    return;
+  }
+  const purchaseOrderQtyError = getCreditNotePurchaseOrderQuantityError(draft);
+  if (purchaseOrderQtyError) {
+    showCreditNoteToast(purchaseOrderQtyError, 'error');
     return;
   }
   // Stable id persisted on the draft so a retry / re-save reuses it and the backend's
@@ -10066,9 +10131,23 @@ function updateWastageQty(index, value) {
 async function saveWastageDraft() {
   const draft = appState.adjustments.wastageDraft || createEmptyWastageDraft();
   const locations = appState.adjustments.locations || [];
-  const locationObj = getLocationById(locations, draft.locationId) || getDefaultLocation(locations);
-  const locationId = locationObj?.id || draft.locationId || '';
-  const locationName = locationId ? getLocationNameById(locations, locationId, locationObj?.name || 'Main Store') : (locationObj?.name || 'Main Store');
+  const locationObj = getLocationById(locations, draft.locationId);
+  const locationId = String(draft.locationId || '').trim();
+  const locationName = locationId ? getLocationNameById(locations, locationId, locationObj?.name || 'Main Store') : '';
+  const items = Array.isArray(draft.items) ? draft.items : [];
+  let validationError = '';
+  if (!items.length) validationError = 'Select at least one menu item to waste.';
+  else if (!locationId || !locationObj) validationError = 'Select a valid location before recording wastage.';
+  else if (!String(draft.wasteReason || '').trim()) validationError = 'Select a waste reason before recording wastage.';
+  else {
+    const invalidItem = items.find((item) => !(Number(parseDecimalInputValue(item.quantity)) > 0));
+    if (invalidItem) validationError = `Enter a quantity greater than zero for ${invalidItem.productName || 'every menu item'}.`;
+  }
+  if (validationError) {
+    appState.adjustments = { ...appState.adjustments, wastageStatus: '', wastageError: validationError };
+    renderApp();
+    return;
+  }
 
   if (!draft.id) draft.id = makeStableSubmitId('wst_adj');
   appState.adjustments = { ...appState.adjustments, wastageDraft: draft, wastageStatus: 'saving', wastageError: '' };
@@ -10357,7 +10436,23 @@ function clearRestaurantBackground() {
 }
 
 async function saveSettingsDraft(options = {}) {
-  const draft = options.draft || appState.settings.draft || createDefaultSettingsDraft();
+  if (settingsDraftRenderTimer) {
+    clearTimeout(settingsDraftRenderTimer);
+    settingsDraftRenderTimer = null;
+  }
+  const baseDraft = options.draft || appState.settings.draft || createDefaultSettingsDraft();
+  const draft = options.draftPatch
+    ? {
+        ...baseDraft,
+        ...options.draftPatch,
+        companyTaxInfo: options.draftPatch.companyTaxInfo
+          ? {
+              ...(baseDraft.companyTaxInfo && typeof baseDraft.companyTaxInfo === 'object' ? baseDraft.companyTaxInfo : {}),
+              ...options.draftPatch.companyTaxInfo
+            }
+          : baseDraft.companyTaxInfo
+      }
+    : baseDraft;
   if (isClearlyInvalidVatNumber(draft.companyTaxInfo?.vatNumber)) {
     showSettingsToast('VAT number looks invalid. Leave it blank or enter a valid tax identifier.', 'error');
     return false;
@@ -10372,7 +10467,7 @@ async function saveSettingsDraft(options = {}) {
   showGlobalSaving('Saving Settings');
 
   try {
-    const saved = await saveWorkspaceSettings(appState.workspace?.id, draft);
+    const saved = await saveWorkspaceSettings(appState.workspace?.id, draft, { includePersonal: false });
     appState.settings = {
       ...appState.settings,
       status: 'ready',
@@ -10383,8 +10478,12 @@ async function saveSettingsDraft(options = {}) {
       appearanceModal: options.closeAppearanceModal ? '' : appState.settings.appearanceModal
     };
     applyWorkspaceSettingsEffects(saved);
+    const previousSiteName = String(appState.workspace?.siteName || '').trim();
     updateWorkspaceSiteName(saved.siteName);
-    await syncDefaultWorkspaceSiteName(saved.siteName);
+    const nextSiteName = String(saved.siteName || '').trim();
+    if (options.syncSiteName !== false && nextSiteName && nextSiteName !== previousSiteName) {
+      await syncDefaultWorkspaceSiteName(nextSiteName);
+    }
     showSettingsToast(options.successMessage || 'Settings saved.', 'success');
     return true;
   } catch (error) {
@@ -10401,7 +10500,37 @@ async function saveSettingsDraft(options = {}) {
 }
 
 async function saveAppearanceSettingsDraft() {
-  await saveSettingsDraft({ closeAppearanceModal: true });
+  const draft = appState.settings.draft || createDefaultSettingsDraft();
+  appState.settings = {
+    ...appState.settings,
+    actionStatus: 'saving',
+    actionError: ''
+  };
+  renderApp();
+  showGlobalSaving('Saving My Appearance');
+  try {
+    const saved = await savePersonalSettings(appState.workspace?.id, draft);
+    appState.settings = {
+      ...appState.settings,
+      status: 'ready',
+      values: { ...(appState.settings.values || {}), ...saved },
+      draft: { ...draft, ...saved },
+      actionStatus: '',
+      actionError: '',
+      appearanceModal: ''
+    };
+    applyWorkspaceSettingsEffects(appState.settings.values);
+    showSettingsToast('Your personal appearance settings were saved.', 'success');
+  } catch (error) {
+    appState.settings = {
+      ...appState.settings,
+      actionStatus: '',
+      actionError: error.message || 'Could not save your appearance settings.'
+    };
+    renderApp();
+  } finally {
+    hideGlobalSaving();
+  }
 }
 
 async function confirmGoLiveStockDepletion() {
@@ -14953,23 +15082,6 @@ async function scanStockTakeBarcode(mode = 'focus') {
   }
 }
 
-function restoreSavedStockTakeDraft() {
-  const drafts = appState.stockTake.savedDrafts || [];
-  if (!drafts.length) {
-    showStockTakeToast('No saved stock take draft is available.', 'warning');
-    return;
-  }
-  appState.stockTake = {
-    ...appState.stockTake,
-    filters: {
-      ...appState.stockTake.filters,
-      overlay: 'resume-drafts',
-      openDropdown: ''
-    }
-  };
-  renderApp();
-}
-
 function restoreSpecificStockTakeDraft(draftId = '') {
   const savedDraft = (appState.stockTake.savedDrafts || []).find((entry) => String(entry.id) === String(draftId));
   if (!savedDraft) {
@@ -15011,7 +15123,8 @@ async function discardSpecificStockTakeDraft(draftId = '') {
       savedDrafts: remainingDrafts,
       filters: {
         ...appState.stockTake.filters,
-        overlay: remainingDrafts.length ? 'resume-drafts' : ''
+        overlay: '',
+        openDropdown: ''
       }
     };
     renderApp();
@@ -15023,31 +15136,92 @@ async function discardSpecificStockTakeDraft(draftId = '') {
 }
 
 async function saveStockTakeSessionDraft() {
-  const draft = hydrateStockTakeDraft(appState.stockTake.draftSession, appState.stockTake.locations || []);
-  appState.stockTake = {
-    ...appState.stockTake,
-    actionStatus: 'saving-draft',
-    actionError: ''
+  // A count field can remain the active element after a button click in Safari. renderApp()
+  // deliberately skips DOM replacement while a text input is focused, which made a successful
+  // draft save look permanently stuck and also hid any API error. Release both live and queued
+  // focus before starting, and guard against rapid duplicate submissions.
+  if (appState.stockTake.actionStatus === 'saving-draft') return;
+  pendingFocusField = null;
+  if (typeof document !== 'undefined' && document.activeElement && typeof document.activeElement.blur === 'function') {
+    document.activeElement.blur();
+  }
+
+  const hydratedDraft = hydrateStockTakeDraft(appState.stockTake.draftSession, appState.stockTake.locations || []);
+  const draft = {
+    ...hydratedDraft,
+    // Keep one stable id across retries so a response timeout cannot create duplicate drafts.
+    id: String(hydratedDraft.id || makeStableSubmitId('std'))
   };
-  renderApp();
+
+  if (!draft.locationId) {
+    const message = 'Choose a stock take location before saving a draft.';
+    appState.stockTake = { ...appState.stockTake, actionError: message };
+    renderApp();
+    showStockTakeToast(message, 'error');
+    return;
+  }
 
   try {
+    appState.stockTake = {
+      ...appState.stockTake,
+      draftSession: draft,
+      actionStatus: 'saving-draft',
+      actionError: '',
+      filters: {
+        ...appState.stockTake.filters,
+        openDropdown: ''
+      }
+    };
+    renderApp();
+
     const { saveStockTakeDraftSession } = await import('./services/stockTakeService.js');
-    const savedDraft = await saveStockTakeDraftSession(appState.workspace?.id, appState.user?.uid || appState.user?.id || '', draft);
+    const savedDraft = await saveStockTakeDraftSession(
+      appState.workspace?.id,
+      appState.user?.uid || appState.user?.id || '',
+      draft
+    );
+    const nextSavedDrafts = [
+      savedDraft,
+      ...(appState.stockTake.savedDrafts || []).filter((entry) => String(entry.id) !== String(savedDraft.id))
+    ].sort((left, right) => String(right.savedAt || '').localeCompare(String(left.savedAt || '')));
+
+    // The user may have clicked back into a field while the request was in flight. Force the
+    // completion render so the active session closes and the Active Sessions table updates now.
+    pendingFocusField = null;
+    if (typeof document !== 'undefined' && document.activeElement && typeof document.activeElement.blur === 'function') {
+      document.activeElement.blur();
+    }
     appState.stockTake = {
       ...appState.stockTake,
       actionStatus: '',
       actionError: '',
-      draftSession: hydrateStockTakeDraft(savedDraft, appState.stockTake.locations || [])
+      sessionActive: false,
+      savedDrafts: nextSavedDrafts,
+      draftSession: hydrateStockTakeDraft(createEmptyStockTakeDraft(), appState.stockTake.locations || []),
+      sessionSetup: createEmptyStockTakeSessionSetup(),
+      filters: {
+        ...appState.stockTake.filters,
+        overlay: '',
+        openDropdown: '',
+        query: ''
+      }
     };
-    showStockTakeToast('Draft saved.', 'success');
+    renderApp();
+    showStockTakeToast('Draft saved to Active Sessions.', 'success');
+    refreshActiveTabFromApi().catch(() => {});
   } catch (error) {
+    const message = error?.message || 'Could not save stock take draft.';
+    pendingFocusField = null;
+    if (typeof document !== 'undefined' && document.activeElement && typeof document.activeElement.blur === 'function') {
+      document.activeElement.blur();
+    }
     appState.stockTake = {
       ...appState.stockTake,
       actionStatus: '',
-      actionError: error.message || 'Could not save stock take draft.'
+      actionError: message
     };
     renderApp();
+    showStockTakeToast(message, 'error');
   }
 }
 
@@ -16737,7 +16911,9 @@ function createCreditNoteLineDetailEntry(line, index) {
     vatEnabled: line.vatEnabled !== false,
     locationId: line.locationId || '',
     locationName: line.locationName || '',
-    sourceIndex: index
+    sourceIndex: index,
+    originalOrderQty: Number(line.originalOrderQty ?? line.maxReturnQty ?? 0) || 0,
+    maxReturnQty: Number(line.maxReturnQty ?? line.originalOrderQty ?? 0) || 0
   };
 }
 
@@ -16900,8 +17076,6 @@ function createDefaultSettingsDraft(seed = {}) {
     uiScale: 'normal',
     logoutTimeout: 30,
     costingMethod: 'last',
-    lowStockEmailFrequency: 'off',
-    lowStockEmailDispatchTime: '08:00',
     yocoCategoryMap: {},
     stockCategoryRoutingMap: {},
     restaurantThemeId: DEFAULT_RESTAURANT_THEME_ID,
@@ -17466,7 +17640,6 @@ function renderApp() {
       onOpenBulkScan: openStockTakeBulkScan,
       onOpenTemplateManager: openStockTakeTemplateManager,
       onOpenTemplateEditor: openStockTakeTemplateEditor,
-      onRestoreSavedDraft: restoreSavedStockTakeDraft,
       onDiscardSpecificDraft: discardSpecificStockTakeDraft,
       onCloseOverlay: closeStockTakeOverlay,
       onCloseScanCount: closeStockTakeScanCountModal,
@@ -17612,6 +17785,7 @@ function renderApp() {
       onPreserveFocus: preserveFieldFocus,
       onDraftChange: updateSettingsDraft,
       onDraftChangeSilent: updateSettingsDraftSilent,
+      onTaxFieldChangeSilent: updateSettingsTaxFieldSilent,
       onDropdownToggle: toggleSettingsDropdown,
       onOpenStockRoutingModal: openStockRoutingModal,
       onCloseStockRoutingModal: closeStockRoutingModal,
@@ -17641,6 +17815,7 @@ function renderApp() {
   restoreActiveField(activeField);
   restoreScrollSnapshots(scrollSnapshots);
   syncAppModalScrollLock();
+  scheduleAppDropdownPortalRefresh();
   startLiveClock();
   updateLiveClockNodes();
   scheduleDeferredRealtimeSnapshotFlush();
@@ -18279,6 +18454,7 @@ function cssEscape(value = '') {
 
 function replaceApp(element) {
   if (!app) return;
+  cleanupAppDropdownPortal();
   app.replaceChildren(element);
   mountGlobalImportLoader();
 }
@@ -19139,7 +19315,8 @@ function normalizeLineUomConfigurations(value = []) {
         baseUom: String(row.baseUom || row.base_uom || row.baseUnit || row.unit || '').trim(),
         customUom: String(row.customUom || row.custom_uom || row.customUnit || row.orderingUom || '').trim(),
         ratio: parseDecimalInputValue(row.ratio ?? row.conversionRatio ?? row.unitsPerCustomUnit ?? row.units_per_custom_unit, 0),
-        barcode: parseBarcodeValues(row.barcode || row.barcodes || row.customBarcode || row.customUomBarcode)[0] || ''
+        barcode: parseBarcodeValues(row.barcode || row.barcodes || row.customBarcode || row.customUomBarcode)[0] || '',
+        isDefaultOrdering: ['true', '1', 'yes', 'on'].includes(String(row.isDefaultOrdering ?? row.defaultOrdering ?? row.is_default_ordering ?? row.defaultOrderUom ?? '').toLowerCase()) || row.isDefaultOrdering === true || row.defaultOrdering === true
       };
     })
     .filter((entry) => entry.customUom && entry.ratio > 0);
@@ -19174,6 +19351,16 @@ function getDefaultLineUomSelection(stockItem = {}, barcode = '') {
       ratio: barcodeMatch.ratio,
       baseUom: barcodeMatch.baseUom || stockItem.unit || 'ea',
       barcode: barcodeMatch.barcode || ''
+    };
+  }
+  const defaultOrderingConfig = normalizeLineUomConfigurations(stockItem.uomConfigurations || stockItem.uomConfig || stockItem.uomConversions)
+    .find((entry) => entry.isDefaultOrdering);
+  if (defaultOrderingConfig) {
+    return {
+      selectedUom: defaultOrderingConfig.customUom,
+      ratio: defaultOrderingConfig.ratio,
+      baseUom: defaultOrderingConfig.baseUom || stockItem.unit || 'ea',
+      barcode: defaultOrderingConfig.barcode || ''
     };
   }
   return getLineUomSelection(stockItem, stockItem.unit || 'ea');
@@ -20226,8 +20413,19 @@ function mapLegacyStockRows(rows = []) {
     const batchYieldRaw = getColumn(row, 'Batch_Yield', 'BatchYield', 'Batch Yield');
     const barcode = getColumn(row, 'Barcode', 'Barcodes', 'EAN', 'UPC');
     const baseUnit = norm(getColumn(row, 'Base_UOM', 'Base UOM', 'Unit', 'UOM')) || 'ea';
+    const defaultOrderingUom = norm(getColumn(
+      row,
+      'Default_Ordering_UOM',
+      'Default Ordering UOM',
+      'Default_Order_UOM',
+      'Default Order UOM',
+      'Ordering_UOM',
+      'Ordering UOM',
+      'Purchase_UOM',
+      'Purchase UOM'
+    ));
     const errorCountBeforeUom = review.errors.length;
-    const uomConfigurations = parseStockImportUomConfigurations(row, baseUnit, rowNumber, review);
+    const uomConfigurations = parseStockImportUomConfigurations(row, baseUnit, rowNumber, review, defaultOrderingUom);
     if (review.errors.length > errorCountBeforeUom) return null;
     const siteId = norm(getColumn(row, 'Site_ID', 'SiteId', 'siteId'));
     const siteName = norm(getColumn(row, 'Site', 'Site_Name', 'Store', 'Store_Location'));
@@ -20293,8 +20491,8 @@ function mapLegacyStockRows(rows = []) {
   return { items, review };
 }
 
-function parseStockImportUomConfigurations(row = {}, baseUnit = 'ea', rowNumber = 0, review = { errors: [] }) {
-  return [1, 2, 3].map((slot) => {
+function parseStockImportUomConfigurations(row = {}, baseUnit = 'ea', rowNumber = 0, review = { errors: [] }, defaultOrderingUom = '') {
+  const configurations = [1, 2, 3].map((slot) => {
     const customUom = norm(getColumn(
       row,
       `UOM_${slot}_Name`,
@@ -20343,9 +20541,26 @@ function parseStockImportUomConfigurations(row = {}, baseUnit = 'ea', rowNumber 
       baseUom: baseUnit || 'ea',
       customUom,
       ratio,
-      barcode
+      barcode,
+      isDefaultOrdering: false
     };
   }).filter(Boolean);
+
+  const requestedDefault = String(defaultOrderingUom || '').trim();
+  if (!requestedDefault || requestedDefault.toLowerCase() === String(baseUnit || 'ea').toLowerCase()) {
+    return configurations;
+  }
+  const matchingConfig = configurations.find((config) => config.customUom.toLowerCase() === requestedDefault.toLowerCase());
+  if (!matchingConfig) {
+    review.errors.push(createImportError(
+      'ERR_DEFAULT_ORDERING_UOM',
+      rowNumber,
+      'Default_Ordering_UOM must match the Base_UOM or one of the UOM_1, UOM_2, or UOM_3 names on the same row.'
+    ));
+    return configurations;
+  }
+  matchingConfig.isDefaultOrdering = true;
+  return configurations;
 }
 
 function mapSupplierImportRows(rows = []) {

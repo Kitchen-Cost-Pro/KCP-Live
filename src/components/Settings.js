@@ -67,18 +67,6 @@ export function renderSettings({ state, onSettingsAction = {} } = {}) {
                 ${renderTimeSelector('tradingTime', draft.tradingTime || '23:59')}
               </label>
               <label>
-                <span>UI Scale</span>
-                ${renderSettingsDropdown({
-                  id: 'uiScale',
-                  selectedValue: draft.uiScale || 'normal',
-                  openDropdown,
-                  options: [
-                    { value: 'normal', label: 'Normal' },
-                    { value: 'large', label: 'Large Text' }
-                  ]
-                })}
-              </label>
-              <label>
                 <span>Auto Logout Timeout (Minutes)</span>
                 <input type="text" inputmode="numeric" value="${escapeAttribute(draft.logoutTimeout ?? 30)}" data-settings-field="logoutTimeout" data-focus-key="settings-logout-timeout" />
               </label>
@@ -94,39 +82,17 @@ export function renderSettings({ state, onSettingsAction = {} } = {}) {
                   ]
                 })}
               </label>
-              <label>
-                <span>Low Stock Summary Email</span>
-                ${renderSettingsDropdown({
-                  id: 'lowStockEmailFrequency',
-                  selectedValue: draft.lowStockEmailFrequency || 'off',
-                  openDropdown,
-                  options: [
-                    { value: 'off', label: 'Off' },
-                    { value: '1_day', label: 'Every 1 Day' },
-                    { value: '2_day', label: 'Every 2 Days' },
-                    { value: '1_week', label: 'Every 1 Week' },
-                    { value: '2_week', label: 'Every 2 Weeks' },
-                    { value: '1_month', label: 'Every 1 Month' }
-                  ]
-                })}
-                <small class="settingsFieldHint">Emails are batched and sent on the selected cadence.</small>
-              </label>
-              <label>
-                <span>Alert Dispatch Time</span>
-                ${renderTimeSelector('lowStockEmailDispatchTime', draft.lowStockEmailDispatchTime || '08:00')}
-                <small class="settingsFieldHint">Send time uses this workspace timezone, defaulting to Africa/Johannesburg.</small>
-              </label>
             </div>
 
             <div class="settingsActions">
-              <button type="button" class="settingsPrimaryButton" data-settings-save ${isSaving ? 'disabled' : ''}>
+              <button type="button" class="settingsPrimaryButton" data-settings-save="workspace" ${isSaving ? 'disabled' : ''}>
                 ${isSaving ? 'Saving...' : 'Save Settings'}
               </button>
             </div>
           </section>
 
           ${renderGoLivePanel(draft, state)}
-          ${renderCompanyTaxPanel(draft)}
+          ${renderCompanyTaxPanel(draft, { isSaving })}
           ${renderProfileLinkingPanel(draft)}
 
           ${canManageSnapshots ? `
@@ -234,7 +200,7 @@ function renderGoLivePanel(draft = {}, state = {}) {
   `;
 }
 
-function renderCompanyTaxPanel(draft = {}) {
+function renderCompanyTaxPanel(draft = {}, { isSaving = false } = {}) {
   const taxInfo = normalizeTaxInfo(draft.companyTaxInfo || {});
   const fields = [
     ['Registered Company Name', 'registeredCompanyName', 'Legal registered entity name'],
@@ -281,6 +247,12 @@ function renderCompanyTaxPanel(draft = {}) {
             />
           </label>
         `).join('')}
+      </div>
+
+      <div class="settingsActions settingsActions--legal">
+        <button type="button" class="settingsPrimaryButton" data-settings-save="legal" ${isSaving ? 'disabled' : ''}>
+          ${isSaving ? 'Saving...' : 'Save Legal Details'}
+        </button>
       </div>
     </section>
   `;
@@ -531,6 +503,23 @@ function renderAppearancePanel(draft = {}, settingsState = {}) {
             ? `<img src="${escapeAttribute(logoDataUrl)}" alt="Current restaurant logo" />`
             : `<span>KCP</span>`}
         </div>
+      </div>
+
+      <div class="settingsPersonalPreferenceRow">
+        <label>
+          <span>Personal UI Scale</span>
+          ${renderSettingsDropdown({
+            id: 'uiScale',
+            selectedValue: draft.uiScale || 'normal',
+            openDropdown: settingsState.openDropdown || '',
+            options: [
+              { value: 'normal', label: 'Normal' },
+              { value: 'large', label: 'Large Text' }
+            ]
+          })}
+          <small class="settingsFieldHint">Saved only for your user in this workspace.</small>
+        </label>
+        <button type="button" class="settingsPrimaryButton" data-settings-save-appearance>Save My Appearance</button>
       </div>
 
       <div class="settingsAppearanceActions">
@@ -795,13 +784,7 @@ function bindSettingsEvents(view, onSettingsAction, draft = {}, settingsState = 
     const handleTaxChange = () => {
       const key = field.dataset.settingsTaxField || '';
       if (!key) return;
-      onSettingsAction.onPreserveFocus?.(field);
-      onSettingsAction.onDraftChange?.({
-        companyTaxInfo: {
-          ...normalizeTaxInfo(draft.companyTaxInfo || {}),
-          [key]: field.value
-        }
-      });
+      onSettingsAction.onTaxFieldChangeSilent?.(key, field.value);
     };
     field.addEventListener('input', handleTaxChange);
     field.addEventListener('change', handleTaxChange);
@@ -918,7 +901,23 @@ function bindSettingsEvents(view, onSettingsAction, draft = {}, settingsState = 
   });
 
   view.querySelectorAll('[data-settings-save]').forEach((button) => {
-    button.addEventListener('click', () => onSettingsAction.onSave?.());
+    button.addEventListener('click', () => {
+      const saveScope = button.dataset.settingsSave || 'workspace';
+      if (saveScope === 'legal') {
+        const companyTaxInfo = normalizeTaxInfo(draft.companyTaxInfo || {});
+        view.querySelectorAll('[data-settings-tax-field]').forEach((field) => {
+          const key = field.dataset.settingsTaxField || '';
+          if (key) companyTaxInfo[key] = field.value;
+        });
+        onSettingsAction.onSave?.({
+          draftPatch: { companyTaxInfo },
+          successMessage: 'Legal details saved.',
+          syncSiteName: false
+        });
+        return;
+      }
+      onSettingsAction.onSave?.();
+    });
   });
   view.querySelectorAll('[data-settings-save-appearance]').forEach((button) => {
     button.addEventListener('click', () => onSettingsAction.onSaveAppearance?.());
@@ -1058,8 +1057,6 @@ function createDefaultSettings(state = {}) {
     uiScale: 'normal',
     logoutTimeout: 30,
     costingMethod: 'last',
-    lowStockEmailFrequency: 'off',
-    lowStockEmailDispatchTime: '08:00',
     orgId: '',
     corpId: '',
     viewingOnly: false,

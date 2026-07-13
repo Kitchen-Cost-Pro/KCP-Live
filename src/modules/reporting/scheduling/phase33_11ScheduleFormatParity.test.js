@@ -21,7 +21,7 @@ const aliases = [
   ['modifier_sales_log', '', 'modifier_report', 'sales_log'],
   ['low_stock_alert', '', 'stock_control', 'item_detail'],
   ['reorder_report', '', 'stock_control', 'reorder_detail'],
-  ['supplier_reorder_report', '', 'stock_control', 'supplier_reorder'],
+  ['supplier_reorder_report', '', 'stock_control', 'reorder_detail'],
   ['below_par_report', '', 'stock_control', 'reorder_detail'],
   ['menu_health', '', 'menu_recipe_health', 'menu_items'],
   ['recipe_health', '', 'menu_recipe_health', 'recipe_detail'],

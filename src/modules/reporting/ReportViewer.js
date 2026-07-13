@@ -21,6 +21,7 @@ import {
 } from "./exports/exportExcel.js";
 import { downloadReportPdf } from "./exports/exportPdf.js";
 import { getReportDefinition, resolveReportRoute } from "./reports/index.js";
+import { isOrderableStockControlRow } from "./reports/operations/stockControlOrderability.js";
 import { bindReportTooltips } from "./tooltips/tooltipBuilder.js";
 import { renderSavedViewsControl } from "./savedViews/SavedViewsControl.js";
 import { applyDateRangePreset } from "./scheduling/dateRangePresets.js";
@@ -103,7 +104,6 @@ export function renderReportViewer({
       ? [...initialVisibleColumns]
       : null;
   let activeBulkSelection = new Set();
-  let activeBulkSupplier = "";
   let activeSavedViewId = initialSavedViewId || "";
   let activePage = 1;
   let activePageSize = 25;
@@ -270,7 +270,6 @@ export function renderReportViewer({
           renderLowStockBulkActions(
             result,
             activeBulkSelection,
-            activeBulkSupplier,
           ),
         );
       }
@@ -278,6 +277,7 @@ export function renderReportViewer({
         renderReportTable(pagedDisplayResult, {
           selectableRows: bulkLowStock,
           selectedRowKeys: [...activeBulkSelection],
+          isRowSelectable: bulkLowStock ? isOrderableStockControlRow : undefined,
         }),
       );
       root.append(renderReportPagination(pagination));
@@ -290,10 +290,6 @@ export function renderReportViewer({
           getSelection: () => activeBulkSelection,
           setSelection: (next) => {
             activeBulkSelection = new Set(next);
-          },
-          getSupplier: () => activeBulkSupplier,
-          setSupplier: (next) => {
-            activeBulkSupplier = text(next);
           },
           services,
         });
@@ -391,7 +387,6 @@ export function renderReportViewer({
           activeSort = null;
           activeVisibleColumns = null;
           activeBulkSelection = new Set();
-          activeBulkSupplier = "";
           activePage = 1;
           void draw();
         });
@@ -699,28 +694,20 @@ function isBulkLowStockReport(result = {}) {
 function renderLowStockBulkActions(
   result = {},
   selectedKeys = new Set(),
-  supplierValue = "",
 ) {
   const rows = getBulkOrderRows(result.rows);
   const selectedCount = rows.filter((row, index) =>
     selectedKeys.has(getReportRowSelectionKey(row, index)),
   ).length;
-  const suppliers = getBulkOrderSuppliers(rows);
   return htmlToNode(`
-    <section class="reportBulkActions" aria-label="Low stock bulk actions">
+    <section class="reportBulkActions" aria-label="Stock control purchase order actions">
       <div class="reportBulkActions__title">
-        <strong>Create Low Stock Purchase Order</strong>
-        <span>${escapeHtml(String(selectedCount))} selected from ${escapeHtml(String(rows.length))} low-stock item${rows.length === 1 ? "" : "s"}</span>
+        <strong>Create Purchase Order</strong>
+        <span>${escapeHtml(String(selectedCount))} selected from ${escapeHtml(String(rows.length))} orderable item${rows.length === 1 ? "" : "s"}</span>
       </div>
       <div class="reportBulkActions__controls">
-        <button type="button" class="reportBulkActions__button" data-report-lowstock-select-all>Select all visible items</button>
-        <label class="reportBulkActions__supplier">
-          <span>Supplier</span>
-          <select data-report-lowstock-supplier>
-            <option value=""${supplierValue ? "" : " selected"}>Use item supplier where available</option>
-            ${suppliers.map((supplier) => `<option value="${escapeHtml(supplier.id || supplier.name)}"${supplierValue === (supplier.id || supplier.name) ? " selected" : ""}>${escapeHtml(supplier.name)}</option>`).join("")}
-          </select>
-        </label>
+        <button type="button" class="reportBulkActions__button" data-report-lowstock-select-all>Select all orderable items</button>
+        <span class="reportBulkActions__hint">Choose the supplier in the purchase order. Manufactured items remain visible but cannot be ordered.</span>
         <button type="button" class="reportBulkActions__primary" data-report-lowstock-create ${selectedCount ? "" : "disabled"}>Send to Purchase Order</button>
       </div>
     </section>
@@ -750,7 +737,7 @@ function installLowStockBulkActions(root, result = {}, state = {}) {
       .querySelector(".reportBulkActions__title span")
       ?.replaceChildren(
         document.createTextNode(
-          `${selectedCount} selected from ${rows.length} low-stock item${rows.length === 1 ? "" : "s"}`,
+          `${selectedCount} selected from ${rows.length} orderable item${rows.length === 1 ? "" : "s"}`,
         ),
       );
     const createButton = root.querySelector("[data-report-lowstock-create]");
@@ -796,12 +783,6 @@ function installLowStockBulkActions(root, result = {}, state = {}) {
     });
 
   root
-    .querySelector("[data-report-lowstock-supplier]")
-    ?.addEventListener("change", (event) => {
-      state.setSupplier(event.currentTarget.value || "");
-    });
-
-  root
     .querySelector("[data-report-lowstock-create]")
     ?.addEventListener("click", (event) => {
       event.preventDefault();
@@ -810,23 +791,14 @@ function installLowStockBulkActions(root, result = {}, state = {}) {
         selected.has(keyForIndex(index)),
       );
       if (!selectedRows.length) return;
-      const supplierValue = text(state.getSupplier());
-      const selectedSupplier = supplierValue
-        ? getBulkOrderSuppliers(rows).find(
-            (supplier) =>
-              supplier.id === supplierValue || supplier.name === supplierValue,
-          )
-        : null;
       handleReportShortcut(
         encodeURIComponent(
           JSON.stringify({
             action: "createPurchaseOrder",
             source: "stock_control_bulk",
-            supplierId: selectedSupplier?.id || "",
-            supplierName: selectedSupplier?.name || "",
-            items: selectedRows.map((row) =>
-              buildLowStockOrderPayload(row, selectedSupplier),
-            ),
+            supplierId: "",
+            supplierName: "",
+            items: selectedRows.map((row) => buildLowStockOrderPayload(row)),
           }),
         ),
         state.services,
@@ -835,26 +807,10 @@ function installLowStockBulkActions(root, result = {}, state = {}) {
 }
 
 function getBulkOrderRows(rows = []) {
-  return toArray(rows).filter((row) => {
-    const requiredQty = safeNumber(row.requiredQty);
-    const status = text(row.status).toLowerCase();
-    return requiredQty > 0 || /low|critical|below par|reorder/.test(status);
-  });
+  return toArray(rows).filter(isOrderableStockControlRow);
 }
 
-function getBulkOrderSuppliers(rows = []) {
-  const seen = new Map();
-  toArray(rows).forEach((row) => {
-    const name = text(row.supplierName);
-    const id = text(row.supplierId);
-    if (!name && !id) return;
-    const key = id || name;
-    if (!seen.has(key)) seen.set(key, { id, name: name || id });
-  });
-  return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name));
-}
-
-function buildLowStockOrderPayload(row = {}, supplier = null) {
+function buildLowStockOrderPayload(row = {}) {
   return {
     itemId: text(
       row.itemId || row.stockItemId || row.inventoryItemId || row.sourceId,
@@ -867,13 +823,13 @@ function buildLowStockOrderPayload(row = {}, supplier = null) {
     ),
     locationId: text(row.locationId),
     locationName: text(row.locationName),
-    supplierId: text(supplier?.id || row.supplierId),
-    supplierName: text(supplier?.name || row.supplierName),
+    supplierId: '',
+    supplierName: '',
     requiredQty: safeNumber(row.requiredQty || row.reorderQty),
     purchaseUom: text(row.purchaseUom || row.baseUom || row.unit),
     purchaseUomQty: safeNumber(
       row.purchaseUomQty || row.requiredQty || row.reorderQty,
-    ),
+    ) || 1,
     unitCostExVat: safeNumber(
       row.unitCostExVat || row.lastPurchaseCost || row.unitCost,
     ),
@@ -1117,20 +1073,17 @@ function installReportFilterInteractions(form) {
   const closeAll = (except = null) => {
     form
       .querySelectorAll(
-        "[data-report-select].is-open, [data-report-time-picker].is-open, [data-report-date-range].is-open",
+        "[data-report-time-picker].is-open, [data-report-date-range].is-open",
       )
       .forEach((node) => {
         if (node === except) return;
         node.classList.remove("is-open");
         node
-          .querySelector(
-            "[data-report-select-button], [data-report-time-button], [data-report-date-button]",
-          )
+          .querySelector("[data-report-time-button], [data-report-date-button]")
           ?.setAttribute("aria-expanded", "false");
       });
   };
 
-  installCustomSelects(form, closeAll);
   installTimePickers(form, closeAll);
   installDateRangePickers(form, closeAll);
   installDatePresetToggle(form);
@@ -1149,45 +1102,8 @@ function installReportFilterInteractions(form) {
   );
 }
 
-function installCustomSelects(form, closeAll) {
-  form.querySelectorAll("[data-report-select-button]").forEach((button) => {
-    button.addEventListener("click", (event) => {
-      event.preventDefault();
-      const select = button.closest("[data-report-select]");
-      const isOpen = select?.classList.contains("is-open");
-      closeAll(select);
-      select?.classList.toggle("is-open", !isOpen);
-      button.setAttribute("aria-expanded", String(!isOpen));
-    });
-  });
-
-  form.querySelectorAll("[data-report-select-option]").forEach((option) => {
-    option.addEventListener("click", (event) => {
-      event.preventDefault();
-      const select = option.closest("[data-report-select]");
-      const value = option.dataset.value || "";
-      const label = option.dataset.label || option.textContent || "";
-      const input = select?.querySelector("[data-report-select-input]");
-      const labelNode = select?.querySelector("[data-report-select-label]");
-      const button = select?.querySelector("[data-report-select-button]");
-      if (input) {
-        input.value = value;
-        input.dispatchEvent(new Event("change", { bubbles: true }));
-      }
-      if (labelNode) labelNode.textContent = label;
-      select
-        ?.querySelectorAll("[data-report-select-option]")
-        .forEach((node) =>
-          node.classList.toggle("is-selected", node === option),
-        );
-      select?.classList.remove("is-open");
-      button?.setAttribute("aria-expanded", "false");
-    });
-  });
-}
-
 function installDatePresetToggle(form) {
-  const input = form.querySelector('input[name="dateRangeType"]');
+  const input = form.querySelector('[name="dateRangeType"]');
   const customRange = form.querySelector("[data-report-date-range]");
   if (!input || !customRange) return;
   const sync = () => {
@@ -1369,3 +1285,8 @@ function updateDateRangeDisplay(display, startDate, endDate) {
       ? `${startDate} → ${endDate}`
       : startDate || endDate || "";
 }
+
+export const __reportViewerInternals = {
+  getBulkOrderRows,
+  buildLowStockOrderPayload,
+};

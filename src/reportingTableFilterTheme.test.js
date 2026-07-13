@@ -4,7 +4,9 @@ import fs from 'node:fs';
 
 const css = fs.readFileSync(new URL('./styles/reporting.css', import.meta.url), 'utf8');
 const marker = 'Phase 42: Reporting table and filter theme alignment only';
-const scopedTheme = css.slice(css.lastIndexOf(marker));
+const start = css.lastIndexOf(marker);
+const end = css.indexOf('Phase 43:', start);
+const scopedTheme = css.slice(start, end > start ? end : undefined);
 
 test('phase 42 only themes the report filter bar and main data table', () => {
   assert.match(scopedTheme, /\.reportingDashboard \.reportFilters\s*\{/);

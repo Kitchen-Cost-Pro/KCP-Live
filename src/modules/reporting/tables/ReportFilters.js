@@ -463,24 +463,14 @@ function renderTextField({ label, name, value = '', placeholder = '', icon = '',
 
 function renderCustomSelect({ label, name, value = '', placeholder = '', options = [] }) {
   const allOptions = [{ value: '', label: placeholder }, ...toArray(options).filter((option) => option.value || option.label)];
-  const selected = allOptions.find((option) => String(option.value) === String(value)) || allOptions[0];
   return `
     <label class="reportFilterField reportFilterField--select">
       <span class="reportFilterField__label">${escapeHtml(label)}</span>
-      <span class="reportFilterSelect" data-report-select>
-        <input type="hidden" name="${escapeHtml(name)}" value="${escapeHtml(value)}" data-report-select-input />
-        <button type="button" class="reportFilterSelect__button" data-report-select-button aria-haspopup="listbox" aria-expanded="false">
-          <span data-report-select-label>${escapeHtml(selected.label || placeholder)}</span>
-          <span class="reportFilterSelect__chevron" aria-hidden="true">⌄</span>
-        </button>
-        <span class="reportFilterSelect__menu" role="listbox">
-          ${allOptions.map((option) => `
-            <button type="button" role="option" class="reportFilterSelect__option${String(option.value) === String(value) ? ' is-selected' : ''}" data-report-select-option data-value="${escapeHtml(option.value)}" data-label="${escapeHtml(option.label)}">
-              ${escapeHtml(option.label)}
-            </button>
-          `).join('')}
-        </span>
-      </span>
+      <select name="${escapeHtml(name)}" data-report-select-min-width="190" aria-label="${escapeHtml(label)}">
+        ${allOptions.map((option) => `
+          <option value="${escapeHtml(option.value)}" ${String(option.value) === String(value) ? 'selected' : ''}>${escapeHtml(option.label)}</option>
+        `).join('')}
+      </select>
     </label>
   `;
 }

@@ -4,6 +4,7 @@ import { groupBy, sumBy, text, toArray } from '../../engine/grouping.js';
 import { formatMoney } from '../../engine/formatters.js';
 import { buildRowFormulaTooltip } from '../../tooltips/tooltipBuilder.js';
 import { filterCustomerActionableQualityRows } from '../../validators/warningCategories.js';
+export { isManufacturedStockControlRow, isOrderableStockControlRow } from './stockControlOrderability.js';
 
 const money = (value) => formatMoney(value || 0);
 const qty = (value) => safeNumber(value).toFixed(3).replace(/\.000$/, '');
@@ -23,7 +24,6 @@ const locationSummaryColumns = [
   numberColumn('criticalItems', 'Critical Items'),
   numberColumn('belowParItems', 'Below Par Items'),
   moneyColumn('estimatedReorderValue', 'Estimated Reorder Value', 'estimatedReorderValue'),
-  { key: 'topSupplier', label: 'Top Supplier', sortable: true },
   { key: 'lastUpdated', label: 'Last Updated', type: 'date', sortable: true }
 ];
 
@@ -34,8 +34,7 @@ const categorySummaryColumns = [
   numberColumn('criticalItems', 'Critical Items'),
   numberColumn('belowParItems', 'Below Par Items'),
   qtyColumn('requiredQty', 'Required Qty', 'requiredQty'),
-  moneyColumn('estimatedReorderValue', 'Estimated Reorder Value', 'estimatedReorderValue'),
-  { key: 'topSupplier', label: 'Top Supplier', sortable: true }
+  moneyColumn('estimatedReorderValue', 'Estimated Reorder Value', 'estimatedReorderValue')
 ];
 
 const itemDetailColumns = [
@@ -49,14 +48,12 @@ const itemDetailColumns = [
   qtyColumn('requiredQty', 'Required Qty', 'requiredQty', requiredQtyTooltip),
   moneyColumn('unitCostExVat', 'Unit Cost Ex VAT', 'unitCostExVat'),
   moneyColumn('estimatedReorderValue', 'Estimated Reorder Value', 'estimatedReorderValue', estimatedReorderValueTooltip),
-  { key: 'supplierName', label: 'Supplier', sortable: true },
   moneyColumn('lastPurchaseCost', 'Last Purchase Cost', 'unitCostExVat'),
   { key: 'lastPurchasedDate', label: 'Last Purchased Date', type: 'date', sortable: true },
   { key: 'status', label: 'Status', sortable: true, tooltipKey: 'stockControlStatus' }
 ];
 
 const reorderDetailColumns = [
-  { key: 'supplierName', label: 'Supplier', sortable: true },
   { key: 'itemName', label: 'Item', sortable: true },
   { key: 'category', label: 'Category', sortable: true },
   { key: 'locationName', label: 'Location', sortable: true },
@@ -70,19 +67,6 @@ const reorderDetailColumns = [
   moneyColumn('estimatedReorderValue', 'Estimated Reorder Value', 'estimatedReorderValue', estimatedReorderValueTooltip),
   moneyColumn('lastPurchaseCost', 'Last Purchase Cost', 'unitCostExVat'),
   { key: 'lastPurchasedDate', label: 'Last Purchased Date', type: 'date', sortable: true },
-  { key: 'suggestedAction', label: 'Suggested Action', sortable: true }
-];
-
-const supplierReorderColumns = [
-  { key: 'supplierName', label: 'Supplier', sortable: true },
-  { key: 'locationsText', label: 'Locations', sortable: true },
-  numberColumn('itemsToOrder', 'Items To Order'),
-  numberColumn('lowStockItems', 'Low Stock Items'),
-  numberColumn('criticalItems', 'Critical Items'),
-  moneyColumn('estimatedReorderValue', 'Estimated Reorder Value', 'estimatedReorderValue'),
-  { key: 'lastPurchaseDate', label: 'Last Purchase Date', type: 'date', sortable: true },
-  numberColumn('missingCostItems', 'Missing Cost Items'),
-  numberColumn('missingPurchaseUomItems', 'Missing Purchase UOM Items'),
   { key: 'suggestedAction', label: 'Suggested Action', sortable: true }
 ];
 
@@ -108,14 +92,12 @@ const itemDetailExportMapping = {
   requiredQty: 'Required Qty',
   unitCostExVat: 'Unit Cost Ex VAT',
   estimatedReorderValue: 'Estimated Reorder Value',
-  supplierName: 'Supplier',
   lastPurchaseCost: 'Last Purchase Cost',
   lastPurchasedDate: 'Last Purchased Date',
   status: 'Status'
 };
 
 const reorderDetailExportMapping = {
-  supplierName: 'Supplier',
   itemName: 'Item',
   category: 'Category',
   locationName: 'Location',
@@ -129,19 +111,6 @@ const reorderDetailExportMapping = {
   estimatedReorderValue: 'Estimated Reorder Value',
   lastPurchaseCost: 'Last Purchase Cost',
   lastPurchasedDate: 'Last Purchased Date',
-  suggestedAction: 'Suggested Action'
-};
-
-const supplierReorderExportMapping = {
-  supplierName: 'Supplier',
-  locationsText: 'Locations',
-  itemsToOrder: 'Items To Order',
-  lowStockItems: 'Low Stock Items',
-  criticalItems: 'Critical Items',
-  estimatedReorderValue: 'Estimated Reorder Value',
-  lastPurchaseDate: 'Last Purchase Date',
-  missingCostItems: 'Missing Cost Items',
-  missingPurchaseUomItems: 'Missing Purchase UOM Items',
   suggestedAction: 'Suggested Action'
 };
 
@@ -160,33 +129,31 @@ export const stockControlReport = {
   id: 'stock_control',
   title: 'Stock Control',
   section: 'stock_control',
-  description: 'Shows low stock, critical stock, below-par items, reorder requirements, supplier grouping, estimated reorder value, and stock control warnings.',
+  description: 'Shows low stock, critical stock, below-par items, reorder requirements, estimated reorder value, and stock control warnings. Items are not restricted to a saved supplier or ordering location.',
   emptyState: { title: 'No low stock items found', message: 'No low stock items found for the selected filters.' },
   suppressEmptyWarning: true,
   defaultView: 'item_detail',
-  availableViews: ['location_summary', 'category_summary', 'item_detail', 'reorder_detail', 'supplier_reorder', 'warnings'],
+  availableViews: ['location_summary', 'category_summary', 'item_detail', 'reorder_detail', 'warnings'],
   filterConfig: {
-    default: ['search', 'location', 'category', 'supplier', 'status', 'itemType', 'onlyCritical', 'onlyBelowPar', 'missingSupplier', 'missingCost'],
-    warnings: ['search', 'location', 'category', 'supplier', 'itemType', 'warningSeverity']
+    default: ['search', 'location', 'category', 'status', 'itemType', 'onlyCritical', 'onlyBelowPar', 'missingCost'],
+    warnings: ['search', 'location', 'category', 'itemType', 'warningSeverity']
   },
   columns: {
     location_summary: locationSummaryColumns,
     category_summary: categorySummaryColumns,
     item_detail: itemDetailColumns,
     reorder_detail: reorderDetailColumns,
-    supplier_reorder: supplierReorderColumns,
     warnings: warningsColumns
   },
   exportMapping: {
     location_summary: {
-      locationName: 'Location', lowStockItems: 'Low Stock Items', criticalItems: 'Critical Items', belowParItems: 'Below Par Items', estimatedReorderValue: 'Estimated Reorder Value', topSupplier: 'Top Supplier', lastUpdated: 'Last Updated'
+      locationName: 'Location', lowStockItems: 'Low Stock Items', criticalItems: 'Critical Items', belowParItems: 'Below Par Items', estimatedReorderValue: 'Estimated Reorder Value', lastUpdated: 'Last Updated'
     },
     category_summary: {
-      category: 'Category', locationName: 'Location', lowStockItems: 'Low Stock Items', criticalItems: 'Critical Items', belowParItems: 'Below Par Items', requiredQty: 'Required Qty', estimatedReorderValue: 'Estimated Reorder Value', topSupplier: 'Top Supplier'
+      category: 'Category', locationName: 'Location', lowStockItems: 'Low Stock Items', criticalItems: 'Critical Items', belowParItems: 'Below Par Items', requiredQty: 'Required Qty', estimatedReorderValue: 'Estimated Reorder Value'
     },
     item_detail: itemDetailExportMapping,
     reorder_detail: reorderDetailExportMapping,
-    supplier_reorder: supplierReorderExportMapping,
     warnings: warningsExportMapping
   },
   getRows: async ({ workspaceId, filters, services = {}, view = 'item_detail' }) => {
@@ -200,20 +167,19 @@ export const stockControlReport = {
   getTotals: ({ rows, view }) => buildStockControlTotals(rows, view),
   validate: ({ rows, services }) => {
     if (!rows.length) return [];
-    return toArray(services?.reporting?.__lastStockControlPayload?.warnings);
+    return filterCustomerActionableQualityRows(toArray(services?.reporting?.__lastStockControlPayload?.warnings)).filter((row) => !isSupplierOnlyWarning(row));
   }
 };
 
 export function buildStockControlViews(payload = {}) {
   const itemRows = toArray(payload.rows).map(normalizeStockControlItem);
-  const warningRows = filterCustomerActionableQualityRows(toArray(payload.warningRows));
+  const warningRows = filterCustomerActionableQualityRows(toArray(payload.warningRows)).filter((row) => !isSupplierOnlyWarning(row));
   const reorderRows = itemRows.filter((row) => safeNumber(row.requiredQty) > 0 || row.status === 'Critical' || row.status === 'Low' || row.status === 'Below Par');
   return {
     location_summary: buildLocationSummaryRows(itemRows),
     category_summary: buildCategorySummaryRows(itemRows),
     item_detail: itemRows,
     reorder_detail: reorderRows,
-    supplier_reorder: buildSupplierReorderRows(reorderRows),
     warnings: warningRows
   };
 }
@@ -227,7 +193,6 @@ function buildLocationSummaryRows(rows = []) {
     criticalItems: group.filter((row) => row.status === 'Critical').length,
     belowParItems: group.filter((row) => row.status === 'Below Par' || row.status === 'Low' || row.status === 'Critical').length,
     estimatedReorderValue: roundMoney(sumBy(group, (row) => row.estimatedReorderValue)),
-    topSupplier: topText(group, (row) => row.supplierName || 'Missing Supplier'),
     lastUpdated: maxText(group, (row) => row.lastUpdated)
   }));
 }
@@ -242,25 +207,7 @@ function buildCategorySummaryRows(rows = []) {
     criticalItems: group.filter((row) => row.status === 'Critical').length,
     belowParItems: group.filter((row) => row.status === 'Below Par' || row.status === 'Low' || row.status === 'Critical').length,
     requiredQty: singleUomOrBlank(group, 'requiredQty'),
-    estimatedReorderValue: roundMoney(sumBy(group, (row) => row.estimatedReorderValue)),
-    topSupplier: topText(group, (row) => row.supplierName || 'Missing Supplier')
-  }));
-}
-
-function buildSupplierReorderRows(rows = []) {
-  return Array.from(groupBy(rows, (row) => row.supplierId || row.supplierName || 'Missing Supplier').entries()).map(([key, group]) => ({
-    id: `stock-control-supplier:${key}`,
-    supplierId: text(group[0]?.supplierId),
-    supplierName: text(group[0]?.supplierName) || 'Missing Supplier',
-    locationsText: uniqueText(group.map((row) => row.locationName)).join(', '),
-    itemsToOrder: group.length,
-    lowStockItems: group.filter((row) => row.status === 'Low').length,
-    criticalItems: group.filter((row) => row.status === 'Critical').length,
-    estimatedReorderValue: roundMoney(sumBy(group, (row) => row.estimatedReorderValue)),
-    lastPurchaseDate: maxText(group, (row) => row.lastPurchasedDate),
-    missingCostItems: group.filter((row) => safeNumber(row.unitCostExVat) <= 0).length,
-    missingPurchaseUomItems: group.filter((row) => !text(row.purchaseUom) || !safeNumber(row.purchaseUomRatio)).length,
-    suggestedAction: resolveSupplierAction(group)
+    estimatedReorderValue: roundMoney(sumBy(group, (row) => row.estimatedReorderValue))
   }));
 }
 
@@ -297,32 +244,7 @@ function buildStockControlTotals(rows = [], view = 'item_detail') {
     totals.purchaseUomQty = singlePurchaseUomOrBlank(rows);
     totals.estimatedReorderValue = roundMoney(sumBy(rows, (row) => row.estimatedReorderValue));
   }
-  if (view === 'supplier_reorder') {
-    totals.itemsToOrder = sumBy(rows, (row) => row.itemsToOrder);
-    totals.lowStockItems = sumBy(rows, (row) => row.lowStockItems);
-    totals.criticalItems = sumBy(rows, (row) => row.criticalItems);
-    totals.estimatedReorderValue = roundMoney(sumBy(rows, (row) => row.estimatedReorderValue));
-  }
   return totals;
-}
-
-function resolveSupplierAction(rows = []) {
-  if (rows.some((row) => row.status === 'Critical')) return 'Reorder urgently';
-  if (rows.some((row) => row.status === 'Low')) return 'Reorder soon';
-  if (rows.some((row) => !text(row.supplierName))) return 'Missing supplier';
-  if (rows.some((row) => safeNumber(row.unitCostExVat) <= 0)) return 'Missing cost';
-  if (rows.some((row) => !text(row.purchaseUom) || !safeNumber(row.purchaseUomRatio))) return 'Missing purchase UOM';
-  return 'Review par level';
-}
-
-function topText(rows = [], selector) {
-  const counts = new Map();
-  rows.forEach((row) => {
-    const value = text(selector(row));
-    if (!value) return;
-    counts.set(value, (counts.get(value) || 0) + 1);
-  });
-  return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0] || '';
 }
 
 function maxText(rows = [], selector) {
@@ -343,6 +265,14 @@ function singlePurchaseUomOrBlank(rows = []) {
   const uoms = uniqueText(rows.map((row) => row.purchaseUom));
   if (uoms.length > 1) return '';
   return sumBy(rows, (row) => row.purchaseUomQty);
+}
+
+function isSupplierOnlyWarning(row = {}) {
+  const content = [row.issueType, row.issue, row.impact, row.suggestedFix, row.message]
+    .map(text)
+    .join(' ')
+    .toLowerCase();
+  return /supplier/.test(content);
 }
 
 function rememberStockControlPayload(services = {}, payload = {}) {

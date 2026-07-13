@@ -438,5 +438,25 @@ DROP TABLE _kcp_yoco_order_dedupe;
 CREATE UNIQUE INDEX IF NOT EXISTS ux_yoco_orders_workspace_business_key
   ON yoco_orders(workspace_id, yoco_order_id, order_type);
 CREATE INDEX IF NOT EXISTS idx_yoco_order_lines_workspace_order
-  ON yoco_order_lines(workspace_id, yoco_order_id);`
+  ON yoco_order_lines(workspace_id, yoco_order_id);`,
+  // 14 — bind the first accepted Yoco personal API key to this workspace. The
+  // fingerprint survives disconnects so another workspace key cannot be substituted
+  // through the customer UI; KCP admin actions may explicitly replace it.
+  `ALTER TABLE yoco_connections ADD COLUMN api_key_fingerprint TEXT;
+ALTER TABLE yoco_connections ADD COLUMN api_key_locked_at TEXT;
+ALTER TABLE yoco_connections ADD COLUMN api_key_locked_by_uid TEXT;`,
+  // 15 — repair existing Durable Object tenants created before resumable stock-take drafts
+  // were added to the generated baseline. Editing migration 0 does not upgrade those tenants,
+  // so create the draft table and owner lookup explicitly as an append-only migration.
+  `CREATE TABLE IF NOT EXISTS stocktake_drafts (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  location_id TEXT REFERENCES locations(id),
+  raw_json TEXT NOT NULL DEFAULT '{}',
+  saved_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_stocktake_drafts_workspace_user
+  ON stocktake_drafts(workspace_id, user_id, updated_at);`
 ];

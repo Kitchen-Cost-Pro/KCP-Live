@@ -43,7 +43,7 @@ export function renderReportPagination(pagination = {}) {
     <div class="reportPagination__controls">
       <label class="reportPagination__pageSize">
         <span>Rows per page</span>
-        <select data-report-page-size aria-label="Rows per page">
+        <select data-report-page-size data-report-select-placement="top" aria-label="Rows per page">
           ${REPORT_PAGE_SIZES.map((size) => `<option value="${size}" ${size === model.pageSize ? 'selected' : ''}>${size}</option>`).join('')}
         </select>
       </label>

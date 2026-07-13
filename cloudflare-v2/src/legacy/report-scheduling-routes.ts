@@ -26,9 +26,9 @@ import {
 // @ts-ignore JavaScript module shared with the Vite reporting client.
 import { reportToCsv } from '../../../src/modules/reporting/exports/exportCsv.js';
 // @ts-ignore Shared XLSX export mapper used by manual and scheduled reporting.
-import { reportToExcelBytes } from '../../../src/modules/reporting/exports/exportExcel.js';
+import { reportResultsToExcelBytes, reportToExcelBytes } from '../../../src/modules/reporting/exports/exportExcel.js';
 // @ts-ignore Shared PDF export mapper used by manual and scheduled reporting.
-import { reportToPdfBytes } from '../../../src/modules/reporting/exports/exportPdf.js';
+import { reportResultsToPdfBytes, reportToPdfBytes } from '../../../src/modules/reporting/exports/exportPdf.js';
 // @ts-ignore Shared timezone formatter for business-facing report timestamps.
 import { formatReportDateTime } from '../../../src/modules/reporting/engine/timezone.js';
 // @ts-ignore Shared reporting engine used by both interactive and scheduled reports.
@@ -76,7 +76,7 @@ const DELETE_SCHEDULE_PERMISSION = 'action-delete-report-schedules';
 const MANAGE_SCHEDULE_PERMISSION = 'action-manage-report-schedules';
 const FREQUENCIES = new Set(['daily', 'weekly', 'monthly']);
 const FORMATS = new Set(['csv', 'xlsx', 'pdf', 'report_link']);
-const DATE_RANGE_TYPES = new Set(['today', 'yesterday', 'this_week', 'last_week', 'this_month', 'last_month', 'last_7_days', 'last_30_days', 'custom']);
+const DATE_RANGE_TYPES = new Set(['today', 'yesterday', 'last_2_days', 'this_week', 'last_week', 'this_month', 'last_month', 'last_7_days', 'last_14_days', 'last_30_days', 'custom']);
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 const REPORTS: Record<string, { title: string; groupId?: string; views: string[]; source: 'detail' | 'stocktake' | 'sales' | 'sale_usage' | 'modifier' | 'menu' | 'stock' | 'audit' | 'stock_on_hand' | 'purchase_orders' | 'grv' | 'credit_notes' | 'manufacturing' | 'transfers' | 'advanced' }> = {
@@ -84,7 +84,7 @@ const REPORTS: Record<string, { title: string; groupId?: string; views: string[]
   sale_stock_movement: { title: 'Sales Reports - Stock Movement', groupId: 'sales_reports', views: ['summary', 'by_menu_item', 'by_inventory_category', 'by_inventory_item', 'recipe_line_detail', 'transaction_detail'], source: 'sale_usage' },
   modifier_report: { title: 'Modifier Report', views: ['summary', 'gp_tracker', 'by_group', 'by_menu_item', 'by_modifier', 'sales_log'], source: 'modifier' },
   menu_recipe_health: { title: 'Menu & Recipe Health', views: ['overview', 'menu_items', 'recipe_detail', 'pricing', 'warnings'], source: 'menu' },
-  stock_control: { title: 'Stock Control', views: ['location_summary', 'category_summary', 'item_detail', 'reorder_detail', 'supplier_reorder', 'warnings'], source: 'stock' },
+  stock_control: { title: 'Stock Control', views: ['location_summary', 'category_summary', 'item_detail', 'reorder_detail', 'warnings'], source: 'stock' },
   stock_on_hand: { title: 'Stock on Hand', views: ['summary', 'by_location', 'by_category', 'by_item', 'line_detail'], source: 'stock_on_hand' },
   stock_out_forecast: { title: 'Stock-Out Forecast', views: ['forecast_summary', 'risk_matrix', 'by_location', 'by_category', 'by_item', 'usage_detail'], source: 'advanced' },
   price_volatility_analysis: { title: 'Price Volatility Analysis', views: ['summary', 'volatility_matrix', 'by_supplier', 'by_category', 'by_item', 'price_history'], source: 'advanced' },
@@ -96,9 +96,9 @@ const REPORTS: Record<string, { title: string; groupId?: string; views: string[]
   inventory_audit: { title: 'Inventory Audit', views: ['change_log', 'by_user', 'by_entity', 'cost_changes', 'recipe_changes', 'data_quality'], source: 'audit' },
   operations_dashboard: { title: 'Operations Dashboard', views: ['overview', 'by_category', 'by_item', 'movement_ledger'], source: 'detail' },
   detailed_activity: { title: 'Detailed Activity', views: ['ledger'], source: 'detail' },
-  wastage: { title: 'Wastage', views: ['summary', 'by_source', 'by_category', 'by_item', 'line_detail'], source: 'detail' },
+  wastage: { title: 'Wastage', views: ['summary', 'by_source', 'menu_items', 'by_category', 'by_item', 'line_detail'], source: 'detail' },
   stock_take_audit: { title: 'Stock Take Audit', views: ['sessions', 'by_category', 'by_item', 'count_detail', 'variance_movements'], source: 'stocktake' },
-  adjustments: { title: 'Adjustments', views: ['summary', 'by_reason', 'by_category', 'by_item', 'line_detail'], source: 'detail' },
+  adjustments: { title: 'Adjustments', views: ['summary', 'by_source', 'menu_items', 'by_reason', 'by_category', 'by_item', 'line_detail'], source: 'detail' },
   stock_transfers: { title: 'Stock Transfers', views: ['summary', 'by_item', 'by_location', 'line_detail', 'movement_ledger'], source: 'detail' }
 };
 
@@ -143,7 +143,7 @@ const REPORT_SCHEDULE_COLUMNS: Record<string, string> = {
   view_id: `TEXT NOT NULL DEFAULT ''`,
   report_items_json: `TEXT NOT NULL DEFAULT '[]'`,
   filters_json: `TEXT NOT NULL DEFAULT '{}'`,
-  date_range_type: `TEXT NOT NULL DEFAULT 'custom'`,
+  date_range_type: `TEXT NOT NULL DEFAULT 'today'`,
   location_id: `TEXT`,
   location_mode: `TEXT NOT NULL DEFAULT 'all'`,
   location_ids_json: `TEXT NOT NULL DEFAULT '[]'`,
@@ -208,7 +208,7 @@ async function repairReportSchedulingSchema(env: Env) {
     id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, created_by TEXT NOT NULL, name TEXT NOT NULL,
     report_group_id TEXT, report_id TEXT NOT NULL, view_id TEXT NOT NULL,
     report_items_json TEXT NOT NULL DEFAULT '[]', filters_json TEXT NOT NULL DEFAULT '{}',
-    date_range_type TEXT NOT NULL DEFAULT 'custom', location_id TEXT,
+    date_range_type TEXT NOT NULL DEFAULT 'today', location_id TEXT,
     location_mode TEXT NOT NULL DEFAULT 'all', location_ids_json TEXT NOT NULL DEFAULT '[]',
     schedule_frequency TEXT NOT NULL, schedule_day INTEGER, schedule_time TEXT NOT NULL,
     timezone TEXT NOT NULL, format TEXT NOT NULL DEFAULT 'report_link' CHECK (format IN ('csv', 'xlsx', 'pdf', 'report_link')), recipients_json TEXT NOT NULL DEFAULT '[]',
@@ -521,10 +521,12 @@ export async function getReportSchedules(request: Request, env: Env, auth: AuthC
     ? locations
     : locations.filter((location) => allowedLocationIds.includes(location.id));
   const schedules = rows.results.map((row) => enrichScheduleLocations(mapSchedule(row), locations));
+  const users = await listActiveScheduleRecipientUsers(env, workspaceId);
   return json(request, env, {
     ok: true,
     schedules,
     locations: selectableLocations,
+    users,
     allowAllLocations: allowedLocationIds === null,
     schedulerVersion: '33.17'
   });
@@ -548,7 +550,7 @@ export async function postReportSchedule(request: Request, env: Env, auth: AuthC
     await withSchedulingSchemaRetry(env, () => env.DB.prepare(
       `INSERT INTO report_schedules (id, workspace_id, created_by, name, report_group_id, report_id, view_id, report_items_json, filters_json, date_range_type, location_id, location_mode, location_ids_json, schedule_frequency, schedule_day, schedule_time, timezone, format, recipients_json, email_subject, email_message, send_condition_json, is_enabled, last_run_at, next_run_at, created_at, updated_at)
        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,NULL,?24,?25,?25)`
-    ).bind(id, workspaceId, auth.uid, clean(body.name), clean(firstItem.reportGroupId || body.reportGroupId || validation.report.groupId), clean(firstItem.reportId), clean(firstItem.viewId), JSON.stringify(validation.items), JSON.stringify(body.filters || {}), validateDateRangeType(clean(body.dateRangeType || 'custom')), validation.locationMode === 'selected' && validation.locationIds.length === 1 ? validation.locationIds[0] : null, validation.locationMode, JSON.stringify(validation.locationIds), clean(body.scheduleFrequency), body.scheduleDay ?? null, clean(body.scheduleTime), clean(body.timezone), requestedFormat, JSON.stringify(body.recipients || []), clean(body.emailSubject), clean(body.emailMessage), JSON.stringify(body.sendCondition || { type: 'always' }), body.isEnabled === false ? 0 : 1, next, now).run());
+    ).bind(id, workspaceId, auth.uid, clean(body.name), clean(firstItem.reportGroupId || body.reportGroupId || validation.report.groupId), clean(firstItem.reportId), clean(firstItem.viewId), JSON.stringify(validation.items), JSON.stringify(body.filters || {}), validateDateRangeType(clean(body.dateRangeType || 'today')), validation.locationMode === 'selected' && validation.locationIds.length === 1 ? validation.locationIds[0] : null, validation.locationMode, JSON.stringify(validation.locationIds), clean(body.scheduleFrequency), body.scheduleDay ?? null, clean(body.scheduleTime), clean(body.timezone), requestedFormat, JSON.stringify(body.recipients || []), clean(body.emailSubject), clean(body.emailMessage), JSON.stringify(body.sendCondition || { type: 'always' }), body.isEnabled === false ? 0 : 1, next, now).run());
   } catch (cause) {
     return error(request, env, 500, schedulePersistenceMessage(cause));
   }
@@ -579,7 +581,7 @@ export async function putReportSchedule(request: Request, env: Env, auth: AuthCo
   try {
     await withSchedulingSchemaRetry(env, () => env.DB.prepare(
       `UPDATE report_schedules SET name=?1, report_group_id=?2, report_id=?3, view_id=?4, report_items_json=?5, filters_json=?6, date_range_type=?7, location_id=?8, location_mode=?9, location_ids_json=?10, schedule_frequency=?11, schedule_day=?12, schedule_time=?13, timezone=?14, format=?15, recipients_json=?16, email_subject=?17, email_message=?18, send_condition_json=?19, is_enabled=?20, next_run_at=?21, updated_at=?22 WHERE id=?23 AND workspace_id=?24`
-    ).bind(clean(merged.name), clean(firstItem.reportGroupId || merged.reportGroupId || validation.report.groupId), clean(firstItem.reportId), clean(firstItem.viewId), JSON.stringify(validation.items), JSON.stringify(merged.filters || {}), validateDateRangeType(clean(merged.dateRangeType || 'custom')), validation.locationMode === 'selected' && validation.locationIds.length === 1 ? validation.locationIds[0] : null, validation.locationMode, JSON.stringify(validation.locationIds), clean(merged.scheduleFrequency), merged.scheduleDay ?? null, clean(merged.scheduleTime), clean(merged.timezone), requestedFormat, JSON.stringify(merged.recipients || []), clean(merged.emailSubject), clean(merged.emailMessage), JSON.stringify(merged.sendCondition || { type: 'always' }), isEnabled ? 1 : 0, next, nowIso(), scheduleId, workspaceId).run());
+    ).bind(clean(merged.name), clean(firstItem.reportGroupId || merged.reportGroupId || validation.report.groupId), clean(firstItem.reportId), clean(firstItem.viewId), JSON.stringify(validation.items), JSON.stringify(merged.filters || {}), validateDateRangeType(clean(merged.dateRangeType || 'today')), validation.locationMode === 'selected' && validation.locationIds.length === 1 ? validation.locationIds[0] : null, validation.locationMode, JSON.stringify(validation.locationIds), clean(merged.scheduleFrequency), merged.scheduleDay ?? null, clean(merged.scheduleTime), clean(merged.timezone), requestedFormat, JSON.stringify(merged.recipients || []), clean(merged.emailSubject), clean(merged.emailMessage), JSON.stringify(merged.sendCondition || { type: 'always' }), isEnabled ? 1 : 0, next, nowIso(), scheduleId, workspaceId).run());
   } catch (cause) {
     return error(request, env, 500, schedulePersistenceMessage(cause));
   }
@@ -675,7 +677,7 @@ async function validateScheduleInput(request: Request, env: Env, auth: AuthConte
   const format = clean(body.format).toLowerCase();
   if (!FORMATS.has(format)) return error(request, env, 400, 'Unsupported scheduled report export format.');
   const recipients = Array.isArray(body.recipients) ? body.recipients.map((v) => clean(v).toLowerCase()).filter(Boolean) : [];
-  try { validateEmails(recipients); validateDateRangeType(clean(body.dateRangeType || 'custom')); } catch (cause) { return error(request, env, 400, (cause as Error).message); }
+  try { validateEmails(recipients); validateDateRangeType(clean(body.dateRangeType || 'today')); } catch (cause) { return error(request, env, 400, (cause as Error).message); }
   const locationMode = normalizeLocationMode(body.locationMode);
   const locationIds = normalizeLocationIds(body);
   const allowedLocations = await getUserAllowedLocationIds(env, auth, workspaceId);
@@ -711,7 +713,7 @@ async function executeSchedule(request: Request, env: Env, auth: AuthContext, wo
     for (const location of locations) await assertLocationAccess(env, auth, workspaceId, clean(location.id), 'scheduled_report_run');
     const outputCount = items.length * locations.length;
     if (schedule.format !== 'report_link' && outputCount > 60) throw new Error('This schedule would create more than 60 attachments. Select fewer report views or locations.');
-    const range = resolveScheduledRelativeRange(schedule.dateRangeType || 'custom', schedule.filters || {}, schedule.timezone, new Date());
+    const range = resolveScheduledRelativeRange(schedule.dateRangeType || 'today', schedule.filters || {}, schedule.timezone, new Date());
     const outputs: Row[] = [];
     let sourceSequence = 0;
 
@@ -730,7 +732,7 @@ async function executeSchedule(request: Request, env: Env, auth: AuthContext, wo
           scheduleFilters: schedule.filters || {},
           itemFilters,
           range,
-          dateRangeType: schedule.dateRangeType || 'custom',
+          dateRangeType: schedule.dateRangeType || 'today',
           location: location as any
         }) as Row;
         sourceSequence += 1;
@@ -959,25 +961,34 @@ async function buildScheduledAttachments(format: string, outputs: Row[]): Promis
   const normalized = clean(format || 'report_link').toLowerCase();
   if (normalized === 'report_link') return [];
   if (!['csv', 'xlsx', 'pdf'].includes(normalized)) throw new Error('Unsupported scheduled report attachment format.');
+  if (normalized === 'csv') return outputs.map((output) => buildCsvAttachment(output.payload, output));
+
+  const groups = groupScheduledOutputsByReport(outputs);
   const attachments: ScheduledAttachment[] = [];
-  for (const output of outputs) {
-    if (normalized === 'csv') {
-      attachments.push(buildCsvAttachment(output.payload, output));
-      continue;
-    }
+  for (const group of groups) {
     if (normalized === 'xlsx') {
-      attachments.push(await buildXlsxAttachment(output.payload, output));
+      attachments.push(await buildCombinedXlsxAttachment(group));
       continue;
     }
-    attachments.push(await buildPdfAttachment(output.payload, output));
+    attachments.push(await buildCombinedPdfAttachment(group));
   }
   return attachments;
 }
 
-function attachmentBaseName(result: Row, output: Row = {}) {
+function groupScheduledOutputsByReport(outputs: Row[]) {
+  const grouped = new Map<string, Row[]>();
+  for (const output of outputs) {
+    const key = `${clean(output.reportId)}::${clean(output.locationId || output.locationName)}`;
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key)?.push(output);
+  }
+  return [...grouped.values()];
+}
+
+function attachmentBaseName(result: Row, output: Row = {}, { includeView = true } = {}) {
   const reportId = clean(output.reportId || result.id || result.report?.id);
   const reportName = result.title || result.report?.title || REPORTS[reportId]?.title || reportId;
-  const suffix = [formatIdentifier(output.viewId), clean(output.locationName)].filter(Boolean).join('-');
+  const suffix = [includeView ? formatIdentifier(output.viewId) : '', clean(output.locationName)].filter(Boolean).join('-');
   const date = clean(output.filters?.to || output.filters?.endDate || result.filters?.to || result.filters?.endDate || new Date().toISOString().slice(0, 10));
   return `${safeFileName(`${reportName}-${suffix}`)}-${safeFileName(date)}`;
 }
@@ -1002,6 +1013,41 @@ async function buildPdfAttachment(result: Row, output: Row = {}): Promise<Schedu
   return {
     filename: `${attachmentBaseName(result, output)}.pdf`,
     content: await reportToPdfBytes(result, { formatted: true }),
+    contentType: 'application/pdf'
+  };
+}
+
+function outputPayloadForCombinedAttachment(output: Row) {
+  return {
+    ...(output.payload || {}),
+    title: clean(output.reportTitle || output.payload?.title || output.payload?.report?.title),
+    view: clean(output.viewId || output.payload?.view),
+    filters: output.filters || output.payload?.filters || {},
+    meta: {
+      ...(output.payload?.meta || {}),
+      locationId: clean(output.locationId),
+      locationName: clean(output.locationName),
+      generatedAt: clean(output.sourceGeneratedAt || output.payload?.meta?.generatedAt)
+    }
+  };
+}
+
+async function buildCombinedXlsxAttachment(outputs: Row[]): Promise<ScheduledAttachment> {
+  const first = outputs[0] || {};
+  const payloads = outputs.map(outputPayloadForCombinedAttachment);
+  return {
+    filename: `${attachmentBaseName(first.payload || {}, first, { includeView: false })}.xlsx`,
+    content: await reportResultsToExcelBytes(payloads, { formatted: true }),
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  };
+}
+
+async function buildCombinedPdfAttachment(outputs: Row[]): Promise<ScheduledAttachment> {
+  const first = outputs[0] || {};
+  const payloads = outputs.map(outputPayloadForCombinedAttachment);
+  return {
+    filename: `${attachmentBaseName(first.payload || {}, first, { includeView: false })}.pdf`,
+    content: await reportResultsToPdfBytes(payloads, { formatted: true, title: clean(first.reportTitle) }),
     contentType: 'application/pdf'
   };
 }
@@ -1130,6 +1176,31 @@ async function listActiveScheduleLocations(env: Env, workspaceId: string) {
   const rows = await env.DB.prepare(`SELECT id, COALESCE(NULLIF(display_name,''), NULLIF(name,''), NULLIF(external_name,''), id) AS name FROM locations WHERE workspace_id=?1 AND COALESCE(active,1)=1 ORDER BY COALESCE(is_default,0) DESC, lower(COALESCE(NULLIF(display_name,''), NULLIF(name,''), NULLIF(external_name,''), id)) ASC`).bind(workspaceId).all<Row>();
   return rows.results.map((row) => ({ id: clean(row.id), name: clean(row.name || row.id) })).filter((row) => row.id);
 }
+async function listActiveScheduleRecipientUsers(env: Env, workspaceId: string) {
+  try {
+    const rows = await env.CENTRAL_DB.prepare(
+      `SELECT email, COALESCE(NULLIF(display_name,''), email) AS name
+         FROM workspace_members
+        WHERE workspace_id=?1
+          AND lower(COALESCE(status, 'active')) NOT IN ('removed', 'deleted', 'disabled', 'inactive')
+          AND email IS NOT NULL
+          AND trim(email)<>''
+        ORDER BY lower(COALESCE(NULLIF(display_name,''), email)) ASC, lower(email) ASC`
+    ).bind(workspaceId).all<Row>();
+    const seen = new Set<string>();
+    return (rows.results || []).map((row) => ({
+      email: clean(row.email),
+      name: clean(row.name || row.email)
+    })).filter((user) => {
+      const key = user.email.toLowerCase();
+      if (!EMAIL_RE.test(user.email) || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  } catch {
+    return [];
+  }
+}
 function enrichScheduleLocations(schedule: Row, activeLocations: Array<{ id: string; name: string }>) {
   const byId = new Map(activeLocations.map((location) => [location.id, location.name]));
   const selectedIds = Array.isArray(schedule.locationIds) ? schedule.locationIds.map((value: unknown) => clean(value)).filter(Boolean) : [];
@@ -1188,7 +1259,7 @@ function mapSchedule(row: Row) {
     id: clean(row.id), workspaceId: clean(row.workspace_id), createdBy: clean(row.created_by), name: clean(row.name),
     reportGroupId: clean(row.report_group_id), reportId: clean(row.report_id), viewId: clean(row.view_id),
     reportItems: normalizedItems, filters: parseJson<Row>(row.filters_json, row.filters || {}),
-    dateRangeType: clean(row.date_range_type || row.dateRangeType || 'custom'), locationId: clean(row.location_id || row.locationId),
+    dateRangeType: clean(row.date_range_type || row.dateRangeType || 'today'), locationId: clean(row.location_id || row.locationId),
     locationMode: clean(row.location_mode || row.locationMode).toLowerCase() === 'selected' || locationIds.length ? 'selected' : 'all', locationIds: Array.from(new Set(locationIds.map((value) => clean(value)).filter(Boolean))),
     scheduleFrequency: clean(row.schedule_frequency || row.scheduleFrequency), scheduleDay: row.schedule_day ?? row.scheduleDay ?? null,
     scheduleTime: clean(row.schedule_time || row.scheduleTime), timezone: clean(row.timezone),

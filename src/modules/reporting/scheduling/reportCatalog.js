@@ -42,11 +42,24 @@ function buildCatalogEntry(report, group = null, label = '') {
     title: label || report.title || report.id,
     fullTitle: group ? `${group.title} · ${label || report.title || report.id}` : (report.title || report.id),
     defaultView: report.defaultView,
+    description: report.description || '',
+    tooltip: buildCatalogTooltip(report, group, label),
     views: (report.availableViews || [report.defaultView]).filter(Boolean).map((view) => ({
       value: view,
       label: formatViewLabel(view)
     }))
   };
+}
+
+
+function buildCatalogTooltip(report = {}, group = null, label = '') {
+  const title = label || report.title || report.id || 'Report';
+  const views = (report.availableViews || [report.defaultView]).filter(Boolean).map(formatViewLabel);
+  const parts = [];
+  if (report.description) parts.push(report.description);
+  if (group?.title) parts.push(`Report group: ${group.title}.`);
+  if (views.length) parts.push(`Views: ${views.join(', ')}.`);
+  return parts.join(' ') || `${title} reporting view.`;
 }
 
 export function formatViewLabel(view = '') {

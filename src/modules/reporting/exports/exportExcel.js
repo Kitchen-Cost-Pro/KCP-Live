@@ -60,6 +60,12 @@ export async function reportResultsToExcelWorkbook(results = [], options = {}) {
   return { XLSX, workbook };
 }
 
+export async function reportResultsToExcelBytes(results = [], options = {}) {
+  const { XLSX, workbook } = await reportResultsToExcelWorkbook(results, options);
+  const bytes = XLSX.write(workbook, { type: 'array', bookType: 'xlsx', compression: true });
+  return bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+}
+
 export async function downloadReportAllViewsExcel(results = [], options = {}) {
   const { XLSX, workbook } = await reportResultsToExcelWorkbook(results, options);
   const first = (Array.isArray(results) ? results : [results]).find(Boolean) || {};

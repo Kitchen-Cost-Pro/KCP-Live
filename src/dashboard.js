@@ -1,11 +1,11 @@
 import styles from './styles/dashboard.module.css';
 import {
-  getDashboardDateRange,
   loadDashboardReportingModel,
   reconcileDashboardLocationNames
 } from './dashboardData.js';
 import { fetchWorkspaceLocationOptions } from './services/locationService.js';
 import { mergeCanonicalLocations } from './utils/locationDisplayName.js';
+import { positionDashboardSelectMenu } from './utils/dashboardDropdown.js';
 
 const DASHBOARD_CACHE_TTL = 60_000;
 const dashboardCache = new Map();
@@ -17,6 +17,9 @@ const SERIES = [
 ];
 const SUPPLIER_COLORS = ['#00e5a0', '#f5a623', '#7b61ff', '#00b3ff', '#ff4455'];
 const RANGE_PRESETS = [
+  ['today', 'Today'],
+  ['this_week', 'This Week'],
+  ['two_weeks', '2 Weeks'],
   ['month', 'This month'],
   ['3m', 'Last 3 months'],
   ['6m', 'Last 6 months'],
@@ -28,7 +31,7 @@ const RANGE_PRESETS = [
 export function renderDashboard({ state = {}, onNavigate, onStockFilterChange, onThemeToggle } = {}) {
   const workspaceId = String(state.workspace?.id || '');
   const workspaceName = state.workspace?.siteName || state.source?.settings?.siteName || 'Workspace';
-  const initialRange = getPresetRange('6m');
+  const initialRange = getPresetRange('today');
   const view = document.createElement('section');
   view.className = styles.shell;
   view.setAttribute('aria-label', 'Main dashboard');
@@ -49,7 +52,7 @@ export function renderDashboard({ state = {}, onNavigate, onStockFilterChange, o
     locationOptions: [],
     inventoryLocationId: '',
     openSelect: '',
-    rangePreset: '6m',
+    rangePreset: 'today',
     from: initialRange.from,
     to: initialRange.to,
     calendarOpen: false,
@@ -206,11 +209,17 @@ function startOfCalendarMonth(value = '') {
     : new Date(now.getFullYear(), now.getMonth(), 1);
 }
 
-function getPresetRange(preset = '6m', now = new Date()) {
+function getPresetRange(preset = 'today', now = new Date()) {
   const anchor = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  let from = new Date(anchor.getFullYear(), anchor.getMonth() - 5, 1);
+  let from = new Date(anchor);
+  if (preset === 'this_week') {
+    const mondayOffset = (anchor.getDay() + 6) % 7;
+    from = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() - mondayOffset);
+  }
+  if (preset === 'two_weeks') from = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() - 13);
   if (preset === 'month') from = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
   if (preset === '3m') from = new Date(anchor.getFullYear(), anchor.getMonth() - 2, 1);
+  if (preset === '6m') from = new Date(anchor.getFullYear(), anchor.getMonth() - 5, 1);
   if (preset === '12m') from = new Date(anchor.getFullYear(), anchor.getMonth() - 11, 1);
   if (preset === 'ytd') from = new Date(anchor.getFullYear(), 0, 1);
   return { from: formatDateInput(from), to: formatDateInput(anchor) };
@@ -357,11 +366,7 @@ function renderModel(view, ui, context) {
           </div>
         </div>
         <div class="${styles.topbarActions}">
-          <label class="${styles.searchBox}">
-            ${icon('search', 13)}
-            <input type="search" value="${escapeAttribute(ui.search)}" placeholder="Search SKU or item…" aria-label="Search dashboard stock items" data-dashboard-search>
-          </label>
-          <button type="button" class="${styles.iconButton}" aria-label="Refresh dashboard" title="Refresh dashboard" data-dashboard-refresh>${icon('refresh', 15)}</button>
+          <button type="button" class="${styles.refreshButton}" aria-label="Refresh dashboard" title="Refresh dashboard" data-dashboard-refresh>${icon('refresh', 14)}<span>Refresh</span></button>
           <div class="${styles.notificationWrap}" data-dashboard-notification-wrap>
             <button type="button" class="${styles.iconButton} ${ui.notificationsOpen ? styles.iconButtonActive : ''}" aria-label="Open stock notifications" title="Stock notifications" aria-expanded="${ui.notificationsOpen}" aria-controls="dashboard-stock-notifications" data-dashboard-alert-button>
               ${icon('bell', 15)}
@@ -472,13 +477,6 @@ function bindDashboardEvents(view, ui, context) {
   view.__dashboardAbortController = controller;
   const { signal } = controller;
 
-  const search = view.querySelector('[data-dashboard-search]');
-  search?.addEventListener('input', (event) => {
-    ui.search = event.target.value;
-    ui.visibleRows = 75;
-    renderInventory(view, ui, context);
-  }, { signal });
-
   const closeMenus = (except = '') => {
     view.querySelectorAll('[data-dashboard-select-menu]').forEach((menu) => {
       const kind = menu.dataset.dashboardSelectMenu || '';
@@ -488,6 +486,7 @@ function bindDashboardEvents(view, ui, context) {
       view.querySelector(`[data-dashboard-select-button="${kind}"]`)?.setAttribute('aria-expanded', String(keepOpen));
     });
     ui.openSelect = except;
+    if (except) positionDashboardSelectMenu(view, except);
   };
 
   view.querySelectorAll('[data-dashboard-select-button]').forEach((button) => {
@@ -521,7 +520,7 @@ function bindDashboardEvents(view, ui, context) {
         return;
       }
       if (kind !== 'range') return;
-      ui.rangePreset = value || '6m';
+      ui.rangePreset = value || 'today';
       ui.pendingRangeStart = '';
       if (ui.rangePreset === 'custom') {
         ui.calendarOpen = true;
@@ -611,6 +610,9 @@ function bindDashboardEvents(view, ui, context) {
     renderInventory(view, ui, context);
   }, { signal });
   view.querySelector('[data-dashboard-body]')?.addEventListener('scroll', () => hideChartTooltip(view), { passive: true, signal });
+  window.addEventListener('resize', () => {
+    if (ui.openSelect) positionDashboardSelectMenu(view, ui.openSelect);
+  }, { passive: true, signal });
 
   document.addEventListener('pointerdown', (event) => {
     if (!document.contains(view)) {
@@ -768,8 +770,6 @@ function reviewDashboardStock(view, ui, context, { criticalOnly = false } = {}) 
   ui.sortDir = 'desc';
   ui.visibleRows = 75;
   renderInventory(view, ui, context);
-  const search = view.querySelector('[data-dashboard-search]');
-  if (search) search.value = '';
   panel?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   if (criticalOnly) panel?.setAttribute('data-dashboard-reviewing', 'critical');
 }
@@ -930,7 +930,7 @@ function renderInventory(view, ui, context) {
   countRoot.textContent = `${filtered.length.toLocaleString('en-ZA')} item${filtered.length === 1 ? '' : 's'} shown${selectedInventoryLocation ? ` · ${selectedInventoryLocation.name}` : ''}`;
 
   if (!visible.length) {
-    tableRoot.innerHTML = `<div class="${styles.tableEmpty}">${icon('search', 20)}<strong>No stock items match this location</strong><span>Change the location, search, or category filter.</span></div>`;
+    tableRoot.innerHTML = `<div class="${styles.tableEmpty}">${icon('search', 20)}<strong>No stock items match this location</strong><span>Change the location or category filter.</span></div>`;
     footerRoot.innerHTML = `<button type="button" data-dashboard-open-stock>Open Stock Items</button>`;
   } else {
     const columns = [

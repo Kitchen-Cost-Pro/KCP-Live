@@ -74,7 +74,7 @@ test('Phase 20 scheduling catalog contains grouped child reports and their inter
   assert.ok(payment.views.some((view) => view.value === 'daily_summary'));
   assert.ok(movement.views.some((view) => view.value === 'by_menu_item'));
   assert.ok(modifier.views.some((view) => view.value === 'gp_tracker'));
-  assert.ok(stock.views.some((view) => view.value === 'supplier_reorder'));
+  assert.equal(stock.views.some((view) => view.value === 'supplier_reorder'), false);
 });
 
 test('every report and view exposed by Scheduling is accepted by the Worker registry', () => {
@@ -173,12 +173,12 @@ test('Phase 20 emailed report links restore the reporting route, selected view, 
 test('Phase 20 backend schedule runner uses the shared report runner and manual export mappers', () => {
   assert.match(workerSource, /import \{ runReport \} from .*reportRunner\.js/);
   assert.match(workerSource, /import \{ reportToCsv \} from .*exportCsv\.js/);
-  assert.match(workerSource, /import \{ reportToExcelBytes \} from .*exportExcel\.js/);
-  assert.match(workerSource, /import \{ reportToPdfBytes \} from .*exportPdf\.js/);
+  assert.match(workerSource, /import \{ reportResultsToExcelBytes, reportToExcelBytes \} from .*exportExcel\.js/);
+  assert.match(workerSource, /import \{ reportResultsToPdfBytes, reportToPdfBytes \} from .*exportPdf\.js/);
   assert.match(workerSource, /await runReport\(reportId/);
   assert.match(workerSource, /reportToCsv\(result/);
-  assert.match(workerSource, /reportToExcelBytes\(result/);
-  assert.match(workerSource, /reportToPdfBytes\(result/);
+  assert.match(workerSource, /reportResultsToExcelBytes\(payloads/);
+  assert.match(workerSource, /reportResultsToPdfBytes\(payloads/);
   assert.doesNotMatch(workerSource, /mockReportData|VITE_REPORTING_USE_MOCK_DATA\s*=\s*true/);
 });
 
@@ -205,8 +205,9 @@ test('Phase 20 scheduled report packs include metadata, separate location links,
   assert.match(workerSource, /for \(const location of locations\)/);
   assert.match(workerSource, /buildScheduledAttachments\(schedule\.format, outputs\)/);
   assert.match(workerSource, /buildCsvAttachment\(output\.payload, output\)/);
-  assert.match(workerSource, /buildXlsxAttachment\(output\.payload, output\)/);
-  assert.match(workerSource, /buildPdfAttachment\(output\.payload, output\)/);
+  assert.match(workerSource, /groupScheduledOutputsByReport\(outputs\)/);
+  assert.match(workerSource, /buildCombinedXlsxAttachment\(group\)/);
+  assert.match(workerSource, /buildCombinedPdfAttachment\(group\)/);
   assert.match(workerSource, /text\/csv; charset=utf-8/);
   assert.match(workerSource, /application\/vnd\.openxmlformats-officedocument\.spreadsheetml\.sheet/);
   assert.match(workerSource, /application\/pdf/);

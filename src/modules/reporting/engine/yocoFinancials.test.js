@@ -127,16 +127,18 @@ test('Yoco processing fees can be summed from nested payment fee Money objects',
   assert.equal(sumYocoProcessingFees(order), 10);
   const result = deriveYocoFinancialAmounts({ persistedTotal: 560, raw: order, configuredVatRate: 15 });
   assert.equal(result.feeAmount, 10);
-  assert.equal(result.payoutAmount, 550);
+  assert.equal(result.payoutAmount, 476.96);
+  assert.equal(result.payoutAmount, result.netAmount + result.tipAmount - result.refundNetAmount - result.feeAmount);
 });
 
-test('refund rows preserve the refund amount without reporting false positive sales VAT', () => {
+test('refund rows preserve the refund amount and reverse the VAT-exclusive bill values', () => {
   const result = deriveYocoFinancialAmounts({ persistedTotal: -140, orderType: 'refund', status: 'refunded', configuredVatRate: 15, raw: {} });
   assert.equal(result.grossAmount, 0);
-  assert.equal(result.vatAmount, 0);
-  assert.equal(result.netAmount, 0);
+  assert.equal(result.vatAmount, -18.26);
+  assert.equal(result.netAmount, -121.74);
   assert.equal(result.refundAmount, 140);
-  assert.equal(result.payoutAmount, -140);
+  assert.equal(result.payoutAmount, -121.74);
+  assert.equal(result.refundAmount, Math.abs(result.netAmount) + Math.abs(result.vatAmount));
 });
 
 test('refund rows do not double count the parent order discount, tip, or processing fee', () => {
@@ -158,7 +160,9 @@ test('refund rows do not double count the parent order discount, tip, or process
   assert.equal(result.tipAmount, 0);
   assert.equal(result.feeAmount, 0);
   assert.equal(result.refundAmount, 140);
-  assert.equal(result.payoutAmount, -140);
+  assert.equal(result.vatAmount, -18.26);
+  assert.equal(result.netAmount, -121.74);
+  assert.equal(result.payoutAmount, -121.74);
 });
 
 test('known Checkout scalar fields are converted from cents without magnitude guessing', () => {

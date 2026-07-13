@@ -11,11 +11,11 @@ const dailySummaryColumns = [
   { key: 'date', label: 'Date', type: 'date', sortable: true },
   { key: 'locationName', label: 'Location', sortable: true },
   { key: 'grossSales', label: 'Gross Sales', type: 'money', align: 'right', tooltipKey: 'grossSales', sortable: true },
-  { key: 'discounts', label: 'Discounts', type: 'money', align: 'right', tooltipKey: 'discounts', sortable: true },
-  { key: 'refunds', label: 'Refunds', type: 'money', align: 'right', tooltipKey: 'refunds', sortable: true },
   { key: 'vat', label: 'VAT', type: 'money', align: 'right', tooltipKey: 'salesVat', cellTooltip: salesVatTooltip, sortable: true },
   { key: 'netSales', label: 'Net Sales', type: 'money', align: 'right', tooltipKey: 'netSales', cellTooltip: netSalesTooltip, sortable: true },
   { key: 'tips', label: 'Tips', type: 'money', align: 'right', tooltipKey: 'tips', sortable: true },
+  { key: 'refunds', label: 'Refunds', type: 'money', align: 'right', tooltipKey: 'refunds', sortable: true },
+  { key: 'discounts', label: 'Discounts', type: 'money', align: 'right', tooltipKey: 'discounts', sortable: true },
   { key: 'fees', label: 'Fees', type: 'money', align: 'right', tooltipKey: 'fees', sortable: true },
   { key: 'payoutAmount', label: 'Payout Amount', type: 'money', align: 'right', tooltipKey: 'payoutAmount', cellTooltip: payoutTooltip, sortable: true },
   { key: 'transactionCount', label: 'Transaction Count', type: 'number', align: 'right', sortable: true }
@@ -25,11 +25,11 @@ const byPaymentMethodColumns = [
   { key: 'paymentMethod', label: 'Payment Method', sortable: true },
   { key: 'locationName', label: 'Location', sortable: true },
   { key: 'grossSales', label: 'Gross Sales', type: 'money', align: 'right', tooltipKey: 'grossSales', sortable: true },
-  { key: 'discounts', label: 'Discounts', type: 'money', align: 'right', tooltipKey: 'discounts', sortable: true },
-  { key: 'refunds', label: 'Refunds', type: 'money', align: 'right', tooltipKey: 'refunds', sortable: true },
   { key: 'vat', label: 'VAT', type: 'money', align: 'right', tooltipKey: 'salesVat', cellTooltip: salesVatTooltip, sortable: true },
   { key: 'netSales', label: 'Net Sales', type: 'money', align: 'right', tooltipKey: 'netSales', cellTooltip: netSalesTooltip, sortable: true },
   { key: 'tips', label: 'Tips', type: 'money', align: 'right', tooltipKey: 'tips', sortable: true },
+  { key: 'refunds', label: 'Refunds', type: 'money', align: 'right', tooltipKey: 'refunds', sortable: true },
+  { key: 'discounts', label: 'Discounts', type: 'money', align: 'right', tooltipKey: 'discounts', sortable: true },
   { key: 'fees', label: 'Fees', type: 'money', align: 'right', tooltipKey: 'fees', sortable: true },
   { key: 'payoutAmount', label: 'Payout Amount', type: 'money', align: 'right', tooltipKey: 'payoutAmount', cellTooltip: payoutTooltip, sortable: true },
   { key: 'transactionCount', label: 'Transaction Count', type: 'number', align: 'right', sortable: true },
@@ -39,11 +39,11 @@ const byPaymentMethodColumns = [
 const byLocationColumns = [
   { key: 'locationName', label: 'Location', sortable: true },
   { key: 'grossSales', label: 'Gross Sales', type: 'money', align: 'right', tooltipKey: 'grossSales', sortable: true },
-  { key: 'discounts', label: 'Discounts', type: 'money', align: 'right', tooltipKey: 'discounts', sortable: true },
-  { key: 'refunds', label: 'Refunds', type: 'money', align: 'right', tooltipKey: 'refunds', sortable: true },
   { key: 'vat', label: 'VAT', type: 'money', align: 'right', tooltipKey: 'salesVat', cellTooltip: salesVatTooltip, sortable: true },
   { key: 'netSales', label: 'Net Sales', type: 'money', align: 'right', tooltipKey: 'netSales', cellTooltip: netSalesTooltip, sortable: true },
   { key: 'tips', label: 'Tips', type: 'money', align: 'right', tooltipKey: 'tips', sortable: true },
+  { key: 'refunds', label: 'Refunds', type: 'money', align: 'right', tooltipKey: 'refunds', sortable: true },
+  { key: 'discounts', label: 'Discounts', type: 'money', align: 'right', tooltipKey: 'discounts', sortable: true },
   { key: 'fees', label: 'Fees', type: 'money', align: 'right', tooltipKey: 'fees', sortable: true },
   { key: 'payoutAmount', label: 'Payout Amount', type: 'money', align: 'right', tooltipKey: 'payoutAmount', cellTooltip: payoutTooltip, sortable: true },
   { key: 'transactionCount', label: 'Transaction Count', type: 'number', align: 'right', sortable: true },
@@ -56,13 +56,13 @@ const transactionDetailColumns = [
   { key: 'receiptNumber', label: 'Receipt Number', sortable: true },
   { key: 'locationName', label: 'Location', sortable: true },
   { key: 'paymentMethod', label: 'Payment Method', sortable: true },
-  { key: 'grossAmount', label: 'Gross Amount', type: 'money', align: 'right', tooltipKey: 'grossSales', sortable: true },
+  { key: 'grossAmount', label: 'Gross Sales', type: 'money', align: 'right', tooltipKey: 'grossSales', sortable: true },
   { key: 'vatAmount', label: 'VAT', type: 'money', align: 'right', tooltipKey: 'salesVat', cellTooltip: salesVatDetailTooltip, sortable: true },
-  { key: 'netAmount', label: 'Net Amount', type: 'money', align: 'right', tooltipKey: 'netSales', cellTooltip: netAmountDetailTooltip, sortable: true },
-  { key: 'discountAmount', label: 'Discount Amount', type: 'money', align: 'right', tooltipKey: 'discounts', sortable: true },
-  { key: 'refundAmount', label: 'Refund Amount', type: 'money', align: 'right', tooltipKey: 'refunds', sortable: true },
-  { key: 'tipAmount', label: 'Tip Amount', type: 'money', align: 'right', tooltipKey: 'tips', sortable: true },
-  { key: 'feeAmount', label: 'Fee Amount', type: 'money', align: 'right', tooltipKey: 'fees', sortable: true },
+  { key: 'netAmount', label: 'Net Sales', type: 'money', align: 'right', tooltipKey: 'netSales', cellTooltip: netAmountDetailTooltip, sortable: true },
+  { key: 'tipAmount', label: 'Tips', type: 'money', align: 'right', tooltipKey: 'tips', sortable: true },
+  { key: 'refundAmount', label: 'Refunds', type: 'money', align: 'right', tooltipKey: 'refunds', sortable: true },
+  { key: 'discountAmount', label: 'Discounts', type: 'money', align: 'right', tooltipKey: 'discounts', sortable: true },
+  { key: 'feeAmount', label: 'Fees', type: 'money', align: 'right', tooltipKey: 'fees', sortable: true },
   { key: 'payoutAmount', label: 'Payout Amount', type: 'money', align: 'right', tooltipKey: 'payoutAmount', cellTooltip: payoutDetailTooltip, sortable: true },
   { key: 'status', label: 'Status', sortable: true },
   { key: 'createdBy', label: 'Created By', sortable: true },
@@ -74,11 +74,11 @@ const dailySummaryExportMapping = {
   date: 'Date',
   locationName: 'Location',
   grossSales: 'Gross Sales',
-  discounts: 'Discounts',
-  refunds: 'Refunds',
   vat: 'VAT',
   netSales: 'Net Sales',
   tips: 'Tips',
+  refunds: 'Refunds',
+  discounts: 'Discounts',
   fees: 'Fees',
   payoutAmount: 'Payout Amount',
   transactionCount: 'Transaction Count'
@@ -88,11 +88,11 @@ const byPaymentMethodExportMapping = {
   paymentMethod: 'Payment Method',
   locationName: 'Location',
   grossSales: 'Gross Sales',
-  discounts: 'Discounts',
-  refunds: 'Refunds',
   vat: 'VAT',
   netSales: 'Net Sales',
   tips: 'Tips',
+  refunds: 'Refunds',
+  discounts: 'Discounts',
   fees: 'Fees',
   payoutAmount: 'Payout Amount',
   transactionCount: 'Transaction Count',
@@ -102,11 +102,11 @@ const byPaymentMethodExportMapping = {
 const byLocationExportMapping = {
   locationName: 'Location',
   grossSales: 'Gross Sales',
-  discounts: 'Discounts',
-  refunds: 'Refunds',
   vat: 'VAT',
   netSales: 'Net Sales',
   tips: 'Tips',
+  refunds: 'Refunds',
+  discounts: 'Discounts',
   fees: 'Fees',
   payoutAmount: 'Payout Amount',
   transactionCount: 'Transaction Count',
@@ -119,13 +119,13 @@ const transactionExportMapping = {
   receiptNumber: 'Receipt Number',
   locationName: 'Location',
   paymentMethod: 'Payment Method',
-  grossAmount: 'Gross Amount',
+  grossAmount: 'Gross Sales',
   vatAmount: 'VAT',
-  netAmount: 'Net Amount',
-  discountAmount: 'Discount Amount',
-  refundAmount: 'Refund Amount',
-  tipAmount: 'Tip Amount',
-  feeAmount: 'Fee Amount',
+  netAmount: 'Net Sales',
+  tipAmount: 'Tips',
+  refundAmount: 'Refunds',
+  discountAmount: 'Discounts',
+  feeAmount: 'Fees',
   payoutAmount: 'Payout Amount',
   status: 'Status',
   createdBy: 'Created By',
@@ -136,7 +136,7 @@ export const paymentSalesFinancialReport = {
   id: 'payment_sales_financial',
   title: 'Payment / Sales Financial Report',
   section: 'sales',
-  description: 'Accounting-friendly sales and payment report showing gross sales, VAT, net sales, discounts, refunds, tips, fees, and payout values.',
+  description: 'Accounting-friendly sales and payment report showing gross sales, VAT, net sales, tips, refunds, discounts, fees, and payout values.',
   emptyState: { title: 'No Yoco sales found', message: 'No Yoco sales found for the selected filters.' },
   suppressEmptyWarning: true,
   hiddenFromDashboard: true,
@@ -209,12 +209,12 @@ function validatePaymentRows(rows = []) {
   add((row) => !text(row.sourceId), 'source-id-missing', 'critical', 'Sales line is missing YOCO transaction/source ID.');
   add((row) => !text(row.status) || text(row.status) === 'Unknown', 'transaction-status-missing', 'warning', 'Sales line is missing transaction status.');
   add((row) => Number(row.refundAmount) < 0, 'refund-negative', 'warning', 'Sales line has a negative refund value after standardisation.');
-  add((row) => !payoutReconciles(row), 'payout-reconcile-failed', 'warning', 'Sales line could not reconcile payout amount from gross, refunds, fees, and tips.');
+  add((row) => !payoutReconciles(row), 'payout-reconcile-failed', 'warning', 'Sales line could not reconcile payout amount from net sales plus tips less refunds and fees.');
   return warnings;
 }
 
 function payoutReconciles(row = {}) {
-  const expected = Number(row.grossAmount || 0) - Number(row.refundAmount || 0) - Number(row.feeAmount || 0) + Number(row.tipAmount || 0);
+  const expected = Number(row.netAmount || 0) + Number(row.tipAmount || 0) - Number(row.refundAmount || 0) - Number(row.feeAmount || 0);
   return Math.abs(expected - Number(row.payoutAmount || 0)) <= 0.05;
 }
 
@@ -227,17 +227,23 @@ function salesVatTooltip(row = {}) {
 }
 
 function payoutTooltip(row = {}) {
-  return moneyTooltip('payoutAmount', `${formatMoney(row.payoutAmount)} = ${formatMoney(row.grossSales)} - ${formatMoney(row.refunds)} - ${formatMoney(row.fees)} + ${formatMoney(row.tips)}`);
+  return moneyTooltip('payoutAmount', `${formatMoney(row.payoutAmount)} = ${formatMoney(row.netSales)} + ${formatMoney(row.tips)} - ${formatMoney(row.refunds)} - ${formatMoney(row.fees)}`);
 }
 
 function netAmountDetailTooltip(row = {}) {
+  if (row.isRefund === true) {
+    return moneyTooltip('netSales', `${formatMoney(row.netAmount)} — refund value is shown separately in Refunds`);
+  }
   return moneyTooltip('netSales', `${formatMoney(row.netAmount)} = ${formatMoney(row.grossAmount)} - ${formatMoney(row.vatAmount)}`);
 }
 
 function salesVatDetailTooltip(row = {}) {
+  if (row.isRefund === true) {
+    return moneyTooltip('salesVat', `${formatMoney(row.vatAmount)} — refund VAT is excluded from the sales VAT column`);
+  }
   return moneyTooltip('salesVat', `${formatMoney(row.vatAmount)} = ${formatMoney(row.grossAmount)} - ${formatMoney(row.netAmount)}`);
 }
 
 function payoutDetailTooltip(row = {}) {
-  return moneyTooltip('payoutAmount', `${formatMoney(row.payoutAmount)} = ${formatMoney(row.grossAmount)} - ${formatMoney(row.refundAmount)} - ${formatMoney(row.feeAmount)} + ${formatMoney(row.tipAmount)}`);
+  return moneyTooltip('payoutAmount', `${formatMoney(row.payoutAmount)} = ${formatMoney(row.netAmount)} + ${formatMoney(row.tipAmount)} - ${formatMoney(row.refundAmount)} - ${formatMoney(row.feeAmount)}`);
 }

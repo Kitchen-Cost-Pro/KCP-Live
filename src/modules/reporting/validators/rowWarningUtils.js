@@ -21,7 +21,7 @@ export function createRowWarning(row = {}, code = '', level = 'warning', message
     message: label ? `${label} - ${cleanMessage}` : cleanMessage,
     rowId: text(row.id || row.rowId || row.lineId || row.auditId || row.sourceRowId || row.key),
     itemId: text(row.itemId || row.stockItemId || row.inventoryItemId || row.productId || row.menuItemId),
-    itemName: text(row.itemName || row.stockItemName || row.inventoryItemName || row.inventoryIngredient || row.productName || row.menuItemName || row.name),
+    itemName: text(row.itemName || row.stockItemName || row.inventoryItemName || row.inventoryIngredient || row.productName || row.menuItemName || row.menuItem || row.name),
     menuItemId: text(row.menuItemId || row.productId),
     menuItemName: text(row.menuItemName || row.productName),
     productId: text(row.productId || row.menuItemId),
@@ -43,6 +43,7 @@ function resolveRowLabel(row = {}, index = 0) {
   return text(
     row.itemName ||
     row.menuItemName ||
+    row.menuItem ||
     row.productName ||
     row.stockItemName ||
     row.inventoryItemName ||

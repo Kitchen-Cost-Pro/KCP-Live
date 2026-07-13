@@ -21,6 +21,10 @@ const grossProfitTooltip = (row) => tooltip('grossProfit', `Gross Profit = Net S
 const gpPercentTooltip = (row) => tooltip('gpPercent', `GP % = Gross Profit / Net Sales\n${percent(row.gpPercent)} = ${money(row.grossProfit)} / ${money(row.netSales ?? row.netAmount)}`);
 const selectedPercentTooltip = (row) => tooltip('selectedPercent', `Selected % = Times Selected / Total Selections in Modifier Group\n${percent(row.selectedPercent)} = ${safeNumber(row.timesSelected)} / ${safeNumber(row.groupTotalSelections)}`);
 const averageSellingPriceTooltip = (row) => tooltip('averageSellingPrice', `Average Selling Price = Gross Sales / Qty Selected\n${money(row.averageSellingPrice)} = ${money(row.grossModifierSales ?? row.grossSales)} / ${safeNumber(row.qtySelected ?? row.timesSelected)}`);
+const menuItemNetSalesTooltip = (row) => tooltip('netSales', `Net Menu Sales = Gross Menu Sales - VAT\n${money(row.netMenuSales)} = ${money(row.grossMenuSales)} - ${money(row.vat)}`);
+const menuItemTotalStockCostTooltip = (row) => tooltip('stockCost', `Total Stock Cost = Base Recipe Stock Cost + Modifier Stock Cost\n${money(row.totalStockCost)} = ${money(row.baseStockCost)} + ${money(row.modifierStockCost)}`);
+const menuItemGrossProfitTooltip = (row) => tooltip('grossProfit', `Total Gross Profit = Net Menu Sales - Total Stock Cost\n${money(row.grossProfit)} = ${money(row.netMenuSales)} - ${money(row.totalStockCost)}`);
+const menuItemGpPercentTooltip = (row) => tooltip('gpPercent', `Total GP % = Total Gross Profit / Net Menu Sales\n${percent(row.gpPercent)} = ${money(row.grossProfit)} / ${money(row.netMenuSales)}`);
 
 const moneyColumn = (key, label, tooltipKey, cellTooltip) => ({ key, label, type: 'money', align: 'right', tooltipKey, cellTooltip, sortable: true });
 const numberColumn = (key, label) => ({ key, label, type: 'number', align: 'right', sortable: true });
@@ -78,14 +82,15 @@ const byGroupColumns = [
 
 const byMenuItemColumns = [
   { key: 'menuItemName', label: 'Menu Item', sortable: true },
-  { key: 'modifierGroupName', label: 'Modifier Group', sortable: true },
-  { key: 'modifierName', label: 'Modifier Name', sortable: true },
-  numberColumn('timesSelected', 'Times Selected'),
-  moneyColumn('grossModifierSales', 'Gross Modifier Sales', 'grossSales'),
-  moneyColumn('netModifierSales', 'Net Modifier Sales', 'netSales', netSalesTooltip),
-  moneyColumn('stockCost', 'Stock Cost', 'stockCost', stockCostTooltip),
-  moneyColumn('grossProfit', 'Gross Profit', 'grossProfit', grossProfitTooltip),
-  percentColumn('gpPercent', 'GP %', 'gpPercent', gpPercentTooltip),
+  numberColumn('modifierSelections', 'Modifier Selections'),
+  moneyColumn('grossMenuSales', 'Gross Menu Sales', 'grossSales'),
+  moneyColumn('vat', 'VAT', 'salesVat'),
+  moneyColumn('netMenuSales', 'Net Menu Sales', 'netSales', menuItemNetSalesTooltip),
+  moneyColumn('baseStockCost', 'Base Recipe Stock Cost', 'stockCost'),
+  moneyColumn('modifierStockCost', 'Modifier Stock Cost', 'stockCost'),
+  moneyColumn('totalStockCost', 'Total Stock Cost', 'stockCost', menuItemTotalStockCostTooltip),
+  moneyColumn('grossProfit', 'Total Gross Profit', 'grossProfit', menuItemGrossProfitTooltip),
+  percentColumn('gpPercent', 'Total GP %', 'gpPercent', menuItemGpPercentTooltip),
   { key: 'stockDeductionStatus', label: 'Stock Deduction Status', sortable: true }
 ];
 
@@ -203,14 +208,15 @@ const groupExportMapping = {
 
 const byMenuItemExportMapping = {
   menuItemName: 'Menu Item',
-  modifierGroupName: 'Modifier Group',
-  modifierName: 'Modifier Name',
-  timesSelected: 'Times Selected',
-  grossModifierSales: 'Gross Modifier Sales',
-  netModifierSales: 'Net Modifier Sales',
-  stockCost: 'Stock Cost',
-  grossProfit: 'Gross Profit',
-  gpPercent: 'GP %',
+  modifierSelections: 'Modifier Selections',
+  grossMenuSales: 'Gross Menu Sales',
+  vat: 'VAT',
+  netMenuSales: 'Net Menu Sales',
+  baseStockCost: 'Base Recipe Stock Cost',
+  modifierStockCost: 'Modifier Stock Cost',
+  totalStockCost: 'Total Stock Cost',
+  grossProfit: 'Total Gross Profit',
+  gpPercent: 'Total GP %',
   stockDeductionStatus: 'Stock Deduction Status'
 };
 
@@ -342,6 +348,16 @@ function normalizeModifierRow(row = {}) {
     locationName: text(row.locationName) || 'Unmapped Location',
     menuItemName: text(row.menuItemName) || 'Unmapped Menu Item',
     menuCategory: text(row.menuCategory) || 'Uncategorised',
+    parentLineId: text(row.parentLineId || row.parent_line_id),
+    menuItemSaleKey: text(row.menuItemSaleKey || row.menu_item_sale_key || `${row.receiptNumber || ''}|${row.parentLineId || row.parent_line_id || row.sourceId || row.id || ''}`),
+    menuItemGrossAmount: safeNumber(row.menuItemGrossAmount ?? row.menu_item_gross_amount ?? grossAmount),
+    menuItemVatAmount: safeNumber(row.menuItemVatAmount ?? row.menu_item_vat_amount ?? vatAmount),
+    menuItemNetAmount: safeNumber(row.menuItemNetAmount ?? row.menu_item_net_amount ?? netAmount),
+    menuItemBaseStockCost: safeNumber(row.menuItemBaseStockCost ?? row.menu_item_base_stock_cost),
+    menuItemModifierStockCost: safeNumber(row.menuItemModifierStockCost ?? row.menu_item_modifier_stock_cost ?? stockCost),
+    menuItemTotalStockCost: safeNumber(row.menuItemTotalStockCost ?? row.menu_item_total_stock_cost ?? stockCost),
+    menuItemGrossProfit: safeNumber(row.menuItemGrossProfit ?? row.menu_item_gross_profit ?? calculateGrossProfit(netAmount, stockCost)),
+    menuItemGpPercent: safeNumber(row.menuItemGpPercent ?? row.menu_item_gp_percent ?? calculateGpPercent(calculateGrossProfit(netAmount, stockCost), netAmount)),
     modifierGroupId: text(row.modifierGroupId),
     modifierGroupName: text(row.modifierGroupName) || 'Modifier Group',
     modifierId: text(row.modifierId || row.yocoModifierId),
@@ -454,25 +470,36 @@ function buildByGroup(rows = []) {
 }
 
 function buildByMenuItem(rows = []) {
-  return Array.from(groupBy(rows, (row) => [row.menuItemId || row.menuItemName, row.modifierGroupId || row.modifierGroupName, row.modifierId || row.modifierName].join('::')).entries()).map(([key, groupRows], index) => {
+  return Array.from(groupBy(rows, (row) => row.menuItemId || row.menuItemName).entries()).map(([key, groupRows], index) => {
     const first = groupRows[0] || {};
-    const grossModifierSales = sumBy(groupRows, 'grossAmount');
-    const netModifierSales = sumBy(groupRows, 'netAmount');
-    const stockCost = sumBy(groupRows, 'stockCost');
-    const grossProfit = calculateGrossProfit(netModifierSales, stockCost);
+    const uniqueLines = new Map();
+    groupRows.forEach((row, rowIndex) => {
+      const lineKey = text(row.menuItemSaleKey || `${row.receiptNumber || 'receipt'}|${row.parentLineId || row.sourceId || rowIndex}`);
+      if (!uniqueLines.has(lineKey)) uniqueLines.set(lineKey, row);
+    });
+    const saleLines = [...uniqueLines.values()];
+    const grossMenuSales = sumBy(saleLines, 'menuItemGrossAmount');
+    const vat = sumBy(saleLines, 'menuItemVatAmount');
+    const netMenuSales = sumBy(saleLines, 'menuItemNetAmount');
+    const baseStockCost = sumBy(saleLines, 'menuItemBaseStockCost');
+    const modifierStockCost = sumBy(saleLines, 'menuItemModifierStockCost');
+    const totalStockCost = sumBy(saleLines, 'menuItemTotalStockCost');
+    const grossProfit = calculateGrossProfit(netMenuSales, totalStockCost);
     return {
       id: `modifier-menu-item:${key || index}`,
       menuItemName: first.menuItemName,
-      modifierGroupName: first.modifierGroupName,
-      modifierName: first.modifierName,
-      timesSelected: sumBy(groupRows, 'timesSelected'),
-      grossModifierSales,
-      netModifierSales,
-      stockCost,
+      modifierSelections: sumBy(groupRows, 'timesSelected'),
+      grossMenuSales,
+      vat,
+      netMenuSales,
+      baseStockCost,
+      modifierStockCost,
+      totalStockCost,
       grossProfit,
-      gpPercent: calculateGpPercent(grossProfit, netModifierSales),
+      gpPercent: calculateGpPercent(grossProfit, netMenuSales),
       stockDeductionStatus: mostSevereStatus(groupRows),
-      __rows: groupRows
+      __rows: groupRows,
+      __saleLines: saleLines
     };
   });
 }
@@ -500,6 +527,12 @@ function modifierTotals(rows = [], view = 'summary') {
     netSales: net,
     stockDeducted: sumBy(rows, (row) => row.stockDeducted ?? row.qtyDeducted ?? row.stockQtyDeducted),
     stockCost: sumBy(rows, 'stockCost'),
+    modifierSelections: sumBy(rows, (row) => row.modifierSelections ?? row.timesSelected),
+    grossMenuSales: sumBy(rows, (row) => row.grossMenuSales ?? row.menuItemGrossAmount),
+    netMenuSales: sumBy(rows, (row) => row.netMenuSales ?? row.menuItemNetAmount),
+    baseStockCost: sumBy(rows, (row) => row.baseStockCost ?? row.menuItemBaseStockCost),
+    modifierStockCost: sumBy(rows, (row) => row.modifierStockCost ?? row.menuItemModifierStockCost),
+    totalStockCost: sumBy(rows, (row) => row.totalStockCost ?? row.menuItemTotalStockCost),
     grossProfit,
     gpPercent: calculateGpPercent(grossProfit, net),
     qtySelected: sumBy(rows, (row) => row.qtySelected ?? row.timesSelected),
@@ -519,7 +552,14 @@ function modifierTotals(rows = [], view = 'summary') {
   totals.averageSellingPrice = totals.qtySelected ? roundMoney(totals.grossModifierSales / totals.qtySelected) : 0;
   if (view === 'by_group') return pickTotals(totals, ['totalSelections', 'grossSales', 'vat', 'netSales', 'stockCost', 'grossProfit', 'gpPercent', 'stockDeductionIssues']);
   if (view === 'gp_tracker') return pickTotals(totals, ['qtySelected', 'averageSellingPrice', 'grossModifierSales', 'vat', 'netModifierSales', 'qtyDeducted', 'stockCost', 'grossProfit', 'gpPercent']);
-  if (view === 'by_menu_item') return pickTotals(totals, ['timesSelected', 'grossModifierSales', 'netModifierSales', 'stockCost', 'grossProfit', 'gpPercent']);
+  if (view === 'by_menu_item') {
+    const totalGrossProfit = calculateGrossProfit(totals.netMenuSales, totals.totalStockCost);
+    return {
+      ...pickTotals(totals, ['modifierSelections', 'grossMenuSales', 'vat', 'netMenuSales', 'baseStockCost', 'modifierStockCost', 'totalStockCost']),
+      grossProfit: totalGrossProfit,
+      gpPercent: calculateGpPercent(totalGrossProfit, totals.netMenuSales)
+    };
+  }
   if (view === 'by_modifier') return pickTotals(totals, ['timesSelected', 'stockDeducted', 'grossSales', 'vat', 'netSales', 'stockCost', 'grossProfit', 'gpPercent']);
   if (view === 'sales_log') return pickTotals(totals, ['qty', 'grossAmount', 'vatAmount', 'netAmount', 'stockQtyDeducted', 'stockCost', 'grossProfit']);
   return pickTotals(totals, ['timesSelected', 'grossSales', 'netSales', 'stockDeducted', 'stockCost', 'grossProfit', 'gpPercent']);

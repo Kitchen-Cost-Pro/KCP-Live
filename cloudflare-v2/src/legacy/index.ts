@@ -98,6 +98,7 @@ import {
   getTransferTemplates,
   getWorkspaceAccessRoute,
   getWorkspaceSettingsRoute,
+  getUserPreferencesRoute,
   getGmailOAuthCallback,
   getGmailStatus,
   getYocoModifierGroupRoute,
@@ -128,6 +129,7 @@ import {
   patchStockTake,
   patchWorkspaceMemberRoute,
   patchWorkspaceSettingsRoute,
+  patchUserPreferencesRoute,
   patchStockLevel,
   postExternalTransfer,
   postGmailConnectStart,
@@ -653,6 +655,14 @@ export async function dispatchWorkspaceRoute(
     return getWorkspaceSettingsRoute(request, env, auth, workspaceId);
   }
 
+  if (request.method === 'GET' && resource === 'user-preferences') {
+    return getUserPreferencesRoute(request, env, auth, workspaceId);
+  }
+
+  if ((request.method === 'PATCH' || request.method === 'PUT') && resource === 'user-preferences') {
+    return patchUserPreferencesRoute(request, env, auth, workspaceId);
+  }
+
   if ((request.method === 'PATCH' || request.method === 'PUT') && resource === 'settings') {
     return patchWorkspaceSettingsRoute(request, env, auth, workspaceId);
   }
@@ -1041,6 +1051,13 @@ export async function dispatchWorkspaceRoute(
   // so it can verify the signature against the tenant-stored webhook_secret and deplete stock.
   if (request.method === 'POST' && resource === 'yoco-webhook') {
     return postYocoWebhook(request, env, workspaceId);
+  }
+
+  if (request.method === 'GET' && resource === 'gmail-oauth-callback') {
+    if (auth.uid !== 'gmail-oauth-callback') {
+      return error(request, env, 403, 'Invalid Gmail OAuth callback route.');
+    }
+    return getGmailOAuthCallback(request, env);
   }
 
   if (request.method === 'GET' && resource === 'gmail/status') {

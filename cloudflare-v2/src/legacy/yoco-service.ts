@@ -406,9 +406,26 @@ export async function getYocoApiKey(env: Env, workspaceId: string) {
   return decryptText(env, encrypted);
 }
 
-export async function connectYoco(env: Env, workspaceId: string, apiKey: string) {
+async function yocoApiKeyFingerprint(apiKey: string) {
+  const bytes = new TextEncoder().encode(text(apiKey));
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest)).map((value) => value.toString(16).padStart(2, '0')).join('');
+}
+
+export async function connectYoco(
+  env: Env,
+  workspaceId: string,
+  apiKey: string,
+  options: { allowKeyReplacement?: boolean; actorUid?: string } = {},
+) {
   const cleanKey = text(apiKey);
   if (!cleanKey) throw new Error('Yoco API key is required.');
+  const fingerprint = await yocoApiKeyFingerprint(cleanKey);
+  const existing = await getYocoConnection(env, workspaceId);
+  const lockedFingerprint = text(existing?.api_key_fingerprint);
+  if (lockedFingerprint && lockedFingerprint !== fingerprint && options.allowKeyReplacement !== true) {
+    throw new Error('This workspace is locked to a different Yoco API key. A KCP administrator must replace the locked key.');
+  }
 
   await yocoFetch(env, cleanKey, '/v1/locations/', { params: { limit: 1 } });
 
@@ -436,11 +453,23 @@ export async function connectYoco(env: Env, workspaceId: string, apiKey: string)
   await env.DB.prepare(
     `INSERT INTO yoco_connections
       (workspace_id, status, api_key_encrypted, webhook_id, webhook_secret, webhook_url,
-       connection_active, last_error, created_at, updated_at)
-     VALUES (?1, 'connected', ?2, ?3, ?4, ?5, 1, ?6, datetime('now'), datetime('now'))
+       connection_active, last_error, api_key_fingerprint, api_key_locked_at, api_key_locked_by_uid, created_at, updated_at)
+     VALUES (?1, 'connected', ?2, ?3, ?4, ?5, 1, ?6, ?7, datetime('now'), ?8, datetime('now'), datetime('now'))
      ON CONFLICT(workspace_id) DO UPDATE SET
        status = 'connected',
        api_key_encrypted = excluded.api_key_encrypted,
+       api_key_fingerprint = CASE
+         WHEN ?9 = 1 OR COALESCE(yoco_connections.api_key_fingerprint, '') = '' THEN excluded.api_key_fingerprint
+         ELSE yoco_connections.api_key_fingerprint
+       END,
+       api_key_locked_at = CASE
+         WHEN ?9 = 1 OR COALESCE(yoco_connections.api_key_fingerprint, '') = '' THEN excluded.api_key_locked_at
+         ELSE yoco_connections.api_key_locked_at
+       END,
+       api_key_locked_by_uid = CASE
+         WHEN ?9 = 1 OR COALESCE(yoco_connections.api_key_fingerprint, '') = '' THEN excluded.api_key_locked_by_uid
+         ELSE yoco_connections.api_key_locked_by_uid
+       END,
        webhook_id = excluded.webhook_id,
        webhook_secret = excluded.webhook_secret,
        webhook_url = excluded.webhook_url,
@@ -451,7 +480,7 @@ export async function connectYoco(env: Env, workspaceId: string, apiKey: string)
        last_error = excluded.last_error,
        disconnected_at = NULL,
        updated_at = datetime('now')`
-  ).bind(workspaceId, encrypted, webhookId || null, webhookSecret || null, webhookUrl || null, webhookError).run();
+  ).bind(workspaceId, encrypted, webhookId || null, webhookSecret || null, webhookUrl || null, webhookError, fingerprint, text(options.actorUid) || null, options.allowKeyReplacement === true ? 1 : 0).run();
 
   return {
     connected: true,

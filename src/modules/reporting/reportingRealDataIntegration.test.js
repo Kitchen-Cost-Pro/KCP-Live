@@ -344,7 +344,7 @@ test('Wastage Report uses real ledger rows and keeps wastage sources separate', 
   const sources = new Set(result.rows.map((row) => row.wastageSource));
   assert.equal(result.rows.length, 2);
   assert.ok(sources.has('Manufacturing Wastage'));
-  assert.ok(sources.has('Wastage Adjustment'));
+  assert.ok(sources.has('Stock Item Wastage'));
   assert.equal(sources.has('Stock Take Variance'), false);
   assert.equal(sources.has('Manufacturing Out'), false);
   assert.equal(sources.has('Sale Usage'), false);
@@ -692,7 +692,7 @@ test('Adjustments Report uses real ledger rows and includes adjustment source ty
   const sources = new Set(result.rows.map((row) => row.adjustmentType));
   assert.equal(result.rows.length, 4);
   assert.ok(sources.has('Manual Adjustment'));
-  assert.ok(sources.has('Wastage Adjustment'));
+  assert.ok(sources.has('Stock Item Wastage'));
   assert.ok(sources.has('Stock Take Variance'));
   assert.ok(sources.has('System Correction'));
   assert.equal(sources.has('GRV'), false);
@@ -733,7 +733,7 @@ test('Adjustments Report reconciles to Detailed Activity and Operations Dashboar
 
   assert.equal(adjustments.totals.valueImpact, sum(adjustmentLedgerRows, 'valueImpact'));
   const nonWastageAdjustmentValue = adjustments.rows
-    .filter((row) => row.adjustmentType !== 'Wastage Adjustment')
+    .filter((row) => !['Stock Item Wastage', 'Product Wastage'].includes(row.adjustmentType))
     .reduce((total, row) => total + Number(row.valueImpact || 0), 0);
   assert.equal(nonWastageAdjustmentValue, operations.totals.adjustments);
 });
@@ -753,10 +753,10 @@ test('Wastage Adjustment values in Adjustments Report reconcile to Wastage Repor
   });
 
   const adjustmentWastageValue = adjustments.rows
-    .filter((row) => row.adjustmentType === 'Wastage Adjustment')
+    .filter((row) => ['Stock Item Wastage', 'Product Wastage'].includes(row.adjustmentType))
     .reduce((total, row) => total + Math.abs(Number(row.valueImpact || 0)), 0);
   const wastageAdjustmentValue = wastage.rows
-    .filter((row) => row.wastageSource === 'Wastage Adjustment')
+    .filter((row) => row.wastageSource === 'Stock Item Wastage')
     .reduce((total, row) => total + Number(row.wastageValue || 0), 0);
 
   assert.equal(adjustmentWastageValue, wastageAdjustmentValue);

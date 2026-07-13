@@ -92,7 +92,7 @@ test('Stock Control builds all views from location-specific stock rows', () => {
   assert.equal(model.reorder_detail.length, 3);
   assert.equal(model.location_summary.length, 2);
   assert.equal(model.category_summary.length, 2);
-  assert.equal(model.supplier_reorder.length, 2);
+  assert.equal('supplier_reorder' in model, false);
   assert.equal(model.warnings.length, 0);
 
   const main = model.location_summary.find((row) => row.locationName === 'Main Kitchen');
@@ -100,11 +100,8 @@ test('Stock Control builds all views from location-specific stock rows', () => {
   assert.equal(main.lowStockItems, 1);
   assert.equal(main.belowParItems, 2);
   assert.equal(main.estimatedReorderValue, 288);
+  assert.equal('topSupplier' in main, false);
 
-  const supplier = model.supplier_reorder.find((row) => row.supplierName === 'ABC Foods');
-  assert.equal(supplier.itemsToOrder, 2);
-  assert.equal(supplier.criticalItems, 1);
-  assert.equal(supplier.estimatedReorderValue, 288);
 });
 
 test('Stock Control mapper keeps required quantity, purchase UOM and reorder value separate', () => {

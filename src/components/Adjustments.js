@@ -679,7 +679,8 @@ function normalizeUomConfigurations(value = []) {
   const rows = Array.isArray(value) ? value : (value && typeof value === 'object' ? [value] : []);
   return rows
     .map((entry = {}) => ({
-      barcode: String(entry.barcode || entry.customBarcode || entry.customUomBarcode || '').trim()
+      barcode: String(entry.barcode || entry.customBarcode || entry.customUomBarcode || '').trim(),
+      isDefaultOrdering: ['true', '1', 'yes', 'on'].includes(String(entry.isDefaultOrdering ?? entry.defaultOrdering ?? entry.is_default_ordering ?? entry.defaultOrderUom ?? '').toLowerCase()) || entry.isDefaultOrdering === true || entry.defaultOrdering === true
     }))
     .filter((entry) => entry.barcode);
 }
@@ -774,6 +775,8 @@ function renderWastageTab(adjustments, filters, onAdjustmentFilterChange, onAdju
   const locationOptions = locations.map((loc) => ({ value: loc.id, label: loc.displayName || loc.name }));
   const wasteOptions = WASTE_REASONS.map((r) => ({ value: r, label: r }));
   const totalCostImpact = (draft.items || []).reduce((sum, item) => sum + Number(item.estimatedCost || 0), 0);
+  const wastageValidationMessage = getWastageValidationMessage(draft);
+  const canRecordWastage = !wastageValidationMessage && !isSaving;
 
   if (filters.overlay === 'wastage-picker') {
     return renderWastagePickerOverlay(products, filters);
@@ -881,7 +884,7 @@ function renderWastageTab(adjustments, filters, onAdjustmentFilterChange, onAdju
                 <span>Est. Stock Cost</span>
                 <strong data-wastage-total>${formatCurrency(totalCostImpact)}</strong>
               </div>
-              <button type="button" class="adj-primary" data-wastage-save ${isSaving ? 'disabled' : ''}>${isSaving ? 'Saving…' : 'Record Wastage'}</button>
+              <button type="button" class="adj-primary ${canRecordWastage ? '' : 'adj-primary--blocked'}" data-wastage-save aria-disabled="${canRecordWastage ? 'false' : 'true'}" data-wastage-validation="${escapeAttribute(wastageValidationMessage)}" ${isSaving ? 'disabled' : ''}>${isSaving ? 'Saving…' : 'Record Wastage'}</button>
             </div>
           </section>
         `}
@@ -889,6 +892,16 @@ function renderWastageTab(adjustments, filters, onAdjustmentFilterChange, onAdju
     </div>
     ${renderWastageLog(adjustments)}
   `;
+}
+
+function getWastageValidationMessage(draft = {}) {
+  const items = Array.isArray(draft.items) ? draft.items : [];
+  if (!items.length) return 'Select at least one menu item to waste.';
+  if (!String(draft.locationId || '').trim()) return 'Select a location before recording wastage.';
+  if (!String(draft.wasteReason || '').trim()) return 'Select a waste reason before recording wastage.';
+  const invalidItem = items.find((item) => !(Number(String(item.quantity ?? '').replace(',', '.')) > 0));
+  if (invalidItem) return `Enter a quantity greater than zero for ${invalidItem.productName || 'every menu item'}.`;
+  return '';
 }
 
 function renderWastageLog(adjustments) {

@@ -4642,20 +4642,15 @@ body > .reportActionMenu__panel--portal {
   background: transparent;
 }
 
-.reportSchedulePicker .reportScheduleBundle__groups {
+.reportSchedulePicker .reportScheduleReportGrid {
   max-height: none;
   overflow: visible;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
   gap: .8rem;
 }
 
-.reportSchedulePicker .reportScheduleBundle__group {
-  gap: .5rem;
-}
-
-.reportSchedulePicker .reportScheduleBundle__group h4 {
-  color: var(--accent-blue);
-  font-size: .64rem;
-}
 
 .reportScheduleModal.reportModalCard .reportScheduleReportCard {
   border-color: var(--border-subtle);
@@ -4674,6 +4669,24 @@ body > .reportActionMenu__panel--portal {
 
 .reportScheduleModal.reportModalCard .reportScheduleReportCard__title small {
   color: var(--text-muted);
+}
+
+.reportScheduleModal.reportModalCard .reportScheduleReportCard__title em {
+  margin-left: auto;
+  display: grid;
+  place-items: center;
+  width: 1.45rem;
+  height: 1.45rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent-blue) 14%, var(--surface-primary));
+  color: transparent;
+  font-style: normal;
+  font-size: .7rem;
+}
+
+.reportScheduleModal.reportModalCard .reportScheduleReportCard.is-selected .reportScheduleReportCard__title em {
+  background: var(--accent-blue);
+  color: #06111d;
 }
 
 .reportScheduleModal.reportModalCard .reportScheduleReportCard__views label {
@@ -4724,7 +4737,7 @@ body > .reportActionMenu__panel--portal {
 
 @media (max-width: 900px) {
   .reportScheduleSectionGrid--four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .reportSchedulePicker .reportScheduleBundle__groups { grid-template-columns: 1fr; }
+  .reportSchedulePicker .reportScheduleReportGrid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 650px) {
@@ -4759,4 +4772,650 @@ body > .reportActionMenu__panel--portal {
   font-size: .7rem;
   font-weight: 850;
   cursor: pointer;
+}
+
+/* Phase 45: scheduling pack flow, recipient picker, table alignment, and themed reporting tables. */
+.reportScheduleIconAction {
+  display: inline-grid;
+  place-items: center;
+  width: 2.15rem;
+  height: 2.15rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: .68rem;
+  padding: 0;
+  background: var(--surface-primary);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: border-color 150ms ease, background 150ms ease, color 150ms ease, transform 150ms ease;
+}
+.reportScheduleIconAction svg { width: 1rem; height: 1rem; fill: currentColor; }
+.reportScheduleIconAction:hover,
+.reportScheduleIconAction:focus-visible {
+  border-color: color-mix(in srgb, var(--accent-blue) 55%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent-blue) 10%, var(--surface-primary));
+  color: var(--accent-blue);
+  outline: none;
+  transform: translateY(-1px);
+}
+.reportScheduleIconAction--delete:hover,
+.reportScheduleIconAction--delete:focus-visible {
+  border-color: color-mix(in srgb, #ef4444 52%, var(--border-subtle));
+  background: color-mix(in srgb, #ef4444 9%, var(--surface-primary));
+  color: #ef4444;
+}
+.reportScheduleRowActions { display: flex; align-items: center; justify-content: flex-end; gap: .35rem; }
+
+.reportSchedulePickerSteps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: .55rem;
+  margin: 0 0 .85rem;
+  padding: 0;
+  list-style: none;
+}
+.reportSchedulePickerSteps li {
+  display: flex;
+  align-items: center;
+  gap: .48rem;
+  min-height: 2.6rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: .72rem;
+  padding: .48rem .62rem;
+  background: var(--surface-elevated);
+  color: var(--text-muted);
+  font-size: .66rem;
+}
+.reportSchedulePickerSteps li span {
+  display: grid;
+  place-items: center;
+  width: 1.35rem;
+  height: 1.35rem;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent-blue) 15%, var(--surface-primary));
+  color: var(--accent-blue);
+  font-size: .62rem;
+  font-weight: 900;
+}
+.reportSchedulePickerSteps li strong { color: var(--text-main); font-size: .66rem; }
+
+.reportScheduleModal.reportModalCard .reportScheduleReportCard {
+  position: relative;
+  display: grid;
+  grid-template-rows: auto auto minmax(1.7rem, auto) auto;
+  gap: .58rem;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: .82rem;
+  padding: .72rem;
+}
+.reportScheduleReportCard__toggle {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  overflow: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+.reportScheduleReportCard__open {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+  width: 100%;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.reportScheduleReportCard__open > span:first-child { display: grid; min-width: 0; gap: .12rem; }
+.reportScheduleReportCard__open strong {
+  overflow: hidden;
+  color: var(--text-main);
+  font-size: .78rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.reportScheduleReportCard__open small {
+  color: var(--accent-blue);
+  font-size: .57rem;
+  font-weight: 800;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.reportScheduleReportCard__arrow {
+  display: grid;
+  place-items: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  flex: 0 0 auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: .55rem;
+  background: var(--surface-primary);
+  color: var(--accent-blue);
+}
+.reportScheduleReportCard > p {
+  min-height: 2.45rem;
+  margin: 0;
+  color: var(--text-soft);
+  font-size: .63rem;
+  line-height: 1.45;
+}
+.reportScheduleReportCard__selectedViews {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .28rem;
+  min-height: 1.55rem;
+  align-content: flex-start;
+}
+.reportScheduleReportCard__selectedViews > span:not(.reportScheduleReportCard__noViews) {
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent-blue) 22%, var(--border-subtle));
+  border-radius: 999px;
+  padding: .2rem .4rem;
+  background: color-mix(in srgb, var(--accent-blue) 7%, var(--surface-primary));
+  color: var(--text-muted);
+  font-size: .56rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.reportScheduleReportCard__noViews { color: var(--text-soft); font-size: .59rem; align-self: center; }
+.reportScheduleReportCard__select {
+  min-height: 2.2rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: .62rem;
+  background: var(--surface-primary);
+  color: var(--text-main);
+  font: inherit;
+  font-size: .64rem;
+  font-weight: 850;
+  cursor: pointer;
+}
+.reportScheduleReportCard.is-selected .reportScheduleReportCard__select {
+  border-color: color-mix(in srgb, var(--accent-blue) 44%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent-blue) 12%, var(--surface-primary));
+  color: var(--accent-blue);
+}
+
+.reportScheduleViewPanel[hidden] { display: none !important; }
+.reportSchedulePicker__body.is-selecting-views > .reportSchedulePickerSteps,
+.reportSchedulePicker__body.is-selecting-views > .reportScheduleBundle { display: none; }
+.reportScheduleViewPanel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-height: min(34rem, 70vh);
+  border: 1px solid var(--border-subtle);
+  border-radius: .9rem;
+  overflow: hidden;
+  background: var(--surface-elevated);
+}
+.reportScheduleViewPanel > header {
+  display: flex;
+  align-items: flex-start;
+  gap: .7rem;
+  padding: .85rem;
+  border-bottom: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--accent-blue) 6%, var(--surface-elevated));
+}
+.reportScheduleViewPanel > header > div { display: grid; gap: .12rem; }
+.reportScheduleViewPanel > header span { color: var(--accent-blue); font-size: .58rem; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; }
+.reportScheduleViewPanel > header h5 { margin: 0; color: var(--text-main); font-size: .92rem; }
+.reportScheduleViewPanel > header p { margin: .1rem 0 0; color: var(--text-muted); font-size: .64rem; }
+.reportScheduleViewPanel__back {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  flex: 0 0 auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: .62rem;
+  background: var(--surface-primary);
+  color: var(--text-main);
+  cursor: pointer;
+}
+.reportScheduleViewPanel__list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-content: start;
+  gap: .55rem;
+  overflow: auto;
+  padding: .85rem;
+}
+.reportScheduleViewPanel__list label {
+  display: flex;
+  align-items: flex-start;
+  gap: .55rem;
+  min-height: 3.45rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: .72rem;
+  padding: .62rem;
+  background: var(--surface-primary);
+  cursor: pointer;
+}
+.reportScheduleViewPanel__list label:has(input:checked) {
+  border-color: color-mix(in srgb, var(--accent-blue) 52%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent-blue) 9%, var(--surface-primary));
+}
+.reportScheduleViewPanel__list input { margin-top: .14rem; accent-color: var(--accent-blue); }
+.reportScheduleViewPanel__list label > span { display: grid; gap: .15rem; }
+.reportScheduleViewPanel__list strong { color: var(--text-main); font-size: .7rem; }
+.reportScheduleViewPanel__list small { color: var(--text-soft); font-size: .59rem; line-height: 1.35; }
+.reportScheduleViewPanel > footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .8rem;
+  padding: .75rem .85rem;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--surface-primary);
+  color: var(--text-muted);
+  font-size: .66rem;
+  font-weight: 800;
+}
+
+.reportScheduleRecipientField { display: grid; gap: .42rem; }
+.reportScheduleRecipientField__label { color: var(--text-muted); font-size: .64rem; font-weight: 800; }
+.reportScheduleRecipientPicker {
+  display: grid;
+  gap: .65rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: .78rem;
+  padding: .7rem;
+  background: color-mix(in srgb, var(--surface-primary) 97%, var(--accent-blue));
+}
+.reportScheduleRecipientChips { display: flex; flex-wrap: wrap; gap: .35rem; min-height: 1.65rem; align-items: center; }
+.reportScheduleRecipientChips__empty { color: var(--text-soft); font-size: .62rem; }
+.reportScheduleRecipientChip {
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+  max-width: 100%;
+  border: 1px solid color-mix(in srgb, var(--accent-blue) 28%, var(--border-subtle));
+  border-radius: 999px;
+  padding: .23rem .3rem .23rem .48rem;
+  background: color-mix(in srgb, var(--accent-blue) 8%, var(--surface-elevated));
+  color: var(--text-main);
+  font-size: .61rem;
+}
+.reportScheduleRecipientChip > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reportScheduleRecipientChip button {
+  display: grid;
+  place-items: center;
+  width: 1.2rem;
+  height: 1.2rem;
+  border: 0;
+  border-radius: 999px;
+  padding: 0;
+  background: color-mix(in srgb, var(--accent-blue) 14%, var(--surface-primary));
+  color: var(--text-main);
+  cursor: pointer;
+}
+.reportScheduleRecipientControls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .65rem; }
+.reportScheduleRecipientAdd { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .4rem; }
+.reportScheduleRecipientAdd button {
+  min-width: 3.6rem;
+  border: 1px solid color-mix(in srgb, var(--accent-blue) 42%, var(--border-subtle));
+  border-radius: .62rem;
+  background: color-mix(in srgb, var(--accent-blue) 12%, var(--surface-elevated));
+  color: var(--accent-blue);
+  font: inherit;
+  font-size: .65rem;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.reportPagination { position: relative; z-index: 12; overflow: visible; }
+.reportPagination__controls,
+.reportPagination__pageSize { overflow: visible; }
+.reportPagination__pageSize .reportEnhancedSelect { min-width: 4.6rem; }
+.reportEnhancedSelect--top .reportEnhancedSelect__menu {
+  top: auto;
+  bottom: calc(100% + .35rem);
+}
+
+.reportTable th.is-align-right .reportTable__sort,
+.reportTable th.is-numeric .reportTable__sort { width: 100%; justify-content: flex-end; text-align: right; }
+.reportTable th.is-align-center .reportTable__sort { width: 100%; justify-content: center; text-align: center; }
+.reportTable th.is-align-right,
+.reportTable th.is-numeric { text-align: right; }
+.reportTable th.is-align-center { text-align: center; }
+
+/* Apply the app surface palette to every reporting table, including report viewers
+   rendered outside the reporting dashboard shell. */
+.reportViewer .reportTable th,
+.reportSchedulingPage .reportSchedulingTable th,
+.reportingDashboard .reportTable th {
+  border-color: var(--border-subtle) !important;
+  background: color-mix(in srgb, var(--accent-blue) 13%, var(--surface-elevated)) !important;
+  color: var(--accent-blue) !important;
+}
+.reportViewer .reportTable td {
+  border-color: var(--border-subtle) !important;
+  background: color-mix(in srgb, var(--surface-primary) 96%, var(--accent-blue)) !important;
+  color: var(--text-main) !important;
+}
+.reportViewer .reportTable tbody tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--surface-secondary) 94%, var(--accent-blue)) !important;
+}
+.reportViewer .reportTable tbody tr:hover td {
+  background: color-mix(in srgb, var(--accent-blue) 9%, var(--surface-primary)) !important;
+}
+.reportViewer .reportTable tfoot td {
+  background: color-mix(in srgb, var(--accent-blue) 15%, var(--surface-elevated)) !important;
+  color: var(--text-main) !important;
+}
+
+@media (max-width: 720px) {
+  .reportSchedulePickerSteps,
+  .reportScheduleViewPanel__list,
+  .reportScheduleRecipientControls { grid-template-columns: 1fr; }
+}
+
+/* Phase 46: supplier-neutral stock-control ordering. */
+.reportBulkActions__hint {
+  max-width: 28rem;
+  color: var(--report-muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.reportSelectionCheckbox.is-disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
+}
+
+.reportSelectionCheckbox.is-disabled input {
+  cursor: not-allowed;
+}
+
+/* Phase 47: report selects live in a body-level fixed portal so report shells,
+   tables, modals and viewport borders cannot clip their options. */
+body > .reportEnhancedSelect__menu--portal {
+  position: fixed !important;
+  inset: auto !important;
+  z-index: 2147483647 !important;
+  display: grid;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: .35rem;
+  border: 1px solid var(--border-strong);
+  border-radius: .75rem;
+  background: var(--surface-elevated);
+  color: var(--text-main);
+  box-shadow: 0 24px 72px rgba(0,0,0,.58);
+}
+body > .reportEnhancedSelect__menu--portal[hidden] { display: none !important; }
+
+/* Phase 47: compact report-pack selection and clear schedule action semantics. */
+.reportScheduleModal.reportModalCard .reportScheduleReportCard {
+  grid-template-rows: auto auto auto;
+  gap: 0.38rem;
+  min-height: 0;
+  padding: 0.62rem 0.68rem;
+  border-color: color-mix(in srgb, var(--accent-blue) 14%, var(--border-subtle));
+  box-shadow: none;
+}
+
+.reportScheduleModal.reportModalCard .reportScheduleReportCard.is-selected {
+  border-color: color-mix(in srgb, var(--accent-blue) 46%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent-blue) 7%, var(--surface-elevated));
+  box-shadow: none;
+}
+
+.reportScheduleReportCard > p {
+  display: none;
+}
+
+.reportScheduleReportCard__open {
+  min-height: 2rem;
+}
+
+.reportScheduleReportCard__selectedViews {
+  min-height: 1.35rem;
+  gap: 0.22rem;
+}
+
+.reportScheduleReportCard__select {
+  min-height: 1.95rem;
+  justify-self: start;
+  padding: 0 0.62rem;
+}
+
+.reportScheduleViewPanel {
+  min-height: min(25rem, 66vh);
+}
+
+.reportScheduleViewPanel__list {
+  gap: 0.42rem;
+  padding: 0.68rem;
+}
+
+.reportScheduleViewPanel__list label {
+  align-items: center;
+  gap: 0.48rem;
+  min-height: 2.85rem;
+  padding: 0.5rem 0.58rem;
+  box-shadow: none;
+  outline: 0;
+}
+
+.reportScheduleViewPanel__list label:focus-within {
+  outline: 2px solid color-mix(in srgb, var(--accent-blue) 55%, transparent);
+  outline-offset: 1px;
+}
+
+.reportScheduleViewPanel__list input[type="checkbox"] {
+  inline-size: 1rem !important;
+  block-size: 1rem !important;
+  min-inline-size: 1rem !important;
+  max-inline-size: 1rem !important;
+  flex: 0 0 1rem !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border-radius: 0.2rem;
+  box-shadow: none !important;
+}
+
+.reportScheduleIconAction--run {
+  border-color: color-mix(in srgb, #22c55e 48%, var(--border-subtle));
+  background: color-mix(in srgb, #22c55e 14%, var(--surface-primary));
+  color: #22c55e;
+}
+.reportScheduleIconAction--edit {
+  border-color: color-mix(in srgb, #f59e0b 52%, var(--border-subtle));
+  background: color-mix(in srgb, #f59e0b 14%, var(--surface-primary));
+  color: #f59e0b;
+}
+.reportScheduleIconAction--duplicate {
+  border-color: color-mix(in srgb, #3b82f6 52%, var(--border-subtle));
+  background: color-mix(in srgb, #3b82f6 14%, var(--surface-primary));
+  color: #60a5fa;
+}
+.reportScheduleIconAction--delete {
+  border-color: color-mix(in srgb, #ef4444 52%, var(--border-subtle));
+  background: color-mix(in srgb, #ef4444 13%, var(--surface-primary));
+  color: #ef4444;
+}
+.reportScheduleIconAction--run:hover,
+.reportScheduleIconAction--run:focus-visible { background: color-mix(in srgb, #22c55e 23%, var(--surface-primary)); color: #4ade80; }
+.reportScheduleIconAction--edit:hover,
+.reportScheduleIconAction--edit:focus-visible { background: color-mix(in srgb, #f59e0b 23%, var(--surface-primary)); color: #fbbf24; }
+.reportScheduleIconAction--duplicate:hover,
+.reportScheduleIconAction--duplicate:focus-visible { background: color-mix(in srgb, #3b82f6 23%, var(--surface-primary)); color: #93c5fd; }
+.reportScheduleIconAction--delete:hover,
+.reportScheduleIconAction--delete:focus-visible { background: color-mix(in srgb, #ef4444 22%, var(--surface-primary)); color: #f87171; }
+
+/* Give the rows-per-page control enough room for its value and chevron. */
+.reportPagination__pageSize .reportEnhancedSelect {
+  min-width: 6.4rem;
+}
+.reportPagination__pageSize .reportEnhancedSelect__trigger {
+  min-width: 6.4rem;
+  padding-inline: 0.8rem 0.65rem;
+  justify-content: space-between;
+}
+
+/* Match every report title/header surface to the themed table header treatment. */
+.reportViewer .reportHeader.reportHeader--compact,
+.reportingReportPage .reportHeader.reportHeader--compact,
+.reportViewer .reportingReportPage__bar {
+  border-color: color-mix(in srgb, var(--accent-blue) 26%, var(--border-subtle)) !important;
+  background:
+    linear-gradient(110deg, color-mix(in srgb, var(--accent-blue) 16%, var(--surface-elevated)), color-mix(in srgb, var(--accent-blue) 7%, var(--surface-primary))) !important;
+  color: var(--text-main) !important;
+}
+.reportViewer .reportHeader.reportHeader--compact .reportHeader__eyebrow,
+.reportingReportPage .reportHeader.reportHeader--compact .reportHeader__eyebrow {
+  color: var(--accent-blue) !important;
+}
+.reportPagination__pageSize .reportEnhancedSelect__button {
+  min-width: 6.4rem;
+  padding-inline: 0.8rem 0.65rem;
+  justify-content: space-between;
+}
+
+/* ========================================================================== 
+   Phase 49: personal-preference resilience, dropdown restoration and shell UI
+   ========================================================================== */
+
+/* Reporting now sits on the same application background as every other module. */
+.reportingDashboard,
+.reportingDashboard--miniBentoHome,
+.reportingDashboard--miniBentoHome.reportingDashboard--home,
+.reportingHome,
+.reportingReportPage,
+.reportViewer,
+.reportSchedulingPage {
+  background: transparent !important;
+}
+
+/* Keep report filter menus above every table without clipping. */
+.reportingDashboard .reportFilters,
+.reportFilters {
+  z-index: 2147482000 !important;
+  overflow: visible !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+.reportFilterField,
+.reportFilterSelect {
+  overflow: visible !important;
+}
+.reportFilterSelect__menu {
+  z-index: 2147483400 !important;
+  box-sizing: border-box;
+  overscroll-behavior: contain;
+}
+.reportTimePicker,
+.reportDatePicker {
+  z-index: 2147483400 !important;
+}
+
+/* Body-portalled selects used by scheduling and report pagination. */
+body > .reportEnhancedSelect__menu--portal {
+  position: fixed !important;
+  inset: auto !important;
+  right: auto !important;
+  z-index: 2147483600 !important;
+  display: none;
+  box-sizing: border-box;
+  overscroll-behavior: contain;
+}
+body > .reportEnhancedSelect__menu--portal.is-open {
+  display: grid !important;
+  gap: .22rem;
+}
+body > .reportEnhancedSelect__menu--portal[hidden] {
+  display: none !important;
+}
+
+/* A single vertical view list is quicker to scan and avoids empty grid space. */
+.reportScheduleViewPanel__list {
+  grid-template-columns: minmax(0, 1fr) !important;
+}
+.reportScheduleViewPanel__list label {
+  min-height: 2.75rem;
+}
+
+/* Align the schedule action group with its column heading and preserve colours. */
+.reportSchedulingTable th:last-child,
+.reportSchedulingTable td:last-child {
+  text-align: center;
+  vertical-align: middle;
+}
+.reportSchedulingPage .reportScheduleRowActions {
+  justify-content: center;
+  flex-wrap: nowrap;
+  min-width: 10rem;
+}
+.reportSchedulingPage .reportScheduleRowActions .reportScheduleIconAction--run {
+  border-color: color-mix(in srgb, #22c55e 52%, var(--border-subtle));
+  background: color-mix(in srgb, #22c55e 16%, var(--surface-primary));
+  color: #22c55e;
+}
+.reportSchedulingPage .reportScheduleRowActions .reportScheduleIconAction--edit {
+  border-color: color-mix(in srgb, #f59e0b 54%, var(--border-subtle));
+  background: color-mix(in srgb, #f59e0b 16%, var(--surface-primary));
+  color: #f59e0b;
+}
+.reportSchedulingPage .reportScheduleRowActions .reportScheduleIconAction--duplicate {
+  border-color: color-mix(in srgb, #3b82f6 54%, var(--border-subtle));
+  background: color-mix(in srgb, #3b82f6 16%, var(--surface-primary));
+  color: #60a5fa;
+}
+.reportSchedulingPage .reportScheduleRowActions .reportScheduleIconAction--delete {
+  border-color: color-mix(in srgb, #ef4444 54%, var(--border-subtle));
+  background: color-mix(in srgb, #ef4444 15%, var(--surface-primary));
+  color: #ef4444;
+}
+
+/* Wider rows-per-page pill: value and chevron remain comfortably separated. */
+.reportPagination__pageSize .reportEnhancedSelect {
+  width: 7.25rem;
+  min-width: 7.25rem;
+  flex: 0 0 7.25rem;
+}
+.reportPagination__pageSize .reportEnhancedSelect__button {
+  min-width: 7.25rem;
+  padding-inline: .9rem .75rem;
+  justify-content: space-between;
+}
+
+/* ========================================================================== 
+   Phase 50: one reliable top-layer select system for filters, scheduling and pagination
+   ========================================================================== */
+.reportFilters .reportFilterField--select .reportEnhancedSelect {
+  width: 100%;
+  min-width: 0;
+}
+.reportFilters .reportFilterField--select .reportEnhancedSelect__button {
+  min-height: 2.85rem;
+  border-color: var(--border-subtle);
+  border-radius: .78rem;
+  padding-inline: 1rem .8rem;
+  background: var(--surface-primary);
+  color: var(--text-main);
+  font-size: .87rem;
+  font-weight: 860;
+}
+.reportFilters .reportFilterField--select .reportEnhancedSelect.is-open .reportEnhancedSelect__button,
+.reportFilters .reportFilterField--select .reportEnhancedSelect__button:focus-visible {
+  border-color: color-mix(in srgb, var(--accent-blue) 62%, var(--border-subtle));
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-blue) 12%, transparent);
+}
+
+body > #report-enhanced-select-portal.reportEnhancedSelect__menu--portal {
+  pointer-events: auto;
+  contain: layout paint;
+}
+
+body > #report-enhanced-select-portal .reportEnhancedSelect__option {
+  min-height: 2.35rem;
+  padding: .55rem .7rem;
 }

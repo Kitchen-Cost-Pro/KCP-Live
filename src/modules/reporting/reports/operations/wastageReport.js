@@ -4,6 +4,14 @@ import { buildRowWarnings } from '../../validators/rowWarningUtils.js';
 import { buildRowFormulaTooltip } from '../../tooltips/tooltipBuilder.js';
 import { reconcileWastageToDetailedActivity } from '../../validators/reconciliationChecks.js';
 import { detailedActivityReport } from './detailedActivityReport.js';
+import {
+  buildMenuItemWastageRows,
+  isProductWastageMovement,
+  resolveMovementMetadata,
+  resolveProductWastageIdentity,
+  resolveProductWastageQuantity,
+  resolveWastageSourceLabel,
+} from './wastageSourceUtils.js';
 
 const VALUE_TOLERANCE = 0.01;
 const WASTAGE_REASON_PATTERN = /(wast|waste|loss|lost|spoil|spoilage|break|broken|damage|damaged|expired|burnt|burned|dropped|discard)/i;
@@ -49,6 +57,18 @@ const byItemColumns = [
   { key: 'topWastageSource', label: 'Top Wastage Source', sortable: true }
 ];
 
+const menuItemColumns = [
+  { key: 'menuItemName', label: 'Menu Item', sortable: true },
+  { key: 'locationName', label: 'Location', sortable: true },
+  { key: 'qtyMenuItemsWasted', label: 'Menu Items Wasted', type: 'number', align: 'right', sortable: true, tooltip: 'The total number of finished menu items recorded as product wastage. Ingredient deductions are shown separately in the stock-item views.' },
+  { key: 'wastageValue', label: 'Ingredient Cost Wasted', type: 'money', align: 'right', sortable: true, tooltip: 'The total stock cost of all recipe ingredients deducted for the wasted menu items.' },
+  { key: 'eventCount', label: 'Wastage Events', type: 'number', align: 'right', sortable: true },
+  { key: 'ingredientLineCount', label: 'Ingredient Lines', type: 'number', align: 'right', sortable: true, tooltip: 'The number of unique recipe ingredient deductions represented by the product-wastage events.' },
+  { key: 'lastWastedDate', label: 'Last Wasted Date', type: 'date', sortable: true },
+  { key: 'topReason', label: 'Top Reason', sortable: true },
+  { key: 'createdBy', label: 'Created By', sortable: true }
+];
+
 const lineDetailColumns = [
   { key: 'date', label: 'Date', type: 'date', sortable: true },
   { key: 'time', label: 'Time', type: 'time', sortable: true },
@@ -92,10 +112,11 @@ export const wastageReport = {
   description: 'Detailed wastage report showing stock losses by source, date, location, category, item, reason, quantity, and value.',
   emptyState: { title: 'No wastage found', message: 'No wastage found for the selected filters.' },
   defaultView: 'summary',
-  availableViews: ['summary', 'by_source', 'by_category', 'by_item', 'line_detail'],
+  availableViews: ['summary', 'by_source', 'menu_items', 'by_category', 'by_item', 'line_detail'],
   filterConfig: {
     summary: ['search', 'dateRange', 'location', 'source'],
     by_source: ['search', 'dateRange', 'location', 'source'],
+    menu_items: ['search', 'dateRange', 'location', 'source'],
     by_category: ['search', 'dateRange', 'location', 'category', 'source'],
     by_item: ['search', 'dateRange', 'location', 'category', 'source'],
     line_detail: ['search', 'dateRange', 'time', 'location', 'category', 'source']
@@ -104,6 +125,7 @@ export const wastageReport = {
   columns: {
     summary: summaryColumns,
     by_source: bySourceColumns,
+    menu_items: menuItemColumns,
     by_category: byCategoryColumns,
     by_item: byItemColumns,
     line_detail: lineDetailColumns
@@ -112,6 +134,7 @@ export const wastageReport = {
   exportColumns: {
     summary: summaryColumns,
     by_source: bySourceColumns,
+    menu_items: menuItemColumns,
     by_category: byCategoryColumns,
     by_item: byItemColumns,
     line_detail: wastageExportColumns
@@ -122,6 +145,7 @@ export const wastageReport = {
     const wastageRows = buildWastageRows(ledgerRows);
     const meta = buildWastageMeta(ledgerRows, wastageRows);
     if (view === 'by_source') return aggregateBySource(wastageRows, meta).map((row) => withMeta(row, meta));
+    if (view === 'menu_items') return buildMenuItemWastageRows(wastageRows).map((row) => withMeta(row, meta));
     if (view === 'by_category') return aggregateByCategory(wastageRows, meta).map((row) => withMeta(row, meta));
     if (view === 'by_item') return aggregateByItem(wastageRows, meta).map((row) => withMeta(row, meta));
     if (view === 'line_detail') return wastageRows.map((row) => withMeta(row, meta));
@@ -149,6 +173,17 @@ export const wastageReport = {
       wastageValue: 'Wastage Value',
       percentOfTotalWastage: '% of Total Wastage',
       eventCount: 'Event Count'
+    },
+    menu_items: {
+      menuItemName: 'Menu Item',
+      locationName: 'Location',
+      qtyMenuItemsWasted: 'Menu Items Wasted',
+      wastageValue: 'Ingredient Cost Wasted',
+      eventCount: 'Wastage Events',
+      ingredientLineCount: 'Ingredient Lines',
+      lastWastedDate: 'Last Wasted Date',
+      topReason: 'Top Reason',
+      createdBy: 'Created By'
     },
     by_category: {
       category: 'Category',
@@ -203,11 +238,17 @@ function normalizeWastageRow(row = {}, index = 0) {
     : calculateStockValue(qtyWasted, unitCostExVat);
   const reason = resolveReason(row);
   const wastageSource = resolveWastageSource(row);
+  const product = resolveProductWastageIdentity(row);
   return {
     ...row,
     id: text(row.id) || `wastage:${row.sourceId || index}`,
     wastageSource,
+    wastageKind: isProductWastageMovement(row) ? 'product' : 'stock_item',
     source: wastageSource,
+    productId: product.productId,
+    productName: product.productName,
+    menuItemName: product.productName,
+    menuItemQty: resolveProductWastageQuantity(row),
     date: text(row.date || row.movementDate).slice(0, 10),
     time: text(row.time || row.movementTime || row.timestamp),
     category: text(row.category || row.categoryName) || 'Uncategorised',
@@ -355,6 +396,14 @@ function aggregateByItem(rows = [], meta = {}) {
 
 function getTotalsForView(view = 'summary', rows = []) {
   const reportRows = toArray(rows);
+  if (view === 'menu_items') {
+    return {
+      qtyMenuItemsWasted: sumBy(reportRows, 'qtyMenuItemsWasted'),
+      wastageValue: sumBy(reportRows, 'wastageValue'),
+      eventCount: sumBy(reportRows, 'eventCount'),
+      ingredientLineCount: sumBy(reportRows, 'ingredientLineCount')
+    };
+  }
   const totals = {
     qtyWasted: sumBy(reportRows, 'qtyWasted'),
     wastageValue: sumBy(reportRows, 'wastageValue'),
@@ -370,7 +419,7 @@ function validateWastageRows(rows = [], view = 'summary') {
   const meta = reportRows.find((row) => row.__meta)?.__meta || {};
   const lineRows = view === 'line_detail'
     ? reportRows
-    : Array.from(new Map(reportRows.flatMap((row) => toArray(row.__lineRows)).map((row) => [row.id, row])).values());
+    : Array.from(new Map(reportRows.flatMap((row) => toArray(row.__lineRows || row.__sourceRows)).map((row) => [row.id, row])).values());
 
   return [
     ...toArray(meta.apiWarnings),
@@ -403,7 +452,13 @@ function withMeta(row = {}, meta = {}) {
 }
 
 function resolveQtyWasted(row = {}) {
-  const metadata = row.raw?.metadata || row.raw?.movement?.metadata || row.rawSourceRow?.metadata || {};
+  // Stock-item quantity is always the actual ingredient or stock movement.
+  // Product-wastage menu quantities are reported separately in menu_items.
+  const qtyOut = safeNumber(row.qtyOut);
+  if (qtyOut > 0) return qtyOut;
+  const netQty = safeNumber(row.netQty);
+  if (netQty < 0) return absoluteValue(netQty);
+  const metadata = resolveMovementMetadata(row);
   const recordedWastageQty = safeNumber(
     row.wastageQty
     ?? row.wasteQty
@@ -411,28 +466,17 @@ function resolveQtyWasted(row = {}) {
     ?? metadata.wasteQty
     ?? metadata.wastage_quantity
   );
-  if (recordedWastageQty > 0) return recordedWastageQty;
-  const qtyOut = safeNumber(row.qtyOut);
-  if (qtyOut > 0) return qtyOut;
-  const netQty = safeNumber(row.netQty);
-  if (netQty < 0) return absoluteValue(netQty);
-  return 0;
+  return recordedWastageQty > 0 ? recordedWastageQty : 0;
 }
 
 function resolveWastageSource(row = {}) {
   const source = text(row.source || row.sourceType || row.movementType);
-  const normalized = normalize(source);
-  if (normalized.includes('manufacturing wastage')) return 'Manufacturing Wastage';
-  if (normalized.includes('recipe wastage')) return 'Recipe Wastage';
-  if (normalized.includes('manual wastage')) return 'Manual Wastage';
-  if (normalized.includes('wastage') || normalized.includes('waste')) return 'Wastage Adjustment';
-  if (normalized.includes('manual adjustment')) return 'Manual Adjustment';
-  return source || 'Unknown Source';
+  return resolveWastageSourceLabel(row, source);
 }
 
 function isAccountingOnlyManufacturingWastage(row = {}) {
   if (text(row.wastageSource || row.source || row.sourceType) !== 'Manufacturing Wastage') return false;
-  const metadata = row.raw?.metadata || row.raw?.movement?.metadata || row.rawSourceRow?.metadata || {};
+  const metadata = resolveMovementMetadata(row);
   return row.accountingOnly === true
     || metadata.accountingOnly === true
     || Number(metadata.accountingOnly || 0) === 1;
@@ -444,7 +488,7 @@ function resolveReason(row = {}) {
 }
 
 function shouldHaveReason(row = {}) {
-  return ['Wastage Adjustment', 'Manual Wastage', 'Manual Adjustment', 'Recipe Wastage'].includes(text(row.wastageSource));
+  return ['Product Wastage', 'Stock Item Wastage', 'Manufacturing Wastage', 'Recipe Wastage'].includes(text(row.wastageSource));
 }
 
 function resolveWeightedUnitCost(rows = []) {

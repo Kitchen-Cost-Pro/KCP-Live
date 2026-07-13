@@ -1181,7 +1181,8 @@ function normalizeUomConfigurations(value = []) {
       baseUom: String(entry.baseUom || entry.base_uom || entry.baseUnit || '').trim(),
       customUom: String(entry.customUom || entry.custom_uom || entry.customUnit || entry.orderingUom || '').trim(),
       ratio: Number(entry.ratio ?? entry.conversionRatio ?? entry.unitsPerCustomUnit ?? 0) || 0,
-      barcode: String(entry.barcode || entry.customBarcode || entry.customUomBarcode || '').trim()
+      barcode: String(entry.barcode || entry.customBarcode || entry.customUomBarcode || '').trim(),
+      isDefaultOrdering: ['true', '1', 'yes', 'on'].includes(String(entry.isDefaultOrdering ?? entry.defaultOrdering ?? entry.is_default_ordering ?? entry.defaultOrderUom ?? '').toLowerCase()) || entry.isDefaultOrdering === true || entry.defaultOrdering === true
     }))
     .filter((entry) => entry.customUom && entry.ratio > 0);
 }
@@ -1253,7 +1254,7 @@ function renderGmailPromptModal(purchaseOrders) {
     <div class="purchaseOrdersModule__modalBackdrop">
       <div class="purchaseOrdersModule__confirm purchaseOrdersModule__confirm--gmail">
         <div class="purchaseOrdersModule__gmailPromptIcon">${icon('send')}</div>
-        <span>Gmail Not Connected</span>
+        <span class="purchaseOrdersModule__gmailPromptEyebrow">Gmail Not Connected</span>
         <h2>Link your Gmail account first</h2>
         <p>To send purchase orders by email, your Gmail account must be connected. Head to Integration Settings to link your account — it only takes a moment.</p>
         <div class="purchaseOrdersModule__modalFooter">

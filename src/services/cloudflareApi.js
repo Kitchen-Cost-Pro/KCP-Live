@@ -62,7 +62,8 @@ export async function callCloudflareRoute(path, {
   payload,
   query,
   token = getCloudSessionToken(),
-  headers = {}
+  headers = {},
+  timeoutMs = REQUEST_TIMEOUT_MS
 } = {}) {
   const resourcePath = String(path || '').replace(/^\/+/, '');
   const url = createApiUrl(resourcePath);
@@ -82,7 +83,7 @@ export async function callCloudflareRoute(path, {
     const cached = apiGetCache.get(cacheKey);
     if (cached && cached.expires > now) return cached.promise;
 
-    const promise = executeRequest(url, requestMethod, payload, token, headers);
+    const promise = executeRequest(url, requestMethod, payload, token, headers, timeoutMs);
     apiGetCache.set(cacheKey, { promise, expires: now + GET_CACHE_TTL_MS });
     // Never cache a failed request.
     promise.catch(() => {
@@ -92,7 +93,7 @@ export async function callCloudflareRoute(path, {
   }
 
   // Any mutation may affect any tab's data — invalidate the whole read cache on success.
-  const result = await executeRequest(url, requestMethod, payload, token, headers);
+  const result = await executeRequest(url, requestMethod, payload, token, headers, timeoutMs);
   clearApiCache();
   return result;
 }
@@ -102,7 +103,7 @@ export async function callCloudflareRoute(path, {
 // permanent "saving" state with no error to recover from. This guarantees a rejection.
 const REQUEST_TIMEOUT_MS = 30000;
 
-async function executeRequest(url, requestMethod, payload, token, headers) {
+async function executeRequest(url, requestMethod, payload, token, headers, timeoutMs = REQUEST_TIMEOUT_MS) {
   const requestHeaders = {
     'Content-Type': 'application/json',
     ...headers
@@ -110,7 +111,8 @@ async function executeRequest(url, requestMethod, payload, token, headers) {
   if (token) requestHeaders.Authorization = `Bearer ${token}`;
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const requestTimeoutMs = normalizeRequestTimeoutMs(timeoutMs);
+  const timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
 
   let response;
   try {
@@ -137,6 +139,12 @@ async function executeRequest(url, requestMethod, payload, token, headers) {
   return result;
 }
 
+function normalizeRequestTimeoutMs(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return REQUEST_TIMEOUT_MS;
+  return Math.min(120000, Math.max(1000, Math.round(parsed)));
+}
+
 function requiresFreshGet(pathname = '') {
   return /\/access-management$/.test(String(pathname || ''));
 }
@@ -150,7 +158,8 @@ function getTokenCacheScope(token = '') {
 export async function callCloudflareWorkspaceRoute(workspaceId, resource, {
   method = 'GET',
   payload,
-  query
+  query,
+  timeoutMs = REQUEST_TIMEOUT_MS
 } = {}) {
   const token = getCloudSessionToken();
   if (!token) throw new Error('Sign in before loading workspace data.');
@@ -164,7 +173,7 @@ export async function callCloudflareWorkspaceRoute(workspaceId, resource, {
     url.searchParams.set(key, String(value));
   });
 
-  return callCloudflareRoute(url.pathname + url.search, { method, payload, token });
+  return callCloudflareRoute(url.pathname + url.search, { method, payload, token, timeoutMs });
 }
 
 export async function callOptionalCloudflareWorkspaceRoute(workspaceId, resource, {

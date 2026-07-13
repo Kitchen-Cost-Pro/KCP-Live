@@ -751,7 +751,7 @@
   height: 24px;
 }
 
-.purchaseOrdersModule__confirm--gmail span {
+.purchaseOrdersModule__confirm--gmail .purchaseOrdersModule__gmailPromptEyebrow {
   display: block;
   color: var(--accent-blue);
   font-size: 0.72rem;
@@ -773,6 +773,15 @@
   font-size: 0.88rem;
   font-weight: 780;
   line-height: 1.55;
+}
+
+.purchaseOrdersModule__confirm--gmail .purchaseOrdersModule__primary span {
+  display: inline;
+  color: #fff;
+  font-size: inherit;
+  font-weight: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
 }
 
 .purchaseOrdersModule__modalHeader,

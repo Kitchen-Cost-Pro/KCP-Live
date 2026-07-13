@@ -876,6 +876,35 @@ export async function getModifierSalesReport(
         .all<Row>()
     : { results: [] };
 
+  const menuUsageWhere = buildMenuItemUsageWhere(workspaceId, filters, timeZone);
+  const menuUsageRows = tableStatus.stock_movements
+    ? await env.DB.prepare(
+        `SELECT
+        sm.id,
+        sm.workspace_id,
+        sm.stock_item_id,
+        sm.location_id,
+        sm.movement_type,
+        sm.document_type,
+        sm.document_id,
+        sm.quantity_delta,
+        sm.unit_cost,
+        sm.value_delta,
+        sm.occurred_at,
+        sm.created_by,
+        sm.metadata_json,
+        sm.created_at,
+        si.name AS item_name,
+        si.category AS category_name,
+        si.unit AS base_uom
+       FROM stock_movements sm
+       LEFT JOIN stock_items si ON si.id = sm.stock_item_id AND si.workspace_id = sm.workspace_id
+      WHERE ${menuUsageWhere.whereSql}`,
+      )
+        .bind(...menuUsageWhere.binds)
+        .all<Row>()
+    : { results: [] };
+
   const modifierCatalogue = tableStatus.yoco_modifier_groups
     ? await loadModifierCatalogue(env, workspaceId)
     : new Map<string, Row>();
@@ -887,7 +916,12 @@ export async function getModifierSalesReport(
     salesRows.results || [],
     (row) => clean(row.yoco_order_line_db_id || row.id),
   );
+  const canonicalMenuUsageRows = dedupeRowsByKey(
+    menuUsageRows.results || [],
+    (row) => clean(row.id),
+  );
   const usageIndex = buildModifierUsageIndex(canonicalModifierUsageRows);
+  const menuUsageIndex = buildMenuItemUsageIndex(canonicalMenuUsageRows);
   const standardizedRows: Row[] = [];
 
   for (const row of canonicalModifierSalesRows) {
@@ -897,6 +931,7 @@ export async function getModifierSalesReport(
         row,
         selection,
         usageIndex,
+        menuUsageIndex,
         warnings,
         timeZone,
       );
@@ -1468,7 +1503,7 @@ function standardizeStockControlRow(
   );
   const suggestedAction = resolveStockControlAction({
     status,
-    supplierName: row.supplier_name,
+    itemType: row.item_type,
     unitCostExVat,
     purchaseUom: purchase.purchaseUom,
     purchaseUomRatio: purchase.purchaseUomRatio,
@@ -1528,13 +1563,13 @@ function resolveStockControlStatus(
 
 function resolveStockControlAction({
   status,
-  supplierName,
+  itemType,
   unitCostExVat,
   purchaseUom,
   purchaseUomRatio,
   parLevel,
 }: Row) {
-  if (!clean(supplierName)) return "Missing supplier";
+  if (isManufacturedStockControlItemType(itemType)) return "Manufacture internally";
   if (!unitCostExVat) return "Missing cost";
   if (!clean(purchaseUom)) return "Missing purchase UOM";
   if (!purchaseUomRatio) return "Missing purchase UOM";
@@ -1542,6 +1577,11 @@ function resolveStockControlAction({
   if (status === "Critical") return "Reorder urgently";
   if (status === "Low" || status === "Below Par") return "Reorder soon";
   return "Review par level";
+}
+
+function isManufacturedStockControlItemType(value: unknown) {
+  const itemType = clean(value).toLowerCase().replace(/[\s-]+/g, "_");
+  return ["manufactured", "manufactured_good", "manufactured_goods", "sub_recipe", "subrecipe"].includes(itemType);
 }
 
 function addStockControlRowWarnings(
@@ -1628,15 +1668,7 @@ function addStockControlRowWarnings(
       "Required reorder quantity may fall back to the low stock threshold.",
       "Set a par level for this item and location.",
     );
-  if (!clean(row.supplierName))
-    add(
-      "Critical",
-      "Missing supplier",
-      "No supplier could be inferred from recent purchases.",
-      "Supplier reorder grouping is incomplete.",
-      "Link the item to a supplier or receive it through a supplier GRV.",
-    );
-  if (!clean(row.purchaseUom))
+  if (!isManufacturedStockControlItemType(row.itemType) && !clean(row.purchaseUom))
     add(
       "Critical",
       "Missing purchase UOM",
@@ -1644,7 +1676,7 @@ function addStockControlRowWarnings(
       "Supplier order quantity cannot be converted for purchasing.",
       "Add a purchase UOM to the item setup.",
     );
-  if (clean(row.purchaseUom) && !numberValue(row.purchaseUomRatio, 0))
+  if (!isManufacturedStockControlItemType(row.itemType) && clean(row.purchaseUom) && !numberValue(row.purchaseUomRatio, 0))
     add(
       "Critical",
       "Missing purchase UOM conversion",
@@ -1688,24 +1720,12 @@ function stockControlRowMatchesFilters(
     clean(row.status).toLowerCase() !== filters.status.toLowerCase()
   )
     return false;
-  if (
-    filters.supplierId &&
-    clean(row.supplierId || row.supplierName) !== filters.supplierId
-  )
-    return false;
-  if (
-    filters.supplier &&
-    clean(row.supplierName).toLowerCase() !== filters.supplier.toLowerCase()
-  )
-    return false;
   if (truthyFilter(filters.onlyCritical) && row.status !== "Critical")
     return false;
   if (
     truthyFilter(filters.onlyBelowPar) &&
     !["Critical", "Low", "Below Par"].includes(clean(row.status))
   )
-    return false;
-  if (truthyFilter(filters.missingSupplier) && clean(row.supplierName))
     return false;
   if (
     truthyFilter(filters.missingCost) &&
@@ -1756,6 +1776,29 @@ function resolvePurchaseUomDetails(
   lastPurchaseUom = "",
   baseUom = "",
 ) {
+  const configuredUoms = Array.isArray(raw.uomConfigurations)
+    ? raw.uomConfigurations
+    : Array.isArray(raw.uomConfig)
+      ? raw.uomConfig
+      : Array.isArray(raw.uomConversions)
+        ? raw.uomConversions
+        : Array.isArray(raw.uoms)
+          ? raw.uoms
+          : Array.isArray(raw.customUoms)
+            ? raw.customUoms
+            : [];
+  const defaultConfiguration = configuredUoms.find((item: Row) => {
+    const value = item?.isDefaultOrdering ?? item?.defaultOrdering ?? item?.is_default_ordering ?? item?.defaultOrderUom;
+    return value === true || ["true", "1", "yes", "on"].includes(clean(value).toLowerCase());
+  });
+  const defaultConfiguredUom = clean(
+    defaultConfiguration?.customUom ||
+      defaultConfiguration?.custom_uom ||
+      defaultConfiguration?.customUnit ||
+      defaultConfiguration?.name ||
+      defaultConfiguration?.uom ||
+      defaultConfiguration?.unit,
+  );
   const purchaseUom = clean(
     raw.purchaseUom ||
       raw.purchase_uom ||
@@ -1763,6 +1806,7 @@ function resolvePurchaseUomDetails(
       raw.purchase_unit ||
       raw.defaultPurchaseUom ||
       raw.default_purchase_uom ||
+      defaultConfiguredUom ||
       lastPurchaseUom ||
       baseUom,
   );
@@ -1781,11 +1825,7 @@ function resolvePurchaseUomDetails(
   )
     purchaseUomRatio = 1;
   if (!purchaseUomRatio) {
-    const uoms = Array.isArray(raw.uoms)
-      ? raw.uoms
-      : Array.isArray(raw.customUoms)
-        ? raw.customUoms
-        : [];
+    const uoms = configuredUoms;
     const match = uoms.find(
       (item: Row) =>
         clean(item.name || item.uom || item.unit).toLowerCase() ===
@@ -3868,6 +3908,7 @@ function standardizeSalesFinancialRow(
     netAmount: financials.netAmount,
     discountAmount: financials.discountAmount,
     refundAmount: financials.refundAmount,
+    refundNetAmount: financials.refundNetAmount,
     tipAmount: financials.tipAmount,
     feeAmount: financials.feeAmount,
     payoutAmount: financials.payoutAmount,
@@ -4233,6 +4274,26 @@ function buildModifierUsageOnlyWhere(
   return { whereSql: clauses.join(" AND "), binds };
 }
 
+function buildMenuItemUsageWhere(
+  workspaceId: string,
+  filters: ReturnType<typeof readFilters>,
+  timeZone: string,
+) {
+  const clauses = [
+    "sm.workspace_id = ?1",
+    "sm.document_type = 'yoco_order'",
+    "sm.movement_type IN ('sale_depletion', 'sale_refund')",
+  ];
+  const binds: unknown[] = [workspaceId];
+  const add = (sql: string, value: unknown) => {
+    binds.push(value);
+    clauses.push(sql.replace(/\?/g, `?${binds.length}`));
+  };
+  addZonedDateRange(clauses, binds, "sm.occurred_at", filters, timeZone);
+  if (filters.locationId) add("sm.location_id = ?", filters.locationId);
+  return { whereSql: clauses.join(" AND "), binds };
+}
+
 async function loadModifierCatalogue(env: Env, workspaceId: string) {
   const rows = await env.DB.prepare(
     `SELECT id, yoco_modifier_group_id, name, raw_json
@@ -4471,6 +4532,35 @@ function standardizeRawModifierSelection(
   };
 }
 
+function buildMenuItemUsageIndex(rows: Row[]) {
+  const index = new Map<string, Row[]>();
+  for (const row of rows) {
+    const metadata = parseJson(row.metadata_json);
+    const orderId = clean(row.document_id);
+    const lineId = clean(metadata.componentLineId || metadata.parentLineId || metadata.saleLineId || metadata.lineId);
+    if (!orderId || !lineId) continue;
+    const key = `${orderId}|${lineId}`;
+    if (!index.has(key)) index.set(key, []);
+    index.get(key)?.push(row);
+  }
+  return index;
+}
+
+function matchingMenuItemUsageRows(row: Row, selection: Row, index: Map<string, Row[]>) {
+  const orderId = clean(row.yoco_order_id || row.yoco_payment_id || row.yoco_order_db_id_joined);
+  const lineId = clean(selection.parentLineId || row.yoco_line_id || row.yoco_order_line_db_id);
+  return orderId && lineId ? index.get(`${orderId}|${lineId}`) || [] : [];
+}
+
+function signedMovementStockCost(row: Row) {
+  const amount = Math.abs(
+    hasMeaningfulValue(row.value_delta)
+      ? numberValue(row.value_delta, 0)
+      : numberValue(row.quantity_delta, 0) * numberValue(row.unit_cost, 0),
+  );
+  return clean(row.movement_type) === "sale_refund" ? -amount : amount;
+}
+
 function buildModifierUsageIndex(rows: Row[]) {
   const index = new Map<string, Row[]>();
   for (const row of rows) {
@@ -4552,10 +4642,12 @@ function standardizeModifierSalesRow(
   row: Row,
   selection: Row,
   usageIndex: Map<string, Row[]>,
+  menuUsageIndex: Map<string, Row[]>,
   warnings: Array<{ code: string; level: string; message: string }>,
   timeZone: string,
 ) {
   const usageRows = matchingModifierUsageRows(row, selection, usageIndex);
+  const menuUsageRows = matchingMenuItemUsageRows(row, selection, menuUsageIndex);
   const grossAmount = roundMoneyNumber(
     Math.abs(numberValue(selection.grossAmount, 0)),
   );
@@ -4569,6 +4661,27 @@ function standardizeModifierSalesRow(
   const vatRate = modifierFinancials.vatRate;
   const vatAmount = modifierFinancials.vatAmount;
   const netAmount = modifierFinancials.netAmount;
+  const menuItemGrossAmount = roundMoneyNumber(Math.abs(numberValue(row.line_total, 0)));
+  const menuItemFinancials = deriveYocoFinancialAmounts({
+    raw: parseJson(row.line_raw_json),
+    persistedTotal: menuItemGrossAmount,
+    configuredVatRate: row.vat_rate,
+    orderType: row.order_type,
+    status: row.status,
+  });
+  const menuItemModifierStockCost = roundMoneyNumber(
+    menuUsageRows
+      .filter((usage) => clean(parseJson(usage.metadata_json).componentType).toLowerCase() === "modifier")
+      .reduce((sum, usage) => sum + signedMovementStockCost(usage), 0),
+  );
+  const menuItemBaseStockCost = roundMoneyNumber(
+    menuUsageRows
+      .filter((usage) => clean(parseJson(usage.metadata_json).componentType).toLowerCase() !== "modifier")
+      .reduce((sum, usage) => sum + signedMovementStockCost(usage), 0),
+  );
+  const menuItemTotalStockCost = roundMoneyNumber(menuItemBaseStockCost + menuItemModifierStockCost);
+  const menuItemGrossProfit = roundMoneyNumber(menuItemFinancials.netAmount - menuItemTotalStockCost);
+  const menuItemGpPercent = menuItemFinancials.netAmount ? menuItemGrossProfit / menuItemFinancials.netAmount : 0;
   const stockQtyDeducted = usageRows.reduce(
     (sum, usage) => sum + Math.abs(numberValue(usage.quantity_delta, 0)),
     0,
@@ -4637,6 +4750,16 @@ function standardizeModifierSalesRow(
     menuItemId: clean(row.line_product_id),
     menuItemName: clean(row.product_name || row.line_name),
     menuCategory: clean(row.product_category),
+    parentLineId: clean(selection.parentLineId || row.yoco_line_id || row.yoco_order_line_db_id),
+    menuItemSaleKey: `${clean(row.yoco_order_id || row.yoco_payment_id || row.yoco_order_db_id_joined)}|${clean(selection.parentLineId || row.yoco_line_id || row.yoco_order_line_db_id)}`,
+    menuItemGrossAmount: menuItemFinancials.grossAmount,
+    menuItemVatAmount: menuItemFinancials.vatAmount,
+    menuItemNetAmount: menuItemFinancials.netAmount,
+    menuItemBaseStockCost,
+    menuItemModifierStockCost,
+    menuItemTotalStockCost,
+    menuItemGrossProfit,
+    menuItemGpPercent,
     modifierGroupId: clean(selection.modifierGroupId),
     modifierGroupName: clean(selection.modifierGroupName || "Modifier Group"),
     modifierId: clean(selection.modifierId),
@@ -4679,7 +4802,9 @@ function standardizeModifierSalesRow(
       line: row,
       selection: selection.raw,
       usageRows,
+      menuUsageRows,
       financials: modifierFinancials,
+      menuItemFinancials,
     },
   };
 }

@@ -49,6 +49,34 @@ export async function reportToPdfDocument(result = {}, options = {}) {
   ]);
   const doc = new jsPDF({ orientation: options.orientation || 'landscape', unit: 'pt', format: 'a4' });
   const autoTable = autoTableModule.default || autoTableModule.autoTable;
+  await appendReportPdfSection(doc, autoTable, result, options);
+  return doc;
+}
+
+export async function reportResultsToPdfDocument(results = [], options = {}) {
+  const [{ jsPDF }, autoTableModule] = await Promise.all([
+    import('jspdf'),
+    import('jspdf-autotable')
+  ]);
+  const doc = new jsPDF({ orientation: options.orientation || 'landscape', unit: 'pt', format: 'a4' });
+  const autoTable = autoTableModule.default || autoTableModule.autoTable;
+  const safeResults = (Array.isArray(results) ? results : [results]).filter(Boolean);
+  if (!safeResults.length) safeResults.push({ title: 'Report', rows: [], report: { title: 'Report' } });
+  for (let index = 0; index < safeResults.length; index += 1) {
+    if (index > 0) doc.addPage();
+    await appendReportPdfSection(doc, autoTable, safeResults[index], options);
+  }
+  const first = safeResults[0] || {};
+  const title = text(options.title || first.title || first.report?.title || 'Report');
+  doc.setProperties({
+    title,
+    subject: `${title} - combined report views`,
+    creator: 'Kitchen Cost Pro Reporting'
+  });
+  return doc;
+}
+
+async function appendReportPdfSection(doc, autoTable, result = {}, options = {}) {
   const formatted = options.formatted !== false;
   const columns = getExportColumns(result);
   const headers = columns.map((column) => getExportHeader(result, column));
@@ -57,7 +85,10 @@ export async function reportToPdfDocument(result = {}, options = {}) {
   const exportRows = totalRow ? [...rows, totalRow] : rows;
   const body = exportRows.length
     ? exportRows.map((row) => headers.map((header) => pdfCell(row[header])))
-    : [headers.map((_, index) => index === 0 ? 'No rows for the selected filters. Totals are zero where applicable.' : '')];
+    : [headers.length
+      ? headers.map((_, index) => index === 0 ? 'No rows for the selected filters. Totals are zero where applicable.' : '')
+      : ['No rows for the selected filters. Totals are zero where applicable.']];
+  const safeHeaders = headers.length ? headers : ['Report'];
   const warnings = (result.warnings || []).filter(Boolean);
   const reportTitle = text(result.title || result.report?.title || 'Report');
   const viewLabel = text(result.view || result.report?.defaultView || 'default').replace(/_/g, ' ');
@@ -68,11 +99,6 @@ export async function reportToPdfDocument(result = {}, options = {}) {
     `Rows: ${(result.rows || []).length}`
   ].join('  |  ');
 
-  doc.setProperties({
-    title: reportTitle,
-    subject: `${reportTitle} - ${viewLabel}`,
-    creator: 'Kitchen Cost Pro Reporting'
-  });
   const header = await drawReportPdfHeader(doc, {
     title: reportTitle,
     subtitle,
@@ -81,11 +107,11 @@ export async function reportToPdfDocument(result = {}, options = {}) {
   });
 
   const startY = header.tableStartY;
-  const layout = pdfTableLayoutForColumns(headers.length);
+  const layout = pdfTableLayoutForColumns(safeHeaders.length);
   const tableOptions = {
     ...layout,
     startY,
-    head: [headers],
+    head: [safeHeaders],
     body,
     headStyles: {
       fillColor: [17, 24, 39],
@@ -95,13 +121,13 @@ export async function reportToPdfDocument(result = {}, options = {}) {
     alternateRowStyles: {
       fillColor: [248, 250, 252]
     },
-    columnStyles: buildReportPdfColumnStyles(headers),
+    columnStyles: buildReportPdfColumnStyles(safeHeaders),
     margin: { left: 28, right: 28 },
-    didDrawPage: (data) => {
-      const pageCount = doc.internal.getNumberOfPages();
+    didDrawPage: () => {
+      const currentPage = doc.internal.getCurrentPageInfo?.().pageNumber || doc.internal.getNumberOfPages();
       doc.setFontSize(7);
       doc.setTextColor(120);
-      doc.text(`Page ${data.pageNumber} of ${pageCount}`, doc.internal.pageSize.getWidth() - 82, doc.internal.pageSize.getHeight() - 18);
+      doc.text(`Page ${currentPage}`, doc.internal.pageSize.getWidth() - 68, doc.internal.pageSize.getHeight() - 18);
     }
   };
 
@@ -122,12 +148,16 @@ export async function reportToPdfDocument(result = {}, options = {}) {
     const warningLines = warnings.slice(0, 12).map((warning) => `${text(warning.level || 'warning').toUpperCase()}: ${text(warning.message || warning.code || 'Report warning')}`);
     doc.text(doc.splitTextToSize(warningLines.join('\n'), 760), 36, warningY + 14);
   }
-
-  return doc;
 }
 
 export async function reportToPdfBytes(result = {}, options = {}) {
   const doc = await reportToPdfDocument(result, options);
+  const buffer = doc.output('arraybuffer');
+  return buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+}
+
+export async function reportResultsToPdfBytes(results = [], options = {}) {
+  const doc = await reportResultsToPdfDocument(results, options);
   const buffer = doc.output('arraybuffer');
   return buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
 }

@@ -158,6 +158,43 @@
   color: var(--text-soft);
 }
 
+.refreshButton {
+  min-width: 96px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 13px;
+  border: 1px solid color-mix(in srgb, var(--dash-green) 34%, var(--dash-border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--dash-green) 9%, var(--dash-elev));
+  color: var(--dash-text);
+  font-family: var(--font-main);
+  font-size: 0.66rem;
+  font-weight: 780;
+  cursor: pointer;
+  transition: border-color 150ms ease, background 150ms ease, transform 150ms ease;
+}
+
+.refreshButton:hover,
+.refreshButton:focus-visible {
+  border-color: color-mix(in srgb, var(--dash-green) 60%, var(--dash-border));
+  background: color-mix(in srgb, var(--dash-green) 15%, var(--dash-elev));
+  outline: none;
+  transform: translateY(-1px);
+}
+
+.refreshButton:disabled {
+  opacity: 0.58;
+  cursor: wait;
+  transform: none;
+}
+
+.refreshButton.refreshing svg {
+  animation: dashboardSpin 800ms linear infinite;
+}
+
 .iconButton {
   position: relative;
   width: 34px;
@@ -511,8 +548,11 @@
 .customField {
   position: relative;
   display: grid;
-  gap: 5px;
+  flex: 0 1 240px;
+  width: clamp(190px, 22vw, 280px);
   min-width: 190px;
+  max-width: 100%;
+  gap: 5px;
 }
 
 .customFieldLabel {
@@ -574,9 +614,14 @@
   z-index: 80;
   top: calc(100% + 7px);
   left: 0;
-  width: max(100%, 220px);
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 190px;
+  max-width: min(320px, calc(100vw - 24px));
   max-height: 280px;
+  overflow-x: hidden;
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 6px;
   border: 1px solid var(--dash-border);
   border-radius: 10px;
@@ -1601,7 +1646,7 @@
   .filterControls { width: 100%; display: grid; grid-template-columns: 1fr 1fr; }
   .filterField,
   .dateField,
-  .customField { min-width: 0; width: 100%; }
+  .customField { min-width: 0; width: 100%; max-width: none; }
   .filterSummary { width: 100%; }
   .body { padding: 16px; }
   .kpiGrid { grid-template-columns: 1fr; }

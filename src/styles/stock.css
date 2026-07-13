@@ -1079,7 +1079,7 @@
 }
 
 .stockModule__uomConfigRow {
-  grid-template-columns: minmax(120px, 0.75fr) minmax(140px, 0.9fr) minmax(110px, 0.55fr) minmax(160px, 1fr);
+  grid-template-columns: minmax(110px, 0.7fr) minmax(130px, 0.85fr) minmax(100px, 0.5fr) minmax(145px, 0.9fr) minmax(150px, 0.8fr);
   padding: 10px;
   border: 1px solid var(--border-subtle);
   border-radius: 12px;
@@ -2620,4 +2620,35 @@
   font-size: 0.86rem !important;
   font-weight: 850 !important;
   letter-spacing: 0.035em !important;
+}
+
+/* Phase 47: compact per-item default ordering UOM selector. */
+.stockModule__uomConfigRow .stockModule__defaultOrderingUom {
+  align-self: stretch;
+}
+
+.stockModule__defaultOrderingUomControl {
+  min-height: 2.75rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid color-mix(in srgb, var(--accent, #5da8ff) 30%, var(--border-color, #334155));
+  border-radius: 0.8rem;
+  background: color-mix(in srgb, var(--accent, #5da8ff) 8%, var(--surface-elevated, #172230));
+  color: var(--text-primary, #eef5ff);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.stockModule__defaultOrderingUomControl input {
+  inline-size: 1rem;
+  block-size: 1rem;
+  margin: 0;
+  accent-color: var(--accent, #5da8ff);
+}
+
+.stockModule__defaultOrderingUomControl:has(input:disabled) {
+  opacity: 0.45;
+  cursor: not-allowed;
 }

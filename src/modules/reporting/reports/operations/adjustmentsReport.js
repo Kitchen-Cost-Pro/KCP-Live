@@ -4,6 +4,13 @@ import { buildRowWarnings } from '../../validators/rowWarningUtils.js';
 import { buildRowFormulaTooltip } from '../../tooltips/tooltipBuilder.js';
 import { reconcileAdjustmentsToDetailedActivity } from '../../validators/reconciliationChecks.js';
 import { detailedActivityReport } from './detailedActivityReport.js';
+import {
+  buildMenuItemWastageRows,
+  isProductWastageMovement,
+  resolveProductWastageIdentity,
+  resolveProductWastageQuantity,
+  resolveWastageSourceLabel,
+} from './wastageSourceUtils.js';
 
 const VALUE_TOLERANCE = 0.01;
 const QTY_TOLERANCE = 0.0001;
@@ -17,6 +24,26 @@ const summaryColumns = [
   { key: 'totalQtyAdjusted', label: 'Total Qty Adjusted', type: 'number', align: 'right', tooltipKey: 'adjustmentQty', cellTooltip: adjustmentQtyTooltip, sortable: true },
   { key: 'totalValueAdjusted', label: 'Total Value Adjusted', type: 'money', align: 'right', tooltipKey: 'adjustmentValue', cellTooltip: adjustmentValueTooltip, sortable: true },
   { key: 'adjustmentEvents', label: 'Adjustment Events', type: 'number', align: 'right', sortable: true },
+  { key: 'createdBy', label: 'Created By', sortable: true }
+];
+
+const bySourceColumns = [
+  { key: 'adjustmentSource', label: 'Source', sortable: true },
+  { key: 'qtyAdjusted', label: 'Stock Qty Adjusted', type: 'number', align: 'right', sortable: true, tooltip: 'The absolute stock-item or ingredient quantity adjusted by this source. Menu-item quantities are shown in the Menu Items view.' },
+  { key: 'valueImpact', label: 'Value Impact', type: 'money', align: 'right', tooltipKey: 'adjustmentValue', sortable: true },
+  { key: 'eventCount', label: 'Adjustment Events', type: 'number', align: 'right', sortable: true },
+  { key: 'menuItemsWasted', label: 'Menu Items Wasted', type: 'number', align: 'right', sortable: true, tooltip: 'The number of finished menu items recorded for product-wastage adjustments. This is zero for direct stock-item adjustments.' }
+];
+
+const menuItemColumns = [
+  { key: 'menuItemName', label: 'Menu Item', sortable: true },
+  { key: 'locationName', label: 'Location', sortable: true },
+  { key: 'qtyMenuItemsWasted', label: 'Menu Items Wasted', type: 'number', align: 'right', sortable: true },
+  { key: 'wastageValue', label: 'Ingredient Cost Impact', type: 'money', align: 'right', sortable: true },
+  { key: 'eventCount', label: 'Wastage Events', type: 'number', align: 'right', sortable: true },
+  { key: 'ingredientLineCount', label: 'Ingredient Lines', type: 'number', align: 'right', sortable: true },
+  { key: 'lastWastedDate', label: 'Last Wasted Date', type: 'date', sortable: true },
+  { key: 'topReason', label: 'Top Reason', sortable: true },
   { key: 'createdBy', label: 'Created By', sortable: true }
 ];
 
@@ -98,9 +125,11 @@ export const adjustmentsReport = {
   description: 'Audit all manual stock adjustments, wastage adjustments, stock take corrections, system corrections, and value impact.',
   emptyState: { title: 'No adjustments found', message: 'No adjustments found for the selected filters.' },
   defaultView: 'summary',
-  availableViews: ['summary', 'by_reason', 'by_category', 'by_item', 'line_detail'],
+  availableViews: ['summary', 'by_source', 'menu_items', 'by_reason', 'by_category', 'by_item', 'line_detail'],
   filterConfig: {
     summary: ['search', 'dateRange', 'location', 'source'],
+    by_source: ['search', 'dateRange', 'location', 'source'],
+    menu_items: ['search', 'dateRange', 'location', 'source'],
     by_reason: ['search', 'dateRange', 'location', 'source'],
     by_category: ['search', 'dateRange', 'location', 'category', 'source'],
     by_item: ['search', 'dateRange', 'location', 'category', 'source'],
@@ -109,6 +138,8 @@ export const adjustmentsReport = {
 
   columns: {
     summary: summaryColumns,
+    by_source: bySourceColumns,
+    menu_items: menuItemColumns,
     by_reason: byReasonColumns,
     by_category: byCategoryColumns,
     by_item: byItemColumns,
@@ -117,6 +148,8 @@ export const adjustmentsReport = {
 
   exportColumns: {
     summary: summaryColumns,
+    by_source: bySourceColumns,
+    menu_items: menuItemColumns,
     by_reason: byReasonColumns,
     by_category: byCategoryColumns,
     by_item: byItemColumns,
@@ -144,6 +177,24 @@ export const adjustmentsReport = {
       totalQtyAdjusted: 'Total Qty Adjusted',
       totalValueAdjusted: 'Total Value Adjusted',
       adjustmentEvents: 'Adjustment Events',
+      createdBy: 'Created By'
+    },
+    by_source: {
+      adjustmentSource: 'Source',
+      qtyAdjusted: 'Stock Qty Adjusted',
+      valueImpact: 'Value Impact',
+      eventCount: 'Adjustment Events',
+      menuItemsWasted: 'Menu Items Wasted'
+    },
+    menu_items: {
+      menuItemName: 'Menu Item',
+      locationName: 'Location',
+      qtyMenuItemsWasted: 'Menu Items Wasted',
+      wastageValue: 'Ingredient Cost Impact',
+      eventCount: 'Wastage Events',
+      ingredientLineCount: 'Ingredient Lines',
+      lastWastedDate: 'Last Wasted Date',
+      topReason: 'Top Reason',
       createdBy: 'Created By'
     },
     by_reason: {
@@ -211,6 +262,7 @@ function normalizeAdjustmentRow(row = {}, index = 0) {
   const qtyBeforeAfter = resolveBeforeAfterQty(row, qtyAdjusted);
   const reason = resolveReason(row);
   const adjustmentType = resolveAdjustmentType(row);
+  const product = resolveProductWastageIdentity(row);
   const signedDirection = qtyAdjusted > 0 ? 'positive' : (qtyAdjusted < 0 ? 'negative' : 'zero');
 
   return {
@@ -225,6 +277,11 @@ function normalizeAdjustmentRow(row = {}, index = 0) {
     category: text(row.category || row.categoryName) || 'General',
     adjustmentType,
     source: adjustmentType,
+    wastageKind: isProductWastageMovement(row) ? 'product' : (isWastageAdjustment(row) ? 'stock_item' : ''),
+    productId: product.productId,
+    productName: product.productName,
+    menuItemName: product.productName,
+    menuItemQty: resolveProductWastageQuantity(row),
     sourceType: row.sourceType,
     reason,
     qtyBefore: qtyBeforeAfter.qtyBefore,
@@ -254,6 +311,8 @@ function buildAdjustmentModel(adjustmentRows = [], ledgerRows = []) {
     ledgerRows: toArray(ledgerRows),
     views: {
       summary: summarizeAdjustmentRows(rows, summaryKey, toSummaryRow),
+      by_source: summarizeAdjustmentRows(rows, sourceKey, toSourceRow),
+      menu_items: buildMenuItemWastageRows(rows),
       by_reason: summarizeAdjustmentRows(rows, reasonKey, toReasonRow),
       by_category: summarizeAdjustmentRows(rows, categoryKey, toCategoryRow),
       by_item: summarizeAdjustmentRows(rows, itemKey, toItemRow),
@@ -278,6 +337,20 @@ function toSummaryRow(key, rows = []) {
     totalValueAdjusted: sumBy(rows, 'valueImpact'),
     adjustmentEvents: rows.length,
     createdBy: listTopText(rows, 'createdBy'),
+    __sourceRows: rows
+  };
+}
+
+function toSourceRow(key, rows = []) {
+  const menuRows = buildMenuItemWastageRows(rows);
+  const sourceIds = new Set(rows.map((row) => text(row.sourceId || row.id)).filter(Boolean));
+  return {
+    id: `adjustments-source:${key}`,
+    adjustmentSource: text(key) || 'Adjustment',
+    qtyAdjusted: sumAbs(rows, 'qtyAdjusted'),
+    valueImpact: sumBy(rows, 'valueImpact'),
+    eventCount: sourceIds.size || rows.length,
+    menuItemsWasted: sumBy(menuRows, 'qtyMenuItemsWasted'),
     __sourceRows: rows
   };
 }
@@ -342,6 +415,22 @@ function getTotalsForView(view = 'summary', rows = []) {
       totalQtyAdjusted: sumBy(reportRows, 'totalQtyAdjusted'),
       totalValueAdjusted: sumBy(reportRows, 'totalValueAdjusted'),
       adjustmentEvents: sumBy(reportRows, 'adjustmentEvents')
+    };
+  }
+  if (view === 'by_source') {
+    return {
+      qtyAdjusted: sumBy(reportRows, 'qtyAdjusted'),
+      valueImpact: sumBy(reportRows, 'valueImpact'),
+      eventCount: sumBy(reportRows, 'eventCount'),
+      menuItemsWasted: sumBy(reportRows, 'menuItemsWasted')
+    };
+  }
+  if (view === 'menu_items') {
+    return {
+      qtyMenuItemsWasted: sumBy(reportRows, 'qtyMenuItemsWasted'),
+      wastageValue: sumBy(reportRows, 'wastageValue'),
+      eventCount: sumBy(reportRows, 'eventCount'),
+      ingredientLineCount: sumBy(reportRows, 'ingredientLineCount')
     };
   }
   if (view === 'by_reason') {
@@ -420,11 +509,11 @@ function isAdjustmentLedgerRow(row = {}) {
 function resolveAdjustmentType(row = {}) {
   const source = text(row.source);
   const movementType = text(row.movementType);
+  if (isStockTakeVariance(row)) return 'Stock Take Variance';
+  if (isWastageAdjustment(row)) return resolveWastageSourceLabel(row, source || movementType);
+  if (isSystemCorrection(row)) return 'System Correction';
   if (source) return source;
   if (movementType) return movementType;
-  if (isStockTakeVariance(row)) return 'Stock Take Variance';
-  if (isWastageAdjustment(row)) return 'Wastage Adjustment';
-  if (isSystemCorrection(row)) return 'System Correction';
   return 'Manual Adjustment';
 }
 
@@ -480,6 +569,10 @@ function parseMetadata(value) {
 
 function summaryKey(row = {}) {
   return [row.date, row.locationId || row.locationName, row.adjustmentType, row.reason, row.createdBy].map(text).join('::');
+}
+
+function sourceKey(row = {}) {
+  return text(row.adjustmentType || 'Adjustment');
 }
 
 function reasonKey(row = {}) {
@@ -562,7 +655,7 @@ function isWastageAdjustment(row = {}) {
   const source = text(row.source || row.adjustmentType);
   const sourceType = text(row.sourceType);
   const movementType = text(row.movementType);
-  return source === 'Wastage Adjustment' || source === 'Manual Wastage' || sourceType === 'wastage' || sourceType === 'manualWastage' || /wastage/i.test(movementType) || WASTAGE_REASON_PATTERN.test(text(row.reason || row.notes || row.note));
+  return /wastage|waste/i.test(source) || sourceType === 'wastage' || sourceType === 'manualWastage' || /wastage|waste/i.test(movementType) || WASTAGE_REASON_PATTERN.test(text(row.reason || row.notes || row.note));
 }
 
 function isStockTakeVariance(row = {}) {
@@ -604,7 +697,9 @@ function formatMoney(value) {
 
 export const __adjustmentsReportInternals = {
   buildAdjustmentRows,
-  isAdjustmentLedgerRow
+  isAdjustmentLedgerRow,
+  buildAdjustmentModel,
+  resolveAdjustmentType
 };
 
 export default adjustmentsReport;

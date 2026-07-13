@@ -99,6 +99,98 @@ export async function downloadAoaXlsx(filename, rows = [], sheetName = 'Export')
   XLSX.writeFile(workbook, ensureExtension(filename, 'xlsx'));
 }
 
+
+
+export async function downloadStyledStockTemplateXlsx(filename, {
+  columns = [],
+  rows = [],
+  columnWidths = [],
+  maxRows = 250
+} = {}) {
+  const ExcelJSModule = await import('exceljs');
+  const ExcelJS = ExcelJSModule.default || ExcelJSModule;
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = 'Kitchen Cost Pro';
+  workbook.created = new Date();
+  workbook.calcProperties.fullCalcOnLoad = true;
+
+  const safeColumns = Array.isArray(columns) ? columns : [];
+  const safeRows = Array.isArray(rows) ? rows : [];
+  const main = workbook.addWorksheet('Stock_Import', {
+    views: [{ state: 'frozen', ySplit: 1 }]
+  });
+  main.columns = safeColumns.map((key, index) => ({
+    header: key,
+    key,
+    width: Number(columnWidths[index] || 14) || 14
+  }));
+  main.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: Math.max(safeColumns.length, 1) } };
+
+  const header = main.getRow(1);
+  header.height = 24;
+  header.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  header.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF315B85' } };
+  header.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+  header.eachCell((cell) => {
+    cell.border = {
+      top: { style: 'thin', color: { argb: 'FF54769A' } },
+      left: { style: 'thin', color: { argb: 'FF54769A' } },
+      bottom: { style: 'thin', color: { argb: 'FF54769A' } },
+      right: { style: 'thin', color: { argb: 'FF54769A' } }
+    };
+  });
+
+  safeRows.forEach((row) => main.addRow(Object.fromEntries(safeColumns.map((key) => [key, row?.[key] ?? '']))));
+  const requiredRows = Math.max(Number(maxRows || 250), safeRows.length + 1);
+  while (main.rowCount < requiredRows + 1) main.addRow({});
+
+  for (let rowNumber = 2; rowNumber <= requiredRows + 1; rowNumber += 1) {
+    const row = main.getRow(rowNumber);
+    row.height = 21;
+    row.eachCell({ includeEmpty: true }, (cell) => {
+      cell.alignment = { vertical: 'middle', wrapText: false };
+      cell.border = {
+        bottom: { style: 'hair', color: { argb: 'FFD7E0EA' } }
+      };
+    });
+  }
+
+  const helper = workbook.addWorksheet('UOM_Options', { state: 'veryHidden' });
+  const baseIndex = safeColumns.indexOf('Base_UOM') + 1;
+  const customIndexes = [1, 2, 3].map((slot) => safeColumns.indexOf(`UOM_${slot}_Name`) + 1);
+  const defaultIndex = safeColumns.indexOf('Default_Ordering_UOM') + 1;
+
+  if (baseIndex > 0 && defaultIndex > 0) {
+    const sourceIndexes = [baseIndex, ...customIndexes.filter((index) => index > 0)];
+    for (let rowNumber = 2; rowNumber <= requiredRows + 1; rowNumber += 1) {
+      sourceIndexes.forEach((sourceIndex, optionIndex) => {
+        helper.getCell(rowNumber, optionIndex + 1).value = {
+          formula: `'Stock_Import'!${main.getColumn(sourceIndex).letter}${rowNumber}`
+        };
+      });
+      const lastOptionColumn = helper.getColumn(sourceIndexes.length).letter;
+      main.getCell(rowNumber, defaultIndex).dataValidation = {
+        type: 'list',
+        allowBlank: true,
+        showErrorMessage: true,
+        errorStyle: 'stop',
+        errorTitle: 'Choose an item UOM',
+        error: 'Select only the Base UOM or one of the Custom UOMs entered on this same row.',
+        showInputMessage: true,
+        promptTitle: 'Default ordering UOM',
+        prompt: 'This dropdown contains only the Base UOM and Custom UOMs configured for this item.',
+        formulae: [`'UOM_Options'!$A$${rowNumber}:$${lastOptionColumn}$${rowNumber}`]
+      };
+    }
+  }
+
+  const buffer = await workbook.xlsx.writeBuffer();
+  downloadBlob(
+    ensureExtension(filename, 'xlsx'),
+    buffer,
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  );
+}
 export async function downloadWorkbookXlsx(filename, sheets = []) {
   const XLSX = await import('xlsx');
   const workbook = XLSX.utils.book_new();
@@ -1103,13 +1195,11 @@ export async function buildSupplierPurchaseOrderPdfFile(filename, {
     tableStartY = margin;
   }
   autoTable(doc, {
-    head: [['ITEM DESCRIPTION', 'UNIT', 'PACK SIZE', 'QTY\nREQUIRED', 'SUPPLIER\nNOTES']],
+    head: [['PRODUCT NAME', 'UOM / CUSTOM UOM', 'QTY']],
     body: (Array.isArray(items) ? items : []).map((item) => [
       item.description || '',
       item.unit || '',
-      item.packSize || '',
-      item.quantity || '',
-      item.notes || 'Confirm availability'
+      item.quantity || ''
     ]),
     startY: tableStartY,
     theme: 'grid',
@@ -1131,11 +1221,9 @@ export async function buildSupplierPurchaseOrderPdfFile(filename, {
     },
     alternateRowStyles: { fillColor: [248, 250, 252] },
     columnStyles: {
-      0: { cellWidth: 205 },
-      1: { cellWidth: 64 },
-      2: { cellWidth: 80 },
-      3: { cellWidth: 90 },
-      4: { cellWidth: pageWidth - margin * 2 - 439 }
+      0: { cellWidth: pageWidth - margin * 2 - 210 },
+      1: { cellWidth: 130 },
+      2: { cellWidth: 80, halign: 'center' }
     },
     margin: { left: margin, right: margin }
   });
@@ -1143,7 +1231,7 @@ export async function buildSupplierPurchaseOrderPdfFile(filename, {
   let blockY = (doc.lastAutoTable?.finalY || tableStartY + 80) + 22;
   const blockWidth = 294;
   const blockX = (pageWidth - blockWidth) / 2;
-  const instructionText = instruction || 'Please confirm receipt of this purchase order. Any unavailable items, substitutions, pack-size changes, or quantity changes must be confirmed before delivery. Supply should match the listed unit, pack size, and quantity required.';
+  const instructionText = instruction || 'Please confirm receipt of this purchase order. Any unavailable items, substitutions, UOM changes, or quantity changes must be confirmed before delivery. Supply should match the listed product, UOM, and quantity required.';
   const instructionLines = doc.splitTextToSize(instructionText, blockWidth - 34);
   const blockHeight = Math.max(118, instructionLines.length * 13 + 56);
   if (blockY + blockHeight > pageHeight - 48) {

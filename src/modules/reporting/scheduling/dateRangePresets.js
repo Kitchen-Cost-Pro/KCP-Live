@@ -1,21 +1,23 @@
 export const REPORT_DATE_RANGE_PRESETS = [
   { value: 'today', label: 'Today' },
   { value: 'yesterday', label: 'Yesterday' },
+  { value: 'last_2_days', label: 'Last 2 Days' },
   { value: 'this_week', label: 'This Week' },
-  { value: 'last_week', label: 'Last Week' },
+  { value: 'last_7_days', label: 'Last 1 Week' },
+  { value: 'last_14_days', label: 'Last 2 Weeks' },
   { value: 'this_month', label: 'This Month' },
-  { value: 'last_month', label: 'Last Month' },
-  { value: 'last_7_days', label: 'Last 7 Days' },
-  { value: 'last_30_days', label: 'Last 30 Days' },
+  { value: 'last_30_days', label: 'Last 1 Month' },
+  { value: 'last_week', label: 'Previous Week' },
+  { value: 'last_month', label: 'Previous Month' },
   { value: 'custom', label: 'Custom Range' }
 ];
 
 export function normalizeDateRangeType(value = '') {
   const normalized = String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
-  return REPORT_DATE_RANGE_PRESETS.some((preset) => preset.value === normalized) ? normalized : 'custom';
+  return REPORT_DATE_RANGE_PRESETS.some((preset) => preset.value === normalized) ? normalized : 'today';
 }
 
-export function resolveDateRangePreset(type = 'custom', { now = new Date() } = {}) {
+export function resolveDateRangePreset(type = 'today', { now = new Date() } = {}) {
   const normalized = normalizeDateRangeType(type);
   if (normalized === 'custom') return { startDate: '', endDate: '', dateRangeType: 'custom' };
 
@@ -26,6 +28,8 @@ export function resolveDateRangePreset(type = 'custom', { now = new Date() } = {
   if (normalized === 'yesterday') {
     start.setDate(start.getDate() - 1);
     end = new Date(start);
+  } else if (normalized === 'last_2_days') {
+    start.setDate(start.getDate() - 1);
   } else if (normalized === 'this_week') {
     start = startOfWeek(local);
     end = new Date(local);
@@ -42,6 +46,8 @@ export function resolveDateRangePreset(type = 'custom', { now = new Date() } = {
     end = new Date(local.getFullYear(), local.getMonth(), 0);
   } else if (normalized === 'last_7_days') {
     start.setDate(start.getDate() - 6);
+  } else if (normalized === 'last_14_days') {
+    start.setDate(start.getDate() - 13);
   } else if (normalized === 'last_30_days') {
     start.setDate(start.getDate() - 29);
   }
@@ -68,7 +74,7 @@ export function applyDateRangePreset(filters = {}, { now = new Date() } = {}) {
 }
 
 export function inferDateRangeType(filters = {}) {
-  return filters.dateRangeType || filters.date_range_type || 'custom';
+  return filters.dateRangeType || filters.date_range_type || 'today';
 }
 
 function startOfWeek(date) {

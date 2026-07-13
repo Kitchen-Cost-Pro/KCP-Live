@@ -77,7 +77,7 @@ export const reportRedirects = {
   },
   supplier_reorder_report: {
     targetId: 'stock_control',
-    view: 'supplier_reorder'
+    view: 'reorder_detail'
   },
   below_par_report: {
     targetId: 'stock_control',
@@ -131,7 +131,7 @@ export const reportRegistry = [
   asSingleReport(modifierSalesLogReport, { hiddenFromDashboard: true, internalReport: true }),
   asHiddenViewAlias(stockControlReport, { id: 'low_stock_alert', title: 'Low Stock Alert', defaultView: 'item_detail', redirectsTo: 'stock_control' }),
   asHiddenViewAlias(stockControlReport, { id: 'reorder_report', title: 'Reorder Report', defaultView: 'reorder_detail', redirectsTo: 'stock_control' }),
-  asHiddenViewAlias(stockControlReport, { id: 'supplier_reorder_report', title: 'Supplier Reorder Report', defaultView: 'supplier_reorder', redirectsTo: 'stock_control' }),
+  asHiddenViewAlias(stockControlReport, { id: 'supplier_reorder_report', title: 'Supplier Reorder Report', defaultView: 'reorder_detail', redirectsTo: 'stock_control' }),
   asHiddenViewAlias(stockControlReport, { id: 'below_par_report', title: 'Below Par Report', defaultView: 'reorder_detail', redirectsTo: 'stock_control' }),
   asHiddenViewAlias(menuRecipeHealthReport, { id: 'menu_health', title: 'Menu Health', defaultView: 'menu_items', redirectsTo: 'menu_recipe_health' }),
   asHiddenViewAlias(menuRecipeHealthReport, { id: 'recipe_health', title: 'Recipe Health', defaultView: 'recipe_detail', redirectsTo: 'menu_recipe_health' }),

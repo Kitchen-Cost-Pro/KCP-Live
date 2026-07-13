@@ -115,7 +115,7 @@ test('Payment Summary keeps gross, VAT, net, refunds, discounts, tips, fees, and
   assert.equal(daily.discounts, 5);
   assert.equal(daily.tips, 10);
   assert.equal(daily.fees, 2);
-  assert.equal(daily.payoutAmount, 123);
+  assert.equal(daily.payoutAmount, 108);
   assert.notEqual(daily.grossSales, daily.netSales);
 });
 

@@ -58,7 +58,8 @@ export function renderStockTake({ state, onStockTakeFilterChange, onStockTakeAct
         draftMap,
         locations: stockLocations,
         varianceTotal,
-        actionStatus: stockTake.actionStatus || ''
+        actionStatus: stockTake.actionStatus || '',
+        actionError: stockTake.actionError || ''
       })}
     </div>
 
@@ -72,8 +73,7 @@ export function renderStockTake({ state, onStockTakeFilterChange, onStockTakeAct
       locationOptions,
       stockLocations,
       templateSummary,
-      templateSelectionOptions,
-      savedDrafts
+      templateSelectionOptions
     })}
     ${renderToast(stockTake.toast)}
   `;
@@ -107,7 +107,6 @@ function bindStockTakeEvents(view, onStockTakeFilterChange, onStockTakeAction, f
     if (file) onStockTakeAction.onImportCountTemplate?.(file);
     stockTakeImportInput.value = '';
   });
-  view.querySelector('[data-stocktake-resume-draft]')?.addEventListener('click', () => onStockTakeAction.onRestoreSavedDraft?.());
   view.querySelectorAll('[data-stocktake-resume-specific]').forEach((button) => {
     button.addEventListener('click', () => onStockTakeAction.onRestoreSpecificDraft?.(button.dataset.stocktakeResumeSpecific || ''));
   });
@@ -352,11 +351,8 @@ function renderStockTakePageActions(filters = {}) {
 }
 
 function renderLaunchpad(savedDrafts = []) {
-  const hasDrafts = (savedDrafts || []).length > 0;
-  const resumeLabel = (savedDrafts || []).length > 1 ? 'Resume Drafts' : 'Resume Draft';
-  const resumeMeta = (savedDrafts || []).length > 1
-    ? `${savedDrafts.length} saved sessions`
-    : escapeHtml(savedDrafts[0]?.savedAt ? `Saved ${formatDisplayDate(savedDrafts[0].savedAt)}` : 'Continue previous count');
+  const activeSessions = [...(Array.isArray(savedDrafts) ? savedDrafts : [])]
+    .sort((left, right) => String(right.savedAt || right.date || '').localeCompare(String(left.savedAt || left.date || '')));
   return `
     <div class="stockTakeHero">
       <div class="stockTakeHeroIcon">${icon('clipboard')}</div>
@@ -366,12 +362,6 @@ function renderLaunchpad(savedDrafts = []) {
         Structure your counts by location, category, or specific item lists.
       </p>
       <div class="stockTakeHeroActions">
-        ${hasDrafts ? `
-          <button type="button" class="stockTakeHeroButton stockTakeHeroButton--resume" data-stocktake-resume-draft>
-            <strong>${escapeHtml(resumeLabel)}</strong>
-            <span>${resumeMeta}</span>
-          </button>
-        ` : ''}
         <button type="button" class="stockTakeHeroButton is-primary" data-stocktake-open-start>
           <strong>Start Session</strong>
           <span>Choose Template</span>
@@ -385,11 +375,74 @@ function renderLaunchpad(savedDrafts = []) {
           <span>Scan Multiple</span>
         </button>
       </div>
+
+      <section class="stockTakeActiveSessions" aria-labelledby="stocktake-active-sessions-title">
+        <header class="stockTakeActiveSessionsHead">
+          <div>
+            <span>Saved Drafts</span>
+            <h3 id="stocktake-active-sessions-title">Active Sessions</h3>
+          </div>
+          <strong>${activeSessions.length} ${activeSessions.length === 1 ? 'session' : 'sessions'}</strong>
+        </header>
+        <div class="stockTakeActiveSessionsTableWrap">
+          <table class="stockTakeActiveSessionsTable">
+            <thead>
+              <tr>
+                <th scope="col">Session Template</th>
+                <th scope="col">Date</th>
+                <th scope="col">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${activeSessions.length ? activeSessions.map((draft) => {
+                const itemCount = Array.isArray(draft.items) ? draft.items.length : 0;
+                const sessionName = draft.templateName || draft.locationName || 'Saved Count';
+                const sessionType = draft.sessionMode === 'template' ? 'Template Session' : 'Quick Count';
+                const dateLabel = formatDisplayDate(draft.date || draft.savedAt || '') || 'Date not set';
+                const savedLabel = draft.savedAt ? `Saved ${formatDisplayDate(draft.savedAt)}` : 'Saved draft';
+                return `
+                  <tr>
+                    <td data-label="Session Template">
+                      <strong>${escapeHtml(sessionName)}</strong>
+                      <span>${escapeHtml(sessionType)} · ${escapeHtml(draft.locationName || 'Main Store')} · ${itemCount} ${itemCount === 1 ? 'line' : 'lines'}</span>
+                    </td>
+                    <td data-label="Date">
+                      <strong>${escapeHtml(dateLabel)}</strong>
+                      <span>${escapeHtml(savedLabel)}</span>
+                    </td>
+                    <td data-label="Actions">
+                      <div class="stockTakeActiveSessionActions">
+                        <button type="button" class="stockTakeActiveSessionAction stockTakeActiveSessionAction--resume" data-stocktake-resume-specific="${escapeAttribute(draft.id || '')}" ${draft.id ? '' : 'disabled'}>
+                          Resume
+                        </button>
+                        <button type="button" class="stockTakeActiveSessionAction stockTakeActiveSessionAction--discard" data-stocktake-discard-draft="${escapeAttribute(draft.id || '')}" ${draft.id ? '' : 'disabled'}>
+                          ${icon('trash')}
+                          <span>Discard</span>
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                `;
+              }).join('') : `
+                <tr class="stockTakeActiveSessionsEmptyRow">
+                  <td colspan="3">
+                    <div class="stockTakeActiveSessionsEmpty">
+                      <strong>No active sessions</strong>
+                      <span>Sessions saved as drafts will appear here immediately.</span>
+                    </div>
+                  </td>
+                </tr>
+              `}
+            </tbody>
+          </table>
+        </div>
+      </section>
     </div>
   `;
 }
 
-function renderActiveSession({ draft, filters, visibleItems, draftMap, locations = [], varianceTotal, actionStatus = '' }) {
+function renderActiveSession({ draft, filters, visibleItems, draftMap, locations = [], varianceTotal, actionStatus = '', actionError = '' }) {
+  const actionPending = ['saving', 'saving-draft'].includes(actionStatus);
   const maxCustomUomColumns = Math.min(3, Math.max(0, ...visibleItems.map((item) => getUomConfigs(item).slice(0, 3).length)));
   const customHeaders = Array.from({ length: maxCustomUomColumns }, (_, index) => `<th>Custom UOM ${index + 1} Count</th>`).join('');
   const emptyColspan = 5 + maxCustomUomColumns;
@@ -520,12 +573,17 @@ function renderActiveSession({ draft, filters, visibleItems, draftMap, locations
             <div><span>Variance Value</span><strong data-stocktake-variance-total>${formatCurrency(varianceTotal)}</strong></div>
           </div>
           <div class="stockTakeSessionActions">
+            ${actionStatus === 'saving-draft' ? `
+              <p class="stockTakeSessionFeedback" role="status" aria-live="polite">Saving this draft and returning to Active Sessions...</p>
+            ` : actionError ? `
+              <p class="stockTakeSessionFeedback stockTakeSessionFeedback--error" role="alert">${escapeHtml(actionError)}</p>
+            ` : ''}
             ${draft.sessionMode === 'template' ? `
-              <button type="button" class="stockTakeGhost" data-stocktake-save-draft ${draft.locationId ? '' : 'disabled'}>
+              <button type="button" class="stockTakeGhost" data-stocktake-save-draft ${draft.locationId && !actionPending ? '' : 'disabled'}>
                 ${actionStatus === 'saving-draft' ? 'Saving Draft...' : 'Save Draft'}
               </button>
             ` : ''}
-            <button type="button" class="stockTakePrimary" data-stocktake-save ${(draft.items || []).length && actionStatus !== 'saving' ? '' : 'disabled'}>
+            <button type="button" class="stockTakePrimary" data-stocktake-save ${(draft.items || []).length && !actionPending ? '' : 'disabled'}>
               ${actionStatus === 'saving' ? 'Committing...' : 'Commit Stock Take'}
             </button>
           </div>
@@ -535,7 +593,7 @@ function renderActiveSession({ draft, filters, visibleItems, draftMap, locations
   `;
 }
 
-function renderOverlay({ stockTake, filters, scanCount, sessionSetup, templateDraft, siteOptions, locationOptions, stockLocations, templateSummary, templateSelectionOptions, savedDrafts = [] }) {
+function renderOverlay({ stockTake, filters, scanCount, sessionSetup, templateDraft, siteOptions, locationOptions, stockLocations, templateSummary, templateSelectionOptions }) {
   if (!filters.overlay) return '';
   if (filters.overlay === 'scan-count') {
     return renderScanCountOverlay(scanCount);
@@ -958,46 +1016,6 @@ function renderOverlay({ stockTake, filters, scanCount, sessionSetup, templateDr
     `;
   }
 
-  if (filters.overlay === 'resume-drafts') {
-    return `
-      <div class="stockTakeOverlayBackdrop">
-        <section class="stockTakeOverlayCard stockTakeOverlayCard--compact">
-          <header class="stockTakeOverlayHead">
-            <div>
-              <p>Stock Take</p>
-              <h3>Resume Saved Draft</h3>
-            </div>
-            <button type="button" class="stockTakeOverlayClose" data-stocktake-overlay-close aria-label="Close">${icon('x')}</button>
-          </header>
-          <div class="stockTakeOverlayBody">
-            <div class="stockTakeTemplateList">
-              ${(savedDrafts || []).map((draft) => `
-                <article class="stockTakeTemplateCard stockTakeTemplateCard--draft">
-                  <div>
-                    <strong>${escapeHtml(draft.templateName || draft.locationName || 'Saved Count')}</strong>
-                    <span>${escapeHtml(formatDisplayDate(draft.date || draft.savedAt || ''))} · ${(draft.items || []).length} ${(draft.items || []).length === 1 ? 'line' : 'lines'}</span>
-                  </div>
-                  <div class="stockTakeTemplateActions stockTakeTemplateActions--draft">
-                    <span class="stockTakeDraftMeta">${escapeHtml(draft.savedAt ? `Saved ${formatDisplayDate(draft.savedAt)}` : 'Resume')}</span>
-                    <button type="button" class="stockTakeGhost stockTakeGhost--small" data-stocktake-resume-specific="${escapeAttribute(draft.id || '')}">
-                      Resume
-                    </button>
-                    <button type="button" class="stockTakeMiniButton stockTakeMiniButton--danger" data-stocktake-discard-draft="${escapeAttribute(draft.id || '')}" aria-label="Discard draft">
-                      ${icon('trash')}
-                    </button>
-                  </div>
-                </article>
-              `).join('') || '<div class="stockTakeEmptyState">No saved drafts available.</div>'}
-            </div>
-          </div>
-          <footer class="stockTakeOverlayFooter stockTakeOverlayFooter--compact">
-            <button type="button" class="stockTakeGhost" data-stocktake-overlay-close>Close</button>
-          </footer>
-        </section>
-      </div>
-    `;
-  }
-
   return '';
 }
 
@@ -1270,7 +1288,8 @@ function normalizeScanUomConfigurations(value = []) {
       baseUom: String(entry.baseUom || entry.base_uom || entry.baseUnit || '').trim(),
       customUom: String(entry.customUom || entry.custom_uom || entry.customUnit || entry.orderingUom || '').trim(),
       ratio: Number(entry.ratio ?? entry.conversionRatio ?? entry.unitsPerCustomUnit ?? 0) || 0,
-      barcode: String(entry.barcode || entry.customBarcode || entry.customUomBarcode || '').trim()
+      barcode: String(entry.barcode || entry.customBarcode || entry.customUomBarcode || '').trim(),
+      isDefaultOrdering: ['true', '1', 'yes', 'on'].includes(String(entry.isDefaultOrdering ?? entry.defaultOrdering ?? entry.is_default_ordering ?? entry.defaultOrderUom ?? '').toLowerCase()) || entry.isDefaultOrdering === true || entry.defaultOrdering === true
     }))
     .filter((entry) => entry.customUom && entry.ratio > 0);
 }

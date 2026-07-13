@@ -94,6 +94,20 @@ export function deriveYocoFinancialAmounts({
   const normalizedVatRate = normalizeVatRate(vatRate);
   const storedTotal = Math.abs(safeNumber(persistedTotal, 0));
 
+  const directTip = resolveYocoMoney(raw, [
+    'amounts.tip_amount',
+    'amounts.tipAmount',
+    'tip_amount',
+    'tipAmount',
+    'tip_total',
+    'tipTotal',
+    'gratuity'
+  ], NaN).value;
+  const paymentTips = sumYocoPaymentTips(raw);
+  const tipAmount = isRefund ? 0 : roundMoney(
+    Number.isFinite(directTip) && directTip > 0 ? directTip : finiteOr(paymentTips, finiteOr(directTip, 0))
+  );
+
   // Yoco Orders calls the final amount after discounts `amounts.net_amount`; it is still
   // VAT-inclusive. Prefer it over `gross_amount`, which represents the pre-discount amount.
   const grossResolution = resolveYocoMoney(raw, [
@@ -111,8 +125,6 @@ export function deriveYocoFinancialAmounts({
     'gross_amount',
     'grossAmount'
   ], NaN);
-  // Checkout API scalar money fields are explicitly cents; this path is context-based,
-  // never inferred from the size of the number.
   const checkoutGross = resolveYocoMoney(raw, ['amount'], NaN, { scalarUnit: 'minor' });
   const resolvedGross = finiteOr(grossResolution.value, checkoutGross.value);
   const resolvedGrossPath = grossResolution.path || checkoutGross.path;
@@ -122,11 +134,22 @@ export function deriveYocoFinancialAmounts({
     && Number.isFinite(resolvedGross)
     && rawFinalAmountIsAuthoritative
     && !moneyReconciles(storedTotal, resolvedGross, 0.02);
-  // Existing rows created by the old magnitude heuristic can contain R14 for a real
-  // R1,400 scalar. When the original raw Yoco final amount is available, repair the
-  // report dynamically and surface the mismatch for audit/re-sync.
-  const selectedGross = persistedTotalMismatch ? resolvedGross : storedTotal || finiteOr(resolvedGross, 0);
-  const grossAmount = isRefund ? 0 : roundMoney(selectedGross);
+  const selectedCustomerTotal = persistedTotalMismatch ? resolvedGross : storedTotal || finiteOr(resolvedGross, 0);
+  // Customer-paid totals can include gratuity. Gross sales must represent only the bill
+  // value because tips are not taxable and are reported in their own column.
+  const grossAmount = isRefund ? 0 : roundMoney(Math.max(0, selectedCustomerTotal - tipAmount));
+
+  const rawRefund = resolveYocoMoney(raw, [
+    'refund_amount',
+    'refundAmount',
+    'refund_total',
+    'refundTotal',
+    'amounts.refund_amount',
+    'amounts.refundAmount'
+  ], NaN).value;
+  const refundAmount = isRefund
+    ? roundMoney(storedTotal || finiteOr(rawRefund, finiteOr(grossResolution.value, 0)))
+    : roundMoney(finiteOr(rawRefund, 0));
 
   const directTaxResolution = resolveYocoMoney(raw, [
     'amounts.tax_amount',
@@ -146,15 +169,19 @@ export function deriveYocoFinancialAmounts({
       ? { value: aggregatedTax, path: 'total_taxes', rawValue: aggregatedTax }
       : checkoutTax;
   const explicitZeroRated = isExplicitlyZeroRated(raw);
-  const explicitTaxPlausible = Number.isFinite(taxResolution.value)
+  const explicitTaxPlausible = !isRefund
+    && Number.isFinite(taxResolution.value)
     && taxResolution.value >= 0
     && taxResolution.value <= grossAmount + CENT_TOLERANCE
     && (taxResolution.value > 0 || !grossAmount || !normalizedVatRate || explicitZeroRated);
   const calculatedVat = calculateVatFromGross(grossAmount, vatRate);
+  const refundVatAmount = explicitZeroRated ? 0 : calculateVatFromGross(refundAmount, vatRate);
   const vatAmount = isRefund
-    ? 0
+    ? roundMoney(-refundVatAmount)
     : roundMoney(explicitTaxPlausible ? taxResolution.value : calculatedVat);
-  const netAmount = isRefund ? 0 : roundMoney(grossAmount - vatAmount);
+  const netAmount = isRefund
+    ? roundMoney(-(refundAmount - refundVatAmount))
+    : roundMoney(grossAmount - vatAmount);
 
   const directDiscount = resolveYocoMoney(raw, [
     'amounts.discount_amount',
@@ -166,35 +193,7 @@ export function deriveYocoFinancialAmounts({
     'total_discount'
   ], NaN).value;
   const checkoutDiscount = resolveYocoMoney(raw, ['totalDiscount'], NaN, { scalarUnit: 'minor' }).value;
-  // Refunds are stored as separate reporting rows. Reusing the parent order's discount
-  // would double count it in period totals.
   const discountAmount = isRefund ? 0 : roundMoney(finiteOr(directDiscount, finiteOr(checkoutDiscount, 0)));
-
-  const rawRefund = resolveYocoMoney(raw, [
-    'refund_amount',
-    'refundAmount',
-    'refund_total',
-    'refundTotal',
-    'amounts.refund_amount',
-    'amounts.refundAmount'
-  ], NaN).value;
-  const refundAmount = isRefund
-    ? roundMoney(storedTotal || finiteOr(rawRefund, finiteOr(grossResolution.value, 0)))
-    : roundMoney(finiteOr(rawRefund, 0));
-
-  const directTip = resolveYocoMoney(raw, [
-    'amounts.tip_amount',
-    'amounts.tipAmount',
-    'tip_amount',
-    'tipAmount',
-    'tip_total',
-    'tipTotal',
-    'gratuity'
-  ], NaN).value;
-  const paymentTips = sumYocoPaymentTips(raw);
-  const tipAmount = isRefund ? 0 : roundMoney(
-    Number.isFinite(directTip) && directTip > 0 ? directTip : finiteOr(paymentTips, finiteOr(directTip, 0))
-  );
 
   const directFee = resolveYocoMoney(raw, [
     'amounts.fee_amount',
@@ -206,22 +205,14 @@ export function deriveYocoFinancialAmounts({
     'processing_fee',
     'processingFee'
   ], NaN).value;
-  // The refund row stores the parent order payload. Original sale fees therefore belong
-  // only to the sale row and must not be counted again on the refund row.
   const feeAmount = isRefund ? 0 : roundMoney(finiteOr(directFee, finiteOr(sumYocoProcessingFees(raw), 0)));
 
-  const payoutResolution = resolveYocoMoney(raw, [
-    'payout_amount',
-    'payoutAmount',
-    'settlement_amount',
-    'settlementAmount',
-    'amounts.payout_amount',
-    'amounts.payoutAmount'
-  ], NaN);
-  const expectedPayout = roundMoney(grossAmount - refundAmount - feeAmount + tipAmount);
-  const payoutAmount = isRefund
-    ? expectedPayout
-    : roundMoney(Number.isFinite(payoutResolution.value) ? payoutResolution.value : expectedPayout);
+  const refundNetAmount = roundMoney(Math.max(0, refundAmount - refundVatAmount));
+  // Payout is deliberately VAT-exclusive and keeps deductions visible as separate columns.
+  // Refund rows contribute through Refunds rather than being counted again in Net Sales.
+  const payoutNetSales = isRefund ? 0 : netAmount;
+  const expectedPayout = roundMoney(payoutNetSales + tipAmount - refundNetAmount - feeAmount);
+  const payoutAmount = expectedPayout;
 
   const issues = [];
   if (persistedTotalMismatch) {
@@ -231,20 +222,20 @@ export function deriveYocoFinancialAmounts({
       message: 'The stored Yoco total did not match the authoritative raw final amount; reporting used the raw amount. Re-sync this order to repair the stored value.'
     });
   }
-  if (grossAmount > 0 && normalizedVatRate > 0 && vatAmount === 0 && !explicitZeroRated) {
+  if (!isRefund && grossAmount > 0 && normalizedVatRate > 0 && vatAmount === 0 && !explicitZeroRated) {
     issues.push({ code: 'yoco-vat-zero-on-taxable-sale', level: 'critical', message: 'A VAT-bearing Yoco sale resolved to zero VAT.' });
   }
-  if (!moneyReconciles(grossAmount, netAmount + vatAmount)) {
-    issues.push({ code: 'yoco-gross-net-vat-mismatch', level: 'critical', message: 'Yoco gross amount does not reconcile to net amount plus VAT.' });
+  const grossReconciles = isRefund
+    ? moneyReconciles(refundAmount, Math.abs(netAmount) + Math.abs(vatAmount))
+    : moneyReconciles(grossAmount, netAmount + vatAmount);
+  if (!grossReconciles) {
+    issues.push({ code: 'yoco-gross-net-vat-mismatch', level: 'critical', message: isRefund ? 'Yoco refund does not reconcile to the reversed net amount plus VAT.' : 'Yoco gross amount does not reconcile to net amount plus VAT.' });
   }
-  if (!moneyReconciles(payoutAmount, expectedPayout, 0.05)) {
-    issues.push({ code: 'yoco-payout-mismatch', level: 'warning', message: 'Yoco payout amount does not reconcile to gross less refunds and fees plus tips.' });
-  }
-  if (vatRateResolution.fallbackApplied && grossAmount > 0 && !explicitZeroRated) {
+  if (vatRateResolution.fallbackApplied && (grossAmount > 0 || refundAmount > 0) && !explicitZeroRated) {
     issues.push({ code: 'yoco-vat-rate-fallback-applied', level: 'warning', message: 'The workspace VAT rate was missing or zero; reporting used the default South African VAT rate of 15%.' });
   }
-  if (taxResolution.path && !explicitTaxPlausible && grossAmount > 0 && normalizedVatRate > 0) {
-    issues.push({ code: 'yoco-tax-fallback-applied', level: 'info', message: 'The Yoco tax value was missing, zero without a zero-rated marker, or invalid; VAT was calculated from the VAT-inclusive gross amount.' });
+  if (!isRefund && taxResolution.path && !explicitTaxPlausible && grossAmount > 0 && normalizedVatRate > 0) {
+    issues.push({ code: 'yoco-tax-fallback-applied', level: 'info', message: 'The Yoco tax value was missing, zero without a zero-rated marker, or invalid; VAT was calculated from the VAT-inclusive bill value.' });
   }
 
   return {
@@ -254,18 +245,19 @@ export function deriveYocoFinancialAmounts({
     netAmount,
     discountAmount,
     refundAmount,
+    refundNetAmount,
     tipAmount,
     feeAmount,
     payoutAmount,
     expectedPayout,
     vatRate,
     isVatExempt: explicitZeroRated,
-    vatSource: isRefund ? 'refund' : explicitZeroRated ? 'zero-rated' : explicitTaxPlausible ? 'yoco' : 'calculated',
+    vatSource: isRefund ? 'refund-calculated' : explicitZeroRated ? 'zero-rated' : explicitTaxPlausible ? 'yoco' : 'calculated',
     grossSource: persistedTotalMismatch
       ? `raw-corrected:${resolvedGrossPath}`
       : storedTotal
         ? 'persisted-order-total'
-        : resolvedGrossPath || 'unresolved',
+        : (resolvedGrossPath || 'unresolved'),
     issues,
     diagnostics: {
       explicitTaxPath: taxResolution.path,
@@ -275,10 +267,12 @@ export function deriveYocoFinancialAmounts({
       vatRateSource: vatRateResolution.source,
       configuredVatRate: vatRateResolution.configuredValue,
       persistedTotal: storedTotal,
+      customerPaidTotal: roundMoney(selectedCustomerTotal),
+      tipExcludedFromGross: tipAmount,
       rawFinalAmount: Number.isFinite(resolvedGross) ? roundMoney(resolvedGross) : null,
       rawFinalAmountPath: resolvedGrossPath,
       persistedTotalMismatch,
-      grossNetVatReconciles: moneyReconciles(grossAmount, netAmount + vatAmount),
+      grossNetVatReconciles: grossReconciles,
       payoutReconciles: moneyReconciles(payoutAmount, expectedPayout, 0.05)
     }
   };

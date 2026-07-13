@@ -1,6 +1,6 @@
 const DATE_RANGE_TYPES = new Set([
-  'today', 'yesterday', 'this_week', 'last_week', 'this_month', 'last_month',
-  'last_7_days', 'last_30_days', 'custom'
+  'today', 'yesterday', 'last_2_days', 'this_week', 'last_week', 'this_month', 'last_month',
+  'last_7_days', 'last_14_days', 'last_30_days', 'custom'
 ]);
 
 export function resolveScheduledRelativeRange(type = 'custom', filters = {}, timezone = 'Africa/Johannesburg', now = new Date()) {
@@ -24,6 +24,8 @@ export function resolveScheduledRelativeRange(type = 'custom', filters = {}, tim
   if (normalized === 'yesterday') {
     start.setUTCDate(start.getUTCDate() - 1);
     end = new Date(start);
+  } else if (normalized === 'last_2_days') {
+    start.setUTCDate(start.getUTCDate() - 1);
   } else if (normalized === 'this_week') {
     start = mondayStart(start);
   } else if (normalized === 'last_week') {
@@ -38,6 +40,8 @@ export function resolveScheduledRelativeRange(type = 'custom', filters = {}, tim
     end = new Date(Date.UTC(parts.year, parts.month - 1, 0));
   } else if (normalized === 'last_7_days') {
     start.setUTCDate(start.getUTCDate() - 6);
+  } else if (normalized === 'last_14_days') {
+    start.setUTCDate(start.getUTCDate() - 13);
   } else if (normalized === 'last_30_days') {
     start.setUTCDate(start.getUTCDate() - 29);
   }

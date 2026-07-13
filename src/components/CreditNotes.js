@@ -484,8 +484,9 @@ function renderDraftTable(draft, vatRate, selectedLineIndexes = new Set(), locat
                   data-cn-line-field="returnedQty"
                   data-cn-line-index="${index}"
                   data-focus-key="cn-line-qty-${index}-${escapeAttribute(String(item.stockItemId || item.id || 'line'))}"
+                  ${Number(item.maxReturnQty || item.originalOrderQty || 0) > 0 ? `aria-describedby="cn-max-qty-${index}"` : ''}
                 />
-                <small class="cn-cellHint">pack qty</small>
+                <small class="cn-cellHint" id="cn-max-qty-${index}">${Number(item.maxReturnQty || item.originalOrderQty || 0) > 0 ? `Max PO qty: ${escapeHtml(formatEditable(item.maxReturnQty || item.originalOrderQty))}` : 'pack qty'}</small>
               </td>
               <td>
                 <span class="cn-packField">
@@ -748,7 +749,7 @@ function renderLineDetailOverlay(detailDraft, draft, sites, locations, openDropd
               <span>${escapeHtml(entry.category || getCreditNoteLineUomLabel(entry) || '')}</span>
             </div>
             <div class="cn-detailInputWrap">
-              <input type="text" inputmode="decimal" value="${escapeAttribute(formatEditable(entry.returnedQty || ''))}" data-cn-line-detail-index="${index}" data-cn-line-detail-field="returnedQty" data-focus-key="cn-detail-qty-${index}" />
+              <input type="text" inputmode="decimal" value="${escapeAttribute(formatEditable(entry.returnedQty || ''))}" data-cn-line-detail-index="${index}" data-cn-line-detail-field="returnedQty" data-focus-key="cn-detail-qty-${index}" title="${Number(entry.maxReturnQty || entry.originalOrderQty || 0) > 0 ? `Maximum original PO quantity: ${escapeAttribute(formatEditable(entry.maxReturnQty || entry.originalOrderQty))}` : 'Return quantity'}" />
             </div>
             <div class="cn-detailInputWrap cn-detailInputWrap--uom">
               <input type="text" inputmode="decimal" value="${escapeAttribute(formatEditable(entry.packSize || '1'))}" data-cn-line-detail-index="${index}" data-cn-line-detail-field="packSize" data-focus-key="cn-detail-pack-${index}" ${isCreditNoteLineCustomUom(entry) ? 'readonly title="Pack size is set by the selected UOM."' : ''} />

@@ -2,13 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { aggregateInventoryRows, buildDashboardModel, getDashboardDateRange } from './dashboardData.js';
 
-test('dashboard date range includes six calendar months', () => {
-  const range = getDashboardDateRange(new Date(2026, 6, 10));
-  assert.equal(range.from, '2026-02-01');
+test('dashboard date range defaults to the current day', () => {
+  const range = getDashboardDateRange(new Date(2026, 6, 10), { from: '2026-07-10', to: '2026-07-10' });
+  assert.equal(range.from, '2026-07-10');
   assert.equal(range.to, '2026-07-10');
-  assert.deepEqual(range.months.map((month) => month.key), [
-    '2026-02', '2026-03', '2026-04', '2026-05', '2026-06', '2026-07'
-  ]);
+  assert.equal(range.dayCount, 1);
 });
 
 test('inventory rows stay split by location so stock status is never based on cumulative quantity', () => {

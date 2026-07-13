@@ -22,6 +22,7 @@ export async function listReportSchedules(workspaceId) {
   return {
     schedules: Array.isArray(response.schedules) ? response.schedules : [],
     locations: Array.isArray(response.locations) ? response.locations : [],
+    users: Array.isArray(response.users) ? response.users : [],
     allowAllLocations: response.allowAllLocations !== false,
     schedulerVersion: String(response.schedulerVersion || '')
   };

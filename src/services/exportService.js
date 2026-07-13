@@ -34,7 +34,8 @@ export const exportSchemas = {
     'UOM_2_Barcode',
     'UOM_3_Name',
     'UOM_3_Qty_In_Base',
-    'UOM_3_Barcode'
+    'UOM_3_Barcode',
+    'Default_Ordering_UOM'
   ],
   manufacturing: ['Item_Type', 'Name', 'Category', 'Unit', 'Batch_Yield', 'Component_Name', 'Quantity_Needed'],
   suppliers: [
@@ -167,6 +168,7 @@ export function buildStockRows(items = [], {
         Item_Type: getStockExportItemType(item),
         Category: formatInventoryCategoryForExport(item),
         Base_UOM: item.unit || '',
+        Default_Ordering_UOM: uomConfigs.find((config) => config.isDefaultOrdering)?.customUom || item.unit || '',
         Cost_Ex_VAT: numberText(item.cost, 4),
         VAT_Enabled: item.vatEnabled === false ? 'No' : 'Yes',
         Barcode: Array.isArray(item.barcodes) ? item.barcodes.join(', ') : String(item.barcodes || ''),
@@ -433,6 +435,7 @@ function getTemplateExampleRows(columns = []) {
         Item_Type: TEMPLATE_ACCEPTED_ITEM_TYPE,
         Category: 'Dairy',
         Base_UOM: TEMPLATE_ACCEPTED_BASE_UOM,
+        Default_Ordering_UOM: 'Box',
         Cost_Ex_VAT: '24.50',
         VAT_Enabled: TEMPLATE_ACCEPTED_VAT,
         Barcode: '600000000002',
@@ -458,6 +461,7 @@ function getTemplateExampleRows(columns = []) {
         Item_Type: 'Manufactured',
         Category: 'Meat',
         Base_UOM: TEMPLATE_ACCEPTED_BASE_UOM,
+        Default_Ordering_UOM: 'Tray',
         Cost_Ex_VAT: '85.00',
         VAT_Enabled: TEMPLATE_ACCEPTED_VAT,
         Barcode: '600000000003',
@@ -483,6 +487,7 @@ function getTemplateExampleRows(columns = []) {
         Item_Type: 'Sub-Recipe',
         Category: 'Sauces',
         Base_UOM: 'L',
+        Default_Ordering_UOM: 'L',
         Cost_Ex_VAT: '12.00',
         VAT_Enabled: 'No',
         Barcode: '',
@@ -700,7 +705,8 @@ function normalizeExportUomConfigurations(value = []) {
       const customUom = String(row.customUom || row.custom_uom || row.customUnit || row.orderingUom || '').trim();
       const ratio = Number(row.ratio ?? row.conversionRatio ?? row.unitsPerCustomUnit ?? row.units_per_custom_unit ?? 0) || 0;
       const barcode = String(row.barcode || row.customBarcode || row.customUomBarcode || '').trim();
-      return { baseUom, customUom, ratio, barcode };
+      const isDefaultOrdering = ['true', '1', 'yes', 'on'].includes(String(row.isDefaultOrdering ?? row.defaultOrdering ?? row.is_default_ordering ?? row.defaultOrderUom ?? '').toLowerCase()) || row.isDefaultOrdering === true || row.defaultOrdering === true;
+      return { baseUom, customUom, ratio, barcode, isDefaultOrdering };
     })
     .filter((entry) => entry.customUom || entry.ratio > 0 || entry.barcode);
 }

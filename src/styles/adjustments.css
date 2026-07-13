@@ -316,6 +316,12 @@
   cursor: not-allowed;
 }
 
+#view-adjustments .adj-primary--blocked:not(:disabled) {
+  opacity: 0.48;
+  cursor: not-allowed;
+  filter: saturate(0.45);
+}
+
 #view-adjustments .adj-dropdown {
   position: relative;
   display: grid;

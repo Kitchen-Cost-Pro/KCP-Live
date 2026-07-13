@@ -969,6 +969,23 @@ async function cleanupPeerGroupLinks(env: Env, wsId: string): Promise<void> {
   }));
 }
 
+function gmailWorkspaceIdFromOauthState(stateValue: string): string {
+  const raw = text(stateValue);
+  if (!raw || raw.startsWith('system:')) return '';
+  const payload = raw.split('.')[0];
+  if (!payload) return '';
+  try {
+    const base64 = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
+    const binary = atob(padded);
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    const state = JSON.parse(new TextDecoder().decode(bytes)) as { workspaceId?: unknown };
+    return text(state.workspaceId);
+  } catch {
+    return '';
+  }
+}
+
 async function handle(request: Request, env: Env): Promise<Response> {
   if (request.method === 'OPTIONS') {
     return new Response(null, { status: 204, headers: corsHeaders(request, env) });
@@ -1010,6 +1027,29 @@ async function handle(request: Request, env: Env): Promise<Response> {
     const headers = new Headers(response.headers);
     for (const [k, v] of Object.entries(corsHeaders(request, env))) headers.set(k, v);
     return new Response(response.body, { status: response.status, headers });
+  }
+
+  // Gmail OAuth returns to a global callback URL, but the connected account is stored in the
+  // workspace Durable Object. Decode only the signed state's routing hint here, then let the tenant
+  // handler verify the HMAC before reading or writing workspace_settings. This prevents the callback
+  // from querying CENTRAL_DB, where tenant tables intentionally do not exist.
+  if (request.method === 'GET' && url.pathname === '/api/gmail/oauth/callback') {
+    const rawState = text(url.searchParams.get('state'));
+    if (!rawState.startsWith('system:')) {
+      const workspaceId = gmailWorkspaceIdFromOauthState(rawState);
+      if (workspaceId) {
+        const response = await forwardToWorkspaceDO(
+          request,
+          env,
+          workspaceId,
+          'gmail-oauth-callback',
+          { uid: 'gmail-oauth-callback', email: '' }
+        );
+        const headers = new Headers(response.headers);
+        for (const [k, v] of Object.entries(corsHeaders(request, env))) headers.set(k, v);
+        return new Response(response.body, { status: response.status, headers });
+      }
+    }
   }
 
   // Central plane — all /api/auth/* + /api/admin/* + security-config etc. run in the front Worker

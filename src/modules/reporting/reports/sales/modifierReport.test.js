@@ -36,6 +36,16 @@ const modifierRows = [
     createdBy: 'yoco',
     sourceId: 'mov-1',
     sourceType: 'Modifier Usage',
+    parentLineId: 'line-100',
+    menuItemSaleKey: 'R-100|line-100',
+    menuItemGrossAmount: 115,
+    menuItemVatAmount: 15,
+    menuItemNetAmount: 100,
+    menuItemBaseStockCost: 40,
+    menuItemModifierStockCost: 10,
+    menuItemTotalStockCost: 50,
+    menuItemGrossProfit: 50,
+    menuItemGpPercent: 0.5,
     hasModifierUsage: true,
     modifierMarkedStockDeducting: true
   },
@@ -65,6 +75,16 @@ const modifierRows = [
     createdBy: 'yoco',
     sourceId: 'R-101:line-1:modifier:no-onion',
     sourceType: 'Modifier Usage',
+    parentLineId: 'line-101',
+    menuItemSaleKey: 'R-101|line-101',
+    menuItemGrossAmount: 92,
+    menuItemVatAmount: 12,
+    menuItemNetAmount: 80,
+    menuItemBaseStockCost: 35,
+    menuItemModifierStockCost: 0,
+    menuItemTotalStockCost: 35,
+    menuItemGrossProfit: 45,
+    menuItemGpPercent: 0.5625,
     hasModifierUsage: false,
     modifierMarkedStockDeducting: false
   },
@@ -99,6 +119,16 @@ const modifierRows = [
     createdBy: 'yoco',
     sourceId: 'mov-3',
     sourceType: 'Modifier Usage',
+    parentLineId: 'line-102',
+    menuItemSaleKey: 'R-102|line-102',
+    menuItemGrossAmount: 138,
+    menuItemVatAmount: 18,
+    menuItemNetAmount: 120,
+    menuItemBaseStockCost: 50,
+    menuItemModifierStockCost: 12,
+    menuItemTotalStockCost: 62,
+    menuItemGrossProfit: 58,
+    menuItemGpPercent: 0.4833333333,
     hasModifierUsage: true,
     modifierMarkedStockDeducting: true
   }
@@ -119,7 +149,7 @@ test('Modifier Report builds summary, GP tracker, group, menu item, modifier, an
   assert.equal(model.views.summary.length, 3);
   assert.equal(model.views.gp_tracker.length, 3);
   assert.equal(model.views.by_group.length, 1);
-  assert.equal(model.views.by_menu_item.length, 3);
+  assert.equal(model.views.by_menu_item.length, 1);
   assert.equal(model.views.by_modifier.length, 3);
   assert.equal(model.views.sales_log.length, 3);
 
@@ -134,6 +164,17 @@ test('Modifier Report builds summary, GP tracker, group, menu item, modifier, an
   assert.equal(bacon.netSales, 0);
   assert.equal(bacon.stockCost, 12);
   assert.equal(bacon.grossProfit, -12);
+  const burger = model.views.by_menu_item[0];
+  assert.equal(burger.menuItemName, 'Burger');
+  assert.equal(burger.modifierSelections, 4);
+  assert.equal(burger.grossMenuSales, 345);
+  assert.equal(burger.vat, 45);
+  assert.equal(burger.netMenuSales, 300);
+  assert.equal(burger.baseStockCost, 125);
+  assert.equal(burger.modifierStockCost, 22);
+  assert.equal(burger.totalStockCost, 147);
+  assert.equal(burger.grossProfit, 153);
+  assert.equal(burger.gpPercent, 0.51);
 });
 
 test('Modifier mapper keeps modifier payment values and usage costs separate', () => {

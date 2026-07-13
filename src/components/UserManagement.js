@@ -324,7 +324,6 @@ function renderCreateModal(draft, roleOptions, filters = {}, canAssignLowStockTa
     renderRolePicker({ label: 'Assigned Role', roleOptions, activeRole: draft.role || 'member', dataPrefix: 'user-create', disabled: !canManagePermissions, searchKey: 'createRoleSearch', searchValue: filters.createRoleSearch || '', typeKey: 'createRoleType', typeValue: filters.createRoleType || 'all' }) +
     '<div class="userMgmtSupplementalOptions">' +
     renderAccessModeToggle(draft.viewingOnly) +
-    renderLowStockAlertToggle(draft.lowStockAlert, false, canAssignLowStockTag) +
     '</div>' +
     '<div class="userMgmtModalActions">' +
     '<button type="button" class="userMgmtGhostButton" data-user-prev-step>' + icon('chevronLeft') + '<span>Back</span></button>' +

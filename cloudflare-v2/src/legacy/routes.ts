@@ -92,6 +92,107 @@ function id(prefix: string) {
   return `${prefix}_${crypto.randomUUID()}`;
 }
 
+let userPreferencesSchemaReady: Promise<void> | null = null;
+
+function userPreferencePrincipal(auth: AuthContext) {
+  const uid = text(auth.uid);
+  if (uid) return `uid:${uid}`;
+  return `email:${text(auth.email).toLowerCase()}`;
+}
+
+async function ensureUserPreferencesSchema(env: Env) {
+  if (userPreferencesSchemaReady) return userPreferencesSchemaReady;
+  userPreferencesSchemaReady = (async () => {
+    await env.CENTRAL_DB.prepare(
+      `CREATE TABLE IF NOT EXISTS user_preferences (
+         principal_key TEXT PRIMARY KEY,
+         auth_uid TEXT,
+         email TEXT,
+         preferences_json TEXT NOT NULL DEFAULT '{}',
+         created_at TEXT NOT NULL DEFAULT (datetime('now')),
+         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+       )`,
+    ).run();
+    await env.CENTRAL_DB.prepare(
+      `CREATE INDEX IF NOT EXISTS idx_user_preferences_auth_uid
+         ON user_preferences(auth_uid)`,
+    ).run();
+    await env.CENTRAL_DB.prepare(
+      `CREATE INDEX IF NOT EXISTS idx_user_preferences_email
+         ON user_preferences(email)`,
+    ).run();
+  })().catch((cause) => {
+    userPreferencesSchemaReady = null;
+    throw cause;
+  });
+  return userPreferencesSchemaReady;
+}
+
+async function readLegacyMemberPreferences(
+  env: Env,
+  auth: AuthContext,
+  workspaceId: string,
+) {
+  try {
+    const info = await env.CENTRAL_DB.prepare(
+      `PRAGMA table_info(workspace_members)`,
+    ).all<{ name?: string }>();
+    const hasLegacyColumn = (info.results || []).some(
+      (row) => text(row.name).toLowerCase() === 'user_preferences_json',
+    );
+    if (!hasLegacyColumn) return {};
+    const row = await env.CENTRAL_DB.prepare(
+      `SELECT user_preferences_json
+         FROM workspace_members
+        WHERE workspace_id = ?1
+          AND status = 'active'
+          AND (auth_uid = ?2 OR lower(email) = lower(?3))
+        LIMIT 1`,
+    )
+      .bind(workspaceId, auth.uid, auth.email)
+      .first<{ user_preferences_json?: string }>();
+    return objectValue(jsonParse(row?.user_preferences_json));
+  } catch {
+    return {};
+  }
+}
+
+async function readPersonalPreferences(
+  env: Env,
+  auth: AuthContext,
+  workspaceId: string,
+) {
+  await ensureUserPreferencesSchema(env);
+  const principalKey = userPreferencePrincipal(auth);
+  const row = await env.CENTRAL_DB.prepare(
+    `SELECT preferences_json
+       FROM user_preferences
+      WHERE principal_key = ?1
+      LIMIT 1`,
+  )
+    .bind(principalKey)
+    .first<{ preferences_json?: string }>();
+  if (row) return objectValue(jsonParse(row.preferences_json));
+
+  const legacy = await readLegacyMemberPreferences(env, auth, workspaceId);
+  if (Object.keys(legacy).length) {
+    const now = nowIso();
+    await env.CENTRAL_DB.prepare(
+      `INSERT INTO user_preferences
+         (principal_key, auth_uid, email, preferences_json, created_at, updated_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+       ON CONFLICT(principal_key) DO UPDATE SET
+         auth_uid = excluded.auth_uid,
+         email = excluded.email,
+         preferences_json = excluded.preferences_json,
+         updated_at = excluded.updated_at`,
+    )
+      .bind(principalKey, auth.uid, auth.email, JSON.stringify(legacy), now)
+      .run();
+  }
+  return legacy;
+}
+
 function numberValue(value: unknown, fallback = 0) {
   const parsed =
     typeof value === "number"
@@ -226,6 +327,10 @@ function normalizeUomConfigurations(value: unknown) {
           0,
         ),
         barcode: text(row.barcode || row.customBarcode || row.customUomBarcode),
+        isDefaultOrdering:
+          row.isDefaultOrdering === true ||
+          row.defaultOrdering === true ||
+          ['true', '1', 'yes', 'on'].includes(text(row.isDefaultOrdering ?? row.defaultOrdering ?? row.is_default_ordering ?? row.defaultOrderUom).toLowerCase()),
       };
     })
     .filter((entry) => entry.customUom && entry.ratio > 0);
@@ -2552,6 +2657,7 @@ export async function adminYocoActionDO(
         env,
         workspaceId,
         text(body.apiKey || body.secretKey),
+        { allowKeyReplacement: true, actorUid: 'kcp-admin' },
       );
       return json(request, env, { ok: true, ...result });
     }
@@ -3489,6 +3595,66 @@ export async function getWorkspaceSettingsRoute(
     },
     source: "cloudflare-d1:workspace_settings",
   });
+}
+
+export async function getUserPreferencesRoute(
+  request: Request,
+  env: Env,
+  auth: AuthContext,
+  workspaceId: string,
+) {
+  // Workspace access is still required, but the preference record belongs to the
+  // authenticated person rather than to a workspace membership row. This also
+  // supports workspace owners and KCP superusers, who may not have a member row.
+  await scoped(request, env, auth, workspaceId);
+  const preferences = await readPersonalPreferences(env, auth, workspaceId);
+  return json(request, env, {
+    ok: true,
+    preferences,
+    scope: 'user',
+  });
+}
+
+export async function patchUserPreferencesRoute(
+  request: Request,
+  env: Env,
+  auth: AuthContext,
+  workspaceId: string,
+) {
+  await scoped(request, env, auth, workspaceId);
+  const payload = await readJson<Record<string, unknown>>(request);
+  const incoming = objectValue(payload.preferences || payload);
+  const allowedKeys = new Set([
+    'uiScale',
+    'restaurantThemeId',
+    'restaurantBackgroundId',
+    'restaurantBackgroundDataUrl',
+    'restaurantBackgroundName',
+  ]);
+  const safeIncoming = Object.fromEntries(
+    Object.entries(incoming).filter(([key]) => allowedKeys.has(key)),
+  );
+  const current = await readPersonalPreferences(env, auth, workspaceId);
+  const updatedAt = nowIso();
+  const next = {
+    ...current,
+    ...safeIncoming,
+    updatedAt,
+  };
+  const principalKey = userPreferencePrincipal(auth);
+  await env.CENTRAL_DB.prepare(
+    `INSERT INTO user_preferences
+       (principal_key, auth_uid, email, preferences_json, created_at, updated_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+     ON CONFLICT(principal_key) DO UPDATE SET
+       auth_uid = excluded.auth_uid,
+       email = excluded.email,
+       preferences_json = excluded.preferences_json,
+       updated_at = excluded.updated_at`,
+  )
+    .bind(principalKey, auth.uid, auth.email, JSON.stringify(next), updatedAt)
+    .run();
+  return json(request, env, { ok: true, preferences: next, scope: 'user' });
 }
 
 export async function patchWorkspaceSettingsRoute(
@@ -8120,6 +8286,8 @@ function normalizeCreditNotePayload(raw: Record<string, unknown>) {
         ),
         returnedQty,
         packQty: returnedQty,
+        originalOrderQty: numberValue(line.originalOrderQty ?? line.maxReturnQty, 0),
+        maxReturnQty: numberValue(line.maxReturnQty ?? line.originalOrderQty, 0),
         packSize,
         baseQuantity,
         unitCost,
@@ -8151,6 +8319,7 @@ function normalizeCreditNotePayload(raw: Record<string, unknown>) {
     timestamp: date.length <= 10 ? `${date}T00:00:00.000Z` : date,
     locationId,
     locationName: text(note.locationName),
+    sourcePoId: text(note.sourcePoId || note.purchaseOrderId || note.poId),
     notes: text(note.notes || note.reason),
     pricesIncludeVat: note.pricesIncludeVat === true,
     totalEx,
@@ -8323,6 +8492,70 @@ export async function postCreditNote(
       transactionReference,
       duplicate: true,
     });
+  }
+
+  const sourcePoId = text(payload.normalized.sourcePoId);
+  if (sourcePoId) {
+    const requestedByStockItem = new Map<string, { quantity: number; name: string; fallbackMaximum: number }>();
+    for (const line of payload.normalized.items) {
+      const stockItemId = text(line.stockItemId);
+      if (!stockItemId) continue;
+      const current = requestedByStockItem.get(stockItemId) || { quantity: 0, name: text(line.stockItemName || stockItemId), fallbackMaximum: 0 };
+      current.quantity += numberValue(line.returnedQty ?? line.packQty, 0);
+      current.fallbackMaximum += numberValue(line.maxReturnQty ?? line.originalOrderQty, 0);
+      requestedByStockItem.set(stockItemId, current);
+    }
+
+    // Include earlier credit notes for this PO so several smaller returns cannot cumulatively
+    // exceed the original ordered quantity. The current credit note id is excluded so retries
+    // remain idempotent and do not count themselves twice.
+    const priorCreditRows = await env.DB.prepare(
+      `SELECT raw_json
+         FROM credit_notes
+        WHERE workspace_id = ?1
+          AND id <> ?2
+          AND json_valid(raw_json) = 1
+          AND COALESCE(json_extract(raw_json, '$.sourcePoId'), '') = ?3`,
+    )
+      .bind(workspaceId, payload.id, sourcePoId)
+      .all<{ raw_json: string }>();
+    const previouslyReturnedByStockItem = new Map<string, number>();
+    for (const row of priorCreditRows.results || []) {
+      const prior = objectValue(jsonParse(row.raw_json));
+      for (const line of arrayValue(prior.items).map(objectValue)) {
+        const stockItemId = text(line.stockItemId || line.itemId || line.id);
+        if (!stockItemId) continue;
+        const quantity = numberValue(line.returnedQty ?? line.packQty ?? line.quantity, 0);
+        previouslyReturnedByStockItem.set(
+          stockItemId,
+          (previouslyReturnedByStockItem.get(stockItemId) || 0) + quantity,
+        );
+      }
+    }
+
+    for (const [stockItemId, requested] of requestedByStockItem.entries()) {
+      const ordered = await env.DB.prepare(
+        `SELECT SUM(quantity) AS quantity
+           FROM purchase_order_lines
+          WHERE workspace_id = ?1
+            AND purchase_order_id = ?2
+            AND stock_item_id = ?3`,
+      )
+        .bind(workspaceId, sourcePoId, stockItemId)
+        .first<{ quantity: number }>();
+      const originalQuantity = numberValue(ordered?.quantity, requested.fallbackMaximum);
+      const previouslyReturned = previouslyReturnedByStockItem.get(stockItemId) || 0;
+      const cumulativeReturn = previouslyReturned + requested.quantity;
+      if (originalQuantity > 0 && cumulativeReturn > originalQuantity + 0.000001) {
+        const remainingQuantity = Math.max(originalQuantity - previouslyReturned, 0);
+        return error(
+          request,
+          env,
+          409,
+          `${requested.name} cannot return more than the original purchase order quantity of ${formatQuantity(originalQuantity)}. ${formatQuantity(remainingQuantity)} remains available to return.`,
+        );
+      }
+    }
   }
 
   const transactionReference = await ensureTransactionReference(
@@ -9488,8 +9721,9 @@ export async function getStockTakeDrafts(
   workspaceId: string,
 ) {
   await scoped(request, env, auth, workspaceId);
-  const url = new URL(request.url);
-  const userId = getParam(url, "userId") || auth.uid;
+  // Draft ownership is always derived from the authenticated Worker session. Never allow a
+  // browser-supplied query parameter to read another workspace member's active count drafts.
+  const userId = auth.uid;
   const rows = await env.DB.prepare(
     `SELECT id, raw_json, saved_at, updated_at
        FROM stocktake_drafts
@@ -9522,7 +9756,9 @@ export async function postStockTakeDraft(
   await scoped(request, env, auth, workspaceId);
   const payload = await readJson<Record<string, unknown>>(request);
   const draft = objectValue(payload.draft || payload);
-  const userId = text(payload.userId || draft.savedByUserId) || auth.uid;
+  // The authenticated session is the source of truth for draft ownership. Client identity fields
+  // are retained only inside the normalized response and cannot redirect the write to another user.
+  const userId = auth.uid;
   const draftId = text(draft.id) || id("std");
   const locationId = text(draft.locationId || draft.targetLocation);
   if (!locationId)
@@ -9552,11 +9788,12 @@ export async function deleteStockTakeDraftRoute(
   env: Env,
   auth: AuthContext,
   workspaceId: string,
-  userId: string,
+  _userId: string,
   draftId = "",
 ) {
   await scoped(request, env, auth, workspaceId);
-  const uid = text(userId) || auth.uid;
+  // Ignore the legacy path user id and delete only drafts owned by the authenticated user.
+  const uid = auth.uid;
   const idValue = text(draftId);
   if (idValue) {
     await env.DB.prepare(
@@ -13748,7 +13985,9 @@ export async function postYocoConnect(
     apiKey?: string;
     syncSalesOnConnect?: boolean;
   }>(request);
-  const connection = await connectYoco(env, workspaceId, payload.apiKey || "");
+  const denied = await denyUnlessPermissionManager(request, env, auth, workspaceId);
+  if (denied) return denied;
+  const connection = await connectYoco(env, workspaceId, payload.apiKey || "", { actorUid: auth.uid });
   const catalogue = await syncYocoCatalogue(env, workspaceId);
   const sales =
     payload.syncSalesOnConnect === true
@@ -14466,6 +14705,10 @@ export async function postYocoDisconnect(
   workspaceId: string,
 ) {
   await scoped(request, env, auth, workspaceId);
+  const actorRole = await getWorkspaceActorRole(env, auth, workspaceId);
+  if (normalizeRoleKey(actorRole) !== 'superuser') {
+    return error(request, env, 403, 'Only a KCP super user can disconnect the workspace Yoco integration.');
+  }
   const result = await disconnectYoco(env, workspaceId);
   return json(request, env, { ok: true, ...result });
 }
