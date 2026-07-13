@@ -52,7 +52,9 @@ test('scheduled email format selector enables CSV, XLSX, PDF, and report links',
 });
 
 test('schedule UI and runner support multiple views and one independent output per location', () => {
-  assert.match(schedulingSource, /Select multiple reports and views/);
+  assert.match(schedulingSource, /data-schedule-pack-open/);
+  assert.match(schedulingSource, /data-schedule-pack-picker/);
+  assert.match(schedulingSource, /Select reports and views/);
   assert.match(schedulingSource, /name="locationSelection"/);
   assert.match(schedulingSource, /Choose All Locations to generate a separate output for every active location/);
   assert.match(schedulingSource, /values\.locations\.map\(\(location\) => `<option/);

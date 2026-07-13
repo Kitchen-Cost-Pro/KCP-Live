@@ -4056,3 +4056,707 @@ body > .reportActionMenu__panel--portal {
   white-space: nowrap;
   vertical-align: top;
 }
+
+/* ========================================================================== 
+   Phase 42: Reporting table and filter theme alignment only
+   Keep the existing reporting page, directory, headers, cards, tabs, imagery,
+   and blue reporting background unchanged. Only the main report filter bar and
+   data tables consume the shared KCP application colour tokens.
+   ========================================================================== */
+.reportingDashboard .reportFilters {
+  border-color: var(--border-subtle) !important;
+  background: var(--surface-primary) !important;
+  box-shadow: var(--shadow-soft) !important;
+}
+
+.reportingDashboard .reportFilters .reportFilterField__label {
+  color: var(--text-muted) !important;
+}
+
+.reportingDashboard .reportFilters :is(.reportFilterControl, .reportFilterSelect__button) {
+  border-color: var(--border-subtle) !important;
+  background: var(--surface-elevated) !important;
+  color: var(--text-main) !important;
+}
+
+.reportingDashboard .reportFilters :is(.reportFilterControl:focus-within, .reportFilterSelect.is-open .reportFilterSelect__button) {
+  border-color: color-mix(in srgb, var(--accent-blue) 55%, var(--border-subtle)) !important;
+  background: color-mix(in srgb, var(--accent-blue) 8%, var(--surface-elevated)) !important;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-blue) 12%, transparent) !important;
+}
+
+.reportingDashboard .reportFilters :is(input[type="text"], .reportFilterSelect__button) {
+  color: var(--text-main) !important;
+}
+
+.reportingDashboard .reportFilters input::placeholder {
+  color: var(--text-soft) !important;
+}
+
+.reportingDashboard .reportFilters :is(.reportFilterControl__icon, .reportFilterSelect__chevron) {
+  color: var(--accent-blue) !important;
+}
+
+.reportingDashboard .reportFilters .reportFilterSelect__menu {
+  border-color: var(--border-subtle) !important;
+  background: var(--surface-elevated) !important;
+  color: var(--text-main) !important;
+  box-shadow: var(--shadow-hover) !important;
+}
+
+.reportingDashboard .reportFilters .reportFilterSelect__option {
+  color: var(--text-muted) !important;
+}
+
+.reportingDashboard .reportFilters .reportFilterSelect__option:hover,
+.reportingDashboard .reportFilters .reportFilterSelect__option:focus-visible,
+.reportingDashboard .reportFilters .reportFilterSelect__option.is-selected {
+  background: color-mix(in srgb, var(--accent-blue) 12%, var(--surface-elevated)) !important;
+  color: var(--text-main) !important;
+}
+
+.reportingDashboard .reportTableWrap {
+  border-color: var(--border-subtle) !important;
+  background: var(--surface-primary) !important;
+  box-shadow: var(--shadow-soft) !important;
+}
+
+.reportingDashboard .reportTable {
+  background: var(--surface-primary) !important;
+  color: var(--text-main) !important;
+}
+
+.reportingDashboard .reportTable th {
+  border-color: var(--border-subtle) !important;
+  background: color-mix(in srgb, var(--accent-blue) 13%, var(--surface-elevated)) !important;
+  color: var(--accent-blue) !important;
+}
+
+.reportingDashboard .reportTable td {
+  border-color: var(--border-subtle) !important;
+  background: color-mix(in srgb, var(--surface-primary) 96%, var(--accent-blue)) !important;
+  color: var(--text-main) !important;
+}
+
+.reportingDashboard .reportTable tbody tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--surface-secondary) 94%, var(--accent-blue)) !important;
+}
+
+.reportingDashboard .reportTable tbody tr:hover td {
+  background: color-mix(in srgb, var(--accent-blue) 9%, var(--surface-primary)) !important;
+}
+
+.reportingDashboard .reportTable tfoot td {
+  border-color: var(--border-strong) !important;
+  background: color-mix(in srgb, var(--accent-blue) 15%, var(--surface-elevated)) !important;
+  color: var(--text-main) !important;
+}
+
+.reportingDashboard .reportTable__transactionLink,
+.reportingDashboard .reportTable__sort:hover,
+.reportingDashboard .reportTable__sort:focus-visible {
+  color: var(--accent-blue) !important;
+}
+
+.reportingDashboard .reportTable th.reportTable__transactionColumn,
+.reportingDashboard .reportTableWrap--stickyTransaction .reportTable thead th.reportTable__transactionColumn {
+  background: color-mix(in srgb, var(--accent-blue) 13%, var(--surface-elevated)) !important;
+}
+
+.reportingDashboard .reportTable td.reportTable__transactionColumn,
+.reportingDashboard .reportTableWrap--stickyTransaction .reportTable tbody td.reportTable__transactionColumn {
+  background: color-mix(in srgb, var(--surface-primary) 96%, var(--accent-blue)) !important;
+}
+
+.reportingDashboard .reportTable tbody tr:nth-child(even) td.reportTable__transactionColumn,
+.reportingDashboard .reportTableWrap--stickyTransaction .reportTable tbody tr:nth-child(even) td.reportTable__transactionColumn {
+  background: color-mix(in srgb, var(--surface-secondary) 94%, var(--accent-blue)) !important;
+}
+
+.reportingDashboard .reportTable tbody tr:hover td.reportTable__transactionColumn,
+.reportingDashboard .reportTableWrap--stickyTransaction .reportTable tbody tr:hover td.reportTable__transactionColumn {
+  background: color-mix(in srgb, var(--accent-blue) 9%, var(--surface-primary)) !important;
+}
+
+.reportingDashboard .reportTableWrap--stickyTransaction .reportTable tfoot td.reportTable__transactionColumn {
+  background: color-mix(in srgb, var(--accent-blue) 15%, var(--surface-elevated)) !important;
+}
+
+.reportingDashboard .reportTableWrap--stickyTransaction .reportTable :is(th, td).reportTable__transactionColumn {
+  border-right-color: var(--border-strong) !important;
+}
+
+/* ========================================================================== 
+   Phase 43: Scheduling workspace simplification and theme alignment
+   Scope is intentionally limited to Scheduling. The existing reporting page
+   background and report directory remain unchanged.
+   ========================================================================== */
+.reportSchedulingPage .reportSchedulingHero,
+.reportSchedulingPage .reportSchedulingTemplates,
+.reportSchedulingPage .reportSchedulingListSection {
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-primary);
+  box-shadow: var(--shadow-soft), inset 0 1px 0 color-mix(in srgb, var(--accent-blue) 10%, transparent);
+}
+
+.reportSchedulingPage .reportSchedulingHero {
+  align-items: center;
+  border-left: 3px solid var(--accent-blue);
+}
+
+.reportSchedulingPage .reportSchedulingHero__eyebrow,
+.reportSchedulingPage .reportSchedulingSectionHeader > div > span {
+  color: var(--accent-blue);
+}
+
+.reportSchedulingPage .reportSchedulingHero h1,
+.reportSchedulingPage .reportSchedulingSectionHeader h2 {
+  color: var(--text-main);
+}
+
+.reportSchedulingPage .reportSchedulingHero p,
+.reportSchedulingPage .reportSchedulingCount {
+  color: var(--text-muted);
+}
+
+.reportSchedulingPage .reportSchedulingPrimary {
+  border: 1px solid color-mix(in srgb, var(--accent-blue) 72%, var(--border-strong));
+  background: var(--accent-blue);
+  color: #06111d;
+  box-shadow: 0 10px 24px color-mix(in srgb, var(--accent-blue) 20%, transparent);
+}
+
+.reportSchedulingPage .reportSchedulingTemplates,
+.reportSchedulingPage .reportSchedulingListSection {
+  position: relative;
+  overflow: hidden;
+}
+
+.reportSchedulingPage .reportSchedulingTemplates::before,
+.reportSchedulingPage .reportSchedulingListSection::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 2px;
+  background: linear-gradient(180deg, var(--accent-blue), transparent 78%);
+  opacity: .7;
+}
+
+.reportSchedulingPage .reportSchedulingTemplate {
+  position: relative;
+  border: 1px solid color-mix(in srgb, var(--accent-blue) 28%, var(--border-subtle));
+  background: var(--surface-elevated);
+  color: var(--text-main);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, .12), inset 0 1px 0 color-mix(in srgb, var(--accent-blue) 10%, transparent);
+  transition: transform 150ms ease, border-color 150ms ease, box-shadow 150ms ease, background 150ms ease;
+}
+
+.reportSchedulingPage .reportSchedulingTemplate::after {
+  content: "→";
+  position: absolute;
+  top: .65rem;
+  right: .72rem;
+  color: var(--accent-blue);
+  font-weight: 900;
+  opacity: .72;
+}
+
+.reportSchedulingPage .reportSchedulingTemplate:hover:not(:disabled),
+.reportSchedulingPage .reportSchedulingTemplate:focus-visible {
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--accent-blue) 62%, var(--border-strong));
+  background: color-mix(in srgb, var(--accent-blue) 7%, var(--surface-elevated));
+  box-shadow: var(--shadow-hover), 0 0 0 3px color-mix(in srgb, var(--accent-blue) 8%, transparent);
+}
+
+.reportSchedulingPage .reportSchedulingTemplate__icon {
+  border: 1px solid color-mix(in srgb, var(--accent-blue) 24%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent-blue) 14%, var(--surface-elevated));
+  color: var(--accent-blue);
+}
+
+.reportSchedulingPage .reportSchedulingTemplate small,
+.reportSchedulingPage .reportSchedulingTable td > span {
+  color: var(--text-muted);
+}
+
+.reportSchedulingPage .reportSchedulingTableWrap {
+  overflow: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: .82rem;
+  background: var(--surface-elevated);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--accent-blue) 8%, transparent);
+}
+
+.reportSchedulingPage .reportSchedulingTable th {
+  border-color: var(--border-subtle);
+  background: color-mix(in srgb, var(--accent-blue) 13%, var(--surface-elevated));
+  color: var(--accent-blue);
+}
+
+.reportSchedulingPage .reportSchedulingTable td {
+  border-color: var(--border-subtle);
+  background: color-mix(in srgb, var(--surface-primary) 96%, var(--accent-blue));
+  color: var(--text-main);
+}
+
+.reportSchedulingPage .reportSchedulingTable tbody tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--surface-secondary) 94%, var(--accent-blue));
+}
+
+.reportSchedulingPage .reportSchedulingTable tbody tr:hover td {
+  background: color-mix(in srgb, var(--accent-blue) 9%, var(--surface-primary));
+}
+
+.reportSchedulingPage .reportScheduleRowActions button {
+  border-color: var(--border-subtle);
+  background: var(--surface-elevated);
+  color: var(--text-main);
+}
+
+.reportSchedulingPage .reportScheduleRowActions button:hover,
+.reportSchedulingPage .reportScheduleRowActions button:focus-visible {
+  border-color: color-mix(in srgb, var(--accent-blue) 55%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent-blue) 10%, var(--surface-elevated));
+  color: var(--accent-blue);
+}
+
+.reportScheduleModalBackdrop {
+  background: rgba(3, 8, 15, .86);
+}
+
+.reportScheduleModal.reportModalCard {
+  width: min(60rem, 96vw);
+  max-height: 94vh;
+  border-color: color-mix(in srgb, var(--accent-blue) 24%, var(--border-subtle));
+  background: var(--surface-primary);
+  color: var(--text-main);
+  box-shadow: 0 34px 100px rgba(0, 0, 0, .58), 0 0 0 1px color-mix(in srgb, var(--accent-blue) 8%, transparent);
+}
+
+.reportScheduleModal.reportModalCard > header {
+  position: sticky;
+  top: 0;
+  z-index: 8;
+  align-items: center;
+  border-color: var(--border-subtle);
+  background: color-mix(in srgb, var(--surface-elevated) 96%, var(--accent-blue));
+}
+
+.reportScheduleModal.reportModalCard > header span {
+  color: var(--accent-blue);
+}
+
+.reportScheduleModal.reportModalCard > header h3 {
+  color: var(--text-main);
+  font-size: 1.15rem;
+}
+
+.reportScheduleModal.reportModalCard > header p {
+  margin: .3rem 0 0;
+  color: var(--text-muted);
+  font-size: .7rem;
+}
+
+.reportScheduleModal.reportModalCard > header button {
+  display: grid;
+  place-items: center;
+  width: 2.2rem;
+  height: 2.2rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: .65rem;
+  background: var(--surface-primary);
+  color: var(--text-main);
+}
+
+.reportScheduleModal.reportModalCard form {
+  gap: 1rem;
+  padding: 1rem;
+  background: color-mix(in srgb, var(--bg-primary) 28%, transparent);
+}
+
+.reportScheduleFormStack {
+  display: grid;
+  gap: .8rem;
+}
+
+.reportScheduleFormSection {
+  display: grid;
+  gap: .75rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: .9rem;
+  padding: .85rem;
+  background: var(--surface-elevated);
+  box-shadow: var(--shadow-soft), inset 0 1px 0 color-mix(in srgb, var(--accent-blue) 7%, transparent);
+}
+
+.reportScheduleFormSection__header {
+  display: flex;
+  align-items: center;
+  gap: .65rem;
+  padding-bottom: .65rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.reportScheduleFormSection__step {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 1.85rem;
+  height: 1.85rem;
+  border: 1px solid color-mix(in srgb, var(--accent-blue) 40%, var(--border-subtle));
+  border-radius: .55rem;
+  background: color-mix(in srgb, var(--accent-blue) 13%, var(--surface-elevated));
+  color: var(--accent-blue);
+  font-size: .68rem;
+  font-weight: 900;
+}
+
+.reportScheduleFormSection__header > div {
+  display: grid;
+  gap: .08rem;
+}
+
+.reportScheduleFormSection__header > div > span {
+  color: var(--accent-blue);
+  font-size: .6rem;
+  font-weight: 850;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.reportScheduleFormSection__header strong {
+  color: var(--text-main);
+  font-size: .76rem;
+}
+
+.reportScheduleSectionGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .7rem;
+}
+
+.reportScheduleSectionGrid--four {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.reportScheduleModal.reportModalCard label {
+  color: var(--text-muted);
+}
+
+.reportScheduleModal.reportModalCard :is(input, textarea),
+.reportScheduleModal.reportModalCard .reportEnhancedSelect__button {
+  border-color: var(--border-subtle);
+  background: var(--surface-primary);
+  color: var(--text-main);
+}
+
+.reportScheduleModal.reportModalCard :is(input, textarea):focus,
+.reportScheduleModal.reportModalCard .reportEnhancedSelect.is-open .reportEnhancedSelect__button {
+  border-color: color-mix(in srgb, var(--accent-blue) 62%, var(--border-subtle));
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-blue) 12%, transparent);
+}
+
+.reportScheduleModal.reportModalCard .reportEnhancedSelect__menu {
+  border-color: var(--border-subtle);
+  background: var(--surface-elevated);
+  color: var(--text-main);
+}
+
+.reportScheduleModal.reportModalCard .reportEnhancedSelect__option {
+  color: var(--text-muted);
+}
+
+.reportScheduleModal.reportModalCard .reportEnhancedSelect__option:hover,
+.reportScheduleModal.reportModalCard .reportEnhancedSelect__option.is-selected {
+  background: color-mix(in srgb, var(--accent-blue) 12%, var(--surface-elevated));
+  color: var(--text-main);
+}
+
+.reportSchedulePackSummary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  min-height: 5rem;
+  border: 1px solid color-mix(in srgb, var(--accent-blue) 30%, var(--border-subtle));
+  border-radius: .75rem;
+  padding: .75rem;
+  background: color-mix(in srgb, var(--accent-blue) 7%, var(--surface-primary));
+}
+
+.reportSchedulePackSummary__copy {
+  display: grid;
+  min-width: 0;
+  gap: .45rem;
+}
+
+.reportSchedulePackSummary__count {
+  color: var(--text-main);
+  font-size: .74rem;
+  font-weight: 850;
+}
+
+.reportSchedulePackSummary__items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .32rem;
+}
+
+.reportSchedulePackSummary__empty {
+  color: var(--text-soft);
+  font-size: .68rem;
+}
+
+.reportSchedulePackChip {
+  max-width: 15rem;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent-blue) 24%, var(--border-subtle));
+  border-radius: 999px;
+  padding: .25rem .48rem;
+  background: var(--surface-elevated);
+  color: var(--text-muted);
+  font-size: .6rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reportSchedulePackChip--more {
+  color: var(--accent-blue);
+  font-weight: 800;
+}
+
+.reportSchedulePackButton {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: .7rem;
+  min-height: 2.65rem;
+  border: 1px solid color-mix(in srgb, var(--accent-blue) 68%, var(--border-strong));
+  border-radius: .7rem;
+  padding: .58rem .8rem;
+  background: var(--accent-blue);
+  color: #06111d;
+  font: inherit;
+  font-size: .7rem;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.reportSchedulePickerBackdrop[hidden] {
+  display: none !important;
+}
+
+.reportSchedulePickerBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgba(3, 8, 15, .9);
+}
+
+.reportSchedulePicker {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(72rem, 97vw);
+  max-height: 92vh;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent-blue) 28%, var(--border-subtle));
+  border-radius: 1rem;
+  background: var(--surface-primary);
+  color: var(--text-main);
+  box-shadow: 0 35px 110px rgba(0, 0, 0, .65);
+}
+
+.reportSchedulePicker > header,
+.reportSchedulePicker > footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: .9rem 1rem;
+  border-color: var(--border-subtle);
+  background: color-mix(in srgb, var(--surface-elevated) 96%, var(--accent-blue));
+}
+
+.reportSchedulePicker > header {
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.reportSchedulePicker > footer {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.reportSchedulePicker > header > div {
+  display: grid;
+  gap: .12rem;
+}
+
+.reportSchedulePicker > header span {
+  color: var(--accent-blue);
+  font-size: .61rem;
+  font-weight: 850;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.reportSchedulePicker > header h4 {
+  margin: 0;
+  color: var(--text-main);
+  font-size: 1rem;
+}
+
+.reportSchedulePicker > header p {
+  margin: .12rem 0 0;
+  color: var(--text-muted);
+  font-size: .67rem;
+}
+
+.reportSchedulePicker > header button {
+  display: grid;
+  place-items: center;
+  width: 2.2rem;
+  height: 2.2rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: .65rem;
+  background: var(--surface-primary);
+  color: var(--text-main);
+  font: inherit;
+  font-size: 1.25rem;
+  cursor: pointer;
+}
+
+.reportSchedulePicker__body {
+  min-height: 0;
+  overflow: auto;
+  padding: .9rem;
+}
+
+.reportSchedulePicker .reportScheduleBundle {
+  border: 0;
+  padding: 0;
+  background: transparent;
+}
+
+.reportSchedulePicker .reportScheduleBundle__groups {
+  max-height: none;
+  overflow: visible;
+  gap: .8rem;
+}
+
+.reportSchedulePicker .reportScheduleBundle__group {
+  gap: .5rem;
+}
+
+.reportSchedulePicker .reportScheduleBundle__group h4 {
+  color: var(--accent-blue);
+  font-size: .64rem;
+}
+
+.reportScheduleModal.reportModalCard .reportScheduleReportCard {
+  border-color: var(--border-subtle);
+  background: var(--surface-elevated);
+}
+
+.reportScheduleModal.reportModalCard .reportScheduleReportCard.is-selected {
+  border-color: color-mix(in srgb, var(--accent-blue) 62%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent-blue) 7%, var(--surface-elevated));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-blue) 9%, transparent);
+}
+
+.reportScheduleModal.reportModalCard .reportScheduleReportCard__title {
+  color: var(--text-main) !important;
+}
+
+.reportScheduleModal.reportModalCard .reportScheduleReportCard__title small {
+  color: var(--text-muted);
+}
+
+.reportScheduleModal.reportModalCard .reportScheduleReportCard__views label {
+  border-color: var(--border-subtle);
+  background: var(--surface-primary);
+  color: var(--text-muted) !important;
+}
+
+.reportScheduleModal.reportModalCard .reportScheduleReportCard__views label:has(input:checked) {
+  border-color: color-mix(in srgb, var(--accent-blue) 42%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent-blue) 14%, var(--surface-elevated));
+  color: var(--text-main) !important;
+}
+
+.reportSchedulePicker > footer > span {
+  color: var(--text-muted);
+  font-size: .7rem;
+  font-weight: 800;
+}
+
+.reportSchedulePicker > footer .reportModalPrimary,
+.reportScheduleModalActions .reportModalPrimary {
+  border-color: color-mix(in srgb, var(--accent-blue) 68%, var(--border-strong));
+  background: var(--accent-blue);
+  color: #06111d;
+}
+
+.reportScheduleModalActions {
+  position: sticky;
+  bottom: -1rem;
+  z-index: 7;
+  margin: 0 -1rem -1rem;
+  padding: .85rem 1rem;
+  border-top: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--surface-elevated) 97%, var(--accent-blue));
+}
+
+.reportScheduleModalActions button {
+  border-color: var(--border-subtle);
+  background: var(--surface-primary);
+  color: var(--text-main);
+}
+
+.reportScheduleLocationNote {
+  margin: 0;
+  color: var(--text-soft);
+}
+
+@media (max-width: 900px) {
+  .reportScheduleSectionGrid--four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .reportSchedulePicker .reportScheduleBundle__groups { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 650px) {
+  .reportScheduleSectionGrid,
+  .reportScheduleSectionGrid--four { grid-template-columns: 1fr; }
+  .reportSchedulePackSummary { align-items: stretch; flex-direction: column; }
+  .reportSchedulePackButton { width: 100%; }
+  .reportScheduleModalActions { flex-wrap: wrap; }
+  .reportScheduleModalActions button { flex: 1 1 auto; }
+}
+
+.reportSchedulingPage .reportSchedulingSectionHeader > div {
+  display: grid;
+  gap: .08rem;
+}
+
+.reportSchedulingPage .reportSchedulingSectionHeader p {
+  margin: .18rem 0 0;
+  color: var(--text-muted);
+  font-size: .68rem;
+  line-height: 1.45;
+}
+
+.reportSchedulePicker > footer button {
+  min-height: 2.45rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: .65rem;
+  padding: .52rem .8rem;
+  background: var(--surface-primary);
+  color: var(--text-main);
+  font: inherit;
+  font-size: .7rem;
+  font-weight: 850;
+  cursor: pointer;
+}

@@ -198,7 +198,7 @@ export function renderSchedulingPage({ workspaceId = '', state = {}, canManage =
       </header>
       <div data-schedule-feedback>${feedbackMarkup()}</div>
       <section class="reportSchedulingTemplates">
-        <div class="reportSchedulingSectionHeader"><div><span>Quick start</span><h2>Schedule templates</h2></div></div>
+        <div class="reportSchedulingSectionHeader"><div><span>Quick start</span><h2>Schedule templates</h2><p>Start with a ready-made report pack, then adjust only what you need.</p></div></div>
         <div class="reportSchedulingTemplateGrid">
           ${SCHEDULE_TEMPLATES.map((template) => `
             <button type="button" class="reportSchedulingTemplate" data-schedule-template="${template.id}" ${canCreate && !loading && schedulerReady() ? '' : 'disabled'}>
@@ -211,7 +211,7 @@ export function renderSchedulingPage({ workspaceId = '', state = {}, canManage =
       </section>
       <section class="reportSchedulingListSection">
         <div class="reportSchedulingSectionHeader">
-          <div><span>Workspace schedules</span><h2>Scheduled sends</h2></div>
+          <div><span>Workspace schedules</span><h2>Scheduled sends</h2><p>Review delivery timing, recipients and status for every saved schedule.</p></div>
           <span class="reportSchedulingCount" data-schedule-count>${schedules.length} schedule${schedules.length === 1 ? '' : 's'}</span>
         </div>
         <div data-schedule-list>${scheduleListMarkup()}</div>
@@ -290,9 +290,28 @@ export function renderSchedulingPage({ workspaceId = '', state = {}, canManage =
     overlay.innerHTML = renderScheduleModal(values, catalog, savedViews, Boolean(schedule));
     document.body.append(overlay);
     const form = overlay.querySelector('[data-schedule-form]');
+    const packPicker = form.querySelector('[data-schedule-pack-picker]');
     const close = () => overlay.remove();
+    const openPackPicker = () => {
+      if (!packPicker) return;
+      packPicker.hidden = false;
+      packPicker.querySelector('[data-schedule-pack-close]')?.focus();
+    };
+    const closePackPicker = () => {
+      if (!packPicker) return;
+      packPicker.hidden = true;
+      form.querySelector('[data-schedule-pack-open]')?.focus();
+    };
     overlay.querySelectorAll('[data-schedule-close]').forEach((button) => button.addEventListener('click', close));
+    form.querySelector('[data-schedule-pack-open]')?.addEventListener('click', openPackPicker);
+    form.querySelectorAll('[data-schedule-pack-close]').forEach((button) => button.addEventListener('click', closePackPicker));
+    packPicker?.addEventListener('click', (event) => { if (event.target === packPicker) closePackPicker(); });
     overlay.addEventListener('click', (event) => { if (event.target === overlay) close(); });
+    overlay.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      if (packPicker && !packPicker.hidden) closePackPicker();
+      else close();
+    });
 
     const syncDateRange = () => {
       const isCustom = form.querySelector('[name="dateRangeType"]')?.value === 'custom';
@@ -452,58 +471,125 @@ function renderScheduleModal(values, catalog, savedViews, editing) {
   const catalogGroups = groupCatalog(catalog);
   return `
     <section class="reportModalCard reportScheduleModal" role="dialog" aria-modal="true" aria-labelledby="schedule-dialog-title">
-      <header><div><span>Reporting · Scheduling</span><h3 id="schedule-dialog-title">${editing ? 'Edit schedule' : 'Create schedule'}</h3></div><button type="button" data-schedule-close aria-label="Close">×</button></header>
+      <header>
+        <div><span>Reporting · Scheduling</span><h3 id="schedule-dialog-title">${editing ? 'Edit schedule' : 'Create schedule'}</h3><p>Configure the report pack, delivery timing and recipients.</p></div>
+        <button type="button" data-schedule-close aria-label="Close">×</button>
+      </header>
       <form data-schedule-form>
         <input type="hidden" name="filtersJson" value="${escapeHtml(JSON.stringify(values.filters || {}))}" />
         <div data-schedule-modal-message></div>
-        <div class="reportScheduleFormGrid">
-          <label class="reportScheduleFull"><span>Schedule name</span><input name="name" value="${escapeHtml(values.name)}" required maxlength="120" placeholder="Weekly Management Report Pack" /></label>
-          <label class="reportScheduleFull"><span>Start from a saved view (optional)</span><select name="savedViewId"><option value="">Do not apply a saved view</option>${savedViews.map((view) => `<option value="${escapeHtml(view.id)}" ${values.savedViewId === view.id ? 'selected' : ''}>${escapeHtml(view.name)}</option>`).join('')}</select></label>
 
-          <section class="reportScheduleBundle reportScheduleFull">
-            <header><div><span>Report pack</span><strong>Select multiple reports and views</strong></div><span data-schedule-bundle-count></span></header>
-            <div class="reportScheduleBundle__groups">
-              ${catalogGroups.map((group) => `
-                <div class="reportScheduleBundle__group">
-                  <h4>${escapeHtml(group.title)}</h4>
-                  ${group.items.map((entry) => {
-                    const reportSelected = activeReports.has(entry.reportId);
-                    return `
-                      <article class="reportScheduleReportCard${reportSelected ? ' is-selected' : ''}" data-schedule-report-card>
-                        <label class="reportScheduleReportCard__title">
-                          <input type="checkbox" data-schedule-report-toggle value="${escapeHtml(entry.reportId)}" ${reportSelected ? 'checked' : ''} />
-                          <span><strong>${escapeHtml(entry.title)}</strong><small>${escapeHtml(entry.reportGroupTitle || 'Report')}</small></span>
-                        </label>
-                        <div class="reportScheduleReportCard__views">
-                          ${entry.views.map((view) => `<label><input type="checkbox" data-schedule-report-view data-report-id="${escapeHtml(entry.reportId)}" data-report-group-id="${escapeHtml(entry.reportGroupId || '')}" data-default-view="${view.value === entry.defaultView ? 'true' : 'false'}" value="${escapeHtml(view.value)}" ${selectedKeys.has(`${entry.reportId}::${view.value}`) ? 'checked' : ''} ${reportSelected ? '' : 'disabled'} /><span>${escapeHtml(view.label)}</span></label>`).join('')}
-                        </div>
-                      </article>
-                    `;
-                  }).join('')}
-                </div>
-              `).join('')}
+        <div class="reportScheduleFormStack">
+          <section class="reportScheduleFormSection">
+            <header class="reportScheduleFormSection__header">
+              <span class="reportScheduleFormSection__step">1</span>
+              <div><span>Schedule details</span><strong>Name and optional saved configuration</strong></div>
+            </header>
+            <div class="reportScheduleSectionGrid">
+              <label><span>Schedule name</span><input name="name" value="${escapeHtml(values.name)}" required maxlength="120" placeholder="Weekly Management Report Pack" /></label>
+              <label><span>Start from a saved view (optional)</span><select name="savedViewId"><option value="">Do not apply a saved view</option>${savedViews.map((view) => `<option value="${escapeHtml(view.id)}" ${values.savedViewId === view.id ? 'selected' : ''}>${escapeHtml(view.name)}</option>`).join('')}</select></label>
             </div>
           </section>
 
-          <label><span>Date range</span><select name="dateRangeType">${REPORT_DATE_RANGE_PRESETS.map((preset) => `<option value="${preset.value}" ${values.dateRangeType === preset.value ? 'selected' : ''}>${preset.label}</option>`).join('')}</select></label>
-          <label><span>Location</span><select name="locationSelection" ${!values.allowAllLocations && !values.locations.length ? 'disabled' : ''}>${values.allowAllLocations ? `<option value="all" ${values.locationSelection === 'all' ? 'selected' : ''}>All Locations</option>` : ''}${values.locations.map((location) => `<option value="${escapeHtml(location.id)}" ${values.locationSelection === location.id ? 'selected' : ''}>${escapeHtml(location.name)}</option>`).join('')}${!values.allowAllLocations && !values.locations.length ? '<option value="">No assigned locations</option>' : ''}</select></label>
-          <label data-schedule-custom-date><span>From</span><input type="date" name="customFrom" value="${escapeHtml(values.customFrom)}" /></label>
-          <label data-schedule-custom-date><span>To</span><input type="date" name="customTo" value="${escapeHtml(values.customTo)}" /></label>
-          <p class="reportScheduleLocationNote reportScheduleFull">Choose All Locations to generate a separate output for every active location, or choose one individual location from this dropdown.</p>
+          <section class="reportScheduleFormSection reportScheduleFormSection--pack">
+            <header class="reportScheduleFormSection__header">
+              <span class="reportScheduleFormSection__step">2</span>
+              <div><span>Report pack</span><strong>Choose the reports and views to deliver</strong></div>
+            </header>
+            <div class="reportSchedulePackSummary">
+              <div class="reportSchedulePackSummary__copy">
+                <span class="reportSchedulePackSummary__count" data-schedule-bundle-count></span>
+                <div class="reportSchedulePackSummary__items" data-schedule-pack-summary></div>
+              </div>
+              <button type="button" class="reportSchedulePackButton" data-schedule-pack-open>
+                <span>Choose reports &amp; views</span><span aria-hidden="true">→</span>
+              </button>
+            </div>
 
-          <label><span>Frequency</span><select name="frequency"><option value="daily" ${values.frequency === 'daily' ? 'selected' : ''}>Daily</option><option value="weekly" ${values.frequency === 'weekly' ? 'selected' : ''}>Weekly</option><option value="monthly" ${values.frequency === 'monthly' ? 'selected' : ''}>Monthly</option></select></label>
-          <label data-schedule-day-field><span>Day</span><select name="weeklyDay" data-weekly-day>${weekDayOptions(values.scheduleDay)}</select><select name="monthlyDay" data-monthly-day>${monthDayOptions(values.scheduleDay)}</select></label>
-          <label><span>Time</span><input type="time" name="scheduleTime" value="${escapeHtml(values.scheduleTime)}" required /></label>
-          <label><span>Timezone</span><input name="timezone" value="${escapeHtml(values.timezone)}" required /></label>
-          <label><span>Export format</span><select name="format"><option value="csv" ${values.format === 'csv' ? 'selected' : ''}>CSV attachments</option><option value="xlsx" ${values.format === 'xlsx' ? 'selected' : ''}>XLSX attachments</option><option value="pdf" ${values.format === 'pdf' ? 'selected' : ''}>PDF attachments</option><option value="report_link" ${values.format === 'report_link' ? 'selected' : ''}>Report links only</option></select></label>
-          <label><span>Send condition</span><select name="sendCondition">${conditionOptions(values.sendCondition)}</select></label>
-          <label data-schedule-threshold><span>Wastage threshold (R)</span><input type="number" min="0" step="0.01" name="wastageThreshold" value="${escapeHtml(String(values.wastageThreshold || ''))}" /></label>
-          <label class="reportScheduleFull"><span>Recipients</span><input name="recipients" value="${escapeHtml(values.recipients.join(', '))}" required placeholder="manager@example.com, owner@example.com" /></label>
-          <label class="reportScheduleFull"><span>Email subject</span><input name="emailSubject" value="${escapeHtml(values.emailSubject)}" placeholder="Kitchen Cost Pro - Weekly Report Pack" /></label>
-          <label class="reportScheduleFull"><span>Email message</span><textarea name="emailMessage" rows="4" placeholder="Your scheduled reports are ready.">${escapeHtml(values.emailMessage)}</textarea></label>
-          <label class="reportModalCheck reportScheduleFull"><input type="checkbox" name="isEnabled" ${values.isEnabled ? 'checked' : ''} /> <span>Enable this schedule</span></label>
+            <div class="reportSchedulePickerBackdrop" data-schedule-pack-picker hidden>
+              <section class="reportSchedulePicker" role="dialog" aria-modal="true" aria-labelledby="schedule-pack-picker-title">
+                <header>
+                  <div><span>Report pack</span><h4 id="schedule-pack-picker-title">Select reports and views</h4><p>Choose one or more views. Each selected view is delivered as its own report output.</p></div>
+                  <button type="button" data-schedule-pack-close aria-label="Close report selector">×</button>
+                </header>
+                <div class="reportSchedulePicker__body">
+                  <section class="reportScheduleBundle">
+                    <div class="reportScheduleBundle__groups">
+                      ${catalogGroups.map((group) => `
+                        <div class="reportScheduleBundle__group">
+                          <h4>${escapeHtml(group.title)}</h4>
+                          ${group.items.map((entry) => {
+                            const reportSelected = activeReports.has(entry.reportId);
+                            return `
+                              <article class="reportScheduleReportCard${reportSelected ? ' is-selected' : ''}" data-schedule-report-card>
+                                <label class="reportScheduleReportCard__title">
+                                  <input type="checkbox" data-schedule-report-toggle value="${escapeHtml(entry.reportId)}" ${reportSelected ? 'checked' : ''} />
+                                  <span><strong>${escapeHtml(entry.title)}</strong><small>${escapeHtml(entry.reportGroupTitle || 'Report')}</small></span>
+                                </label>
+                                <div class="reportScheduleReportCard__views">
+                                  ${entry.views.map((view) => `<label><input type="checkbox" data-schedule-report-view data-report-id="${escapeHtml(entry.reportId)}" data-report-group-id="${escapeHtml(entry.reportGroupId || '')}" data-default-view="${view.value === entry.defaultView ? 'true' : 'false'}" value="${escapeHtml(view.value)}" ${selectedKeys.has(`${entry.reportId}::${view.value}`) ? 'checked' : ''} ${reportSelected ? '' : 'disabled'} /><span>${escapeHtml(view.label)}</span></label>`).join('')}
+                                </div>
+                              </article>
+                            `;
+                          }).join('')}
+                        </div>
+                      `).join('')}
+                    </div>
+                  </section>
+                </div>
+                <footer>
+                  <span data-schedule-bundle-count></span>
+                  <button type="button" class="reportModalPrimary" data-schedule-pack-close>Done</button>
+                </footer>
+              </section>
+            </div>
+          </section>
+
+          <section class="reportScheduleFormSection">
+            <header class="reportScheduleFormSection__header">
+              <span class="reportScheduleFormSection__step">3</span>
+              <div><span>Report scope</span><strong>Select the reporting period and location</strong></div>
+            </header>
+            <div class="reportScheduleSectionGrid">
+              <label><span>Date range</span><select name="dateRangeType">${REPORT_DATE_RANGE_PRESETS.map((preset) => `<option value="${preset.value}" ${values.dateRangeType === preset.value ? 'selected' : ''}>${preset.label}</option>`).join('')}</select></label>
+              <label><span>Location</span><select name="locationSelection" ${!values.allowAllLocations && !values.locations.length ? 'disabled' : ''}>${values.allowAllLocations ? `<option value="all" ${values.locationSelection === 'all' ? 'selected' : ''}>All Locations</option>` : ''}${values.locations.map((location) => `<option value="${escapeHtml(location.id)}" ${values.locationSelection === location.id ? 'selected' : ''}>${escapeHtml(location.name)}</option>`).join('')}${!values.allowAllLocations && !values.locations.length ? '<option value="">No assigned locations</option>' : ''}</select></label>
+              <label data-schedule-custom-date><span>From</span><input type="date" name="customFrom" value="${escapeHtml(values.customFrom)}" /></label>
+              <label data-schedule-custom-date><span>To</span><input type="date" name="customTo" value="${escapeHtml(values.customTo)}" /></label>
+              <p class="reportScheduleLocationNote reportScheduleFull">Choose All Locations to generate a separate output for every active location, or choose one individual location to limit the complete pack to that site.</p>
+            </div>
+          </section>
+
+          <section class="reportScheduleFormSection">
+            <header class="reportScheduleFormSection__header">
+              <span class="reportScheduleFormSection__step">4</span>
+              <div><span>Timing</span><strong>Choose when the schedule should run</strong></div>
+            </header>
+            <div class="reportScheduleSectionGrid reportScheduleSectionGrid--four">
+              <label><span>Frequency</span><select name="frequency"><option value="daily" ${values.frequency === 'daily' ? 'selected' : ''}>Daily</option><option value="weekly" ${values.frequency === 'weekly' ? 'selected' : ''}>Weekly</option><option value="monthly" ${values.frequency === 'monthly' ? 'selected' : ''}>Monthly</option></select></label>
+              <label data-schedule-day-field><span>Day</span><select name="weeklyDay" data-weekly-day>${weekDayOptions(values.scheduleDay)}</select><select name="monthlyDay" data-monthly-day>${monthDayOptions(values.scheduleDay)}</select></label>
+              <label><span>Time</span><input type="time" name="scheduleTime" value="${escapeHtml(values.scheduleTime)}" required /></label>
+              <label><span>Timezone</span><input name="timezone" value="${escapeHtml(values.timezone)}" required /></label>
+            </div>
+          </section>
+
+          <section class="reportScheduleFormSection">
+            <header class="reportScheduleFormSection__header">
+              <span class="reportScheduleFormSection__step">5</span>
+              <div><span>Delivery</span><strong>Set the format, recipients and email content</strong></div>
+            </header>
+            <div class="reportScheduleSectionGrid">
+              <label><span>Export format</span><select name="format"><option value="csv" ${values.format === 'csv' ? 'selected' : ''}>CSV attachments</option><option value="xlsx" ${values.format === 'xlsx' ? 'selected' : ''}>XLSX attachments</option><option value="pdf" ${values.format === 'pdf' ? 'selected' : ''}>PDF attachments</option><option value="report_link" ${values.format === 'report_link' ? 'selected' : ''}>Report links only</option></select></label>
+              <label><span>Send condition</span><select name="sendCondition">${conditionOptions(values.sendCondition)}</select></label>
+              <label data-schedule-threshold><span>Wastage threshold (R)</span><input type="number" min="0" step="0.01" name="wastageThreshold" value="${escapeHtml(String(values.wastageThreshold || ''))}" /></label>
+              <label class="reportScheduleFull"><span>Recipients</span><input name="recipients" value="${escapeHtml(values.recipients.join(', '))}" required placeholder="manager@example.com, owner@example.com" /></label>
+              <label class="reportScheduleFull"><span>Email subject</span><input name="emailSubject" value="${escapeHtml(values.emailSubject)}" placeholder="Kitchen Cost Pro - Weekly Report Pack" /></label>
+              <label class="reportScheduleFull"><span>Email message</span><textarea name="emailMessage" rows="3" placeholder="Your scheduled reports are ready.">${escapeHtml(values.emailMessage)}</textarea></label>
+              <label class="reportModalCheck reportScheduleFull"><input type="checkbox" name="isEnabled" ${values.isEnabled ? 'checked' : ''} /> <span>Enable this schedule</span></label>
+            </div>
+          </section>
         </div>
-        <div class="reportModalActions"><button type="button" data-schedule-close>Cancel</button><button type="button" data-schedule-test>Send test email</button><button type="submit" class="reportModalPrimary">${editing ? 'Save changes' : 'Create schedule'}</button></div>
+
+        <div class="reportModalActions reportScheduleModalActions"><button type="button" data-schedule-close>Cancel</button><button type="button" data-schedule-test>Send test email</button><button type="submit" class="reportModalPrimary">${editing ? 'Save changes' : 'Create schedule'}</button></div>
       </form>
     </section>
   `;
@@ -743,10 +829,23 @@ function selectReportItem(form, reportId, viewId, replace = false) {
 }
 
 function updateBundleCount(form) {
-  const views = form.querySelectorAll('[data-schedule-report-view]:checked').length;
-  const reports = new Set([...form.querySelectorAll('[data-schedule-report-view]:checked')].map((input) => input.dataset.reportId)).size;
-  const slot = form.querySelector('[data-schedule-bundle-count]');
-  if (slot) slot.textContent = `${reports} report${reports === 1 ? '' : 's'} · ${views} view${views === 1 ? '' : 's'}`;
+  const selectedViews = [...form.querySelectorAll('[data-schedule-report-view]:checked')];
+  const views = selectedViews.length;
+  const reports = new Set(selectedViews.map((input) => input.dataset.reportId)).size;
+  const countLabel = `${reports} report${reports === 1 ? '' : 's'} · ${views} view${views === 1 ? '' : 's'}`;
+  form.querySelectorAll('[data-schedule-bundle-count]').forEach((slot) => { slot.textContent = countLabel; });
+
+  const summary = form.querySelector('[data-schedule-pack-summary]');
+  if (!summary) return;
+  if (!selectedViews.length) {
+    summary.innerHTML = '<span class="reportSchedulePackSummary__empty">No report views selected</span>';
+    return;
+  }
+  summary.innerHTML = selectedViews.slice(0, 5).map((input) => {
+    const reportTitle = input.closest('[data-schedule-report-card]')?.querySelector('.reportScheduleReportCard__title strong')?.textContent?.trim() || input.dataset.reportId || 'Report';
+    const viewTitle = input.closest('label')?.querySelector('span')?.textContent?.trim() || formatViewLabel(input.value);
+    return `<span class="reportSchedulePackChip">${escapeHtml(reportTitle)} · ${escapeHtml(viewTitle)}</span>`;
+  }).join('') + (selectedViews.length > 5 ? `<span class="reportSchedulePackChip reportSchedulePackChip--more">+${selectedViews.length - 5} more</span>` : '');
 }
 
 function extractLocations(state = {}) {

@@ -301,6 +301,7 @@ The current clean baseline includes:
 - Per-workspace SQLite Durable Object tenancy
 - Main application and admin portal wired to the current data model
 - Full reporting registry, exports, saved views, scheduling, and transaction drill-downs
+- Simplified scheduled-report creation with a separate report-and-view selector, stepped delivery configuration, and theme-matched scheduling panels
 - Stable dashboard loading and notification-centre behaviour
 - Theme contrast improvements across light and dark modes
 - Canonical location-name resolution across dashboard, reporting, exports, schedules, transactions, and permissions
