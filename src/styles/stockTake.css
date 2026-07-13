@@ -135,7 +135,7 @@
 }
 
 #view-stock-take .stockTakeHero {
-  width: min(880px, 100%);
+  width: min(1120px, 100%);
   display: grid;
   justify-items: center;
   text-align: center;
@@ -195,11 +195,12 @@
 }
 
 #view-stock-take .stockTakeHeroActions {
-  display: flex;
+  width: min(760px, 100%);
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   align-items: stretch;
   justify-content: center;
   gap: 16px;
-  flex-wrap: wrap;
 }
 
 #view-stock-take .stockTakeHeroButton,
@@ -251,6 +252,230 @@
 #view-stock-take .stockTakeHeroButton--bulk {
   border-color: rgba(34, 211, 238, 0.28);
   background: rgba(14, 165, 233, 0.08);
+}
+
+#view-stock-take .stockTakeActiveSessions {
+  width: 100%;
+  margin-top: 10px;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 1.5rem;
+  background: linear-gradient(180deg, rgba(22, 33, 51, 0.96), rgba(13, 22, 37, 0.96));
+  box-shadow: 0 24px 58px rgba(0, 0, 0, 0.24);
+  text-align: left;
+}
+
+#view-stock-take .stockTakeActiveSessionsHead {
+  min-height: 82px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 18px 22px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+  background: linear-gradient(110deg, rgba(37, 99, 235, 0.16), rgba(14, 165, 233, 0.05));
+}
+
+#view-stock-take .stockTakeActiveSessionsHead > div {
+  display: grid;
+  gap: 5px;
+}
+
+#view-stock-take .stockTakeActiveSessionsHead > div > span {
+  color: #60a5fa;
+  font-size: 10px;
+  font-weight: 950;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+#view-stock-take .stockTakeActiveSessionsHead h3 {
+  margin: 0;
+  color: #f8fbff;
+  font-size: 1.15rem;
+  font-weight: 950;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+#view-stock-take .stockTakeActiveSessionsHead > strong {
+  min-width: 92px;
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(96, 165, 250, 0.24);
+  border-radius: 999px;
+  padding: 0 13px;
+  background: rgba(37, 99, 235, 0.12);
+  color: #bfdbfe;
+  font-size: 10px;
+  font-weight: 950;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+#view-stock-take .stockTakeActiveSessionsTableWrap {
+  width: 100%;
+  max-height: 380px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+#view-stock-take .stockTakeActiveSessionsTable {
+  width: 100%;
+  min-width: 720px;
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: fixed;
+}
+
+#view-stock-take .stockTakeActiveSessionsTable thead {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+#view-stock-take .stockTakeActiveSessionsTable th {
+  padding: 13px 22px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(10, 18, 31, 0.98);
+  color: rgba(148, 163, 184, 0.9);
+  font-size: 10px;
+  font-weight: 950;
+  letter-spacing: 0.14em;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+#view-stock-take .stockTakeActiveSessionsTable th:nth-child(1) {
+  width: 52%;
+}
+
+#view-stock-take .stockTakeActiveSessionsTable th:nth-child(2) {
+  width: 24%;
+}
+
+#view-stock-take .stockTakeActiveSessionsTable th:last-child {
+  width: 24%;
+  text-align: right;
+}
+
+#view-stock-take .stockTakeActiveSessionsTable td {
+  padding: 17px 22px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+  background: rgba(255, 255, 255, 0.012);
+  vertical-align: middle;
+}
+
+#view-stock-take .stockTakeActiveSessionsTable tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+#view-stock-take .stockTakeActiveSessionsTable tbody tr:not(.stockTakeActiveSessionsEmptyRow):hover td {
+  background: rgba(37, 99, 235, 0.07);
+}
+
+#view-stock-take .stockTakeActiveSessionsTable td > strong {
+  display: block;
+  overflow: hidden;
+  color: rgba(248, 250, 252, 0.96);
+  font-size: 0.9rem;
+  font-weight: 930;
+  text-overflow: ellipsis;
+  text-transform: none;
+  white-space: nowrap;
+}
+
+#view-stock-take .stockTakeActiveSessionsTable td > span {
+  display: block;
+  margin-top: 6px;
+  overflow: hidden;
+  color: rgba(148, 163, 184, 0.76);
+  font-size: 9px;
+  font-weight: 850;
+  letter-spacing: 0.08em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+#view-stock-take .stockTakeActiveSessionActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+#view-stock-take .stockTakeActiveSessionAction {
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 999px;
+  padding: 0 14px;
+  font: inherit;
+  font-size: 9px;
+  font-weight: 950;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+#view-stock-take .stockTakeActiveSessionAction svg {
+  width: 14px;
+  height: 14px;
+}
+
+#view-stock-take .stockTakeActiveSessionAction--resume {
+  border-color: rgba(74, 222, 128, 0.3);
+  background: rgba(22, 163, 74, 0.14);
+  color: #86efac;
+}
+
+#view-stock-take .stockTakeActiveSessionAction--discard {
+  border-color: rgba(248, 113, 113, 0.28);
+  background: rgba(127, 29, 29, 0.16);
+  color: #fca5a5;
+}
+
+#view-stock-take .stockTakeActiveSessionAction:hover,
+#view-stock-take .stockTakeActiveSessionAction:focus-visible {
+  filter: brightness(1.16);
+  outline: none;
+  transform: translateY(-1px);
+}
+
+#view-stock-take .stockTakeActiveSessionAction:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+  filter: none;
+  transform: none;
+}
+
+#view-stock-take .stockTakeActiveSessionsEmpty {
+  min-height: 112px;
+  display: grid;
+  place-content: center;
+  gap: 7px;
+  text-align: center;
+}
+
+#view-stock-take .stockTakeActiveSessionsEmpty strong {
+  color: rgba(226, 232, 240, 0.9);
+  font-size: 0.86rem;
+  font-weight: 930;
+  text-transform: uppercase;
+}
+
+#view-stock-take .stockTakeActiveSessionsEmpty span {
+  color: rgba(148, 163, 184, 0.68);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 #view-stock-take .stockTakeSession {
@@ -575,6 +800,20 @@
   border-color: rgba(251, 146, 60, 0.34);
   color: #fdba74;
   background: rgba(124, 45, 18, 0.18);
+}
+
+#view-stock-take .stockTakeSessionFeedback {
+  flex: 1 0 100%;
+  margin: 0;
+  color: rgba(191, 219, 254, 0.9);
+  font-size: 0.76rem;
+  font-weight: 850;
+  line-height: 1.4;
+  text-align: right;
+}
+
+#view-stock-take .stockTakeSessionFeedback--error {
+  color: #fca5a5;
 }
 
 #view-stock-take .stockTakeOverlayBackdrop {
@@ -1819,6 +2058,99 @@
     flex-direction: column;
     align-items: stretch;
   }
+
+  #view-stock-take .stockTakeActiveSessionsHead {
+    min-height: 72px;
+    padding: 16px;
+  }
+
+  #view-stock-take .stockTakeActiveSessionsTableWrap {
+    max-height: none;
+    overflow: visible;
+    padding: 12px;
+  }
+
+  #view-stock-take .stockTakeActiveSessionsTable {
+    min-width: 0;
+    border-collapse: separate;
+  }
+
+  #view-stock-take .stockTakeActiveSessionsTable thead {
+    display: none;
+  }
+
+  #view-stock-take .stockTakeActiveSessionsTable tbody,
+  #view-stock-take .stockTakeActiveSessionsTable tr,
+  #view-stock-take .stockTakeActiveSessionsTable td {
+    display: block;
+    width: 100%;
+  }
+
+  #view-stock-take .stockTakeActiveSessionsTable tbody {
+    display: grid;
+    gap: 12px;
+  }
+
+  #view-stock-take .stockTakeActiveSessionsTable tr:not(.stockTakeActiveSessionsEmptyRow) {
+    overflow: hidden;
+    border: 1px solid rgba(148, 163, 184, 0.14);
+    border-radius: 1rem;
+    background: rgba(255, 255, 255, 0.025);
+  }
+
+  #view-stock-take .stockTakeActiveSessionsTable td {
+    display: grid;
+    grid-template-columns: minmax(105px, 0.4fr) minmax(0, 1fr);
+    align-items: center;
+    gap: 12px;
+    border: 0;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+    padding: 13px 14px;
+    background: transparent;
+  }
+
+  #view-stock-take .stockTakeActiveSessionsTable td:last-child {
+    border-bottom: 0;
+  }
+
+  #view-stock-take .stockTakeActiveSessionsTable td::before {
+    content: attr(data-label);
+    color: rgba(148, 163, 184, 0.74);
+    font-size: 9px;
+    font-weight: 950;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  #view-stock-take .stockTakeActiveSessionsTable td > strong,
+  #view-stock-take .stockTakeActiveSessionsTable td > span {
+    grid-column: 2;
+    white-space: normal;
+  }
+
+  #view-stock-take .stockTakeActiveSessionsTable td > span {
+    margin-top: -5px;
+  }
+
+  #view-stock-take .stockTakeActiveSessionActions {
+    grid-column: 2;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  #view-stock-take .stockTakeActiveSessionAction {
+    width: 100%;
+    padding-inline: 10px;
+  }
+
+  #view-stock-take .stockTakeActiveSessionsEmptyRow td {
+    display: block;
+    border: 0;
+  }
+
+  #view-stock-take .stockTakeActiveSessionsEmptyRow td::before {
+    display: none;
+  }
 }
 
 @media (max-width: 640px) {
@@ -1827,8 +2159,36 @@
   }
 
   #view-stock-take .stockTakeShell {
-    padding: 18px 14px;
+    padding: 86px 14px 18px;
     border-radius: 1.2rem;
+  }
+
+  #view-stock-take .stockTakeHero {
+    gap: 18px;
+  }
+
+  #view-stock-take .stockTakeActiveSessionsHead {
+    align-items: flex-start;
+  }
+
+  #view-stock-take .stockTakeActiveSessionsHead > strong {
+    min-width: 0;
+  }
+
+  #view-stock-take .stockTakeActiveSessionsTable td {
+    grid-template-columns: 1fr;
+    gap: 7px;
+  }
+
+  #view-stock-take .stockTakeActiveSessionsTable td::before,
+  #view-stock-take .stockTakeActiveSessionsTable td > strong,
+  #view-stock-take .stockTakeActiveSessionsTable td > span,
+  #view-stock-take .stockTakeActiveSessionActions {
+    grid-column: 1;
+  }
+
+  #view-stock-take .stockTakeActiveSessionsTable td > span {
+    margin-top: 0;
   }
 
   #view-stock-take .stockTakeSession {
@@ -1860,4 +2220,189 @@
   #view-stock-take .stockTakeBatchHeader {
     padding: 14px 18px;
   }
+}
+
+
+.stockTakeLocationExportList {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.stockTakeLocationExportRow {
+  width: 100%;
+  border: 1px solid var(--border-subtle);
+  border-radius: 16px;
+  padding: 0.85rem 1rem;
+  background: var(--surface-elevated);
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.stockTakeLocationExportRow:hover {
+  border-color: rgba(0, 174, 239, 0.45);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+  transform: translateY(-1px);
+}
+
+.stockTakeLocationExportRow strong {
+  color: var(--text-main);
+}
+
+.stockTakeLocationExportRow span {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.stockTakeTable--uomColumns th,
+.stockTakeTable--uomColumns td {
+  vertical-align: middle;
+}
+
+.stockTakeTable--uomColumns .stockTakeCountInput {
+  max-width: 220px;
+}
+
+.stockTakeTableDash {
+  color: rgba(148, 163, 184, 0.8);
+  text-align: center;
+  font-weight: 800;
+}
+
+.stockTakeDropdownMenu {
+  max-height: 340px;
+  overflow: hidden;
+}
+
+.stockTakeDropdownSearch {
+  width: calc(100% - 1rem);
+  margin: 0.5rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 10px;
+  font: inherit;
+  background: rgba(255,255,255,0.96);
+}
+
+.stockTakeDropdownOptions {
+  max-height: 260px;
+  overflow: auto;
+}
+
+.stockTakeDropdownOptions [data-stocktake-option] {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
+}
+
+.stockTakeDropdownOptions [data-stocktake-option] small {
+  color: var(--color-text-muted, #64748b);
+  font-size: 0.72rem;
+}
+
+/* Clean searchable location dropdowns */
+#view-stock-take .stockTakeDropdownMenu {
+  padding: 10px;
+  border-color: rgba(116, 142, 185, 0.22);
+  background: rgba(8, 15, 29, 0.98);
+}
+
+#view-stock-take .stockTakeDropdownSearch {
+  width: 100%;
+  margin: 0 0 8px 0;
+  min-height: 44px;
+  padding: 0 14px;
+  border-color: rgba(126, 152, 194, 0.22);
+  border-radius: 14px;
+  background: rgba(6, 12, 24, 0.82);
+  color: rgba(242, 247, 255, 0.96);
+}
+
+#view-stock-take .stockTakeDropdownSearch::placeholder {
+  color: rgba(164, 178, 205, 0.72);
+}
+
+#view-stock-take .stockTakeDropdownOptions {
+  display: grid;
+  gap: 2px;
+}
+
+#view-stock-take .stockTakeDropdownOptions [data-stocktake-option] {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  border: 0;
+  border-radius: 10px;
+  padding: 0 12px;
+  background: transparent;
+  color: rgba(235, 242, 255, 0.92);
+  font-size: 0.88rem;
+  font-weight: 850;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+#view-stock-take .stockTakeDropdownOptions [data-stocktake-option] span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#view-stock-take .stockTakeDropdownOptions [data-stocktake-option] small {
+  display: none;
+}
+
+#view-stock-take .stockTakeDropdownOptions [data-stocktake-option]:hover,
+#view-stock-take .stockTakeDropdownOptions [data-stocktake-option].is-active {
+  background: rgba(59, 130, 246, 0.16);
+  color: #ffffff;
+}
+
+/* Polished searchable dropdowns: clean centered rows and reliable filtering */
+#view-stock-take .stockTakeDropdownOptions [data-stocktake-option][hidden] {
+  display: none !important;
+}
+
+#view-stock-take .stockTakeDropdownSearch {
+  min-height: 54px;
+  padding: 0 18px;
+  border-radius: 18px;
+  font-size: 1rem;
+  font-weight: 850;
+  text-align: left;
+}
+
+#view-stock-take .stockTakeDropdownOptions {
+  gap: 8px;
+  padding: 4px 2px 2px;
+}
+
+#view-stock-take .stockTakeDropdownOptions [data-stocktake-option] {
+  min-height: 44px;
+  justify-content: center;
+  text-align: center;
+  padding: 0 18px;
+  border: 0;
+  background: transparent;
+  color: rgba(235, 242, 255, 0.9);
+  font-size: 0.98rem;
+  font-weight: 950;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+#view-stock-take .stockTakeDropdownOptions [data-stocktake-option] span {
+  width: 100%;
+  text-align: center;
+}
+
+#view-stock-take .stockTakeDropdownOptions [data-stocktake-option]:hover,
+#view-stock-take .stockTakeDropdownOptions [data-stocktake-option].is-active {
+  background: rgba(96, 165, 250, 0.12);
+  color: #ffffff;
 }

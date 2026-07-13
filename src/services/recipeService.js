@@ -22,6 +22,7 @@ export function subscribeRecipeWorkspace(workspaceId, { onSnapshot, onError } = 
         status: 'ready',
         items,
         ingredients: stockResponse.items || [],
+        locations: stockResponse.locations || [],
         source: 'Live catalogue',
         loaded: {
           firestoreItems: false,
@@ -64,7 +65,8 @@ export async function fetchRecipeItems(workspaceId, options = {}) {
   const modifierItems = (modifierResponse.modifiers || modifierResponse.items || []).map(normalizeRecipeItem);
   return {
     items: sortRecipeItems(filterActiveRecipeItems([...productItems, ...modifierItems])),
-    ingredients: stockResponse.items || []
+    ingredients: stockResponse.items || [],
+    locations: stockResponse.locations || []
   };
 }
 

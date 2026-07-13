@@ -99,6 +99,98 @@ export async function downloadAoaXlsx(filename, rows = [], sheetName = 'Export')
   XLSX.writeFile(workbook, ensureExtension(filename, 'xlsx'));
 }
 
+
+
+export async function downloadStyledStockTemplateXlsx(filename, {
+  columns = [],
+  rows = [],
+  columnWidths = [],
+  maxRows = 250
+} = {}) {
+  const ExcelJSModule = await import('exceljs');
+  const ExcelJS = ExcelJSModule.default || ExcelJSModule;
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = 'Kitchen Cost Pro';
+  workbook.created = new Date();
+  workbook.calcProperties.fullCalcOnLoad = true;
+
+  const safeColumns = Array.isArray(columns) ? columns : [];
+  const safeRows = Array.isArray(rows) ? rows : [];
+  const main = workbook.addWorksheet('Stock_Import', {
+    views: [{ state: 'frozen', ySplit: 1 }]
+  });
+  main.columns = safeColumns.map((key, index) => ({
+    header: key,
+    key,
+    width: Number(columnWidths[index] || 14) || 14
+  }));
+  main.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: Math.max(safeColumns.length, 1) } };
+
+  const header = main.getRow(1);
+  header.height = 24;
+  header.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  header.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF315B85' } };
+  header.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+  header.eachCell((cell) => {
+    cell.border = {
+      top: { style: 'thin', color: { argb: 'FF54769A' } },
+      left: { style: 'thin', color: { argb: 'FF54769A' } },
+      bottom: { style: 'thin', color: { argb: 'FF54769A' } },
+      right: { style: 'thin', color: { argb: 'FF54769A' } }
+    };
+  });
+
+  safeRows.forEach((row) => main.addRow(Object.fromEntries(safeColumns.map((key) => [key, row?.[key] ?? '']))));
+  const requiredRows = Math.max(Number(maxRows || 250), safeRows.length + 1);
+  while (main.rowCount < requiredRows + 1) main.addRow({});
+
+  for (let rowNumber = 2; rowNumber <= requiredRows + 1; rowNumber += 1) {
+    const row = main.getRow(rowNumber);
+    row.height = 21;
+    row.eachCell({ includeEmpty: true }, (cell) => {
+      cell.alignment = { vertical: 'middle', wrapText: false };
+      cell.border = {
+        bottom: { style: 'hair', color: { argb: 'FFD7E0EA' } }
+      };
+    });
+  }
+
+  const helper = workbook.addWorksheet('UOM_Options', { state: 'veryHidden' });
+  const baseIndex = safeColumns.indexOf('Base_UOM') + 1;
+  const customIndexes = [1, 2, 3].map((slot) => safeColumns.indexOf(`UOM_${slot}_Name`) + 1);
+  const defaultIndex = safeColumns.indexOf('Default_Ordering_UOM') + 1;
+
+  if (baseIndex > 0 && defaultIndex > 0) {
+    const sourceIndexes = [baseIndex, ...customIndexes.filter((index) => index > 0)];
+    for (let rowNumber = 2; rowNumber <= requiredRows + 1; rowNumber += 1) {
+      sourceIndexes.forEach((sourceIndex, optionIndex) => {
+        helper.getCell(rowNumber, optionIndex + 1).value = {
+          formula: `'Stock_Import'!${main.getColumn(sourceIndex).letter}${rowNumber}`
+        };
+      });
+      const lastOptionColumn = helper.getColumn(sourceIndexes.length).letter;
+      main.getCell(rowNumber, defaultIndex).dataValidation = {
+        type: 'list',
+        allowBlank: true,
+        showErrorMessage: true,
+        errorStyle: 'stop',
+        errorTitle: 'Choose an item UOM',
+        error: 'Select only the Base UOM or one of the Custom UOMs entered on this same row.',
+        showInputMessage: true,
+        promptTitle: 'Default ordering UOM',
+        prompt: 'This dropdown contains only the Base UOM and Custom UOMs configured for this item.',
+        formulae: [`'UOM_Options'!$A$${rowNumber}:$${lastOptionColumn}$${rowNumber}`]
+      };
+    }
+  }
+
+  const buffer = await workbook.xlsx.writeBuffer();
+  downloadBlob(
+    ensureExtension(filename, 'xlsx'),
+    buffer,
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  );
+}
 export async function downloadWorkbookXlsx(filename, sheets = []) {
   const XLSX = await import('xlsx');
   const workbook = XLSX.utils.book_new();
@@ -560,6 +652,67 @@ function uniqueSheetName(existingNames = [], baseName = 'Sheet') {
   return sanitizeSheetName(`${safeBase.slice(0, 27)} ${index}`);
 }
 
+
+function pdfTableLayoutOptions(columnCount = 0, options = {}) {
+  const count = Number(columnCount || 0) || 0;
+  const dense = count > 10;
+  const veryDense = count > 14;
+  return {
+    showHead: 'everyPage',
+    tableWidth: 'auto',
+    rowPageBreak: 'avoid',
+    horizontalPageBreak: count > 7,
+    horizontalPageBreakRepeat: count > 3 ? 0 : undefined,
+    horizontalPageBreakBehaviour: 'afterAllRows',
+    styles: {
+      font: 'helvetica',
+      fontSize: veryDense ? 6.2 : dense ? 6.8 : 8,
+      cellPadding: veryDense ? 3 : dense ? 4 : 5,
+      valign: 'middle',
+      overflow: 'linebreak',
+      minCellHeight: veryDense ? 15 : 18,
+      ...(options.styles || {})
+    }
+  };
+}
+
+function pdfCellValue(value) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) return value.map(pdfCellValue).filter(Boolean).join(', ');
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return '';
+    }
+  }
+  return String(value);
+}
+
+function normalizePdfBodyRows(rows = [], headers = []) {
+  const safeHeaders = Array.isArray(headers) ? headers : [];
+  return (Array.isArray(rows) ? rows : []).map((row) => {
+    if (Array.isArray(row)) return row.map(pdfCellValue);
+    return safeHeaders.map((header) => pdfCellValue(row?.[header]));
+  });
+}
+
+function buildPdfColumnStyles(headers = []) {
+  return (Array.isArray(headers) ? headers : []).reduce((styles, header, index) => {
+    const label = String(header || '').toLowerCase();
+    if (/qty|count|cost|price|amount|total|value|vat|variance|stock|par|threshold|percentage|yield|batch/.test(label)) {
+      styles[index] = { halign: 'right' };
+    }
+    if (/name|description|notes|address/.test(label)) {
+      styles[index] = { ...(styles[index] || {}), cellWidth: 'wrap' };
+    }
+    return styles;
+  }, {});
+}
+
 export async function downloadPdf(filename, {
   title = 'KCP Export',
   subtitle = '',
@@ -568,7 +721,8 @@ export async function downloadPdf(filename, {
   summaryRows = [],
   orientation = 'landscape',
   branding = {},
-  tableOptions = {}
+  tableOptions = {},
+  detailTables = []
 } = {}) {
   const [{ jsPDF }, autoTableModule] = await Promise.all([
     import('jspdf'),
@@ -577,8 +731,8 @@ export async function downloadPdf(filename, {
   const autoTable = autoTableModule.default || autoTableModule.autoTable;
   const normalizedRows = Array.isArray(rows) ? rows : [];
   const headers = columns || getHeaders(normalizedRows);
-  const body = normalizedRows.map((row) => headers.map((header) => row?.[header] ?? ''));
-  const doc = new jsPDF({ orientation, unit: 'pt', format: 'a4' });
+  const body = normalizePdfBodyRows(normalizedRows, headers);
+  const doc = new jsPDF({ orientation: headers.length > 7 ? 'landscape' : orientation, unit: 'pt', format: 'a4' });
 
   const header = await renderPdfHeader(doc, { title, subtitle, branding });
   const summary = normalizePdfSummaryRows(summaryRows);
@@ -605,29 +759,69 @@ export async function downloadPdf(filename, {
   doc.setLineWidth(1);
   doc.line(40, tableStartY - 14, doc.internal.pageSize.getWidth() - 40, tableStartY - 14);
 
+  const layout = pdfTableLayoutOptions(headers.length, tableOptions);
   autoTable(doc, {
+    ...layout,
     head: [headers],
     body,
     startY: tableStartY,
     theme: 'grid',
-    styles: {
-      font: 'helvetica',
-      fontSize: 8,
-      cellPadding: 5,
-      valign: 'middle',
-      overflow: 'linebreak'
-    },
     headStyles: {
       fillColor: [37, 99, 235],
       textColor: 255,
-      fontStyle: 'bold'
+      fontStyle: 'bold',
+      ...(tableOptions.headStyles || {})
     },
-    alternateRowStyles: { fillColor: [245, 247, 250] },
-    margin: { left: 40, right: 40 },
-    ...tableOptions
+    alternateRowStyles: { fillColor: [245, 247, 250], ...(tableOptions.alternateRowStyles || {}) },
+    columnStyles: { ...buildPdfColumnStyles(headers), ...(tableOptions.columnStyles || {}) },
+    margin: { left: 40, right: 40, ...(tableOptions.margin || {}) },
+    ...tableOptions,
+    styles: layout.styles
   });
 
+  drawPdfDetailTables(doc, autoTable, detailTables, { margin: 40 });
+
   doc.save(ensureExtension(filename, 'pdf'));
+}
+
+
+function drawPdfDetailTables(doc, autoTable, detailTables = [], { margin = 40 } = {}) {
+  const tables = (Array.isArray(detailTables) ? detailTables : [])
+    .map((table) => ({
+      title: String(table?.title || table?.name || 'Detail').trim(),
+      headers: Array.isArray(table?.headers) ? table.headers : (Array.isArray(table?.columns) ? table.columns : []),
+      rows: Array.isArray(table?.rows) ? table.rows : []
+    }))
+    .filter((table) => table.headers.length && table.rows.length);
+  if (!tables.length) return;
+
+  let cursorY = Number(doc.lastAutoTable?.finalY || 80) + 22;
+  const pageHeight = doc.internal.pageSize.getHeight();
+  tables.forEach((table) => {
+    if (cursorY > pageHeight - 110) {
+      doc.addPage();
+      cursorY = margin;
+    }
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.setTextColor(37, 99, 235);
+    doc.text(table.title.toUpperCase(), margin, cursorY);
+    cursorY += 10;
+    const layout = pdfTableLayoutOptions(table.headers.length, {});
+    autoTable(doc, {
+      ...layout,
+      head: [table.headers],
+      body: normalizePdfBodyRows(table.rows, table.headers),
+      startY: cursorY,
+      theme: 'grid',
+      headStyles: { fillColor: [17, 24, 39], textColor: 255, fontStyle: 'bold' },
+      alternateRowStyles: { fillColor: [248, 250, 252] },
+      columnStyles: buildPdfColumnStyles(table.headers),
+      margin: { left: margin, right: margin },
+      styles: layout.styles
+    });
+    cursorY = Number(doc.lastAutoTable?.finalY || cursorY) + 20;
+  });
 }
 
 function normalizePdfSummaryRows(rows = []) {
@@ -653,38 +847,39 @@ export async function downloadAoaPdf(filename, {
     import('jspdf-autotable')
   ]);
   const autoTable = autoTableModule.default || autoTableModule.autoTable;
-  const doc = new jsPDF({ orientation, unit: 'pt', format: 'a4' });
   const safeRows = Array.isArray(rows) ? rows : [];
   const head = [safeRows[headerRowIndex] || []];
+  const doc = new jsPDF({ orientation: (head[0]?.length || 0) > 7 ? 'landscape' : orientation, unit: 'pt', format: 'a4' });
   const body = safeRows
     .filter((_, index) => index !== headerRowIndex)
     .map((row) => (Array.isArray(row) ? row : [row]));
+  const { ruleColor, ...autoTableOptions } = tableOptions || {};
+  const resolvedRuleColor = Array.isArray(ruleColor) && ruleColor.length >= 3 ? ruleColor : [37, 99, 235];
 
   const header = await renderPdfHeader(doc, { title, subtitle, branding });
-  doc.setDrawColor(37, 99, 235);
+  doc.setDrawColor(resolvedRuleColor[0], resolvedRuleColor[1], resolvedRuleColor[2]);
   doc.setLineWidth(1);
   doc.line(40, header.ruleY, doc.internal.pageSize.getWidth() - 40, header.ruleY);
 
+  const headerCount = head[0]?.length || 0;
+  const layout = pdfTableLayoutOptions(headerCount, autoTableOptions);
   autoTable(doc, {
+    ...layout,
     head,
-    body,
+    body: body.map((row) => Array.isArray(row) ? row.map(pdfCellValue) : [pdfCellValue(row)]),
     startY: header.tableStartY,
     theme: 'grid',
-    styles: {
-      font: 'helvetica',
-      fontSize: 8,
-      cellPadding: 5,
-      valign: 'middle',
-      overflow: 'linebreak'
-    },
     headStyles: {
       fillColor: [37, 99, 235],
       textColor: 255,
-      fontStyle: 'bold'
+      fontStyle: 'bold',
+      ...(autoTableOptions.headStyles || {})
     },
-    alternateRowStyles: { fillColor: [245, 247, 250] },
-    margin: { left: 40, right: 40 },
-    ...tableOptions
+    alternateRowStyles: { fillColor: [245, 247, 250], ...(autoTableOptions.alternateRowStyles || {}) },
+    columnStyles: { ...buildPdfColumnStyles(head[0] || []), ...(autoTableOptions.columnStyles || {}) },
+    margin: { left: 40, right: 40, ...(autoTableOptions.margin || {}) },
+    ...autoTableOptions,
+    styles: layout.styles
   });
 
   doc.save(ensureExtension(filename, 'pdf'));
@@ -704,38 +899,39 @@ export async function buildAoaPdfFile(filename, {
     import('jspdf-autotable')
   ]);
   const autoTable = autoTableModule.default || autoTableModule.autoTable;
-  const doc = new jsPDF({ orientation, unit: 'pt', format: 'a4' });
   const safeRows = Array.isArray(rows) ? rows : [];
   const head = [safeRows[headerRowIndex] || []];
+  const doc = new jsPDF({ orientation: (head[0]?.length || 0) > 7 ? 'landscape' : orientation, unit: 'pt', format: 'a4' });
   const body = safeRows
     .filter((_, index) => index !== headerRowIndex)
     .map((row) => (Array.isArray(row) ? row : [row]));
+  const { ruleColor, ...autoTableOptions } = tableOptions || {};
+  const resolvedRuleColor = Array.isArray(ruleColor) && ruleColor.length >= 3 ? ruleColor : [37, 99, 235];
 
   const header = await renderPdfHeader(doc, { title, subtitle, branding });
-  doc.setDrawColor(37, 99, 235);
+  doc.setDrawColor(resolvedRuleColor[0], resolvedRuleColor[1], resolvedRuleColor[2]);
   doc.setLineWidth(1);
   doc.line(40, header.ruleY, doc.internal.pageSize.getWidth() - 40, header.ruleY);
 
+  const headerCount = head[0]?.length || 0;
+  const layout = pdfTableLayoutOptions(headerCount, autoTableOptions);
   autoTable(doc, {
+    ...layout,
     head,
-    body,
+    body: body.map((row) => Array.isArray(row) ? row.map(pdfCellValue) : [pdfCellValue(row)]),
     startY: header.tableStartY,
     theme: 'grid',
-    styles: {
-      font: 'helvetica',
-      fontSize: 8,
-      cellPadding: 5,
-      valign: 'middle',
-      overflow: 'linebreak'
-    },
     headStyles: {
       fillColor: [37, 99, 235],
       textColor: 255,
-      fontStyle: 'bold'
+      fontStyle: 'bold',
+      ...(autoTableOptions.headStyles || {})
     },
-    alternateRowStyles: { fillColor: [245, 247, 250] },
-    margin: { left: 40, right: 40 },
-    ...tableOptions
+    alternateRowStyles: { fillColor: [245, 247, 250], ...(autoTableOptions.alternateRowStyles || {}) },
+    columnStyles: { ...buildPdfColumnStyles(head[0] || []), ...(autoTableOptions.columnStyles || {}) },
+    margin: { left: 40, right: 40, ...(autoTableOptions.margin || {}) },
+    ...autoTableOptions,
+    styles: layout.styles
   });
 
   const fileName = ensureExtension(filename, 'pdf');
@@ -999,13 +1195,11 @@ export async function buildSupplierPurchaseOrderPdfFile(filename, {
     tableStartY = margin;
   }
   autoTable(doc, {
-    head: [['ITEM DESCRIPTION', 'UNIT', 'PACK SIZE', 'QTY\nREQUIRED', 'SUPPLIER\nNOTES']],
+    head: [['PRODUCT NAME', 'UOM / CUSTOM UOM', 'QTY']],
     body: (Array.isArray(items) ? items : []).map((item) => [
       item.description || '',
       item.unit || '',
-      item.packSize || '',
-      item.quantity || '',
-      item.notes || 'Confirm availability'
+      item.quantity || ''
     ]),
     startY: tableStartY,
     theme: 'grid',
@@ -1027,11 +1221,9 @@ export async function buildSupplierPurchaseOrderPdfFile(filename, {
     },
     alternateRowStyles: { fillColor: [248, 250, 252] },
     columnStyles: {
-      0: { cellWidth: 205 },
-      1: { cellWidth: 64 },
-      2: { cellWidth: 80 },
-      3: { cellWidth: 90 },
-      4: { cellWidth: pageWidth - margin * 2 - 439 }
+      0: { cellWidth: pageWidth - margin * 2 - 210 },
+      1: { cellWidth: 130 },
+      2: { cellWidth: 80, halign: 'center' }
     },
     margin: { left: margin, right: margin }
   });
@@ -1039,7 +1231,7 @@ export async function buildSupplierPurchaseOrderPdfFile(filename, {
   let blockY = (doc.lastAutoTable?.finalY || tableStartY + 80) + 22;
   const blockWidth = 294;
   const blockX = (pageWidth - blockWidth) / 2;
-  const instructionText = instruction || 'Please confirm receipt of this purchase order. Any unavailable items, substitutions, pack-size changes, or quantity changes must be confirmed before delivery. Supply should match the listed unit, pack size, and quantity required.';
+  const instructionText = instruction || 'Please confirm receipt of this purchase order. Any unavailable items, substitutions, UOM changes, or quantity changes must be confirmed before delivery. Supply should match the listed product, UOM, and quantity required.';
   const instructionLines = doc.splitTextToSize(instructionText, blockWidth - 34);
   const blockHeight = Math.max(118, instructionLines.length * 13 + 56);
   if (blockY + blockHeight > pageHeight - 48) {

@@ -83,8 +83,13 @@
 }
 
 #view-adjustments .adj-helpDot {
+  box-sizing: border-box;
+  display: inline-grid;
+  place-items: center;
   width: 24px;
   height: 24px;
+  padding: 0;
+  line-height: 1;
   border: 0;
   border-radius: 999px;
   background: rgba(34, 193, 241, 0.18);
@@ -92,6 +97,7 @@
   font: inherit;
   font-size: 12px;
   font-weight: 950;
+  cursor: help;
 }
 
 #view-adjustments .adj-engineLead {
@@ -308,6 +314,12 @@
 #view-adjustments .adj-primary:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+#view-adjustments .adj-primary--blocked:not(:disabled) {
+  opacity: 0.48;
+  cursor: not-allowed;
+  filter: saturate(0.45);
 }
 
 #view-adjustments .adj-dropdown {
@@ -1175,4 +1187,45 @@
   display: block;
   font-size: 0.78rem;
   color: var(--text-secondary, #374151);
+}
+
+#view-adjustments .adj-searchShell {
+  position: relative;
+}
+
+#view-adjustments .adj-searchShell input {
+  padding-right: 58px;
+}
+
+#view-adjustments .adj-searchShell button {
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  width: 38px;
+  height: 38px;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(96, 165, 250, 0.28);
+  border-radius: 13px;
+  background: rgba(37, 99, 235, 0.16);
+  color: #93c5fd;
+  cursor: pointer;
+}
+
+#view-adjustments .adj-searchShell button:hover {
+  background: rgba(37, 99, 235, 0.26);
+}
+
+#view-adjustments .adj-searchShell button svg {
+  width: 17px;
+  height: 17px;
+}
+
+#view-adjustments .adj-table--picker tbody tr[data-adj-stock-row] {
+  cursor: pointer;
+}
+
+#view-adjustments .adj-table--picker tbody tr[data-adj-stock-row]:hover {
+  background: rgba(59, 130, 246, 0.08);
 }

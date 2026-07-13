@@ -114,7 +114,7 @@
   position: relative;
   z-index: 5;
   display: grid;
-  grid-template-columns: minmax(240px, 1fr) minmax(190px, 240px) minmax(190px, 240px);
+  grid-template-columns: minmax(240px, 1fr) repeat(3, minmax(170px, 230px));
   align-items: end;
   margin-bottom: 16px;
   padding: 14px;
@@ -1079,7 +1079,7 @@
 }
 
 .stockModule__uomConfigRow {
-  grid-template-columns: minmax(120px, 0.75fr) minmax(140px, 0.9fr) minmax(110px, 0.55fr) minmax(160px, 1fr);
+  grid-template-columns: minmax(110px, 0.7fr) minmax(130px, 0.85fr) minmax(100px, 0.5fr) minmax(145px, 0.9fr) minmax(150px, 0.8fr);
   padding: 10px;
   border: 1px solid var(--border-subtle);
   border-radius: 12px;
@@ -1919,11 +1919,11 @@
   color: var(--accent-red);
 }
 
-.stockModule__modal--importReport {
+.stockModule__modal--importReview {
   max-width: 780px;
 }
 
-.stockModule__importReportSummary {
+.stockModule__importReviewSummary {
   display: grid;
   gap: 4px;
   border: 1px solid var(--border-subtle);
@@ -1932,17 +1932,17 @@
   background: var(--surface-secondary);
 }
 
-.stockModule__importReportSummary strong {
+.stockModule__importReviewSummary strong {
   color: var(--text-main);
   font-size: 1rem;
 }
 
-.stockModule__importReportSummary span {
+.stockModule__importReviewSummary span {
   color: var(--text-muted);
   font-weight: 800;
 }
 
-.stockModule__importReportList {
+.stockModule__importReviewList {
   display: grid;
   gap: 8px;
   margin: 0;
@@ -1952,7 +1952,7 @@
   overflow: auto;
 }
 
-.stockModule__importReportList li {
+.stockModule__importReviewList li {
   display: flex;
   align-items: flex-start;
   gap: 10px;
@@ -1962,7 +1962,7 @@
   background: var(--danger-bg);
 }
 
-.stockModule__importReportList code {
+.stockModule__importReviewList code {
   color: var(--accent-red);
   font-weight: 950;
 }
@@ -2167,4 +2167,488 @@
     flex-direction: column;
     align-items: stretch;
   }
+}
+
+.stockModule__locationCostingCard {
+  margin: 1rem 0 1.25rem;
+  padding: 1rem;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 18px;
+  background: linear-gradient(135deg, rgba(14, 165, 233, 0.08), rgba(15, 23, 42, 0.03));
+  box-shadow: 0 14px 34px rgba(15, 23, 42, 0.08);
+}
+
+.stockModule__locationCostingIntro,
+.stockModule__locationCostingControls,
+.stockModule__locationCostingActions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.stockModule__locationCostingIntro h2 {
+  margin: 0.1rem 0 0.25rem;
+  font-size: 1.05rem;
+}
+
+.stockModule__locationCostingIntro p {
+  margin: 0;
+  color: var(--color-text-muted, #64748b);
+  max-width: 720px;
+}
+
+.stockModule__locationCostingBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.4rem 0.7rem;
+  border-radius: 999px;
+  background: rgba(14, 165, 233, 0.12);
+  color: #0369a1;
+  font-size: 0.75rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.stockModule__locationCostingControls {
+  margin-top: 1rem;
+  justify-content: flex-start;
+}
+
+.stockModule__locationCostingControls .stockModule__dropdown {
+  min-width: 280px;
+}
+
+.stockModule__locationCostingPreview {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid rgba(148, 163, 184, 0.24);
+}
+
+.stockModule__locationCostingSummary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 0.65rem;
+  margin-bottom: 0.9rem;
+}
+
+.stockModule__locationCostingSummary div {
+  padding: 0.7rem;
+  border-radius: 14px;
+  background: var(--surface-secondary);
+  border: 1px solid var(--border-subtle);
+}
+
+.stockModule__locationCostingSummary span {
+  display: block;
+  color: var(--color-text-muted, #64748b);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.stockModule__locationCostingSummary strong {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: 1rem;
+}
+
+.stockModule__costingPreviewTable {
+  overflow: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  background: var(--surface-elevated);
+}
+
+.stockModule__costingPreviewTable table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 860px;
+}
+
+.stockModule__costingPreviewTable th,
+.stockModule__costingPreviewTable td {
+  padding: 0.62rem 0.7rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+  text-align: left;
+  font-size: 0.84rem;
+}
+
+.stockModule__costingPreviewTable th {
+  background: #0f4c68;
+  color: #fff;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.stockModule__costingRow--error td { background: rgba(239, 68, 68, 0.08); }
+.stockModule__costingRow--update td { background: rgba(14, 165, 233, 0.08); }
+.stockModule__costingRow--unchanged td { background: rgba(148, 163, 184, 0.08); }
+.stockModule__costingEmpty,
+.stockModule__costingTableNote {
+  margin: 0.75rem 0;
+  color: var(--color-text-muted, #64748b);
+  font-weight: 700;
+}
+
+.stockModule__locationCostingActions {
+  margin-top: 1rem;
+  justify-content: flex-end;
+}
+
+/* Location costing now lives inside Stock Items action dropdown */
+.stockModule__locationCostingCard {
+  display: none;
+}
+
+.stockModule__actionDropdown .stockModule__dropdownMenu {
+  min-width: 320px;
+  max-height: min(78vh, 640px);
+  overflow: auto;
+}
+
+.stockModule__actionCosting {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--accent-blue) 22%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--surface-secondary) 72%, transparent);
+}
+
+.stockModule__actionCosting p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.74rem;
+  font-weight: 750;
+  line-height: 1.35;
+}
+
+.stockModule__actionCosting > strong {
+  display: block;
+  color: var(--text-main);
+  font-size: 0.82rem;
+  font-weight: 950;
+}
+
+.stockModule__actionCosting input {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  padding: 0 10px;
+  background: var(--surface-primary);
+  color: var(--text-main);
+  font: inherit;
+  font-size: 0.82rem;
+}
+
+.stockModule__actionCostingList {
+  display: grid;
+  gap: 2px;
+  max-height: 150px;
+  overflow: auto;
+}
+
+.stockModule__actionCostingList button {
+  min-height: 32px;
+  border: 0;
+  border-radius: 9px;
+  padding: 0 10px;
+  background: transparent;
+  color: var(--text-main);
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 850;
+  text-align: left;
+  cursor: pointer;
+}
+
+.stockModule__actionCostingList button:hover,
+.stockModule__actionCostingList button.is-active {
+  background: color-mix(in srgb, var(--accent-blue) 16%, transparent);
+  color: var(--accent-blue);
+}
+
+.stockModule__actionCostingList em {
+  padding: 8px 10px;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-style: normal;
+}
+
+.stockModule__actionCostingButtons {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.stockModule__actionCostingButtons button {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface-primary);
+  color: var(--text-main);
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.stockModule__actionCostingButtons button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.stockModule__actionCostingButtons svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* Location costing picker modal */
+.stockModule__locationCostingBackdrop {
+  z-index: 160;
+}
+
+.stockModule__locationCostingModal {
+  max-width: 520px;
+}
+
+.stockModule__locationCostingModalBody {
+  display: grid;
+  gap: 18px;
+}
+
+.stockModule__locationCostingModalBody > p {
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 0.96rem;
+  font-weight: 760;
+  line-height: 1.45;
+}
+
+.stockModule__locationCostingPickerField {
+  display: grid;
+  gap: 8px;
+}
+
+.stockModule__locationCostingPickerField > span {
+  color: var(--text-soft);
+  font-size: 0.72rem;
+  font-weight: 950;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.stockModule__locationCostingModal .stockModule__dropdown > span {
+  display: none;
+}
+
+.stockModule__locationCostingModal .stockModule__dropdown > button {
+  min-height: 54px;
+  border-radius: 16px;
+}
+
+.stockModule__locationCostingModal .stockModule__dropdownMenu {
+  padding: 12px;
+  border-radius: 18px;
+  background: rgba(8, 15, 29, 0.98);
+}
+
+.stockModule__locationCostingModal .stockModule__dropdownMenu [data-stock-option][hidden],
+.stockModule__dropdownMenu [data-stock-option][hidden] {
+  display: none !important;
+}
+
+.stockModule__locationCostingModal .stockModule__dropdownMenu input {
+  min-height: 52px;
+  border-radius: 16px;
+  font-size: 1rem;
+  font-weight: 850;
+}
+
+.stockModule__locationCostingModal .stockModule__dropdownOptions {
+  display: grid;
+  gap: 8px;
+  padding-top: 6px;
+}
+
+.stockModule__locationCostingModal .stockModule__dropdownOptions button {
+  min-height: 44px;
+  justify-content: center;
+  border: 0;
+  background: transparent;
+  color: rgba(235, 242, 255, 0.9);
+  font-size: 0.98rem;
+  font-weight: 950;
+  letter-spacing: 0.04em;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.stockModule__locationCostingModal .stockModule__dropdownOptions button:hover,
+.stockModule__locationCostingModal .stockModule__dropdownOptions button.is-active {
+  background: rgba(96, 165, 250, 0.12);
+  color: #ffffff;
+}
+
+.stockModule__locationCostingModalFooter {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  border-top: 1px solid var(--border-subtle);
+  margin-top: 18px;
+  padding-top: 16px;
+}
+
+@media (max-width: 680px) {
+  .stockModule__locationCostingModalFooter {
+    flex-direction: column;
+  }
+}
+
+/* Polish location costing modal: one clean modal, dropdown owns the scrolling */
+.stockModule__locationCostingBackdrop {
+  place-items: center;
+  overflow: auto;
+  padding: 24px;
+}
+
+.stockModule__locationCostingModal {
+  width: min(720px, calc(100vw - 48px));
+  max-width: min(720px, calc(100vw - 48px));
+  max-height: none;
+  overflow: visible;
+  padding: 28px;
+  border-radius: 24px;
+}
+
+.stockModule__locationCostingModal .stockModule__dropdown {
+  gap: 10px;
+}
+
+.stockModule__locationCostingModal .stockModule__dropdown > button {
+  min-height: 58px;
+  border-radius: 16px;
+  font-size: 1.02rem;
+}
+
+.stockModule__locationCostingModal .stockModule__dropdownMenu {
+  position: static;
+  display: none;
+  gap: 10px;
+  max-height: none;
+  overflow: visible;
+  margin-top: 10px;
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+  transition: none;
+}
+
+.stockModule__locationCostingModal .stockModule__dropdown--open .stockModule__dropdownMenu {
+  display: grid;
+}
+
+.stockModule__locationCostingModal .stockModule__dropdownOptions {
+  max-height: min(34vh, 300px);
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.stockModule__locationCostingModal .stockModule__dropdownOptions button {
+  min-height: 48px;
+  font-size: 1.02rem;
+  letter-spacing: 0.025em;
+}
+
+.stockModule__dropdownEmpty {
+  display: block;
+  padding: 14px 12px;
+  color: var(--text-muted);
+  font-size: 0.88rem;
+  font-style: normal;
+  font-weight: 850;
+  text-align: center;
+}
+
+/* Final polish: keep Location Costing selector compact with app-scale text */
+.stockModule__locationCostingModal {
+  max-width: min(680px, calc(100vw - 48px)) !important;
+}
+
+.stockModule__locationCostingModal header p {
+  font-size: 0.72rem !important;
+  letter-spacing: 0.12em !important;
+}
+
+.stockModule__locationCostingModal header h2 {
+  font-size: 1.18rem !important;
+  line-height: 1.2 !important;
+}
+
+.stockModule__locationCostingModalBody > p {
+  font-size: 0.88rem !important;
+  line-height: 1.42 !important;
+}
+
+.stockModule__locationCostingPickerField > span {
+  font-size: 0.68rem !important;
+}
+
+.stockModule__locationCostingModal .stockModule__dropdown > button {
+  min-height: 50px !important;
+  font-size: 0.92rem !important;
+  font-weight: 850 !important;
+}
+
+.stockModule__locationCostingModal .stockModule__dropdownMenu input {
+  min-height: 46px !important;
+  font-size: 0.9rem !important;
+  font-weight: 760 !important;
+}
+
+.stockModule__locationCostingModal .stockModule__dropdownOptions button {
+  min-height: 42px !important;
+  font-size: 0.86rem !important;
+  font-weight: 850 !important;
+  letter-spacing: 0.035em !important;
+}
+
+/* Phase 47: compact per-item default ordering UOM selector. */
+.stockModule__uomConfigRow .stockModule__defaultOrderingUom {
+  align-self: stretch;
+}
+
+.stockModule__defaultOrderingUomControl {
+  min-height: 2.75rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid color-mix(in srgb, var(--accent, #5da8ff) 30%, var(--border-color, #334155));
+  border-radius: 0.8rem;
+  background: color-mix(in srgb, var(--accent, #5da8ff) 8%, var(--surface-elevated, #172230));
+  color: var(--text-primary, #eef5ff);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.stockModule__defaultOrderingUomControl input {
+  inline-size: 1rem;
+  block-size: 1rem;
+  margin: 0;
+  accent-color: var(--accent, #5da8ff);
+}
+
+.stockModule__defaultOrderingUomControl:has(input:disabled) {
+  opacity: 0.45;
+  cursor: not-allowed;
 }

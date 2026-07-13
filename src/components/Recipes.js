@@ -1,9 +1,79 @@
 import '../styles/recipes.css';
 import { renderLoadingPanel } from './LoadingPanel.js';
 import { matchesBarcodeQuery } from '../utils/barcodes.js';
+import { resolveRecipeIngredientUnitCost } from '../utils/stockCostResolver.js';
 
 let lastFocusedRecipeModalRequest = '';
 let _uomDocumentCloseHandler = null;
+
+
+function getAccessibleSellingLocationOptions(locations = [], access = {}) {
+  const active = (locations || []).filter((location) => location?.active !== false);
+  const selling = (active.length ? active : locations).filter((location) => {
+    const type = String(location.kind || location.type || location.locationType || 'selling').trim().toLowerCase();
+    return type === 'selling' || type === 'sale' || type === 'sales' || type === '';
+  });
+  const base = selling.length ? selling : active.length ? active : locations;
+  const filtered = filterLocationsByAccess(base, access);
+  return [...(filtered.length ? filtered : base)]
+    .map((location) => ({
+      value: String(location.id || location.locationId || '').trim(),
+      label: String(location.displayName || location.name || location.locationName || location.id || '').trim()
+    }))
+    .filter((option) => option.value)
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
+function filterLocationsByAccess(locations = [], access = {}) {
+  if (access.currentIsSuperUser === true || access.currentIsKcpSuperUser === true) return locations;
+  let filtered = locations;
+  const roleLocations = access.roleDefinition?.locations || access.currentRoleDefinition?.locations || [];
+  if (Array.isArray(roleLocations) && roleLocations.length && !roleLocations.includes('all')) {
+    const allowed = new Set(roleLocations.map(normalizeLocationKey).filter(Boolean));
+    const next = filtered.filter((location) => locationMatchesLocationKeys(location, allowed));
+    filtered = next.length ? next : filtered;
+  }
+  const userLocations = Array.isArray(access.currentUserLocations) ? access.currentUserLocations : [];
+  if (userLocations.length) {
+    const allowed = new Set(userLocations.map(normalizeLocationKey).filter(Boolean));
+    const next = filtered.filter((location) => locationMatchesLocationKeys(location, allowed));
+    filtered = next.length ? next : filtered;
+  }
+  return filtered;
+}
+
+function locationMatchesLocationKeys(location = {}, keys = new Set()) {
+  if (!keys.size) return true;
+  return [location.id, location.locationId, location.name, location.displayName, location.locationName]
+    .map(normalizeLocationKey)
+    .filter(Boolean)
+    .some((value) => keys.has(value));
+}
+
+function normalizeLocationKey(value = '') {
+  return String(value || '').normalize('NFKC').toLowerCase().replace(/[^a-z0-9]+/g, '').trim();
+}
+
+function resolveActiveLocationId(locationId = '', options = []) {
+  const value = String(locationId || '').trim();
+  if (value && options.some((option) => option.value === value)) return value;
+  return String(options[0]?.value || '');
+}
+
+function applyRecipeLocationPrice(item = {}, locationId = '', locationOptions = []) {
+  const entry = locationId ? item.locationPrices?.[locationId] : null;
+  const locationPrice = Number(entry?.sellingPrice ?? entry?.price ?? item.sellingPrice ?? item.price ?? 0) || 0;
+  const locationName = locationOptions.find((option) => option.value === locationId)?.label || '';
+  return {
+    ...item,
+    globalSellingPrice: Number(item.sellingPrice ?? item.price ?? 0) || 0,
+    sellingPrice: locationPrice,
+    price: locationPrice,
+    activeLocationId: locationId,
+    activeLocationName: locationName,
+    locationPriceSource: entry ? 'location' : 'global'
+  };
+}
 
 function renderUomDropdown({ options, selected, attr, attrValue }) {
   const current = options.find((o) => o.value === selected) || options[0];
@@ -33,17 +103,27 @@ export function renderRecipes({ state, onRecipeFilterChange, onRecipeAction = {}
     ingredientQuery: '',
     ingredientCategory: '',
     ingredientType: '',
+    locationId: '',
     openDropdown: '',
     categoryDropdownSearch: '',
     ingredientCategoryDropdownSearch: '',
+    locationIdDropdownSearch: '',
     ...(recipes.filters || {})
   };
   filters.recipeView = 'products';
-  const allItems = (recipes.items || []).filter((item) => !isModifierRecipeItem(item));
+  const locationOptions = getAccessibleSellingLocationOptions(recipes.locations || [], state.access || {});
+  const activeLocationId = resolveActiveLocationId(filters.locationId, locationOptions);
+  const activeLocationName = locationOptions.find((option) => option.value === activeLocationId)?.label || '';
+  const allItems = (recipes.items || [])
+    .filter((item) => !isModifierRecipeItem(item))
+    .map((item) => applyRecipeLocationPrice(item, activeLocationId, locationOptions));
   const items = filterRecipeItems(allItems, filters);
   const selectedIds = new Set((recipes.selectedIds || []).map(String));
   const selectedCount = selectedIds.size;
-  const selectedItem = recipes.editingItem;
+  const selectedItem = recipes.editingItem
+    ? allItems.find((item) => String(item.id) === String(recipes.editingItem.id)) || applyRecipeLocationPrice(recipes.editingItem, activeLocationId, locationOptions)
+    : null;
+  const displayRecipes = { ...recipes, items: allItems, activeLocationId, activeLocationName };
   const draftRecipe = recipes.draftRecipe || selectedItem?.recipe || [];
   const categories = getCategories(allItems);
   const categoryOptions = [
@@ -85,12 +165,20 @@ export function renderRecipes({ state, onRecipeFilterChange, onRecipeAction = {}
         openDropdown: filters.openDropdown,
         options: categoryOptions
       })}
+      ${locationOptions.length ? renderDropdown({
+        id: 'locationId',
+        label: 'Selling Location',
+        value: activeLocationId,
+        searchValue: filters.locationIdDropdownSearch,
+        openDropdown: filters.openDropdown,
+        options: locationOptions
+      }) : ''}
     </section>
 
     ${recipes.actionError && !selectedItem && !recipes.confirmDelete ? renderNotice(recipes.actionError, 'error') : ''}
-    ${renderRecipeBody(recipes, items, selectedIds, 'products')}
-    ${selectedItem ? renderRecipeModal(selectedItem, draftRecipe, recipes, filters) : ''}
-    ${selectedItem && recipes.pickerOpen ? renderRecipePickerModal(draftRecipe, recipes, filters) : ''}
+    ${renderRecipeBody(displayRecipes, items, selectedIds, 'products')}
+    ${selectedItem ? renderRecipeModal(selectedItem, draftRecipe, displayRecipes, filters) : ''}
+    ${selectedItem && recipes.pickerOpen ? renderRecipePickerModal(draftRecipe, displayRecipes, filters) : ''}
     ${renderDeleteDialog(recipes)}
     ${filters.exportPlatformPicker?.open ? `
     <div id="recipe-platform-picker" class="manufacturingModalBackdrop" style="display:flex;align-items:center;justify-content:center;z-index:1100;">
@@ -465,14 +553,14 @@ function renderRecipeBody(recipes, items, selectedIds, recipeView = 'products') 
         <span>GP / Status</span>
         <span>Action</span>
       </div>
-      ${items.map((item) => renderRecipeRow(item, recipes.ingredients || [], selectedIds.has(String(item.id)), isModifierView)).join('')}
+      ${items.map((item) => renderRecipeRow(item, recipes.ingredients || [], selectedIds.has(String(item.id)), isModifierView, recipes.activeLocationId || '')).join('')}
     </div>
   `;
 }
 
-function renderRecipeRow(item, ingredients, isSelected, showLinkedProduct = false) {
+function renderRecipeRow(item, ingredients, isSelected, showLinkedProduct = false, activeLocationId = '') {
   const effectiveRecipe = getEffectiveRecipeForDisplay(item);
-  const recipeCost = calculateRecipeCost(effectiveRecipe, ingredients);
+  const recipeCost = calculateRecipeCost(effectiveRecipe, ingredients, activeLocationId);
   const gp = item.sellingPrice > 0 ? ((item.sellingPrice - recipeCost) / item.sellingPrice) * 100 : 0;
   const isModifier = isModifierRecipeItem(item);
   const linkedProduct = getModifierLinkedProductDisplay(item);
@@ -538,9 +626,9 @@ function renderRecipeModal(item, draftRecipe, recipes, filters) {
   const linkedProductMode = isModifierRecipeItem(item) && getLinkedProductIds(item).length > 0 && item.recipeSource === 'linked_product';
   const linkedStockItemMode = !isModifierRecipeItem(item) && !normalizeRecipeLinesForDisplay(draftRecipe).length && getRecipeSourceRecipeLines(item).length > 0;
   const displayRecipe = linkedStockItemMode ? getRecipeSourceRecipeLines(item) : draftRecipe;
-  const totalCost = calculateRecipeCost(displayRecipe, ingredients);
+  const totalCost = calculateRecipeCost(displayRecipe, ingredients, recipes.activeLocationId || '');
   const gp = item.sellingPrice > 0 ? ((item.sellingPrice - totalCost) / item.sellingPrice) * 100 : 0;
-  const combinedBreakdown = buildCombinedModifierBreakdown(item, displayRecipe, recipes, ingredients, totalCost);
+  const combinedBreakdown = buildCombinedModifierBreakdown(item, displayRecipe, recipes, ingredients, totalCost, recipes.activeLocationId || '');
   const isModifier = isModifierRecipeItem(item);
   const showModifierPanel = !isModifier && combinedBreakdown.hasModifierContext;
 
@@ -561,7 +649,7 @@ function renderRecipeModal(item, draftRecipe, recipes, filters) {
 	        ${isModifier ? renderModifierProductLinkPanel(item, recipes.items || [], filters) : ''}
 
 	        <div class="recipesModule__blueprintGrid ${showModifierPanel ? '' : 'recipesModule__blueprintGrid--single'}">
-	          ${renderBaseIngredientPanel(displayRecipe, ingredients, { linkedProductMode, linkedStockItemMode, recipeSourceStockItemName: item.recipeSourceStockItemName || item.recipeSourceStockItem?.name || '' })}
+	          ${renderBaseIngredientPanel(displayRecipe, ingredients, { linkedProductMode, linkedStockItemMode, recipeSourceStockItemName: item.recipeSourceStockItemName || item.recipeSourceStockItem?.name || '', activeLocationId: recipes.activeLocationId || '' })}
 	          ${showModifierPanel ? renderModifierCostBreakdown(combinedBreakdown) : ''}
 	        </div>
 
@@ -646,7 +734,7 @@ function renderBaseIngredientPanel(draftRecipe = [], ingredients = [], options =
         <span></span>
       </div>
       <div class="recipesModule__lineList">
-	        ${draftRecipe.length ? draftRecipe.map((line, index) => renderRecipeLine(line, index, ingredients, { readOnly: isReadOnly })).join('') : `
+	        ${draftRecipe.length ? draftRecipe.map((line, index) => renderRecipeLine(line, index, ingredients, { readOnly: isReadOnly, activeLocationId: options.activeLocationId || '' })).join('') : `
 	          <div class="recipesModule__emptyLines">No base ingredients added to this recipe.</div>
 	        `}
 	      </div>
@@ -654,7 +742,7 @@ function renderBaseIngredientPanel(draftRecipe = [], ingredients = [], options =
   `;
 }
 
-function buildCombinedModifierBreakdown(item = {}, draftRecipe = [], recipes = {}, ingredients = [], baseCost = 0) {
+function buildCombinedModifierBreakdown(item = {}, draftRecipe = [], recipes = {}, ingredients = [], baseCost = 0, activeLocationId = '') {
   const attachedGroups = normalizeAttachedModifierGroups(item);
   const allItems = recipes.items || [];
   const modifierRows = findAttachedModifierRows(item, recipes.items || [], attachedGroups)
@@ -664,8 +752,8 @@ function buildCombinedModifierBreakdown(item = {}, draftRecipe = [], recipes = {
       const modifierRecipe = Array.isArray(modifier.recipe) ? modifier.recipe : [];
       const usesLinkedProductRecipe = linkedProductRecipe.length > 0;
       const modifierCost = usesLinkedProductRecipe
-        ? calculateRecipeCost(linkedProductRecipe, ingredients)
-        : calculateRecipeCost(modifierRecipe, ingredients);
+        ? calculateRecipeCost(linkedProductRecipe, ingredients, activeLocationId)
+        : calculateRecipeCost(modifierRecipe, ingredients, activeLocationId);
       const modifierPrice = Number(modifier.sellingPrice ?? modifier.price ?? 0) || 0;
       const combinedPrice = Number(item.sellingPrice || 0) + modifierPrice;
       const combinedCost = baseCost + modifierCost;
@@ -974,7 +1062,8 @@ function renderRecipeSourceStockItemPanel(item = {}, stockItems = [], filters = 
               ${sourceItems.map((stockItem) => {
                 const isSelected = selectedId && String(stockItem.id) === selectedId;
                 const recipeLines = normalizeRecipeLinesForDisplay(stockItem.recipe || stockItem.recipeLines || []);
-                const sourceLabel = isRecipeSourceStockItem(stockItem) ? 'Non-stock items' : 'Stock item';
+                const sourceTypeMeta = getIngredientTypeMeta(stockItem);
+                const sourceLabel = sourceTypeMeta.value === 'raw' ? 'Stock item' : sourceTypeMeta.label;
                 return `
                   <button
                     type="button"
@@ -1334,7 +1423,7 @@ function renderRecipeLine(line, index, ingredients, options = {}) {
   const uomRatio = getIngredientUomRatio(ingredient, selectedUnit);
   const hasCustomUoms = uomOptions.length > 1;
 
-  const unitCost = getIngredientUnitCost(ingredient.id, ingredients);
+  const unitCost = getIngredientUnitCost(ingredient.id, ingredients, options.activeLocationId || '');
   const yieldPct = ingredient.yieldFactor && ingredient.yieldFactor > 0 ? ingredient.yieldFactor / 100 : 1;
   const effectiveCostPerBaseUnit = unitCost / yieldPct;
   const effectiveCostPerSelectedUnit = effectiveCostPerBaseUnit * uomRatio;
@@ -1414,20 +1503,10 @@ function renderIngredientChoice(ingredient, selected = false, ingredients = [], 
 }
 
 function getIngredientTypeMeta(ingredient = {}) {
-	  const explicit = String(ingredient.itemType || ingredient.stockItemType || ingredient.specificationType || '')
-	    .trim()
-	    .toLowerCase()
-	    .replace(/[\s-]+/g, '_');
-	  const category = String(ingredient.category || '').toLowerCase();
-	  if (isRecipeSourceStockItem(ingredient)) {
-	    return { label: 'Non Stock', tone: 'sub', value: 'recipe_source' };
-	  }
-	  if (
-    ['sub_recipe', 'subrecipe', 'sub_recipe_item'].includes(explicit) ||
-    ingredient.isSubRecipe === true ||
-    category.includes('sub recipe') ||
-    category.includes('sub-recipe')
-  ) {
+  const explicit = normalizeRecipeIngredientTypeValue(ingredient.itemType || ingredient.stockItemType || ingredient.specificationType || '');
+  const category = String(ingredient.category || '').toLowerCase();
+
+  if (isSubRecipeStockItem(ingredient, explicit, category)) {
     return { label: 'Sub-Recipe', tone: 'sub', value: 'sub_recipe' };
   }
   if (
@@ -1436,18 +1515,30 @@ function getIngredientTypeMeta(ingredient = {}) {
     category.includes('manufactured')
   ) {
     return { label: 'Manufactured', tone: 'manufactured', value: 'manufactured' };
-	  }
-	  return { label: 'Raw', tone: 'raw', value: 'raw' };
+  }
+  if (isRecipeSourceStockItem(ingredient, explicit, category)) {
+    return { label: 'Non Stock', tone: 'sub', value: 'recipe_source' };
+  }
+  return { label: 'Raw', tone: 'raw', value: 'raw' };
 }
 
-function isRecipeSourceStockItem(item = {}) {
-  const explicit = String(item.itemType || item.stockItemType || item.specificationType || '')
+function normalizeRecipeIngredientTypeValue(value = '') {
+  return String(value || '')
     .trim()
     .toLowerCase()
     .replace(/[\s-]+/g, '_');
-  const category = String(item.category || '').toLowerCase();
-  return item.isStocked === false ||
-    ['non_stock', 'recipe_source', 'virtual'].includes(explicit) ||
+}
+
+function isSubRecipeStockItem(item = {}, explicit = normalizeRecipeIngredientTypeValue(item.itemType || item.stockItemType || item.specificationType || ''), category = String(item.category || '').toLowerCase()) {
+  return ['sub_recipe', 'subrecipe', 'sub_recipe_item'].includes(explicit) ||
+    item.isSubRecipe === true ||
+    category.includes('sub recipe') ||
+    category.includes('sub-recipe');
+}
+
+function isRecipeSourceStockItem(item = {}, explicit = normalizeRecipeIngredientTypeValue(item.itemType || item.stockItemType || item.specificationType || ''), category = String(item.category || '').toLowerCase()) {
+  if (isSubRecipeStockItem(item, explicit, category)) return false;
+  return ['non_stock', 'recipe_source', 'virtual'].includes(explicit) ||
     category.includes('recipe source') ||
     category.includes('non-stock') ||
     category.includes('non stock') ||
@@ -1681,40 +1772,18 @@ function filterIngredients(ingredients, filters, draftRecipe) {
     .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
 }
 
-function calculateRecipeCost(recipe, ingredients) {
+function calculateRecipeCost(recipe, ingredients, activeLocationId = '') {
   return (recipe || []).reduce((sum, line) => {
     const ingredient = ingredients.find((item) => String(item.id) === String(line.ingId));
     if (!ingredient) return sum;
     const yieldPct = ingredient.yieldFactor && ingredient.yieldFactor > 0 ? ingredient.yieldFactor / 100 : 1;
     const uomRatio = getIngredientUomRatio(ingredient, line.unit);
-    return sum + (getIngredientUnitCost(ingredient.id, ingredients) / yieldPct) * parseQtyNumber(line.qty) * uomRatio;
+    return sum + (getIngredientUnitCost(ingredient.id, ingredients, activeLocationId) / yieldPct) * parseQtyNumber(line.qty) * uomRatio;
   }, 0);
 }
 
-function getIngredientUnitCost(ingredientId, ingredients, seen = new Set()) {
-  const ingredient = ingredients.find((item) => String(item.id) === String(ingredientId));
-  if (!ingredient) return 0;
-  if (seen.has(String(ingredient.id))) return 0;
-  seen.add(String(ingredient.id));
-
-  const isManufactured = ingredient.isManufactured === true || String(ingredient.category || '').toLowerCase().includes('manufactured');
-  const recipe = Array.isArray(ingredient.recipe) ? ingredient.recipe : [];
-  if (isManufactured && recipe.length) {
-    const total = recipe.reduce((sum, line) => {
-      return sum + getIngredientUnitCost(line.ingId, ingredients, new Set(seen)) * parseQtyNumber(line.qty);
-    }, 0);
-    const yieldBatch = Number(ingredient.yieldBatch || 1);
-    return total / (yieldBatch > 0 ? yieldBatch : 1);
-  }
-
-  return Number(
-    ingredient.lastPurchasePrice ??
-    ingredient.lastPurchaseCost ??
-    ingredient.latestPurchasePrice ??
-    ingredient.costEx ??
-    ingredient.cost ??
-    0
-  ) || 0;
+function getIngredientUnitCost(ingredientId, ingredients, activeLocationId = '', seen = new Set()) {
+  return resolveRecipeIngredientUnitCost(ingredientId, ingredients, activeLocationId, seen);
 }
 
 function getCategories(items) {

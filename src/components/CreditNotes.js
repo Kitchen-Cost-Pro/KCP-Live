@@ -44,7 +44,7 @@ export function renderCreditNotes({ state, onCreditNoteFilterChange, onCreditNot
             <div class="cn-stack">
               <div class="cn-inputWrap" data-cn-dropdown-root>
                 <input
-                  type="text"
+                  type="search"
                   class="cn-input"
                   value="${escapeAttribute(draft.supplierName || '')}"
                   placeholder="Search supplier"
@@ -82,7 +82,7 @@ export function renderCreditNotes({ state, onCreditNoteFilterChange, onCreditNot
                 ${icon('calendar')}
               </button>
 
-              ${renderCnLocationPicker(draft, creditNotes.locations || [], filters.openDropdown)}
+              ${renderCnLocationPicker(draft, creditNotes.locations || [], filters.openDropdown, filters.headerLocationQuery || '')}
 
               <label class="cn-pill">
                 <input
@@ -173,28 +173,38 @@ function bindCreditNoteEvents(view, state, filters, draft, onCreditNoteFilterCha
       const payload = { [field.dataset.cnDraftField]: field.value };
       if (field.hasAttribute('data-cn-supplier-input')) {
         payload.supplierId = '';
-        if (filters.openDropdown !== 'supplier') {
-          onCreditNoteFilterChange?.({ openDropdown: 'supplier' });
-        }
+        if (filters.openDropdown !== 'supplier') onCreditNoteFilterChange?.({ openDropdown: 'supplier' });
       }
       onCreditNoteAction.onDraftChange?.(payload);
     };
     field.addEventListener('input', apply);
     field.addEventListener('change', apply);
     if (field.hasAttribute('data-cn-supplier-input')) {
-      field.addEventListener('focus', () => {
-        if (filters.openDropdown === 'supplier') return;
-        onCreditNoteFilterChange?.({ openDropdown: 'supplier' });
-      });
-      field.addEventListener('click', () => {
-        if (filters.openDropdown === 'supplier') return;
-        onCreditNoteFilterChange?.({ openDropdown: 'supplier' });
-      });
+      const openSupplierDropdown = () => {
+        if (filters.openDropdown !== 'supplier') onCreditNoteFilterChange?.({ openDropdown: 'supplier' });
+      };
+      field.addEventListener('focus', openSupplierDropdown);
+      field.addEventListener('click', openSupplierDropdown);
+      field.addEventListener('mousedown', openSupplierDropdown);
     }
   });
 
   view.querySelector('[data-cn-price-mode]')?.addEventListener('change', (event) => {
     onCreditNoteAction.onDraftChange?.({ pricesIncludeVat: event.currentTarget.checked });
+  });
+
+  view.querySelectorAll('[data-cn-location-input]').forEach((field) => {
+    const openLocationDropdown = () => {
+      if (filters.openDropdown !== 'cn-header-location') {
+        onCreditNoteFilterChange?.({ openDropdown: 'cn-header-location', headerLocationQuery: field.value });
+      }
+    };
+    field.addEventListener('focus', openLocationDropdown);
+    field.addEventListener('click', openLocationDropdown);
+    field.addEventListener('input', () => onCreditNoteFilterChange?.({
+      openDropdown: 'cn-header-location',
+      headerLocationQuery: field.value
+    }));
   });
 
   view.querySelectorAll('[data-cn-open-dropdown]').forEach((button) => {
@@ -220,7 +230,7 @@ function bindCreditNoteEvents(view, state, filters, draft, onCreditNoteFilterCha
         locationId: button.dataset.cnHeaderLocation || '',
         locationName: button.dataset.cnHeaderLocationName || ''
       });
-      onCreditNoteFilterChange?.({ openDropdown: '' });
+      onCreditNoteFilterChange?.({ openDropdown: '', headerLocationQuery: '' });
     });
   });
 
@@ -280,7 +290,7 @@ function bindCreditNoteEvents(view, state, filters, draft, onCreditNoteFilterCha
   view.addEventListener('click', (event) => {
     if (!filters.openDropdown) return;
     if (event.target.closest('[data-cn-dropdown-root]')) return;
-    onCreditNoteFilterChange?.({ openDropdown: '' });
+    onCreditNoteFilterChange?.({ openDropdown: '', headerLocationQuery: '' });
   });
 
   view.querySelector('[data-cn-open-stock]')?.addEventListener('click', () => {
@@ -474,8 +484,9 @@ function renderDraftTable(draft, vatRate, selectedLineIndexes = new Set(), locat
                   data-cn-line-field="returnedQty"
                   data-cn-line-index="${index}"
                   data-focus-key="cn-line-qty-${index}-${escapeAttribute(String(item.stockItemId || item.id || 'line'))}"
+                  ${Number(item.maxReturnQty || item.originalOrderQty || 0) > 0 ? `aria-describedby="cn-max-qty-${index}"` : ''}
                 />
-                <small class="cn-cellHint">pack qty</small>
+                <small class="cn-cellHint" id="cn-max-qty-${index}">${Number(item.maxReturnQty || item.originalOrderQty || 0) > 0 ? `Max PO qty: ${escapeHtml(formatEditable(item.maxReturnQty || item.originalOrderQty))}` : 'pack qty'}</small>
               </td>
               <td>
                 <span class="cn-packField">
@@ -738,7 +749,7 @@ function renderLineDetailOverlay(detailDraft, draft, sites, locations, openDropd
               <span>${escapeHtml(entry.category || getCreditNoteLineUomLabel(entry) || '')}</span>
             </div>
             <div class="cn-detailInputWrap">
-              <input type="text" inputmode="decimal" value="${escapeAttribute(formatEditable(entry.returnedQty || ''))}" data-cn-line-detail-index="${index}" data-cn-line-detail-field="returnedQty" data-focus-key="cn-detail-qty-${index}" />
+              <input type="text" inputmode="decimal" value="${escapeAttribute(formatEditable(entry.returnedQty || ''))}" data-cn-line-detail-index="${index}" data-cn-line-detail-field="returnedQty" data-focus-key="cn-detail-qty-${index}" title="${Number(entry.maxReturnQty || entry.originalOrderQty || 0) > 0 ? `Maximum original PO quantity: ${escapeAttribute(formatEditable(entry.maxReturnQty || entry.originalOrderQty))}` : 'Return quantity'}" />
             </div>
             <div class="cn-detailInputWrap cn-detailInputWrap--uom">
               <input type="text" inputmode="decimal" value="${escapeAttribute(formatEditable(entry.packSize || '1'))}" data-cn-line-detail-index="${index}" data-cn-line-detail-field="packSize" data-focus-key="cn-detail-pack-${index}" ${isCreditNoteLineCustomUom(entry) ? 'readonly title="Pack size is set by the selected UOM."' : ''} />
@@ -878,45 +889,51 @@ function getCategoryOptions(stockItems = []) {
 }
 
 function isPhysicalStockItem(item = {}) {
-  if (item.isStocked === false) return false;
-  // Manufactured items and sub recipes are produced in-house, not purchased/received/credited.
+  // Credit Notes can only credit Standard and Non Stock items.
   if (item.isSubRecipe === true || item.isManufactured === true) return false;
   const type = String(item.itemType || item.stockItemType || item.specificationType || '')
     .trim()
     .toLowerCase()
     .replace(/[\s-]+/g, '_');
-  if (['recipe_source', 'non_stock', 'virtual', 'sub_recipe', 'manufactured'].includes(type)) return false;
+  if (['sub_recipe', 'subrecipe', 'manufactured', 'manufactured_item', 'prep', 'prepared'].includes(type)) return false;
   const category = String(item.category || '').toLowerCase();
-  return !category.includes('recipe source') &&
-    !category.includes('non-stock') &&
-    !category.includes('non stock') &&
-    !category.includes('virtual') &&
-    !category.includes('sub recipe') &&
+  return !category.includes('sub recipe') &&
     !category.includes('sub-recipe') &&
     !category.includes('manufactured');
 }
 
-function renderCnLocationPicker(draft, locations = [], openDropdown = '') {
+function renderCnLocationPicker(draft, locations = [], openDropdown = '', query = '') {
   const locationId = String(draft.locationId || '');
-  const options = locations.filter((l) => String(l.id || '').trim()).map((l) => ({ id: String(l.id), name: l.displayName || l.name || l.id }));
+  const options = locations
+    .filter((l) => String(l.id || '').trim())
+    .map((l) => ({ id: String(l.id), name: l.displayName || l.name || l.id }))
+    .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
   const selected = options.find((o) => o.id === locationId) || null;
   const isOpen = openDropdown === 'cn-header-location';
+  const searchValue = isOpen ? String(query || '') : (selected ? selected.name : '');
+  const needle = String(query || '').trim().toLowerCase();
+  const visibleOptions = options.filter((opt) => !needle || String(opt.name || '').toLowerCase().includes(needle));
   return `
     <div class="cn-locationPickerWrap" data-cn-dropdown-root>
       <label class="cn-locationPickerLabel">Return to Location</label>
-      <button type="button"
-        class="cn-input cn-selectLike cn-locationTrigger ${selected ? 'cn-locationTrigger--set' : 'cn-locationTrigger--empty'}"
-        data-cn-open-dropdown="cn-header-location"
-        aria-expanded="${isOpen}"
-        aria-haspopup="listbox"
-      >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
-        <span>${selected ? escapeHtml(selected.name) : 'Select your location'}</span>
+      <div class="cn-locationSearchShell">
+        <input
+          type="search"
+          class="cn-input cn-locationInput ${selected ? 'cn-locationTrigger--set' : 'cn-locationTrigger--empty'}"
+          value="${escapeAttribute(searchValue)}"
+          placeholder="Search or select your location"
+          autocomplete="off"
+          role="combobox"
+          aria-expanded="${isOpen}"
+          aria-haspopup="listbox"
+          data-focus-key="cn-header-location"
+          data-cn-location-input
+        />
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" class="cn-chevron" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
-      </button>
+      </div>
       ${isOpen ? `
         <div class="cn-locationMenu" role="listbox">
-          ${options.length ? options.map((opt) => `
+          ${visibleOptions.length ? visibleOptions.map((opt) => `
             <button type="button" role="option"
               class="cn-locationOption ${opt.id === locationId ? 'is-selected' : ''}"
               data-cn-header-location="${escapeAttribute(opt.id)}"

@@ -1,8 +1,8 @@
 import './styles/main.css';
 import './styles/chat.css';
+import './styles/reporting.css';
 import { mountChatWidget, unmountChatWidget } from './components/Chat.js';
 import { renderAuthenticatedApp } from './appShell.js';
-import { renderDashboard } from './dashboard.js';
 import { renderLogin } from './auth.js';
 import {
   claimInvitationForUser,
@@ -27,15 +27,17 @@ import {
 } from './services/database.js';
 import {
   exportWorkspaceSnapshot,
+  getGoLiveReadiness,
   getStockCategoryOptions,
   getYocoCategoryOptions,
   getWorkspaceSettingsSnapshot,
   importWorkspaceSnapshot,
   normalizeSettings,
+  savePersonalSettings,
   saveWorkspaceSettings
 } from './services/settingsService.js';
-import { ACTION_PERMISSION_MAP, canManagePermissionSets, hasPermission, hasSectionAccess, normalizeRoleName, resolveRoleDefinition, toRoleLabel } from './services/roleService.js';
-import { buildSupplierPurchaseOrderPdfFile as buildSupplierPurchaseOrderPdfDocument, buildManufacturingBuilderXlsx, downloadFileBlob, parseDataFile } from './services/dataService.js';
+import { ACTION_PERMISSION_MAP, canManagePermissionSets, getAccessRenderRevision, hasPermission, hasSectionAccess, normalizeRoleName, resolveRoleDefinition, toRoleLabel } from './services/roleService.js';
+import { buildSupplierPurchaseOrderPdfFile as buildSupplierPurchaseOrderPdfDocument, buildManufacturingBuilderXlsx, downloadFileBlob, downloadStyledRecipeTemplateXlsx, downloadStyledStockTemplateXlsx, parseDataFile } from './services/dataService.js';
 import {
   buildMenuCatalogueRows,
   buildGoodsReceiptDocumentRows,
@@ -49,9 +51,8 @@ import {
   exportObjectRows,
   exportSchemas,
 } from './services/exportService.js';
-import { dashboardTileKeys, subscribeDashboardTiles } from './services/dashboardTileService.js';
-import { subscribeAnalyticsWorkspace } from './services/analyticsService.js';
-import { deleteReportConfig, fetchReportConfigs, saveReportConfig } from './services/reportConfigService.js';
+import { callCloudflareWorkspaceRoute, clearApiCache } from './services/cloudflareApi.js';
+import { sendSupplierEmailWithGmail, syncYocoCatalogue, syncYocoSales } from './services/integrationService.js';
 import { fetchSystemBroadcast } from './services/systemBroadcastService.js';
 import { DEFAULT_STOCK_LOCATION_ID, DEFAULT_STOCK_LOCATION_NAME } from './services/locationModel.js';
 import {
@@ -63,6 +64,12 @@ import {
 } from './themePresets.js';
 import { matchesBarcodeQuery, parseBarcodeValues } from './utils/barcodes.js';
 import { todayLocal } from './utils/date.js';
+import {
+  cleanupAppDropdownPortal,
+  installAppDropdownPortalSystem,
+  scheduleAppDropdownPortalRefresh
+} from './utils/appDropdownPortal.js';
+import { isStockCountableItem, isTransferEligibleStockItem } from './services/stockCountEligibility.js';
 // Canonical per-location balance resolver (same one the Transfers UI uses to show before/after),
 // so the transfer insufficient-stock validation resolves the source balance identically.
 import { getLocationStock as resolveLocationStock } from './utils/stockBalances.js';
@@ -70,15 +77,14 @@ import { getLocationStock as resolveLocationStock } from './utils/stockBalances.
 const app = document.querySelector('#app');
 const THEME_STORAGE_KEY = 'kcp-live-theme';
 const ROUTE_STORAGE_KEY = 'kcp-live-route';
-const DASHBOARD_RANGE_STORAGE_KEY = 'kcp-live-dashboard-range';
 const AUTO_LOGIN_STORAGE_PREFIX = 'kcp:auto-login-workspace:v1';
 const DRAFT_STORAGE_PREFIX = 'kcp:drafts:v1';
-const REPORT_CONFIG_STORAGE_PREFIX = 'kcp:report-configs:v1';
 const ADJUSTMENT_PAGE_SIZE = 25;
-const PERSISTED_ROUTES = ['dashboard', 'products', 'recipes', 'ingredients', 'suppliers', 'purchase-orders', 'grv', 'credit-note', 'adjustments', 'transfers', 'stock-count', 'locations', 'mfg-products', 'analytics', 'integrations', 'user-management', 'custom-roles', 'settings', 'settings-business', 'settings-customization'];
+const PERSISTED_ROUTES = ['dashboard', 'products', 'recipes', 'ingredients', 'suppliers', 'purchase-orders', 'grv', 'credit-note', 'adjustments', 'transfers', 'stock-count', 'locations', 'mfg-products', 'reporting', 'reporting-scheduling', 'integrations', 'user-management', 'custom-roles', 'settings', 'settings-business', 'settings-customization'];
 const SETTINGS_ROUTES = ['settings', 'settings-business', 'settings-customization'];
 
-const dashboardNodeKeys = dashboardTileKeys;
+installAppDropdownPortalSystem();
+
 
 function showBrandConfirmDialog({
   eyebrow = 'Confirm Action',
@@ -153,12 +159,7 @@ export const appState = {
     active: getInitialRoute()
   },
   theme: getInitialTheme(),
-  dashboardRange: getInitialDashboardRange(),
-  dashboardChartTab: 'costOfSales',
-  dashboardSiteId: '',
-  dashboardLocationId: '',
   source: null,
-  dashboard: createDashboardState('idle'),
   menu: createMenuState('idle'),
   recipes: createRecipeState('idle'),
   stock: createStockState('idle'),
@@ -171,25 +172,19 @@ export const appState = {
   stockTake: createStockTakeState('idle'),
   locations: createLocationState('idle'),
   manufacturing: createManufacturingState('idle'),
-  analytics: createAnalyticsState('idle'),
   userManagement: createUserManagementState('idle'),
   roleManagement: createRoleManagementState('idle'),
   settings: createSettingsState('idle')
 };
 
 window.__KCP_LIVE_STATE__ = appState;
-document.addEventListener('submit', handleReportBuilderDocumentSubmit, true);
-document.addEventListener('click', handleReportBuilderDocumentClick, true);
+
 window.addEventListener('kcp:integrations-sync-complete', () => {
-  flushDeferredRealtimeSnapshots();
-  // Refetch the active tab so freshly synced Yoco catalogue/locations/sales appear without a
-  // reload. Skip if the user is mid-edit (a modal/typing) to avoid disrupting them.
-  if (appState.user && appState.workspace && !isUserBusy()) {
-    refreshActiveTabFromApi().catch(() => {});
-  }
+  // Integration actions update their own drawer/status UI. Do not remount the active module
+  // after a background sync: that looked like a random page reload and reset report/table state.
+  // Fresh data is loaded by the module's explicit Refresh action or the next navigation.
 });
 
-let unsubscribeDashboard = null;
 let unsubscribeAccess = null;
 let systemBroadcastRefreshTimer = null;
 let integrationAutoSyncTimer = null;
@@ -199,7 +194,6 @@ let dataVersionPollVisibilityHandler = null;
 let lastSeenDataVersion = null;
 let _integrationVisibilityHandler = null;
 let _globalSavingOverlay = null;
-let dashboardSubscriptionToken = 0;
 let accessSubscriptionToken = 0;
 let unsubscribeMenu = null;
 let menuSubscriptionToken = 0;
@@ -212,6 +206,7 @@ let unsubscribeSuppliers = null;
 let supplierSubscriptionToken = 0;
 let unsubscribePurchaseOrders = null;
 let purchaseOrderSubscriptionToken = 0;
+let pendingReportingPurchaseOrderSeed = null;
 let unsubscribeGrv = null;
 let grvSubscriptionToken = 0;
 let unsubscribeCreditNotes = null;
@@ -226,8 +221,7 @@ let unsubscribeLocations = null;
 let locationSubscriptionToken = 0;
 let unsubscribeManufacturing = null;
 let manufacturingSubscriptionToken = 0;
-let unsubscribeAnalytics = null;
-let analyticsSubscriptionToken = 0;
+
 let settingsLoadToken = 0;
 let clockTimer = null;
 let menuToastTimer = null;
@@ -248,9 +242,6 @@ let focusRestoreToken = 0;
 let settingsDraftRenderTimer = null;
 let supplierDraftRenderTimer = null;
 let purchaseOrderLineRenderTimer = null;
-let dashboardRangeRefreshTimer = null;
-let dashboardSnapshotRenderTimer = null;
-let pendingDashboardSnapshot = null;
 const deferredRealtimeSnapshots = new Map();
 let deferredRealtimeSnapshotFlushTimer = null;
 let modalScrollLockSyncQueued = false;
@@ -274,7 +265,6 @@ if (!appState.user && !appState.workspace) {
 
 listenToAuthChanges(async (user) => {
   cleanupAccessSubscription();
-  cleanupWorkspaceSubscription();
   cleanupMenuSubscription();
   cleanupRecipeSubscription();
   cleanupStockSubscription();
@@ -289,7 +279,7 @@ listenToAuthChanges(async (user) => {
   cleanupManufacturingSubscription();
   cleanupLocationSubscription();
   cleanupManufacturingSubscription();
-  cleanupAnalyticsSubscription();
+
 
   if (!user) {
     stopAutoLogout();
@@ -303,8 +293,7 @@ listenToAuthChanges(async (user) => {
       route: { active: getInitialRoute() },
       theme: appState.theme,
       source: null,
-      dashboard: createDashboardState('idle'),
-      menu: createMenuState('idle'),
+          menu: createMenuState('idle'),
       recipes: createRecipeState('idle'),
       stock: createStockState('idle'),
       suppliers: createSupplierState('idle'),
@@ -316,8 +305,7 @@ listenToAuthChanges(async (user) => {
       stockTake: createStockTakeState('idle'),
       locations: createLocationState('idle'),
       manufacturing: createManufacturingState('idle'),
-      analytics: createAnalyticsState('idle'),
-      userManagement: createUserManagementState('idle'),
+          userManagement: createUserManagementState('idle'),
       roleManagement: createRoleManagementState('idle'),
       settings: createSettingsState('idle')
     });
@@ -341,7 +329,6 @@ async function loadAuthenticatedUser(user) {
   appState.user = user;
   appState.autoLoginPreference = readAutoLoginPreference(user);
   appState.auth = { status: 'loading', error: '' };
-  appState.dashboard = createDashboardState('loading');
   appState.recipes = createRecipeState('idle', appState.recipes.filters);
   appState.stock = createStockState('idle', appState.stock.filters);
   appState.suppliers = createSupplierState('idle', appState.suppliers.filters);
@@ -353,7 +340,6 @@ async function loadAuthenticatedUser(user) {
   appState.stockTake = createStockTakeState('idle', appState.stockTake.filters, appState.stockTake.sessionActive);
   appState.locations = createLocationState('idle', appState.locations.filters);
   appState.manufacturing = createManufacturingState('idle', appState.manufacturing.filters);
-  appState.analytics = createAnalyticsState('idle', appState.analytics.filters);
   appState.userManagement = createUserManagementState('idle', appState.userManagement.filters);
   appState.roleManagement = createRoleManagementState('idle');
   appState.settings = createSettingsState('idle', appState.settings?.draft);
@@ -385,7 +371,6 @@ async function loadAuthenticatedUser(user) {
       appState.workspaceOptions = [];
       appState.workspaceError = '';
       appState.auth = { status: 'force-password-reset', error: '', mode: 'set-password' };
-      appState.dashboard = createDashboardState('idle');
       renderApp();
       return;
     }
@@ -430,7 +415,6 @@ async function loadAuthenticatedUser(user) {
     appState.workspace = null;
     appState.workspaceError = '';
     appState.auth = { status: 'workspace-select', error: '' };
-    appState.dashboard = createDashboardState('idle');
     renderApp();
   } catch (error) {
     if (userUsesGoogleProvider(user)) {
@@ -451,7 +435,6 @@ function routeToWorkspaceRegistration(user, error = '') {
     appState.workspaceOptions = [];
   appState.autoLoginPreference = readAutoLoginPreference(user);
   appState.workspaceError = '';
-  appState.dashboard = createDashboardState('idle');
   appState.auth = {
     status: 'idle',
     error,
@@ -511,7 +494,6 @@ async function handlePostPasswordChange() {
     appState.workspace = null;
     appState.workspaceError = '';
     appState.auth = { status: 'workspace-select', error: '' };
-    appState.dashboard = createDashboardState('idle');
     renderApp();
   } catch (error) {
     appState.auth = { status: 'force-password-reset', error: error.message || 'Could not load your approved workspace.', mode: 'set-password' };
@@ -574,17 +556,19 @@ function startIntegrationAutoSync() {
     const workspaceId = appState.workspace?.id;
     if (!workspaceId) return;
     try {
-      const { syncYocoSales, syncYocoCatalogue } = await import('./services/integrationService.js');
-      await Promise.all([syncYocoSales(workspaceId), syncYocoCatalogue(workspaceId)]);
-      // Re-check: user may have opened a modal or started typing while sync was in-flight
-      if (!isUserBusy()) refreshActiveTabFromApi().catch(() => {});
+      await Promise.all([
+        syncYocoSales(workspaceId, { resetWebhook: false }),
+        syncYocoCatalogue(workspaceId, { resetWebhook: false })
+      ]);
+      // Background integration work must never remount the user's active screen. The user can
+      // explicitly refresh the current module when they are ready to consume newly synced data.
     } catch { /* silent */ }
   };
 
   const startTimer = () => {
     if (integrationAutoSyncTimer) window.clearInterval(integrationAutoSyncTimer);
-    // 15 min (was 5). Each cycle re-fetches the active tab's whole call batch, so this is
-    // the dominant recurring Workers/D1 cost — a longer interval keeps free-tier headroom.
+    // Background sync is intentionally infrequent and silent. It must not repaint the current
+    // module or create a delayed four-second refresh after every workspace bootstrap.
     integrationAutoSyncTimer = window.setInterval(runSync, 900000);
   };
 
@@ -609,14 +593,9 @@ function startIntegrationAutoSync() {
   window.addEventListener('focus', onActive);
   window.addEventListener('blur', onInactive);
 
-  // Only start now if the tab is already in focus
-  if (isActive()) {
-    startTimer();
-    // Pull catalogue + sales once shortly after the workspace opens so new/deleted products and
-    // locations appear without waiting for the 15-min timer or a manual sync. Change-detection on
-    // the worker keeps this cheap (writes only deltas). Delay lets the initial tab load settle.
-    window.setTimeout(() => { if (isActive()) runSync(); }, 4000);
-  }
+  // Only start the silent 15-minute timer when the tab is already in focus. Do not run a
+  // delayed startup sync because its completion used to remount the page a few seconds after login.
+  if (isActive()) startTimer();
 }
 
 function stopIntegrationAutoSync() {
@@ -632,9 +611,13 @@ function stopIntegrationAutoSync() {
 
 function startSystemBroadcastRefresh() {
   if (systemBroadcastRefreshTimer) window.clearInterval(systemBroadcastRefreshTimer);
-  loadSystemBroadcast();
+  // The initial broadcast request is also silent. Permission, route, or settings hydration will
+  // naturally display it on the next normal render without an unrelated full-page remount.
+  loadSystemBroadcast({ render: false });
   systemBroadcastRefreshTimer = window.setInterval(() => {
-    if (appState.user && appState.workspace) loadSystemBroadcast();
+    // Store the latest broadcast silently. The next normal render can display it without
+    // replacing the active module while the user is working.
+    if (appState.user && appState.workspace) loadSystemBroadcast({ render: false });
   }, 900000);
 }
 
@@ -644,11 +627,11 @@ function stopSystemBroadcastRefresh() {
   appState.systemBroadcast = null;
 }
 
-// Cross-user live refresh: poll a tiny "data-version" signal and, when it changes because another
-// user (or another device) committed something, refetch the active tab so the change appears
-// without a manual reload. Gated on tab visibility + user-not-busy and only refetches on an actual
-// version change, so the recurring cost is a single cheap indexed query — negligible on free tier.
-const DATA_VERSION_POLL_INTERVAL_MS = 120000; // 2 min
+// Cross-user change detection: poll a tiny "data-version" signal without remounting the active
+// screen. A changed version emits a passive event; users consume fresh data through explicit
+// Refresh actions or normal navigation, so forms, drawers, filters, and scroll never reset.
+const DATA_VERSION_POLL_INTERVAL_MS = 120000; // 2 min on normal modules
+const STOCK_DATA_VERSION_POLL_INTERVAL_MS = 45000; // quick but cheap stock-tab refresh for POS webhooks
 
 function startDataVersionPoll() {
   // Re-establish the baseline on (re)start so a workspace switch doesn't fire a spurious refetch.
@@ -659,7 +642,6 @@ function startDataVersionPoll() {
     const workspaceId = appState.workspace?.id;
     if (!workspaceId) return;
     try {
-      const { callCloudflareWorkspaceRoute } = await import('./services/cloudflareApi.js');
       const response = await callCloudflareWorkspaceRoute(workspaceId, 'data-version', { query: { t: Date.now() } });
       const version = String(response?.version ?? '');
       // First observation establishes the baseline without refetching.
@@ -669,18 +651,35 @@ function startDataVersionPoll() {
       }
       if (version && version !== lastSeenDataVersion) {
         lastSeenDataVersion = version;
-        // Don't yank data out from under an open modal / active edit — refresh on the next tick.
-        if (!isUserBusy()) refreshActiveTabFromApi().catch(() => {});
+        // Record the change without remounting the active module. Automatic DOM replacement here
+        // caused the recurring 'page refresh' effect and could close drawers or reset filters.
+        window.dispatchEvent(new CustomEvent('kcp:data-version-changed', {
+          detail: { workspaceId, version }
+        }));
       }
     } catch { /* silent — a failed poll should never disrupt the app */ }
   };
 
+  const currentPollInterval = () => (
+    appState.route.active === 'ingredients'
+      ? STOCK_DATA_VERSION_POLL_INTERVAL_MS
+      : DATA_VERSION_POLL_INTERVAL_MS
+  );
   const startTimer = () => {
-    if (dataVersionPollTimer) window.clearInterval(dataVersionPollTimer);
-    dataVersionPollTimer = window.setInterval(pollOnce, DATA_VERSION_POLL_INTERVAL_MS);
+    if (dataVersionPollTimer) window.clearTimeout(dataVersionPollTimer);
+    const scheduleNext = () => {
+      if (dataVersionPollTimer) window.clearTimeout(dataVersionPollTimer);
+      dataVersionPollTimer = window.setTimeout(async () => {
+        dataVersionPollTimer = null;
+        await pollOnce();
+        if (document.visibilityState === 'visible') scheduleNext();
+      }, currentPollInterval());
+    };
+    pollOnce().catch(() => {});
+    scheduleNext();
   };
   const stopTimer = () => {
-    if (dataVersionPollTimer) { window.clearInterval(dataVersionPollTimer); dataVersionPollTimer = null; }
+    if (dataVersionPollTimer) { window.clearTimeout(dataVersionPollTimer); dataVersionPollTimer = null; }
   };
 
   if (dataVersionPollVisibilityHandler) {
@@ -695,7 +694,7 @@ function startDataVersionPoll() {
 }
 
 function stopDataVersionPoll() {
-  if (dataVersionPollTimer) { window.clearInterval(dataVersionPollTimer); dataVersionPollTimer = null; }
+  if (dataVersionPollTimer) { window.clearTimeout(dataVersionPollTimer); dataVersionPollTimer = null; }
   if (dataVersionPollVisibilityHandler) {
     document.removeEventListener('visibilitychange', dataVersionPollVisibilityHandler);
     dataVersionPollVisibilityHandler = null;
@@ -802,7 +801,6 @@ function toggleAutoLoginPreference(enabled) {
 }
 
 async function selectWorkspace(workspace, options = {}) {
-  cleanupWorkspaceSubscription();
   cleanupMenuSubscription();
   cleanupRecipeSubscription();
   cleanupStockSubscription();
@@ -815,14 +813,13 @@ async function selectWorkspace(workspace, options = {}) {
   cleanupStockTakeSubscription();
   cleanupLocationSubscription();
   cleanupManufacturingSubscription();
-  cleanupAnalyticsSubscription();
+
   cleanupAccessSubscription();
   syncAutoLoginPreferenceForWorkspace(workspace, options);
   appState.workspace = { ...workspace };
   appState.workspaceError = '';
   appState.access = createAccessState('loading');
   appState.source = null;
-  appState.dashboard = createDashboardState(appState.route.active === 'dashboard' ? 'loading' : 'idle', workspace.id);
   appState.menu = createMenuState(appState.route.active === 'products' ? 'loading' : 'idle', appState.menu.filters);
   appState.recipes = createRecipeState(appState.route.active === 'recipes' ? 'loading' : 'idle', appState.recipes.filters);
   appState.stock = createStockState(appState.route.active === 'ingredients' ? 'loading' : 'idle', appState.stock.filters);
@@ -835,7 +832,6 @@ async function selectWorkspace(workspace, options = {}) {
   appState.stockTake = createStockTakeState(appState.route.active === 'stock-count' ? 'loading' : 'idle', appState.stockTake.filters, appState.stockTake.sessionActive);
   appState.locations = createLocationState(appState.route.active === 'locations' ? 'loading' : 'idle', appState.locations.filters);
   appState.manufacturing = createManufacturingState(appState.route.active === 'mfg-products' ? 'loading' : 'idle', appState.manufacturing.filters);
-  appState.analytics = createAnalyticsState(appState.route.active === 'analytics' ? 'loading' : 'idle', appState.analytics.filters);
   appState.userManagement = createUserManagementState(appState.route.active === 'user-management' ? 'loading' : 'idle', appState.userManagement.filters);
   appState.roleManagement = createRoleManagementState(appState.route.active === 'custom-roles' ? 'loading' : 'idle');
   appState.settings = createSettingsState(isSettingsRoute(appState.route.active) ? 'loading' : 'idle', appState.settings?.draft);
@@ -878,13 +874,17 @@ async function selectWorkspace(workspace, options = {}) {
 
 function navigateTo(sectionId) {
   if (String(sectionId || '').trim() === 'low-stock-alerts') {
-    openLowStockAlertsReport();
+    openLowStockAlerts();
     return;
   }
 
   const nextSection = resolveAccessibleRoute(sectionId || 'dashboard');
 
-  if (appState.route.active === nextSection) return;
+  if (nextSection === 'reporting') clearReportingNavigationParameters();
+  if (appState.route.active === nextSection) {
+    if (nextSection === 'reporting') renderApp();
+    return;
+  }
 
   appState.route = { active: nextSection };
   persistRoute(nextSection);
@@ -902,19 +902,9 @@ function navigateTo(sectionId) {
     cleanupStockTakeSubscription();
     cleanupLocationSubscription();
     cleanupManufacturingSubscription();
-    cleanupAnalyticsSubscription();
-    appState.dashboard = createDashboardState('loading', appState.workspace?.id);
     renderApp();
-    startDashboardSubscription(appState.workspace?.id);
     return;
   }
-
-  cleanupWorkspaceSubscription();
-  cleanupAnalyticsSubscription();
-  appState.dashboard = {
-    ...appState.dashboard,
-    status: 'idle'
-  };
 
   if (nextSection === 'products') {
     cleanupRecipeSubscription();
@@ -1137,24 +1127,7 @@ function navigateTo(sectionId) {
     return;
   }
 
-  if (nextSection === 'analytics') {
-    cleanupMenuSubscription();
-    cleanupRecipeSubscription();
-    cleanupStockSubscription();
-    cleanupSupplierSubscription();
-    cleanupPurchaseOrderSubscription();
-    cleanupGrvSubscription();
-    cleanupCreditNoteSubscription();
-    cleanupAdjustmentSubscription();
-    cleanupTransferSubscription();
-    cleanupStockTakeSubscription();
-    cleanupLocationSubscription();
-    cleanupManufacturingSubscription();
-    appState.analytics = createAnalyticsState('loading', appState.analytics.filters);
-    renderApp();
-    startAnalyticsSubscription(appState.workspace?.id);
-    return;
-  }
+
 
   if (nextSection === 'user-management') {
     cleanupMenuSubscription();
@@ -1225,7 +1198,7 @@ function navigateTo(sectionId) {
   cleanupStockTakeSubscription();
   cleanupLocationSubscription();
   cleanupManufacturingSubscription();
-  cleanupAnalyticsSubscription();
+
   appState.menu = createMenuState('idle', appState.menu.filters);
   appState.recipes = createRecipeState('idle', appState.recipes.filters);
   appState.stock = createStockState('idle', appState.stock.filters);
@@ -1238,7 +1211,6 @@ function navigateTo(sectionId) {
   appState.stockTake = createStockTakeState('idle', appState.stockTake.filters, appState.stockTake.sessionActive);
   appState.locations = createLocationState('idle', appState.locations.filters);
   appState.manufacturing = createManufacturingState('idle', appState.manufacturing.filters);
-  appState.analytics = createAnalyticsState('idle', appState.analytics.filters);
   appState.userManagement = createUserManagementState('idle', appState.userManagement.filters);
   appState.roleManagement = createRoleManagementState('idle');
   renderApp();
@@ -1269,7 +1241,7 @@ function bootstrapActiveRouteForWorkspace(workspaceId) {
   }
 
   if (nextSection === 'dashboard') {
-    startDashboardSubscription(workspaceId);
+    renderApp();
     return;
   }
   if (nextSection === 'products') {
@@ -1320,10 +1292,7 @@ function bootstrapActiveRouteForWorkspace(workspaceId) {
     startManufacturingSubscription(workspaceId);
     return;
   }
-  if (nextSection === 'analytics') {
-    startAnalyticsSubscription(workspaceId);
-    return;
-  }
+
   if (isSettingsRoute(nextSection)) {
     loadSettings(workspaceId);
     return;
@@ -1345,6 +1314,11 @@ function forceRefreshActiveTab() {
 }
 
 async function refreshActiveTabFromApi() {
+  // Dashboard and Reporting own their internal filters and async report runs.
+  // Background data-version/Yoco syncs must not replace or silently refresh them;
+  // both surfaces expose explicit refresh controls.
+  if (['dashboard', 'reporting', 'reporting-scheduling'].includes(appState.route.active)) return;
+
   const workspaceId = appState.workspace?.id;
   // Drop focus + clear any pending focus restore so the post-save render actually paints
   // (renderApp() suppresses DOM updates while a text field is focused). This makes saves
@@ -1361,7 +1335,6 @@ async function refreshActiveTabFromApi() {
   // An explicit refresh (post-save, data-version poll on a real change, Yoco sync-complete) must
   // fetch fresh — drop the short-lived GET cache so navigation stays fast but refreshes are live.
   try {
-    const { clearApiCache } = await import('./services/cloudflareApi.js');
     clearApiCache();
   } catch { /* cache clear is best-effort */ }
 
@@ -1492,132 +1465,13 @@ async function refreshActiveTabFromApi() {
       return;
     }
 
-    if (appState.route.active === 'analytics') {
-      startAnalyticsSubscription(workspaceId);
-      return;
-    }
+
 
     forceRefreshActiveTab();
   } catch (error) {
     console.warn('[Refresh] Active tab API refresh failed:', error);
     forceRefreshActiveTab();
   }
-}
-
-function startDashboardSubscription(workspaceId) {
-  cleanupWorkspaceSubscription();
-  const subscriptionToken = ++dashboardSubscriptionToken;
-
-  if (!workspaceId) {
-    appState.dashboard = createDashboardState('idle');
-    return;
-  }
-
-  appState.dashboard = createDashboardState('loading', workspaceId);
-  renderDashboardOnly();
-
-  unsubscribeDashboard = subscribeDashboardTiles(workspaceId, {
-    range: appState.dashboardRange,
-    siteId: appState.dashboardLocationId || appState.dashboardSiteId,
-    onSnapshot: (snapshot) => {
-      if (
-        subscriptionToken !== dashboardSubscriptionToken ||
-        appState.route.active !== 'dashboard' ||
-        appState.workspace?.id !== workspaceId
-      ) return;
-
-      const nextSignature = getDashboardSnapshotSignature(snapshot);
-      if (appState.dashboard?.metrics && nextSignature === appState.dashboard.signature) {
-        appState.dashboard = {
-          ...appState.dashboard,
-          connection: snapshot.connection || appState.dashboard.connection,
-          loaded: snapshot.loaded || appState.dashboard.loaded,
-          errors: snapshot.errors || appState.dashboard.errors,
-          isReady: snapshot.isReady || appState.dashboard.isReady,
-          insights: snapshot.insights || appState.dashboard.insights || {},
-          siteName: snapshot.siteName || appState.dashboard.siteName || ''
-        };
-        return;
-      }
-
-      appState.source = snapshot.source || appState.source;
-      appState.dashboard = {
-        status: snapshot.isReady || snapshot.metrics ? 'ready' : 'loading',
-        workspaceId,
-        metrics: snapshot.metrics,
-        loaded: snapshot.loaded,
-        errors: snapshot.errors,
-        isReady: snapshot.isReady,
-        connection: snapshot.connection,
-        insights: snapshot.insights || {},
-        siteName: snapshot.siteName || appState.dashboard?.siteName || '',
-        signature: nextSignature
-      };
-      renderDashboardOnly();
-    },
-    onError: (error, nodeKey) => {
-      if (
-        subscriptionToken !== dashboardSubscriptionToken ||
-        appState.route.active !== 'dashboard' ||
-        appState.workspace?.id !== workspaceId
-      ) return;
-
-      appState.dashboard.errors = {
-        ...appState.dashboard.errors,
-        [nodeKey]: error
-      };
-      appState.dashboard.connection = {
-        ...appState.dashboard.connection,
-        status: 'error',
-        label: 'Attention',
-        lastUpdated: new Date().toISOString()
-      };
-      renderDashboardOnly();
-    }
-  });
-}
-
-function getDashboardSnapshotSignature(snapshot = {}) {
-  const summary = snapshot.metrics?.summary || {};
-  const ranges = snapshot.metrics?.ranges || {};
-  const trends = snapshot.metrics?.trends || {};
-  const today = snapshot.metrics?.today || '';
-  const insights = snapshot.insights || {};
-  const siteName = snapshot.siteName || '';
-  const siteId = appState.dashboardSiteId || '';
-  return JSON.stringify({ summary, ranges, trends, today, insights, siteName, siteId });
-}
-
-function isCustomDashboardRange(range = '') {
-  return /^custom:\d{4}-\d{2}-\d{2}:\d{4}-\d{2}-\d{2}$/.test(String(range || ''));
-}
-
-function getDashboardHydrationNodes(range = appState.dashboardRange) {
-  if (!isCustomDashboardRange(range)) return [];
-
-  const overviewNodes = [
-    'settings',
-    'locations',
-    'ingredients',
-    'products',
-    'suppliers',
-    'purchaseOrders',
-    'stockTakes',
-    'stockTakeTemplates',
-    'logs_grv',
-    'logs_adj',
-    'logs_stocktakes',
-    'logs_transfers',
-    'logs_sales'
-  ];
-
-  return [
-    ...overviewNodes,
-    'logs_cn',
-    'logs_mfg',
-    'sessionOpeningStock',
-    'logs_snapshots'
-  ];
 }
 
 async function loadSettings(workspaceId) {
@@ -1636,13 +1490,14 @@ async function loadSettings(workspaceId) {
   };
 
   try {
-    const [settingsSnapshot, siteConfig, yocoCategories, stockCategories] = await Promise.all([
+    const [settingsSnapshot, siteConfig, yocoCategories, stockCategories, goLiveReadiness] = await Promise.all([
       getWorkspaceSettingsSnapshot(workspaceId),
       import('./services/orgTransferService.js')
         .then(({ getSiteConfiguration }) => getSiteConfiguration(workspaceId))
         .catch(() => null),
       getYocoCategoryOptions(workspaceId).catch(() => []),
-      getStockCategoryOptions(workspaceId).catch(() => [])
+      getStockCategoryOptions(workspaceId).catch(() => []),
+      getGoLiveReadiness(workspaceId).catch(() => ({ productCount: 0, recipeCount: 0, locationCount: 0 }))
     ]);
     const settings = normalizeSettings({
       ...settingsSnapshot,
@@ -1664,6 +1519,7 @@ async function loadSettings(workspaceId) {
       draft: settings,
       yocoCategories,
       stockCategories,
+      goLiveReadiness,
       error: ''
     };
     applyWorkspaceSettingsEffects(settings);
@@ -1717,17 +1573,26 @@ async function startMenuSubscription(workspaceId) {
           const nextStatus = status === 'ready' || !(appState.menu.items || []).length
             ? status
             : appState.menu.status;
+          const nextLocations = locations || appState.menu.locations || [];
+          const allowedLocationIds = new Set(getLocationsAllowedForCurrentRole(nextLocations).map((location) => String(location.id || location.locationId || '')).filter(Boolean));
+          const defaultLocationId = getDefaultSellingLocationId(nextLocations);
+          const currentLocationId = String(appState.menu.filters?.locationId || '');
+          const nextFilters = {
+            ...appState.menu.filters,
+            locationId: currentLocationId && (!allowedLocationIds.size || allowedLocationIds.has(currentLocationId)) ? currentLocationId : defaultLocationId
+          };
           appState.menu = {
             ...appState.menu,
             status: nextStatus,
             items,
             modifierItems: modifierItems || [],
-            locations: locations || appState.menu.locations || [],
+            locations: nextLocations,
             posIntegration: posIntegration || { active: false, provider: '', label: '' },
             source,
             updatedAt,
             error: error?.message || '',
-            selectedIds: posIntegration?.active ? [] : (appState.menu.selectedIds || []).filter((id) => liveIds.has(String(id)))
+            selectedIds: posIntegration?.active ? [] : (appState.menu.selectedIds || []).filter((id) => liveIds.has(String(id))),
+            filters: nextFilters
           };
         });
       },
@@ -1788,7 +1653,7 @@ async function startRecipeSubscription(workspaceId) {
     ) return;
 
     unsubscribeRecipes = subscribeRecipeWorkspace(workspaceId, {
-      onSnapshot: ({ status, items, ingredients, source, updatedAt, loaded }) => {
+      onSnapshot: ({ status, items, ingredients, locations, source, updatedAt, loaded }) => {
         if (
           subscriptionToken !== recipeSubscriptionToken ||
           appState.route.active !== 'recipes' ||
@@ -1817,6 +1682,7 @@ async function startRecipeSubscription(workspaceId) {
             status,
             items,
             ingredients,
+            locations: locations || appState.recipes.locations || [],
 	          source,
 	          updatedAt,
 	          loaded,
@@ -1896,18 +1762,27 @@ async function startStockSubscription(workspaceId) {
             ? status
             : appState.stock.status;
           const editingItem = appState.stock.editingItem || null;
+          const nextLocations = locations || appState.stock.locations || [];
+          const allowedLocationIds = new Set(getLocationsAllowedForCurrentRole(nextLocations).map((location) => String(location.id || location.locationId || '')).filter(Boolean));
+          const defaultLocationId = getDefaultSellingLocationId(nextLocations);
+          const currentLocationId = String(appState.stock.filters?.locationId || '');
+          const nextFilters = {
+            ...appState.stock.filters,
+            locationId: currentLocationId && (!allowedLocationIds.size || allowedLocationIds.has(currentLocationId)) ? currentLocationId : defaultLocationId
+          };
           appState.stock = {
             ...appState.stock,
             status: nextStatus,
             items,
             sites,
-            locations,
+            locations: nextLocations,
             categories,
             uoms,
             loaded,
             updatedAt,
             editingItem,
-            selectedIds: (appState.stock.selectedIds || []).filter((id) => liveIds.has(String(id)))
+            selectedIds: (appState.stock.selectedIds || []).filter((id) => liveIds.has(String(id))),
+            filters: nextFilters
           };
         });
       },
@@ -2058,6 +1933,7 @@ async function startPurchaseOrderSubscription(workspaceId) {
           draftOrder,
           selectedIds: (appState.purchaseOrders.selectedIds || []).filter((id) => liveIds.has(String(id)))
         };
+        applyPendingReportingPurchaseOrderSeed();
         renderApp();
       },
       onError: (error) => {
@@ -2781,972 +2657,14 @@ async function startManufacturingSubscription(workspaceId) {
   }
 }
 
-function startAnalyticsSubscription(workspaceId) {
-  cleanupAnalyticsSubscription();
-  const subscriptionToken = ++analyticsSubscriptionToken;
 
-  if (!workspaceId) {
-    appState.analytics = createAnalyticsState('idle', appState.analytics.filters);
-    return;
-  }
 
-  appState.analytics = createAnalyticsState('loading', appState.analytics.filters);
 
-  try {
-    unsubscribeAnalytics = subscribeAnalyticsWorkspace(workspaceId, {
-      onSnapshot: ({ status, source, loaded, updatedAt }) => {
-        if (
-          subscriptionToken !== analyticsSubscriptionToken ||
-          appState.route.active !== 'analytics' ||
-          appState.workspace?.id !== workspaceId
-        ) return;
 
-        applyRealtimeSnapshot('analytics', () => {
-          appState.analytics = {
-            ...appState.analytics,
-            status,
-            source,
-            loaded,
-            updatedAt,
-            error: ''
-          };
-        });
-        refreshAnalyticsReportConfigs(workspaceId, subscriptionToken);
-      },
-      onError: (error, nodeKey) => {
-        if (
-          subscriptionToken !== analyticsSubscriptionToken ||
-          appState.route.active !== 'analytics' ||
-          appState.workspace?.id !== workspaceId
-        ) return;
 
-        appState.analytics = {
-          ...appState.analytics,
-          status: 'error',
-          error: `${nodeKey || 'Reporting'}: ${error.message || 'Could not load reporting data.'}`
-        };
-        renderApp();
-      }
-    });
-  } catch (error) {
-    if (
-      subscriptionToken !== analyticsSubscriptionToken ||
-      appState.route.active !== 'analytics' ||
-      appState.workspace?.id !== workspaceId
-    ) return;
 
-    appState.analytics = {
-      ...appState.analytics,
-      status: 'error',
-      error: error.message || 'Could not initialize reporting.'
-    };
-    renderApp();
-  }
-}
-
-async function refreshAnalyticsReportConfigs(workspaceId, subscriptionToken = analyticsSubscriptionToken) {
-  try {
-    const savedReports = await fetchReportConfigs(workspaceId);
-    const mergedReports = mergeSavedReportConfigs(savedReports, loadLocalReportConfigs(workspaceId));
-    persistLocalReportConfigs(workspaceId, mergedReports);
-    if (
-      subscriptionToken !== analyticsSubscriptionToken ||
-      appState.route.active !== 'analytics' ||
-      appState.workspace?.id !== workspaceId
-    ) return;
-    appState.analytics = {
-      ...appState.analytics,
-      savedReports: mergedReports
-    };
-    renderApp();
-  } catch (error) {
-    const localReports = loadLocalReportConfigs(workspaceId);
-    if (
-      subscriptionToken !== analyticsSubscriptionToken ||
-      appState.route.active !== 'analytics' ||
-      appState.workspace?.id !== workspaceId
-    ) return;
-    appState.analytics = {
-      ...appState.analytics,
-      savedReports: localReports.length ? mergeSavedReportConfigs(localReports, appState.analytics.savedReports || []) : appState.analytics.savedReports,
-      reportConfigError: localReports.length ? '' : (error.message || 'Saved report views could not load.')
-    };
-    renderApp();
-  }
-}
-
-function createLocalReportConfigId() {
-  return `local_report_${globalThis.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`}`;
-}
-
-function getReportConfigStorageKey(workspaceId = '') {
-  return `${REPORT_CONFIG_STORAGE_PREFIX}:${String(workspaceId || 'workspace').trim() || 'workspace'}`;
-}
-
-function loadLocalReportConfigs(workspaceId = '') {
-  try {
-    const raw = window.localStorage.getItem(getReportConfigStorageKey(workspaceId));
-    const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed.filter((item) => item && typeof item === 'object' && item.id) : [];
-  } catch {
-    return [];
-  }
-}
-
-function persistLocalReportConfigs(workspaceId = '', reports = []) {
-  try {
-    window.localStorage.setItem(getReportConfigStorageKey(workspaceId), JSON.stringify(Array.isArray(reports) ? reports : []));
-  } catch {
-    // Local fallback is best-effort; remote saving remains the source of truth when available.
-  }
-}
-
-function mergeSavedReportConfigs(primaryReports = [], fallbackReports = []) {
-  const merged = [];
-  const seen = new Set();
-  [...(Array.isArray(primaryReports) ? primaryReports : []), ...(Array.isArray(fallbackReports) ? fallbackReports : [])]
-    .filter((report) => report && typeof report === 'object')
-    .forEach((report) => {
-      const id = String(report.id || '').trim();
-      const key = id || `${report.name || 'report'}:${report.updatedAt || ''}`;
-      if (!key || seen.has(key)) return;
-      seen.add(key);
-      merged.push(report);
-    });
-  return merged;
-}
-
-function findSavedReportConfig(reportId = '') {
-  const id = String(reportId || '').trim();
-  if (!id) return null;
-  return (appState.analytics.savedReports || []).find((report) => (
-    String(report.id || '') === id ||
-    String(report.reportConfigId || '') === id ||
-    String(report.config?.builder?.reportConfigId || '') === id
-  )) || null;
-}
-
-function replaceSavedReportConfig(reportId = '', nextReport = {}) {
-  const id = String(reportId || nextReport.id || '').trim();
-  const reports = appState.analytics.savedReports || [];
-  const withoutExisting = reports.filter((report) => !(
-    String(report.id || '') === id ||
-    String(report.reportConfigId || '') === id ||
-    String(report.config?.builder?.reportConfigId || '') === id
-  ));
-  return mergeSavedReportConfigs([nextReport], withoutExisting);
-}
-
-let lastReportBuilderDocumentSaveAt = 0;
-
-function runReportBuilderDocumentSave(action = 'save') {
-  const now = Date.now();
-  if (now - lastReportBuilderDocumentSaveAt < 500) return;
-  lastReportBuilderDocumentSaveAt = now;
-  saveCurrentCustomReport(
-    action === 'preview'
-      ? { previewAfterSave: true }
-      : { closeAfterSave: true }
-  );
-}
-
-function handleReportBuilderDocumentSubmit(event) {
-  const form = event.target?.closest?.('[data-report-builder-save-form]');
-  if (!form) return;
-  event.preventDefault();
-  event.stopImmediatePropagation();
-  const action = event.submitter?.dataset?.reportBuilderSubmit || event.submitter?.value || 'save';
-  runReportBuilderDocumentSave(action);
-}
-
-function handleReportBuilderDocumentClick(event) {
-  const button = event.target?.closest?.('[data-report-builder-submit]');
-  if (!button || !button.closest?.('[data-report-builder-save-form]')) return;
-  event.preventDefault();
-  event.stopImmediatePropagation();
-  if (button.disabled) return;
-  runReportBuilderDocumentSave(button.dataset.reportBuilderSubmit || button.value || 'save');
-}
-
-function updateAnalyticsFilters(nextFilters) {
-  const shouldRefreshData = nextFilters?.refreshData === true;
-  const { refreshData, ...filterPatch } = nextFilters || {};
-  appState.analytics = {
-    ...appState.analytics,
-    filters: {
-      ...appState.analytics.filters,
-      ...filterPatch
-    }
-  };
-  renderApp();
-  if (shouldRefreshData && appState.route.active === 'analytics') {
-    startAnalyticsSubscription(appState.workspace?.id);
-  }
-}
-
-async function updateStockTakeCountFromReport(stockTakeId, payload = {}) {
-  const workspaceId = appState.workspace?.id;
-  const stockTakeKey = String(stockTakeId || '').trim();
-  if (!workspaceId || !stockTakeKey) return;
-
-  appState.analytics = {
-    ...appState.analytics,
-    actionStatus: 'saving-stocktake-edit',
-    reportConfigError: ''
-  };
-  renderApp();
-
-  try {
-    const { updateStockTake } = await import('./services/stockTakeService.js');
-    await updateStockTake(workspaceId, stockTakeKey, {
-      id: stockTakeKey,
-      items: payload.items || []
-    });
-    appState.analytics = {
-      ...appState.analytics,
-      actionStatus: '',
-      filters: {
-        ...appState.analytics.filters,
-        stockTakeDetailId: stockTakeKey,
-        stockTakeEditId: ''
-      }
-    };
-    renderApp();
-    startAnalyticsSubscription(workspaceId);
-  } catch (error) {
-    appState.analytics = {
-      ...appState.analytics,
-      actionStatus: '',
-      reportConfigError: error.message || 'Could not update this stock count.'
-    };
-    renderApp();
-  }
-}
-
-function buildCurrentCustomReportConfig(overrides = {}) {
-  const filters = appState.analytics.filters || {};
-  const builder = filters.customReportBuilder && typeof filters.customReportBuilder === 'object'
-    ? filters.customReportBuilder
-    : null;
-  if (builder) {
-    const layoutFieldIds = getBuilderLayoutFieldIds(builder);
-    const sourceIds = getBuilderSourceIds(builder, filters);
-    const primarySourceId = builder.sourceId || sourceIds[0] || filters.customSource || 'sales';
-    const primaryColumns = layoutFieldIds
-      .filter((fieldId) => getBuilderSourceIdFromFieldId(fieldId) === primarySourceId)
-      .map(getBuilderColumnFromFieldId)
-      .filter(Boolean);
-    const displayColumns = layoutFieldIds
-      .map(getBuilderColumnFromFieldId)
-      .filter(Boolean);
-    const selectedColumns = primaryColumns.length ? primaryColumns : displayColumns;
-    const reportConfigId = overrides.id || builder.reportConfigId || filters.customReportConfigId || '';
-    const name = overrides.name || builder.name || filters.customReportName || 'Custom Report';
-    const existingReport = (appState.analytics.savedReports || []).find((item) => String(item.id) === String(reportConfigId));
-    const pinned = typeof overrides.pinned === 'boolean' ? overrides.pinned : Boolean(existingReport?.pinned);
-    const ownerUid = existingReport?.ownerUid || existingReport?.createdBy || appState.user?.uid || appState.user?.id || '';
-    const ownerEmail = existingReport?.ownerEmail || appState.user?.email || appState.profile?.email || '';
-    const ownerName = existingReport?.ownerName || appState.user?.displayName || appState.profile?.displayName || appState.user?.email || 'Workspace user';
-    const accessPolicy = builder.accessPolicy || existingReport?.config?.accessPolicy || { roles: [], locationIds: [] };
-    const visualizationType = builder.visualizationType || existingReport?.visualizationType || existingReport?.config?.visualizationType || 'table';
-    const thresholdRules = Array.isArray(builder.thresholdRules) ? builder.thresholdRules : [];
-    const shareEnabled = builder.options?.shareEnabled === true || existingReport?.shareEnabled === true || existingReport?.config?.shareEnabled === true;
-    const shareToken = builder.options?.shareToken || existingReport?.shareToken || existingReport?.config?.shareToken || '';
-    return {
-      id: reportConfigId,
-      name,
-      status: overrides.status || existingReport?.status || 'Active',
-      sourceId: primarySourceId,
-      sourceIds,
-      visualizationType,
-      groupBy: getBuilderColumnFromFieldId(builder.layout?.rows?.[0]) || 'none',
-      ownerUid,
-      ownerEmail,
-      ownerName,
-      allowedRoles: Array.isArray(accessPolicy.roles) ? accessPolicy.roles : [],
-      allowedLocationIds: Array.isArray(accessPolicy.locationIds) ? accessPolicy.locationIds : [],
-      thresholdRules,
-      shareEnabled,
-      shareToken,
-      filters: {
-        query: filters.query || '',
-        category: filters.category || '',
-        locationId: filters.locationId || '',
-        startDate: filters.startDate || '',
-        endDate: filters.endDate || ''
-      },
-      columns: selectedColumns,
-      config: {
-        name,
-        sourceId: primarySourceId,
-        sourceIds,
-        customSource: primarySourceId,
-        visualizationType,
-        groupBy: getBuilderColumnFromFieldId(builder.layout?.rows?.[0]) || 'none',
-        customColumns: selectedColumns,
-        builderFieldIds: layoutFieldIds,
-        thresholdRules,
-        shareEnabled,
-        shareToken,
-        templateId: builder.templateId || '',
-        ownerUid,
-        ownerEmail,
-        ownerName,
-        allowedRoles: Array.isArray(accessPolicy.roles) ? accessPolicy.roles : [],
-        allowedLocationIds: Array.isArray(accessPolicy.locationIds) ? accessPolicy.locationIds : [],
-        accessPolicy,
-        builder: {
-          ...builder,
-          reportConfigId,
-          sourceId: primarySourceId,
-          sourceIds,
-          accessPolicy,
-          visualizationType,
-          thresholdRules,
-          templateId: builder.templateId || ''
-        }
-      },
-      pinned
-    };
-  }
-  const sourceId = overrides.sourceId || filters.customSource || 'stock';
-  const columns = overrides.columns || filters.customColumns || [];
-  const visualizationType = overrides.visualizationType || filters.visualizationType || 'table';
-  const groupBy = overrides.groupBy || filters.groupBy || 'none';
-  const name = overrides.name || filters.customReportName || 'Custom Report';
-  const eodEnabled = overrides.eodEnabled ?? (filters.customReportEod === true || filters.customReportEod === 'true');
-  const eodRecipients = overrides.eodRecipients || filters.customReportRecipients || '';
-  const eodSchedule = overrides.eodSchedule || filters.customReportSchedule || 'Daily EOD';
-  const prompt = overrides.prompt || filters.customReportPrompt || '';
-  const customReportBlocks = Array.isArray(overrides.customReportBlocks)
-    ? overrides.customReportBlocks
-    : (Array.isArray(filters.customReportBlocks) ? filters.customReportBlocks : []);
-  const existingReport = (appState.analytics.savedReports || []).find((item) => String(item.id) === String(overrides.id || filters.customReportConfigId || ''));
-  const pinned = typeof overrides.pinned === 'boolean' ? overrides.pinned : Boolean(existingReport?.pinned);
-  const ownerUid = existingReport?.ownerUid || existingReport?.createdBy || appState.user?.uid || appState.user?.id || '';
-  const ownerEmail = existingReport?.ownerEmail || appState.user?.email || appState.profile?.email || '';
-  const ownerName = existingReport?.ownerName || appState.user?.displayName || appState.profile?.displayName || appState.user?.email || 'Workspace user';
-  const shareEnabled = overrides.shareEnabled ?? existingReport?.shareEnabled ?? existingReport?.config?.shareEnabled ?? false;
-  const shareToken = overrides.shareToken || existingReport?.shareToken || existingReport?.config?.shareToken || '';
-  return {
-    id: overrides.id || '',
-    name,
-    status: overrides.status || existingReport?.status || 'Active',
-    sourceId,
-    visualizationType,
-    groupBy,
-    ownerUid,
-    ownerEmail,
-    ownerName,
-    allowedRoles: existingReport?.allowedRoles || [],
-    allowedLocationIds: existingReport?.allowedLocationIds || [],
-    thresholdRules: existingReport?.thresholdRules || existingReport?.config?.thresholdRules || [],
-    shareEnabled,
-    shareToken,
-    filters: {
-      query: filters.query || '',
-      category: filters.category || '',
-      locationId: filters.locationId || '',
-      startDate: filters.startDate || '',
-      endDate: filters.endDate || ''
-    },
-    columns,
-    config: {
-      name,
-      customSource: sourceId,
-      sourceId,
-      customColumns: columns,
-      visualizationType,
-      groupBy,
-      prompt,
-      customReportBlocks,
-      ownerUid,
-      ownerEmail,
-      ownerName,
-      allowedRoles: existingReport?.allowedRoles || [],
-      allowedLocationIds: existingReport?.allowedLocationIds || [],
-      accessPolicy: existingReport?.config?.accessPolicy || { roles: existingReport?.allowedRoles || [], locationIds: existingReport?.allowedLocationIds || [] },
-      thresholdRules: existingReport?.thresholdRules || existingReport?.config?.thresholdRules || [],
-      shareEnabled,
-      shareToken,
-      eodEnabled,
-      eodRecipients,
-      eodSchedule
-    },
-    pinned
-  };
-}
-
-function getBuilderLayoutFieldIds(builder = {}) {
-  const layout = builder.layout || {};
-  return [
-    ...(Array.isArray(layout.rows) ? layout.rows : []),
-    ...(Array.isArray(layout.columns) ? layout.columns : []),
-    ...(Array.isArray(layout.values) ? layout.values : []),
-    ...(Array.isArray(layout.filters) ? layout.filters : [])
-  ].map((fieldId) => String(fieldId || '').trim()).filter(Boolean);
-}
-
-function getBuilderSourceIdFromFieldId(fieldId = '') {
-  const value = String(fieldId || '').trim();
-  return value.includes('::') ? value.split('::')[0] : '';
-}
-
-function getBuilderColumnFromFieldId(fieldId = '') {
-  const value = String(fieldId || '').trim();
-  return value.includes('::') ? value.split('::').slice(1).join('::') : value;
-}
-
-function getBuilderSourceIds(builder = {}, filters = {}) {
-  const ids = [
-    builder.sourceId || filters.customSource || '',
-    ...(Array.isArray(builder.sourceIds) ? builder.sourceIds : []),
-    ...getBuilderLayoutFieldIds(builder).map(getBuilderSourceIdFromFieldId)
-  ].map((id) => String(id || '').trim()).filter(Boolean);
-  return [...new Set(ids)];
-}
-
-function getCurrentReportBuilderNameInput() {
-  try {
-    return String(document.querySelector('[data-report-builder-field="name"]')?.value || '').trim();
-  } catch {
-    return '';
-  }
-}
-
-async function saveCurrentCustomReport(options = {}) {
-  const { pinned, closeAfterSave = false, previewAfterSave = false } = options || {};
-  const builder = appState.analytics.filters?.customReportBuilder;
-  const liveName = getCurrentReportBuilderNameInput();
-  const name = builder && typeof builder === 'object'
-    ? String(liveName || builder.name || appState.analytics.filters?.customReportName || 'Custom Report').trim()
-    : window.prompt('Name this custom report view:', appState.analytics.filters?.customReportName || 'Custom Report');
-  if (!name) return;
-  const workspaceId = appState.workspace?.id || '';
-  const reportConfig = buildCurrentCustomReportConfig({ name, pinned });
-  const now = new Date().toISOString();
-  const localId = reportConfig.id || createLocalReportConfigId();
-  const localReport = {
-    ...reportConfig,
-    id: localId,
-    name,
-    createdAt: reportConfig.createdAt || now,
-    updatedAt: now,
-    config: {
-      ...(reportConfig.config || {}),
-      name,
-      builder: reportConfig.config?.builder && typeof reportConfig.config.builder === 'object'
-        ? {
-          ...reportConfig.config.builder,
-          name,
-          reportConfigId: localId
-        }
-        : reportConfig.config?.builder
-    },
-    _localOnly: !reportConfig.id
-  };
-  const returnToDashboard = closeAfterSave && !previewAfterSave;
-  const localReports = mergeSavedReportConfigs(
-    [localReport],
-    (appState.analytics.savedReports || []).filter((report) => String(report.id) !== String(reportConfig.id || localId))
-  );
-  persistLocalReportConfigs(workspaceId, localReports);
-  const localPreviewBuilder = localReport.config?.builder && typeof localReport.config.builder === 'object'
-    ? {
-      ...localReport.config.builder,
-      reportConfigId: localId,
-      name,
-      step: 1
-    }
-    : builder && typeof builder === 'object'
-      ? { ...builder, name, reportConfigId: localId, step: 1 }
-      : appState.analytics.filters?.customReportBuilder;
-  appState.analytics = {
-    ...appState.analytics,
-    actionStatus: 'saving-report',
-    reportConfigError: '',
-    savedReports: localReports,
-    filters: {
-      ...appState.analytics.filters,
-      reportId: 'custom_report',
-      view: 'detail',
-      customReportName: name,
-      customReportConfigId: returnToDashboard ? '' : localId,
-      customReportSavedMessage: previewAfterSave ? 'Report saved.' : '',
-      customReportEmailSentMessage: `${name} saved and added to the dashboard.`,
-      customReportsLoading: false,
-      customReportsError: '',
-      customReportsSearch: '',
-      customReportsStatus: '',
-      customReportsCreator: '',
-      customReportsSchedule: '',
-      customReportsDate: '',
-      customReportsRecipients: '',
-      customReportsSort: 'updated',
-      customReportCreateOpen: false,
-      customReportPreviewOpen: previewAfterSave ? true : returnToDashboard ? false : appState.analytics.filters?.customReportPreviewOpen,
-      customSetupOpen: false,
-      customReportReadOnly: previewAfterSave,
-      customSource: localReport.sourceId || reportConfig.sourceId || appState.analytics.filters?.customSource || 'stock',
-      customColumns: localReport.columns || reportConfig.columns || appState.analytics.filters?.customColumns || [],
-      visualizationType: localReport.visualizationType || reportConfig.visualizationType || appState.analytics.filters?.visualizationType || 'table',
-      groupBy: localReport.groupBy || reportConfig.groupBy || appState.analytics.filters?.groupBy || 'none',
-      openDropdown: '',
-      customReportBuilder: returnToDashboard ? null : localPreviewBuilder
-    }
-  };
-  renderApp();
-  try {
-    let saved;
-    try {
-      saved = await saveReportConfig(appState.workspace?.id, reportConfig);
-    } catch (error) {
-      const message = String(error?.message || '');
-      if (!reportConfig.id || !/not found|404|missing/i.test(message)) throw error;
-      saved = await saveReportConfig(appState.workspace?.id, {
-        ...reportConfig,
-        id: '',
-        config: {
-          ...(reportConfig.config || {}),
-          builder: reportConfig.config?.builder
-            ? { ...reportConfig.config.builder, reportConfigId: '' }
-            : reportConfig.config?.builder
-        }
-      });
-    }
-    let refreshedReports = [];
-    try {
-      refreshedReports = await fetchReportConfigs(appState.workspace?.id);
-    } catch {
-      refreshedReports = appState.analytics.savedReports || [];
-    }
-    const savedId = saved?.id || reportConfig.id || localId;
-    const savedReports = saved?.id
-      ? mergeSavedReportConfigs(
-        [saved],
-        refreshedReports.filter((report) => String(report.id) !== String(saved.id) && String(report.id) !== String(localId))
-      )
-      : mergeSavedReportConfigs(refreshedReports, [localReport]);
-    persistLocalReportConfigs(workspaceId, savedReports);
-    const savedReport = savedReports.find((report) => String(report.id) === String(savedId)) || saved || null;
-    const savedConfig = savedReport?.config || {};
-    const previewBuilder = savedReport
-      ? savedConfig.builder && typeof savedConfig.builder === 'object'
-        ? {
-          ...savedConfig.builder,
-          reportConfigId: savedReport.id || savedConfig.builder.reportConfigId || savedId,
-          name: savedReport.name || savedConfig.builder.name || name,
-          step: 1
-        }
-        : buildSavedCustomReportBuilder(savedReport, savedConfig, 'view')
-      : builder && typeof builder === 'object'
-        ? { ...builder, name, reportConfigId: savedId, step: 1 }
-        : appState.analytics.filters?.customReportBuilder;
-    appState.analytics = {
-      ...appState.analytics,
-      actionStatus: '',
-      savedReports,
-      filters: {
-        ...appState.analytics.filters,
-        reportId: 'custom_report',
-        view: 'detail',
-        customReportName: name,
-        customReportConfigId: returnToDashboard ? '' : savedId,
-        customReportSavedMessage: returnToDashboard ? '' : (savedId ? 'Report saved.' : 'Report saved locally.'),
-        customReportEmailSentMessage: `${name} saved and added to the dashboard.`,
-        customReportsLoading: false,
-        customReportsError: '',
-        customReportsSearch: '',
-        customReportsStatus: '',
-        customReportsCreator: '',
-        customReportsSchedule: '',
-        customReportsDate: '',
-        customReportsRecipients: '',
-        customReportsSort: 'updated',
-        customReportCreateOpen: false,
-        customReportPreviewOpen: previewAfterSave ? true : returnToDashboard ? false : appState.analytics.filters?.customReportPreviewOpen,
-        customSetupOpen: false,
-        customReportReadOnly: previewAfterSave,
-        customSource: savedReport?.sourceId || savedConfig.customSource || reportConfig.sourceId || appState.analytics.filters?.customSource || 'stock',
-        customColumns: savedReport?.columns || savedConfig.customColumns || reportConfig.columns || appState.analytics.filters?.customColumns || [],
-        visualizationType: savedReport?.visualizationType || savedConfig.visualizationType || reportConfig.visualizationType || appState.analytics.filters?.visualizationType || 'table',
-        groupBy: savedReport?.groupBy || savedConfig.groupBy || reportConfig.groupBy || appState.analytics.filters?.groupBy || 'none',
-        openDropdown: '',
-        customReportBuilder: returnToDashboard
-          ? null
-          : previewAfterSave
-            ? previewBuilder
-            : builder && typeof builder === 'object'
-              ? { ...builder, name, reportConfigId: savedId }
-              : appState.analytics.filters?.customReportBuilder
-      }
-    };
-    renderApp();
-  } catch (error) {
-    const message = error.message || 'Could not sync custom report.';
-    appState.analytics = {
-      ...appState.analytics,
-      actionStatus: '',
-      reportConfigError: `Report saved locally. Cloud sync failed: ${message}`,
-      savedReports: localReports,
-      filters: {
-        ...appState.analytics.filters,
-        customReportEmailSentMessage: `${name} saved locally and added to the dashboard.`
-      }
-    };
-    renderApp();
-  }
-}
-
-window.__kcpReportBuilderSave = (action = 'save') => saveCurrentCustomReport(
-  action === 'preview'
-    ? { previewAfterSave: true }
-    : { closeAfterSave: true }
-);
-
-async function togglePinnedCustomReport(reportId = '') {
-  const report = findSavedReportConfig(reportId);
-  if (!report) return;
-  const workspaceId = appState.workspace?.id || '';
-  const nextReport = { ...report, pinned: !report.pinned, updatedAt: new Date().toISOString() };
-  const localReports = replaceSavedReportConfig(reportId, nextReport);
-  persistLocalReportConfigs(workspaceId, localReports);
-  appState.analytics = { ...appState.analytics, savedReports: localReports, actionStatus: 'saving-report', reportConfigError: '' };
-  renderApp();
-  try {
-    await saveReportConfig(workspaceId, nextReport);
-    await refreshAnalyticsReportConfigs(workspaceId);
-  } catch (error) {
-    appState.analytics = {
-      ...appState.analytics,
-      actionStatus: '',
-      savedReports: localReports,
-      reportConfigError: `Pinned report updated locally. Cloud sync failed: ${error.message || 'Could not update pinned report.'}`
-    };
-    renderApp();
-  }
-}
-
-async function removeSavedCustomReport(reportId = '') {
-  if (!reportId) return;
-  const confirmed = window.confirm('Delete this saved report view?');
-  if (!confirmed) return;
-  const workspaceId = appState.workspace?.id || '';
-  const report = findSavedReportConfig(reportId);
-  const id = report?.id || reportId;
-  const localReports = (appState.analytics.savedReports || []).filter((item) => !(
-    String(item.id || '') === String(id) ||
-    String(item.reportConfigId || '') === String(reportId) ||
-    String(item.config?.builder?.reportConfigId || '') === String(reportId)
-  ));
-  persistLocalReportConfigs(workspaceId, localReports);
-  appState.analytics = { ...appState.analytics, savedReports: localReports, actionStatus: 'saving-report', reportConfigError: '' };
-  renderApp();
-  try {
-    await deleteReportConfig(workspaceId, id);
-    await refreshAnalyticsReportConfigs(workspaceId);
-  } catch (error) {
-    appState.analytics = {
-      ...appState.analytics,
-      actionStatus: '',
-      savedReports: localReports,
-      reportConfigError: `Report removed locally. Cloud sync failed: ${error.message || 'Could not delete saved report.'}`
-    };
-    renderApp();
-  }
-}
-
-async function manageSavedCustomReport(reportId = '', action = '', payload = {}) {
-  const id = String(reportId || '').trim();
-  const report = findSavedReportConfig(id);
-  if (!id || !report) return;
-  const workspaceId = appState.workspace?.id || '';
-  const actionKey = String(action || '').trim();
-  const cleanName = String(payload.name || report.name || 'Custom Report').trim() || 'Custom Report';
-  const recipients = Array.isArray(payload.recipients)
-    ? payload.recipients
-    : String(payload.recipients || '')
-        .split(/[,;\n]/)
-        .map((item) => item.trim())
-        .filter(Boolean);
-  const baseConfig = {
-    ...report.config,
-    ...(payload.config || {})
-  };
-  const nextPatch = {
-    ...payload,
-    name: cleanName,
-    recipients,
-    recipientCount: Number(payload.recipientCount ?? recipients.length ?? report.recipientCount ?? 0) || 0,
-    config: {
-      ...baseConfig,
-      name: cleanName,
-      description: payload.description ?? report.description ?? baseConfig.description ?? '',
-      status: payload.status ?? report.status ?? baseConfig.status ?? 'Active',
-      recipients,
-      recipientCount: Number(payload.recipientCount ?? recipients.length ?? report.recipientCount ?? 0) || 0
-    }
-  };
-  const now = new Date().toISOString();
-  const localReport = actionKey === 'duplicate'
-    ? {
-      ...report,
-      ...nextPatch,
-      id: createLocalReportConfigId(),
-      name: cleanName,
-      pinned: false,
-      favourite: false,
-      createdAt: now,
-      updatedAt: now,
-      config: {
-        ...report.config,
-        ...nextPatch.config,
-        name: cleanName,
-        status: nextPatch.status ?? report.status ?? report.config?.status ?? 'Active'
-      },
-      _localOnly: true
-    }
-    : {
-      ...report,
-      ...nextPatch,
-      id: report.id || id,
-      updatedAt: now,
-      config: {
-        ...report.config,
-        ...nextPatch.config,
-        name: cleanName,
-        status: nextPatch.status ?? report.status ?? report.config?.status ?? 'Active'
-      }
-    };
-  const localReports = actionKey === 'duplicate'
-    ? mergeSavedReportConfigs([localReport], appState.analytics.savedReports || [])
-    : replaceSavedReportConfig(id, localReport);
-  persistLocalReportConfigs(workspaceId, localReports);
-
-  appState.analytics = {
-    ...appState.analytics,
-    savedReports: localReports,
-    actionStatus: 'saving-report',
-    reportConfigError: '',
-    filters: {
-      ...appState.analytics.filters,
-      customReportsLoading: true,
-      customReportEmailSentMessage: ''
-    }
-  };
-  renderApp();
-
-  try {
-    if (actionKey === 'duplicate') {
-      const duplicate = {
-        ...report,
-        ...nextPatch,
-        id: '',
-        name: cleanName,
-        createdAt: '',
-        updatedAt: '',
-        pinned: false,
-        favourite: false,
-        config: {
-          ...report.config,
-          ...nextPatch.config,
-          name: cleanName,
-          status: nextPatch.status ?? report.status ?? report.config?.status ?? 'Active'
-        }
-      };
-      delete duplicate.reportConfigId;
-      await saveReportConfig(workspaceId, duplicate);
-    } else {
-      await saveReportConfig(workspaceId, {
-        ...report,
-        ...nextPatch,
-        id: report.id || id,
-        config: {
-          ...report.config,
-          ...nextPatch.config,
-          name: cleanName,
-          status: nextPatch.status ?? report.status ?? report.config?.status ?? 'Active'
-        }
-      });
-    }
-    await refreshAnalyticsReportConfigs(workspaceId);
-    appState.analytics = {
-      ...appState.analytics,
-      actionStatus: '',
-      filters: {
-        ...appState.analytics.filters,
-        customReportsLoading: false,
-        customReportsError: '',
-        customReportEmailId: '',
-        customReportManageId: '',
-        customReportManageAction: '',
-        customReportManageName: '',
-        customReportManageDescription: '',
-        customReportManageRecipients: '',
-        customReportManageScheduleType: '',
-        customReportManageScheduleLabel: '',
-        customReportManageNextSendAt: '',
-        openDropdown: '',
-        customReportEmailSentMessage: customReportManageSuccessMessage(actionKey, cleanName)
-      }
-    };
-    renderApp();
-  } catch (error) {
-    appState.analytics = {
-      ...appState.analytics,
-      actionStatus: '',
-      savedReports: localReports,
-      reportConfigError: `Report updated locally. Cloud sync failed: ${error.message || 'Could not update saved report.'}`,
-      filters: {
-        ...appState.analytics.filters,
-        customReportsLoading: false,
-        customReportEmailId: '',
-        customReportManageId: '',
-        customReportManageAction: '',
-        customReportEmailSentMessage: customReportManageSuccessMessage(actionKey, cleanName)
-      }
-    };
-    renderApp();
-  }
-}
-
-function customReportManageSuccessMessage(action = '', name = 'Report') {
-  const label = String(name || 'Report').trim() || 'Report';
-  if (action === 'email-now') return `${label} queued for email delivery.`;
-  if (action === 'duplicate') return `${label} was duplicated.`;
-  if (action === 'schedule') return `${label} schedule saved.`;
-  if (action === 'recipients') return `${label} recipients saved.`;
-  if (action === 'share') return `${label} read-only link enabled and copied.`;
-  if (action === 'archive') return `${label} archived.`;
-  return `${label} saved.`;
-}
-
-function buildSavedCustomReportBuilder(report = {}, config = {}, mode = 'view') {
-  const sourceId = report.sourceId || config.customSource || config.sourceId || 'inventory';
-  const columns = Array.isArray(report.columns) && report.columns.length
-    ? report.columns
-    : Array.isArray(config.customColumns)
-      ? config.customColumns
-      : [];
-  const groupBy = report.groupBy || config.groupBy || 'none';
-  return {
-    reportConfigId: report.id || config.reportConfigId || '',
-    name: report.name || config.name || 'Custom Report',
-    title: config.builder?.title || report.name || config.name || 'Custom Report',
-    sourceId,
-    sourceIds: Array.isArray(report.sourceIds) && report.sourceIds.length
-      ? report.sourceIds
-      : Array.isArray(config.sourceIds) && config.sourceIds.length
-        ? config.sourceIds
-        : [sourceId],
-    layout: {
-      filters: Array.isArray(config.builder?.layout?.filters) ? config.builder.layout.filters : [],
-      columns: columns.map((column) => `${sourceId}::${column}`),
-      values: Array.isArray(config.builder?.layout?.values) ? config.builder.layout.values : [],
-      rows: groupBy && groupBy !== 'none' ? [`${sourceId}::${groupBy}`] : []
-    },
-    step: mode === 'view' ? 1 : 0,
-    calculatedFields: Array.isArray(config.builder?.calculatedFields) ? config.builder.calculatedFields : [],
-    formattingRules: Array.isArray(config.builder?.formattingRules) ? config.builder.formattingRules : [],
-    filterRules: Array.isArray(config.builder?.filterRules) ? config.builder.filterRules : [],
-    options: config.builder?.options && typeof config.builder.options === 'object' ? config.builder.options : {},
-    description: config.description || report.description || ''
-  };
-}
-
-function openSavedCustomReport(reportId = '', mode = 'view') {
-  const report = findSavedReportConfig(reportId);
-  if (!report) return;
-  const config = report.config || {};
-  const builder = config.builder && typeof config.builder === 'object'
-    ? {
-        ...config.builder,
-        reportConfigId: report.id || config.builder.reportConfigId || '',
-        name: report.name || config.builder.name || 'Custom Report',
-        step: mode === 'view' ? 1 : 0
-      }
-    : buildSavedCustomReportBuilder(report, config, mode);
-  updateAnalyticsFilters({
-    reportId: 'custom_report',
-    view: 'detail',
-    ...(report.filters || {}),
-    customSource: report.sourceId || config.customSource || 'stock',
-    customColumns: report.columns || config.customColumns || [],
-    visualizationType: report.visualizationType || config.visualizationType || 'table',
-    groupBy: report.groupBy || config.groupBy || 'none',
-    customReportName: report.name || 'Custom Report',
-    customReportConfigId: report.id || '',
-    customReportBuilder: builder,
-    customReportPrompt: config.prompt || '',
-    customReportBlocks: Array.isArray(config.customReportBlocks) ? config.customReportBlocks : [],
-    customReportEod: config.eodEnabled === true,
-    customReportRecipients: config.eodRecipients || '',
-    customReportSchedule: config.eodSchedule || 'Daily EOD',
-    customReportPreviewOpen: true,
-    customReportReadOnly: mode === 'view',
-    customReportCreateOpen: false,
-    customSetupOpen: false,
-    page: 1,
-    openDropdown: ''
-  });
-}
-
-function applyCustomReportTemplate(template = {}) {
-  const templateBuilder = template.builder && typeof template.builder === 'object'
-    ? {
-      ...template.builder,
-      name: template.name || 'Custom Report',
-      title: template.name || 'Custom Report',
-      description: template.description || '',
-      templateId: template.id || '',
-      sourceId: template.builder.sourceId || template.sourceId || 'inventory',
-      visualizationType: template.builder.visualizationType || template.visualizationType || 'table',
-      reportConfigId: '',
-      options: {
-        ...(template.builder.options || {}),
-        shareEnabled: false
-      }
-    }
-    : null;
-  updateAnalyticsFilters({
-    reportId: 'custom_report',
-    view: 'detail',
-    customSource: template.sourceId || 'stock',
-    customColumns: template.columns || [],
-    visualizationType: template.visualizationType || 'table',
-    groupBy: template.groupBy || 'none',
-    customReportName: template.name || 'Custom Report',
-    customReportPrompt: template.prompt || '',
-    customReportBlocks: Array.isArray(template.customReportBlocks) ? template.customReportBlocks : [],
-    customReportBuilder: templateBuilder,
-    customReportConfigId: '',
-    customReportReadOnly: false,
-    page: 1,
-    customReportPreviewOpen: true,
-    customReportCreateOpen: false,
-    customSetupOpen: false,
-    openDropdown: ''
-  });
-}
-
-function openLowStockAlertsReport() {
-  appState.analytics = {
-    ...appState.analytics,
-    filters: {
-      ...appState.analytics.filters,
-      reportId: 'low_stock',
-      view: 'detail',
-      page: 1,
-      openDropdown: ''
-    }
-  };
-
-  if (appState.route.active === 'analytics') {
-    renderApp();
-    return;
-  }
-
-  navigateTo('analytics');
+function openLowStockAlerts() {
+  navigateTo('ingredients');
 }
 
 function updateMenuFilters(nextFilters) {
@@ -3782,97 +2700,6 @@ async function scanMenuBarcode() {
   } catch (error) {
     showMenuToast(error.message || 'Could not start the barcode scanner.', 'error');
   }
-}
-
-function updateDashboardRange(range) {
-  const nextRange = normalizeDashboardRange(range);
-  if (appState.dashboardRange === nextRange && !appState.dashboard.rangeLoading) return;
-
-  appState.dashboardRange = nextRange;
-  appState.dashboard = {
-    ...appState.dashboard,
-    rangeLoading: true
-  };
-
-  try {
-    localStorage.setItem(DASHBOARD_RANGE_STORAGE_KEY, nextRange);
-  } catch (error) {
-    console.warn('[Dashboard] Could not persist range preference:', error);
-  }
-
-  syncDashboardRangeUrl(nextRange);
-
-  renderApp();
-
-  if (appState.workspace?.id) {
-    startDashboardSubscription(appState.workspace.id);
-    return;
-  }
-
-  if (dashboardRangeRefreshTimer) window.clearTimeout(dashboardRangeRefreshTimer);
-  dashboardRangeRefreshTimer = window.setTimeout(() => {
-    appState.dashboard = {
-      ...appState.dashboard,
-      rangeLoading: false
-    };
-    renderApp();
-    dashboardRangeRefreshTimer = null;
-  }, 160);
-}
-
-function updateDashboardSite(siteId = '') {
-  const nextSiteId = String(siteId || '').trim();
-  if (appState.dashboardSiteId === nextSiteId && !appState.dashboard.rangeLoading) return;
-
-  appState.dashboardSiteId = nextSiteId;
-  appState.dashboard = {
-    ...appState.dashboard,
-    rangeLoading: true
-  };
-
-  renderApp();
-
-  if (appState.workspace?.id) {
-    startDashboardSubscription(appState.workspace.id);
-  }
-}
-
-function updateDashboardLocation(locationId = '') {
-  appState.dashboardLocationId = String(locationId || '').trim();
-  appState.dashboard = { ...appState.dashboard, rangeLoading: true };
-  renderApp();
-  if (appState.workspace?.id) {
-    startDashboardSubscription(appState.workspace.id);
-  }
-}
-
-function setDashboardChartTab(tab = 'costOfSales') {
-  const next = ['costOfSales', 'stockValue', 'wastage'].includes(String(tab)) ? String(tab) : 'costOfSales';
-  if (appState.dashboardChartTab === next) return;
-  appState.dashboardChartTab = next;
-  // Series are already loaded in metrics.trends — no re-fetch, just re-render.
-  renderDashboardOnly();
-}
-
-function refreshDashboardDirect() {
-  if (!appState.workspace?.id) return;
-
-  pendingDashboardSnapshot = null;
-  if (dashboardSnapshotRenderTimer) {
-    window.clearTimeout(dashboardSnapshotRenderTimer);
-    dashboardSnapshotRenderTimer = null;
-  }
-
-  try {
-    sessionStorage.removeItem(DASHBOARD_RANGE_STORAGE_KEY);
-    localStorage.removeItem(DASHBOARD_RANGE_STORAGE_KEY);
-  } catch (error) {
-    console.warn('[Dashboard] Could not clear dashboard cache keys:', error);
-  }
-
-  appState.dashboardRange = '7';
-  appState.source = { settings: appState.source?.settings || {} };
-  startDashboardSubscription(appState.workspace.id);
 }
 
 function updateMenuSelection(itemId, selected) {
@@ -4418,10 +3245,10 @@ async function importMenuFile(file) {
 
   try {
     const rows = await parseDataFile(file, { preferredSheetNames: ['Menu_Import'] });
-    const { items, report } = mapLegacyMenuRows(rows);
+    const { items, review } = mapLegacyMenuRows(rows);
 
     if (!items.length) {
-      throw new Error(formatImportFailure('No valid menu catalogue rows were found in this file.', report.errors));
+      throw new Error(formatImportFailure('No valid menu catalogue rows were found in this file.', review.errors));
     }
 
     const { importMenuItems } = await import('./services/menuService.js');
@@ -4432,16 +3259,16 @@ async function importMenuFile(file) {
       actionStatus: '',
       actionError: ''
     };
-    const skippedCount = Number(report.errors.length || result.skippedCount || 0);
+    const skippedCount = Number(review.errors.length || result.skippedCount || 0);
     if (skippedCount) {
       showImportNotification({
         moduleLabel: 'Menu Import',
         title: 'Menu Import Needs Attention',
         message: `${result.importedCount || 0} item${Number(result.importedCount || 0) === 1 ? '' : 's'} imported, but ${skippedCount} row${skippedCount === 1 ? '' : 's'} need fixing. Confirm this message, fix the errors, and try again.`,
-        errors: report.errors,
+        errors: review.errors,
         importedCount: result.importedCount || 0,
         skippedCount,
-        totalRows: report.totalRows,
+        totalRows: review.totalRows,
         tone: 'warning',
         confirmLabel: 'Confirm & Fix Errors'
       });
@@ -4581,6 +3408,62 @@ async function scanRecipeIngredientBarcode(target = 'ingredient') {
   }
 }
 
+async function scanPurchaseOrderBarcode() {
+  try {
+    const { openBarcodeScanner } = await import('./services/barcodeScanner.js');
+    await openBarcodeScanner({
+      title: 'Scan Purchase Order Barcode',
+      helper: 'Scan a stock item barcode to filter the purchase order stock picker.',
+      onScan: (code) => {
+        const barcode = String(code || '').trim();
+        if (!barcode) return;
+        appState.purchaseOrders = {
+          ...appState.purchaseOrders,
+          filters: {
+            ...appState.purchaseOrders.filters,
+            lineQuery: barcode,
+            openDropdown: ''
+          }
+        };
+        renderApp();
+        showPurchaseOrderToast(`Barcode ${barcode} loaded into purchase order stock search.`, 'success');
+      }
+    });
+  } catch (error) {
+    showPurchaseOrderToast(error.message || 'Could not start the purchase order barcode scanner.', 'error');
+  }
+}
+
+async function scanAdjustmentBarcode() {
+  try {
+    const { openBarcodeScanner } = await import('./services/barcodeScanner.js');
+    await openBarcodeScanner({
+      title: 'Scan Adjustment Barcode',
+      helper: 'Scan a stock item barcode to filter the adjustment stock picker.',
+      onScan: (code) => {
+        const barcode = String(code || '').trim();
+        if (!barcode) return;
+        appState.adjustments = {
+          ...appState.adjustments,
+          filters: {
+            ...appState.adjustments.filters,
+            adjustmentWorkflow: 'bulk',
+            overlay: 'stock',
+            stockSearch: barcode,
+            stockPage: 1,
+            selectedStockIds: [],
+            openDropdown: ''
+          }
+        };
+        renderApp();
+        showAdjustmentToast(`Barcode ${barcode} loaded into adjustment stock search.`, 'success');
+      }
+    });
+  } catch (error) {
+    showAdjustmentToast(error.message || 'Could not start the adjustment barcode scanner.', 'error');
+  }
+}
+
 async function scanGrvBarcode() {
   try {
     const { openBarcodeScanner } = await import('./services/barcodeScanner.js');
@@ -4684,8 +3567,7 @@ function openRecipeSetupFromMenu(itemId) {
   // loaded), the "Add Recipe" action appeared to do nothing.
   const recipeItem = findRecipeItemForTarget(appState.recipes.items || [], target);
   const fallbackItem = recipeItem
-    || findRecipeItemForTarget(appState.menu.items || [], target)
-    || findRecipeItemForTarget(appState.analytics?.source?.products || [], target);
+    || findRecipeItemForTarget(appState.menu.items || [], target);
   const id = String(recipeItem?.id || fallbackItem?.id || target.id || '').trim();
   const name = String(recipeItem?.name || fallbackItem?.name || target.name || '').trim();
 
@@ -5375,6 +4257,7 @@ async function confirmRecipeDelete() {
         ...appState.recipes,
         items: refreshedRecipeData?.items || previousRecipeItems,
         ingredients: refreshedRecipeData?.ingredients || appState.recipes.ingredients,
+        locations: refreshedRecipeData?.locations || appState.recipes.locations || [],
         confirmDelete: null,
         actionStatus: '',
         actionError: blockingError.message || 'Could not delete selected recipes.'
@@ -5396,6 +4279,7 @@ async function confirmRecipeDelete() {
       ...appState.recipes,
       items: nextRecipeItems,
       ingredients: refreshedRecipeData?.ingredients || appState.recipes.ingredients,
+      locations: refreshedRecipeData?.locations || appState.recipes.locations || [],
       selectedIds: (appState.recipes.selectedIds || []).filter((id) => !affectedIds.has(String(id))),
       confirmDelete: null,
       actionStatus: '',
@@ -5506,10 +4390,10 @@ async function importRecipeFile(file) {
     if (!rows.length) {
       throw new Error('The file appears to be empty or could not be read. Make sure you\'re importing a Recipe Import template (.csv or .xlsx) that has been filled out.');
     }
-    const { recipes, report, missingIngredients } = mapLegacyRecipeRows(rows);
+    const { recipes, review, missingIngredients } = mapLegacyRecipeRows(rows);
     if (!recipes.length) {
-      const errorDetail = report.errors.length
-        ? formatImportErrors(report.errors, 8)
+      const errorDetail = review.errors.length
+        ? formatImportErrors(review.errors, 8)
         : 'Make sure the file uses the Recipe Import template with Product_Name, Ingredient_Name, and Quantity_Needed columns. The recipe builder export is not an import template.';
       throw new Error(`No valid recipe rows were found in this file. ${errorDetail}`);
     }
@@ -5522,7 +4406,7 @@ async function importRecipeFile(file) {
       actionError: ''
     };
     const importErrors = [
-      ...(report.errors || []),
+      ...(review.errors || []),
       ...((result.errors || []).map((entry) => ({
         code: entry.code || 'ERR_RECIPE_IMPORT',
         row: entry.row || '',
@@ -5538,7 +4422,7 @@ async function importRecipeFile(file) {
         errors: importErrors,
         importedCount: result.importedCount || 0,
         skippedCount,
-        totalRows: report.totalRows,
+        totalRows: review.totalRows,
         tone: 'warning',
         confirmLabel: 'Confirm & Fix Errors'
       });
@@ -5604,7 +4488,6 @@ async function exportRecipeTemplate(format = 'csv') {
 
   if (normalizedFormat === 'xlsx') {
     try {
-      const { downloadStyledRecipeTemplateXlsx } = await import('./services/dataService.js');
       const products = [...new Set(
         (appState.recipes.items || []).map((item) => item.name || '').filter(Boolean)
       )].sort((a, b) => a.localeCompare(b));
@@ -5669,10 +4552,10 @@ function updateStockFilters(nextFilters) {
   renderApp();
 }
 
-function dismissStockImportReport() {
+function dismissStockImportReview() {
   appState.stock = {
     ...appState.stock,
-    importReport: null
+    importReview: null
   };
   renderApp();
 }
@@ -5815,6 +4698,10 @@ function addStockRecipeLine(itemId) {
     showStockToast('Stock item could not be found.', 'error');
     return;
   }
+  if (isNonStockRecipeIngredient(ingredient)) {
+    showStockToast('Non-stock items can be counted, but they cannot be assigned as recipe ingredients.', 'warning');
+    return;
+  }
 
   const recipe = normalizeStockDraftRecipe(current.recipe);
   if (recipe.some((line) => String(line.ingId) === ingredientId)) return;
@@ -5837,6 +4724,16 @@ function addStockRecipeLine(itemId) {
     }
   };
   renderApp();
+}
+
+function isNonStockRecipeIngredient(item = {}) {
+  const type = String(item.itemType || item.stockItemType || item.specificationType || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_');
+  if (['recipe_source', 'non_stock', 'virtual'].includes(type)) return true;
+  const category = String(item.category || '').toLowerCase();
+  return category.includes('recipe source') || category.includes('non-stock') || category.includes('non stock') || category.includes('virtual');
 }
 
 function removeStockRecipeLine(index) {
@@ -5978,6 +4875,7 @@ function updateStockDraftField(field, value) {
     nextItem.isManufactured = nextType === 'manufactured';
     if (nextType !== 'sub_recipe') nextItem.isSubRecipe = false;
     if (nextType === 'sub_recipe') nextItem.isSubRecipe = true;
+    nextItem.isStocked = nextType !== 'sub_recipe';
   }
 
   if (key === 'cost') {
@@ -6192,6 +5090,17 @@ async function saveStockItem(item) {
     return;
   }
 
+  const duplicateNameError = getDuplicateStockItemNameError(item, appState.stock.items || []);
+  if (duplicateNameError) {
+    appState.stock = {
+      ...appState.stock,
+      actionStatus: '',
+      actionError: duplicateNameError
+    };
+    renderApp();
+    return;
+  }
+
   appState.stock = {
     ...appState.stock,
     actionStatus: 'saving',
@@ -6226,6 +5135,42 @@ async function saveStockItem(item) {
   } finally {
     hideGlobalSaving();
   }
+}
+
+function getDuplicateStockItemNameError(item = {}, stockItems = []) {
+  const nextName = String(item.name || '').trim();
+  const nextKey = normalizeStockItemDuplicateName(nextName);
+  if (!nextKey) return '';
+
+  const currentIds = new Set(
+    String(item.id || '')
+      .split(',')
+      .map((id) => id.trim())
+      .filter(Boolean)
+  );
+
+  const duplicate = (stockItems || []).find((entry = {}) => {
+    if (normalizeStockItemDuplicateName(entry.name) !== nextKey) return false;
+    const entryIds = String(entry.mergedIds || entry.id || '')
+      .split(',')
+      .map((id) => id.trim())
+      .filter(Boolean);
+    if (!currentIds.size) return true;
+    return !entryIds.some((id) => currentIds.has(id));
+  });
+
+  return duplicate
+    ? `A stock item named "${nextName}" already exists. Stock item names must be unique.`
+    : '';
+}
+
+function normalizeStockItemDuplicateName(value = '') {
+  return String(value || '')
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function getStockUomConfigurationError(configurations = []) {
@@ -6529,7 +5474,7 @@ function requestResetStockTotals(mode = 'reporting_stock') {
     renderApp();
     return;
   }
-  const resetMode = mode === 'reporting' ? 'reporting' : 'reporting_stock';
+  const resetMode = mode === 'reporting' || mode === 'dashboard' ? 'reporting' : 'reporting_stock';
   appState.settings = {
     ...appState.settings,
     confirmResetTotals: { mode: resetMode, confirmText: '' },
@@ -6550,7 +5495,7 @@ function updateResetTotalsConfirmText(value = '') {
   };
   // Update the confirm button's disabled state directly — calling renderApp() here
   // destroys and recreates the DOM, collapsing the input and losing focus on every keystroke.
-  const resetMode = appState.settings.confirmResetTotals?.mode === 'reporting' ? 'reporting' : 'reporting_stock';
+  const resetMode = appState.settings.confirmResetTotals?.mode === 'reporting' || appState.settings.confirmResetTotals?.mode === 'dashboard' ? 'reporting' : 'reporting_stock';
   const requiredText = resetMode === 'reporting' ? 'Reset Reporting' : 'Reset Reporting and Stock Values';
   const btn = document.querySelector('[data-settings-confirm-reset-totals]');
   if (btn) btn.disabled = confirmText !== requiredText || appState.settings.actionStatus === 'resetting';
@@ -6576,7 +5521,7 @@ async function confirmResetStockTotals() {
     renderApp();
     return;
   }
-  const resetMode = appState.settings.confirmResetTotals?.mode === 'reporting'
+  const resetMode = appState.settings.confirmResetTotals?.mode === 'reporting' || appState.settings.confirmResetTotals?.mode === 'dashboard'
     ? 'reporting'
     : 'reporting_stock';
   const requiredText = resetMode === 'reporting'
@@ -6598,8 +5543,8 @@ async function confirmResetStockTotals() {
   renderApp();
 
   try {
-    const { resetWorkspaceReporting } = await import('./services/stockService.js');
-    const result = await resetWorkspaceReporting(appState.workspace?.id, {
+    const { resetWorkspaceReportingHistory } = await import('./services/stockService.js');
+    const result = await resetWorkspaceReportingHistory(appState.workspace?.id, {
       includeStockOnHand: resetMode === 'reporting_stock'
     });
     appState.settings = {
@@ -6609,15 +5554,15 @@ async function confirmResetStockTotals() {
       actionError: ''
     };
     const toastMessage = resetMode === 'reporting_stock'
-      ? `Reporting reset and ${result.stockResetCount || 0} stock item${Number(result.stockResetCount || 0) === 1 ? '' : 's'} zeroed.`
-      : 'Reporting, dashboard summaries, and report totals reset.';
+      ? `Reporting data reset and ${result.stockResetCount || 0} stock item${Number(result.stockResetCount || 0) === 1 ? '' : 's'} zeroed.`
+      : 'Reporting data reset.';
     showSettingsToast(toastMessage, 'success');
     await selectWorkspace(appState.workspace);
   } catch (error) {
     appState.settings = {
       ...appState.settings,
       actionStatus: '',
-      actionError: error.message || 'Could not reset reporting.'
+      actionError: error.message || 'Could not reset reporting data.'
     };
     renderApp();
   }
@@ -6629,15 +5574,20 @@ async function importStockFile(file) {
     ...appState.stock,
     actionStatus: 'importing',
     actionError: '',
-    importReport: null
+    importReview: null
   };
   renderApp();
 
   try {
+    const { detectImportFileType, IMPORT_TYPES } = await import('./services/locationCostingService.js');
+    const fileType = await detectImportFileType(file);
+    if (fileType === IMPORT_TYPES.LOCATION_COSTING_IMPORT) {
+      throw new Error('This file looks like a Location Costing Import. Please upload it in the Location Costing Import section.');
+    }
     const rows = await parseDataFile(file, { preferredSheetNames: ['Stock_Import'] });
-    const { items, report } = mapLegacyStockRows(rows);
-    if (!items.length && !report.errors.length && !report.skippedCount) throw new Error('No valid stock item rows were found in this file.');
-    const ignoredAdjustmentCount = (report.errors || []).filter((entry) => entry.code === 'WARN_STOCK_ADJUSTMENT_IGNORED').length;
+    const { items, review } = mapLegacyStockRows(rows);
+    if (!items.length && !review.errors.length && !review.skippedCount) throw new Error('No valid stock item rows were found in this file.');
+    const ignoredAdjustmentCount = (review.errors || []).filter((entry) => entry.code === 'WARN_STOCK_ADJUSTMENT_IGNORED').length;
 
     let result = { importedCount: 0 };
     if (items.length) {
@@ -6648,17 +5598,17 @@ async function importStockFile(file) {
       });
     }
     const nextReport = {
-      ...report,
+      ...review,
       importedCount: result.importedCount || 0,
-      skippedCount: report.skippedCount || 0
+      skippedCount: review.skippedCount || 0
     };
     const skippedCount = Number(nextReport.skippedCount || 0);
-    const hasReportEntries = skippedCount > 0 || ignoredAdjustmentCount > 0 || (report.errors || []).length > 0;
+    const hasReportEntries = skippedCount > 0 || ignoredAdjustmentCount > 0 || (review.errors || []).length > 0;
     appState.stock = {
       ...appState.stock,
       actionStatus: '',
       actionError: '',
-      importReport: hasReportEntries ? nextReport : null
+      importReview: hasReportEntries ? nextReport : null
     };
     if (hasReportEntries) {
       renderApp();
@@ -6670,7 +5620,7 @@ async function importStockFile(file) {
       ...appState.stock,
       actionStatus: '',
       actionError: '',
-      importReport: null
+      importReview: null
     };
     showImportNotification({
       moduleLabel: 'Stock Import',
@@ -6681,6 +5631,239 @@ async function importStockFile(file) {
       confirmLabel: 'Confirm & Try Again'
     });
   }
+}
+
+
+async function exportLocationCostingSheet(format = 'xlsx') {
+  const normalizedFormat = String(format || 'xlsx').toLowerCase() === 'pdf' ? 'pdf' : 'xlsx';
+  const locationId = String(appState.stock.filters?.locationCostingLocationId || '').trim();
+  if (!locationId) {
+    showStockToast('Please select a location before exporting or importing location costs.', 'warning');
+    return;
+  }
+  appState.stock = { ...appState.stock, actionStatus: 'exporting-location-costing', actionError: '' };
+  renderApp();
+  try {
+    const locations = appState.stock.locations || appState.locations?.items || [];
+    if (normalizedFormat === 'pdf') {
+      const result = await exportLocationCostingPdf({
+        stockItems: appState.stock.items || [],
+        locations,
+        locationId,
+        workspaceName: appState.workspace?.siteName || appState.workspace?.name || 'KCP'
+      });
+      appState.stock = {
+        ...appState.stock,
+        actionStatus: '',
+        actionError: '',
+        filters: {
+          ...appState.stock.filters,
+          locationCostingPickerKind: '',
+          locationCostingLocationIdDropdownSearch: '',
+          openDropdown: ''
+        }
+      };
+      showStockToast(`Location cost PDF exported for ${result.locationName}.`, 'success');
+      return;
+    }
+
+    const { exportLocationCostingTemplate } = await import('./services/locationCostingService.js');
+    const result = await exportLocationCostingTemplate({
+      stockItems: appState.stock.items || [],
+      locations,
+      locationId,
+      workspaceName: appState.workspace?.siteName || appState.workspace?.name || 'KCP'
+    });
+    appState.stock = {
+      ...appState.stock,
+      actionStatus: '',
+      actionError: '',
+      filters: {
+        ...appState.stock.filters,
+        locationCostingPickerKind: '',
+        locationCostingLocationIdDropdownSearch: '',
+        openDropdown: ''
+      }
+    };
+    showStockToast(`Location cost sheet exported for ${result.locationName}.`, 'success');
+  } catch (error) {
+    appState.stock = { ...appState.stock, actionStatus: '', actionError: error.message || 'Could not export location costs.' };
+    showStockToast(error.message || 'Could not export location costs.', 'error');
+  }
+}
+
+async function exportLocationCostingPdf({ stockItems = [], locations = [], locationId = '', workspaceName = 'KCP' } = {}) {
+  const selectedLocation = (locations || []).find((location) => String(location.id || location.locationId || '') === String(locationId || ''));
+  if (!selectedLocation) throw new Error('Please select a location before exporting or importing location costs.');
+  const locationName = getLocationNameForCostingExport(selectedLocation);
+  const columns = ['Item Name', 'SKU / Barcode', 'Category', 'UOM', 'Cost Ex VAT'];
+  const rows = (stockItems || [])
+    .filter((item) => item && typeof item === 'object' && item.id)
+    .slice()
+    .sort((left, right) => {
+      const categoryCompare = String(left.category || '').localeCompare(String(right.category || ''));
+      if (categoryCompare !== 0) return categoryCompare;
+      return String(left.name || '').localeCompare(String(right.name || ''));
+    })
+    .map((item) => ({
+      'Item Name': item.name || '',
+      'SKU / Barcode': getStockCostingSkuBarcode(item),
+      Category: item.category || item.inventoryCategory || 'General',
+      UOM: item.unit || item.uom || 'ea',
+      'Cost Ex VAT': formatCurrency(resolveStockLocationCostForExport(item, locationId))
+    }));
+
+  await exportObjectRows({
+    format: 'pdf',
+    filename: `kcp-location-costing-${slugifyExportName(locationName)}-${getExportTimestamp()}`,
+    sheetName: 'Location Costing',
+    title: 'Location Costing Report',
+    subtitle: `${workspaceName || 'KCP'} | ${locationName} | ${new Date().toLocaleString('en-ZA')}`,
+    rows,
+    columns,
+    summaryRows: [
+      { label: 'Report', value: 'Location Costing' },
+      { label: 'Location', value: locationName },
+      { label: 'Items', value: rows.length },
+      { label: 'Generated', value: new Date().toLocaleString('en-ZA') }
+    ],
+    branding: getPdfBranding()
+  });
+  return { rowCount: rows.length, locationName };
+}
+
+function resolveStockLocationCostForExport(item = {}, locationId = '') {
+  const costs = item.locationCosts || item.locationPrices || item.locationPricing || item.pricesByLocation || {};
+  const entry = costs[String(locationId || '')];
+  if (entry && typeof entry === 'object') return Number(entry.cost ?? entry.unitCost ?? entry.price ?? item.cost ?? 0) || 0;
+  if (entry !== undefined && entry !== null && entry !== '') return Number(entry) || 0;
+  return Number(item.cost ?? item.unitCost ?? 0) || 0;
+}
+
+function getStockCostingSkuBarcode(item = {}) {
+  return [item.sku || item.SKU || item.stockCode || item.itemCode || '', parseBarcodeValues(item)[0] || '']
+    .filter(Boolean)
+    .join(' / ');
+}
+
+function getLocationNameForCostingExport(location = {}) {
+  return String(location.displayName || location.name || location.locationName || location.id || 'Location').trim();
+}
+
+async function importLocationCostingFile(file) {
+  if (!file) return;
+  const selectedLocationId = String(appState.stock.filters?.locationCostingLocationId || '').trim();
+  appState.stock = { ...appState.stock, actionStatus: 'importing-location-costing', actionError: '', locationCostingPreview: null };
+  renderApp();
+  try {
+    const {
+      detectImportFileType,
+      IMPORT_TYPES,
+      parseLocationCostingImport,
+      applyLocationCostingImport,
+      applyLocationCostPreviewToItems
+    } = await import('./services/locationCostingService.js');
+    const fileType = await detectImportFileType(file);
+    if (fileType === IMPORT_TYPES.STOCK_ITEM_IMPORT) {
+      throw new Error('This file looks like a Stock Item Import. Please upload it in the Stock Item Import section.');
+    }
+    if (fileType !== IMPORT_TYPES.LOCATION_COSTING_IMPORT) {
+      throw new Error('We could not identify this import file. Please download a fresh template from the correct section and try again.');
+    }
+    const preview = await parseLocationCostingImport(file, {
+      selectedLocationId,
+      requireFileLocationMetadata: !selectedLocationId,
+      stockItems: appState.stock.items || [],
+      locations: appState.stock.locations || appState.locations?.items || []
+    });
+    if (preview.summary?.errors) {
+      throw new Error('Some rows have invalid costs. Fix the highlighted rows and upload again.');
+    }
+    if (!preview.summary?.toUpdate) {
+      appState.stock = {
+        ...appState.stock,
+        actionStatus: '',
+        actionError: '',
+        locationCostingPreview: null,
+        filters: {
+          ...appState.stock.filters,
+          locationCostingLocationId: preview.locationId || appState.stock.filters?.locationCostingLocationId || '',
+          locationCostingPickerKind: '',
+          locationCostingLocationIdDropdownSearch: '',
+          openDropdown: ''
+        }
+      };
+      renderApp();
+      showStockToast('No changes found.', 'info');
+      return;
+    }
+    appState.stock = { ...appState.stock, actionStatus: 'saving-location-costing', actionError: '', locationCostingPreview: null };
+    renderApp();
+    const result = await applyLocationCostingImport(appState.workspace?.id, preview);
+    appState.stock = {
+      ...appState.stock,
+      actionStatus: '',
+      actionError: '',
+      locationCostingPreview: null,
+      items: applyLocationCostPreviewToItems(appState.stock.items || [], preview),
+      filters: {
+        ...appState.stock.filters,
+        locationCostingLocationId: preview.locationId || appState.stock.filters?.locationCostingLocationId || '',
+        locationCostingPickerKind: '',
+        locationCostingLocationIdDropdownSearch: '',
+        openDropdown: ''
+      }
+    };
+    showStockToast(`Location costs updated successfully for ${preview.locationName}.`, 'success');
+    refreshActiveTabFromApi().catch((error) => console.warn('[Stock] Location cost refresh failed:', error));
+    return result;
+  } catch (error) {
+    appState.stock = { ...appState.stock, actionStatus: '', actionError: error.message || 'This file is not a Location Costing Import file. Please upload the correct template.', locationCostingPreview: null };
+    showStockToast(error.message || 'This file is not a Location Costing Import file. Please upload the correct template.', 'error');
+  }
+}
+
+async function confirmLocationCostingImport() {
+  const preview = appState.stock.locationCostingPreview;
+  if (!preview) return;
+  if (preview.summary?.errors) {
+    showStockToast('Some rows have invalid costs. Fix the highlighted rows and upload again.', 'warning');
+    return;
+  }
+  if (!preview.summary?.toUpdate) {
+    showStockToast('No changes found.', 'info');
+    return;
+  }
+  appState.stock = { ...appState.stock, actionStatus: 'saving-location-costing', actionError: '' };
+  renderApp();
+  try {
+    const { applyLocationCostingImport, applyLocationCostPreviewToItems } = await import('./services/locationCostingService.js');
+    const result = await applyLocationCostingImport(appState.workspace?.id, preview);
+    appState.stock = {
+      ...appState.stock,
+      actionStatus: '',
+      actionError: '',
+      locationCostingPreview: null,
+      items: applyLocationCostPreviewToItems(appState.stock.items || [], preview),
+      filters: {
+        ...appState.stock.filters,
+        locationCostingPickerKind: '',
+        locationCostingLocationIdDropdownSearch: '',
+        openDropdown: ''
+      }
+    };
+    showStockToast(`Location costs updated successfully for ${preview.locationName}.`, 'success');
+    refreshActiveTabFromApi().catch((error) => console.warn('[Stock] Location cost refresh failed:', error));
+    return result;
+  } catch (error) {
+    appState.stock = { ...appState.stock, actionStatus: '', actionError: error.message || 'We could not update location costs right now. No changes were applied. Please try again.' };
+    showStockToast(error.message || 'We could not update location costs right now. No changes were applied. Please try again.', 'error');
+  }
+}
+
+function cancelLocationCostingImport() {
+  appState.stock = { ...appState.stock, locationCostingPreview: null, actionStatus: '', actionError: '' };
+  renderApp();
 }
 
 async function exportStockItems(format = 'csv') {
@@ -6760,6 +5943,16 @@ async function exportStockTemplate(format = 'csv') {
   const timestamp = getExportTimestamp();
 
   try {
+    if (normalizedFormat === 'xlsx') {
+      await downloadStyledStockTemplateXlsx(`kcp-stock-items-template-${timestamp}`, {
+        columns: exportSchemas.stock,
+        rows: buildTemplateRows(exportSchemas.stock),
+        columnWidths: getStockImportTemplateColumnWidths(),
+        maxRows: 250
+      });
+      showStockToast('Stock template exported as XLSX.', 'success');
+      return;
+    }
     await exportObjectRows({
       format: normalizedFormat,
       filename: `kcp-stock-items-template-${timestamp}`,
@@ -6789,6 +5982,7 @@ function getStockImportTemplateColumnWidths() {
     SKU: 18,
     Category: 18,
     Base_UOM: 12,
+    Default_Ordering_UOM: 22,
     Cost_Ex_VAT: 14,
     VAT_Enabled: 14,
     Barcode: 18,
@@ -6950,6 +6144,23 @@ function updateSupplierDraftSilent(updates = {}) {
 function updateSettingsDraftSilent(updates = {}) {
   const draft = appState.settings.draft || {};
   appState.settings = { ...appState.settings, draft: { ...draft, ...updates } };
+}
+
+function updateSettingsTaxFieldSilent(key = '', value = '') {
+  const normalizedKey = String(key || '').trim();
+  if (!normalizedKey) return;
+  const draft = appState.settings.draft || createDefaultSettingsDraft();
+  appState.settings = {
+    ...appState.settings,
+    actionError: '',
+    draft: {
+      ...draft,
+      companyTaxInfo: {
+        ...(draft.companyTaxInfo && typeof draft.companyTaxInfo === 'object' ? draft.companyTaxInfo : {}),
+        [normalizedKey]: value
+      }
+    }
+  };
 }
 
 async function saveSupplier(item) {
@@ -7129,8 +6340,8 @@ async function importSupplierFile(file) {
 
   try {
     const rows = await parseDataFile(file, { preferredSheetNames: ['Supplier_Import'] });
-    const { rows: supplierRows, report } = mapSupplierImportRows(rows);
-    if (!supplierRows.length) throw new Error(formatImportFailure('No valid supplier rows were found in this file.', report.errors));
+    const { rows: supplierRows, review } = mapSupplierImportRows(rows);
+    if (!supplierRows.length) throw new Error(formatImportFailure('No valid supplier rows were found in this file.', review.errors));
 
     const { importSuppliers } = await import('./services/supplierService.js');
     const result = await importSuppliers(appState.workspace?.id, supplierRows);
@@ -7143,16 +6354,16 @@ async function importSupplierFile(file) {
       actionStatus: '',
       actionError: ''
     };
-    const skippedCount = Number(report.errors.length || result.skippedCount || 0);
+    const skippedCount = Number(review.errors.length || result.skippedCount || 0);
     if (skippedCount) {
       showImportNotification({
         moduleLabel: 'Supplier Import',
         title: 'Supplier Import Needs Attention',
         message: `${result.importedCount || 0} supplier${Number(result.importedCount || 0) === 1 ? '' : 's'} imported, but ${skippedCount} row${skippedCount === 1 ? '' : 's'} need fixing. Confirm this message, fix the errors, and try again.`,
-        errors: report.errors,
+        errors: review.errors,
         importedCount: result.importedCount || 0,
         skippedCount,
-        totalRows: report.totalRows,
+        totalRows: review.totalRows,
         tone: 'warning',
         confirmLabel: 'Confirm & Fix Errors'
       });
@@ -7283,6 +6494,176 @@ function updateAllPurchaseOrderSelection(orderIds = [], selected) {
     selectedIds: [...selectedIds]
   };
   renderApp();
+}
+
+
+function openPurchaseOrderFromReportingLowStock(payload = {}) {
+  const rawItems = Array.isArray(payload.items) && payload.items.length ? payload.items : [payload];
+  pendingReportingPurchaseOrderSeed = {
+    source: payload.source || 'stock_control',
+    supplierId: String(payload.supplierId || '').trim(),
+    supplierName: String(payload.supplierName || '').trim(),
+    items: rawItems.map(normalizeReportingLowStockSeedItem).filter((item) => item.itemId || item.itemName)
+  };
+  if (!pendingReportingPurchaseOrderSeed.items.length) {
+    pendingReportingPurchaseOrderSeed = null;
+    return;
+  }
+  navigateTo('purchase-orders');
+}
+
+function normalizeReportingLowStockSeedItem(payload = {}) {
+  return {
+    itemId: String(payload.itemId || payload.stockItemId || '').trim(),
+    itemName: String(payload.itemName || payload.stockItemName || '').trim(),
+    locationId: String(payload.locationId || '').trim(),
+    locationName: String(payload.locationName || '').trim(),
+    supplierId: String(payload.supplierId || '').trim(),
+    supplierName: String(payload.supplierName || '').trim(),
+    requiredQty: Number(payload.requiredQty || 0) || 0,
+    purchaseUom: String(payload.purchaseUom || '').trim(),
+    purchaseUomQty: Number(payload.purchaseUomQty || payload.requiredQty || 0) || 0,
+    unitCostExVat: Number(payload.unitCostExVat || payload.lastPurchaseCost || 0) || 0,
+    parLevel: Number(payload.parLevel || 0) || 0,
+    currentStock: Number(payload.currentStock || 0) || 0,
+    lowStockThreshold: Number(payload.lowStockThreshold || payload.threshold || 0) || 0
+  };
+}
+
+function applyPendingReportingPurchaseOrderSeed() {
+  const seed = pendingReportingPurchaseOrderSeed;
+  if (!seed) return false;
+  const stockItems = appState.purchaseOrders.stockItems || [];
+  const locations = appState.purchaseOrders.locations || [];
+  if (!stockItems.length || !locations.length) return false;
+
+  const seedItems = Array.isArray(seed.items) && seed.items.length ? seed.items : [normalizeReportingLowStockSeedItem(seed)];
+  const orderLines = [];
+  const skipped = [];
+
+  seedItems.forEach((itemSeed) => {
+    const stockItem = findPurchaseOrderStockItemForSeed(itemSeed, stockItems);
+    if (!stockItem) {
+      skipped.push(itemSeed.itemName || 'Unknown item');
+      return;
+    }
+    if (!isOrderableStockItem(stockItem)) {
+      skipped.push(`${stockItem.name} cannot be ordered`);
+      return;
+    }
+    orderLines.push(buildPurchaseOrderLineFromReportingSeed(itemSeed, stockItem, locations));
+  });
+
+  if (!orderLines.length) {
+    showPurchaseOrderToast(skipped.length ? `No orderable selected items were found. ${skipped.slice(0, 3).join(', ')}` : 'No orderable selected items were found.', 'error');
+    pendingReportingPurchaseOrderSeed = null;
+    return false;
+  }
+
+  const firstLine = orderLines[0] || {};
+  const forcedSupplierId = String(seed.supplierId || '').trim();
+  const forcedSupplierName = String(seed.supplierName || '').trim();
+  const inferredSupplierId = forcedSupplierId || firstLine.supplierId || '';
+  const inferredSupplierName = forcedSupplierName || firstLine.supplierName || '';
+  const locationId = firstLine.locationId || getDefaultPurchaseOrderLocationId(null);
+  const locationName = firstLine.locationName || getPurchaseOrderLocationName(locationId, '');
+  const siteId = getSiteIdForLocation(locations, locationId);
+  const siteName = getSiteNameById(appState.purchaseOrders.sites || [], siteId, '');
+  const uniqueLocations = new Set(orderLines.map((line) => String(line.locationId || '')).filter(Boolean));
+
+  pendingReportingPurchaseOrderSeed = null;
+  appState.purchaseOrders = {
+    ...appState.purchaseOrders,
+    draftOrder: {
+      id: '',
+      poNumber: '',
+      reference: orderLines.length > 1 ? 'Created from Stock Control selection' : 'Created from Stock Control report',
+      date: todayLocal(),
+      supplierId: inferredSupplierId,
+      supplierName: inferredSupplierName,
+      supplierQuery: inferredSupplierName,
+      siteId,
+      siteName,
+      locationId,
+      targetLocation: locationId,
+      targetLocationName: locationName,
+      inputMode: 'input',
+      supplierPickerOpen: !inferredSupplierId && !inferredSupplierName,
+      status: 'draft',
+      items: orderLines.map((line) => ({
+        ...line,
+        supplierId: forcedSupplierId || line.supplierId || '',
+        supplierName: forcedSupplierName || line.supplierName || ''
+      })),
+      notes: buildReportingLowStockPurchaseOrderNotes({ orderLines, skipped, uniqueLocations })
+    },
+    actionError: '',
+    toast: {
+      tone: skipped.length ? 'warning' : 'success',
+      message: `${orderLines.length} selected item${orderLines.length === 1 ? '' : 's'} added to a purchase order draft.${skipped.length ? ` ${skipped.length} item${skipped.length === 1 ? '' : 's'} skipped.` : ''}`
+    },
+    filters: {
+      ...appState.purchaseOrders.filters,
+      supplierQuery: inferredSupplierName,
+      lineQuery: '',
+      overlay: '',
+      calendarCursor: '',
+      openDropdown: ''
+    }
+  };
+  return true;
+}
+
+function buildPurchaseOrderLineFromReportingSeed(seed = {}, stockItem = {}, locations = []) {
+  const locationId = seed.locationId || getDefaultPurchaseOrderLocationId(null);
+  const locationName = seed.locationName || getPurchaseOrderLocationName(locationId, '');
+  const defaultSelection = getDefaultLineUomSelection(stockItem);
+  const selectedUom = seed.purchaseUom || defaultSelection.selectedUom || stockItem.unit || 'ea';
+  const uomSelection = seed.purchaseUom ? getLineUomSelection(stockItem, selectedUom) : defaultSelection;
+  const qty = Number(seed.purchaseUomQty || 0) > 0
+    ? Number(seed.purchaseUomQty)
+    : (uomSelection.ratio ? Number(seed.requiredQty || 0) / uomSelection.ratio : Number(seed.requiredQty || 0));
+  const cleanQty = Number.isFinite(qty) && qty > 0 ? Number(qty.toFixed(3)) : 0;
+  const suggestedQty = cleanQty || Math.max(Number(seed.parLevel || 0) - Number(seed.currentStock || 0), 0) || 1;
+  return {
+    id: stockItem.id,
+    stockItemId: stockItem.id,
+    stockItemName: stockItem.name,
+    qty: Number.isFinite(suggestedQty) && suggestedQty > 0 ? Number(suggestedQty.toFixed(3)) : 0,
+    packSize: uomSelection.ratio || 1,
+    unitCost: Number(seed.unitCostExVat || stockItem.lastPurchasePrice || stockItem.lastPurchaseCost || stockItem.latestPurchasePrice || stockItem.cost || 0) || 0,
+    unit: stockItem.unit || uomSelection.baseUom || 'ea',
+    selectedUom: uomSelection.selectedUom || selectedUom,
+    uomConfigurations: normalizeLineUomConfigurations(stockItem.uomConfigurations || stockItem.uomConfig || stockItem.uomConversions),
+    locationId,
+    targetLocation: locationId,
+    locationName,
+    targetLocationName: locationName,
+    supplierId: seed.supplierId || '',
+    supplierName: seed.supplierName || '',
+    reportingContext: {
+      parLevel: seed.parLevel,
+      currentStock: seed.currentStock,
+      requiredQty: seed.requiredQty,
+      lowStockThreshold: seed.lowStockThreshold
+    }
+  };
+}
+
+function buildReportingLowStockPurchaseOrderNotes({ orderLines = [], skipped = [], uniqueLocations = new Set() } = {}) {
+  const locationsText = [...uniqueLocations].map((id) => getPurchaseOrderLocationName(id, id)).filter(Boolean).join(', ');
+  const base = `Pre-created from selected Stock Control items${locationsText ? ` for ${locationsText}` : ''}. Items are included because they were explicitly selected, even when current stock is above par. Review supplier, quantity, location and cost before saving.`;
+  const skippedText = skipped.length ? ` Skipped: ${skipped.slice(0, 5).join(', ')}${skipped.length > 5 ? ` and ${skipped.length - 5} more` : ''}.` : '';
+  return `${base}${skippedText}`;
+}
+
+function findPurchaseOrderStockItemForSeed(seed = {}, stockItems = []) {
+  const itemId = String(seed.itemId || '').trim();
+  const itemName = String(seed.itemName || '').trim().toLowerCase();
+  return (stockItems || []).find((item) => itemId && String(item.id) === itemId)
+    || (stockItems || []).find((item) => itemId && String(item.stockItemId || item.itemId || item.sourceId || '') === itemId)
+    || (stockItems || []).find((item) => itemName && String(item.name || '').trim().toLowerCase() === itemName)
+    || null;
 }
 
 function openPurchaseOrderDraft(orderId) {
@@ -7416,6 +6797,10 @@ function addPurchaseOrderLine(stockItemId) {
   const draft = appState.purchaseOrders.draftOrder;
   const stockItem = getPoStockItemById(stockItemId);
   if (!draft || !stockItem || String(draft.status || '').toLowerCase() === 'completed') return;
+  if (!isOrderableStockItem(stockItem)) {
+    showPurchaseOrderToast('Only Standard and Non Stock items can be added to purchase orders.', 'warning');
+    return;
+  }
 
   const items = [...(draft.items || [])];
   const index = items.findIndex((line) => String(line.stockItemId) === String(stockItem.id));
@@ -7741,7 +7126,6 @@ async function sendPurchaseOrderEmail(orderId) {
   const pdfFile = await buildSupplierPurchaseOrderPdfFile(filename, documentOrder, documentContext);
 
   try {
-    const { sendSupplierEmailWithGmail } = await import('./services/integrationService.js');
     await sendSupplierEmailWithGmail(appState.workspace?.id, {
       to: recipient,
       cc: ccList,
@@ -7823,16 +7207,14 @@ async function buildSupplierPurchaseOrderPdfFile(filename, order = {}, context =
       supplierNotes: siteInfo.supplierNotes
     },
     items: (order.items || []).map((item) => {
-      const packSize = getPurchaseOrderLinePackSize(item);
       return {
         description: item.name || item.stockItemName || '',
-        unit: item.unit || 'EA',
-        packSize: formatDocumentQuantity(packSize),
+        unit: item.selectedUom || item.purchaseUom || item.orderUom || item.unit || 'EA',
         quantity: formatDocumentQuantity(item.qty ?? item.quantity ?? ''),
         notes: item.notes || item.note || 'Confirm availability'
       };
     }),
-    instruction: 'Please confirm receipt of this purchase order. Items must be supplied according to the listed pack size and quantity. Any unavailable items, substitutions, or quantity changes must be confirmed before delivery.'
+    instruction: 'Please confirm receipt of this purchase order. Items must be supplied according to the listed UOM and quantity. Any unavailable items, substitutions, UOM changes, or quantity changes must be confirmed before delivery.'
   });
 }
 
@@ -8312,6 +7694,7 @@ function createEmptyGrvDraft(seed = {}) {
     locationName,
     notes: '',
     pricesIncludeVat: false,
+    overrideCostPrice: true,
     transportEx: '',
     invoiceDiscountEx: '',
     invoiceTotalEx: '',
@@ -8354,282 +7737,6 @@ function openManualGrvDraft() {
   renderApp();
 }
 
-function openLowStockGrvDraft(options = {}) {
-  const draft = createLowStockGrvDraftFromAnalytics(options);
-  if (!draft.items.length) {
-    window.alert('No low-stock items are available for the current report filters.');
-    return;
-  }
-
-  clearPersistedDraft('grv');
-  appState.grv = {
-    ...appState.grv,
-    pendingSourcePoId: '',
-    lineDetailDraft: null,
-    missingSupplierPrompt: null,
-    draftReceipt: draft,
-    actionError: '',
-    filters: {
-      ...appState.grv.filters,
-      lineQuery: '',
-      poQuery: '',
-      selectedStockIds: [],
-      selectedLineIndexes: [],
-      calendarCursor: '',
-      openDropdown: '',
-      overlay: ''
-    }
-  };
-  persistGrvDraftSnapshot(draft);
-  navigateTo('grv');
-}
-
-function createLowStockGrvDraftFromAnalytics(options = {}) {
-  const source = appState.analytics?.source || {};
-  const filters = appState.analytics?.filters || {};
-  const locations = source.locations || [];
-  const locationMap = new Map(locations.map((location) => [String(location.id || ''), location]));
-  const locationIds = new Set(locations.map((location) => String(location.id || '')).filter(Boolean));
-  const defaultLocation = resolveDefaultLowStockDraftLocation(locations);
-  const defaultLocationId = String(defaultLocation?.id || DEFAULT_STOCK_LOCATION_ID).trim() || DEFAULT_STOCK_LOCATION_ID;
-  const defaultLocationName = defaultLocation?.displayName || defaultLocation?.name || DEFAULT_STOCK_LOCATION_NAME;
-  const requestedLocationId = String(filters.locationId || '').trim();
-  const selectedLocationId = locationIds.has(requestedLocationId) ? requestedLocationId : '';
-  const query = String(filters.query || '').trim().toLowerCase();
-  const categories = new Set((source.ingredients || []).map((item) => String(item.category || 'General').trim()).filter(Boolean));
-  const requestedCategory = String(filters.category || '').trim();
-  const category = categories.has(requestedCategory) ? requestedCategory : '';
-  const requestedItemId = String(options.itemId || '').trim();
-  const selectedRows = Array.isArray(options.selectedRows) ? options.selectedRows : [];
-  const selectedKeys = new Set(selectedRows.map(createLowStockSelectionKey).filter(Boolean));
-
-  const lines = (source.ingredients || []).flatMap((item) => {
-    const itemId = String(item.id || item.stockItemId || item.name || '').trim();
-    if (requestedItemId && itemId !== requestedItemId && String(item.name || '') !== requestedItemId) return [];
-
-    const itemCategory = String(item.category || 'General').trim() || 'General';
-    if (category && itemCategory !== category) return [];
-
-    return getLowStockLocationBalances(item, { selectedLocationId, locationIds, defaultLocationId }).flatMap(({ locationId, stock }) => {
-      const threshold = resolveLowStockDraftThreshold(item);
-      const deficitQty = Math.max(0, threshold - Number(stock || 0));
-      if (!(deficitQty > 0)) return [];
-
-      const resolvedLocation = locationMap.get(String(locationId));
-      const locationName = resolvedLocation?.displayName || resolvedLocation?.name || (String(locationId) === defaultLocationId ? defaultLocationName : String(locationId || DEFAULT_STOCK_LOCATION_NAME));
-      if (selectedKeys.size) {
-        const selectionKey = createLowStockSelectionKey({
-          _id: itemId,
-          Item: item.name || item.itemName,
-          _locationId: locationId,
-          Location: locationName
-        });
-        if (!selectedKeys.has(selectionKey)) return [];
-      }
-      const searchable = [
-        item.name,
-        item.itemName,
-        itemCategory,
-        locationName,
-        item.unit
-      ].join(' ').toLowerCase();
-      if (query && !searchable.includes(query)) return [];
-
-      return [{
-        id: itemId,
-        stockItemId: itemId,
-        stockItemName: item.name || item.itemName || 'Unnamed Stock Item',
-        unit: item.unit || 'ea',
-        orderedQty: Number(deficitQty.toFixed(4)),
-        receivedQty: Number(deficitQty.toFixed(4)),
-        packSize: 1,
-        unitCost: Number(item.lastPurchasePrice ?? item.lastPurchaseCost ?? item.cost ?? item.costEx ?? 0) || 0,
-        vatEnabled: item.vatEnabled !== false,
-        locationId,
-        targetLocation: locationId,
-        locationName,
-        targetLocationName: locationName,
-        sourceReport: 'Low Stock Alerts',
-        sourceItem: item.name || item.itemName || 'Unnamed Stock Item',
-        sourceLocation: locationName,
-        suggestedReorderQty: Number(deficitQty.toFixed(4)),
-        selectedReorderQty: Number(deficitQty.toFixed(4)),
-        defaultGrvLocation: locationId,
-        createdBy: appState.currentUser?.email || appState.user?.email || 'Current user',
-        createdAt: new Date().toISOString()
-      }];
-    });
-  });
-
-  const fallbackLines = lines.length ? [] : createLowStockGrvLinesFromReport(options, { requestedItemId, selectedKeys });
-  const draftLines = lines.length ? lines : fallbackLines;
-
-  const firstLocationId = draftLines[0]?.locationId || selectedLocationId || defaultLocationId;
-  const firstLocation = locationMap.get(String(firstLocationId));
-  const firstLocationName = draftLines[0]?.locationName || firstLocation?.displayName || firstLocation?.name || defaultLocationName;
-
-  return createEmptyGrvDraft({
-    grvNumber: '',
-    supplierId: '',
-    supplierName: 'Manual Receipt',
-    date: todayLocal(),
-    locationId: firstLocationId,
-    locationName: firstLocationName,
-    notes: 'Low stock replenishment draft from par levels.',
-    sourceReport: 'Low Stock Alerts',
-    defaultGrvLocation: firstLocationId,
-    createdBy: appState.currentUser?.email || appState.user?.email || 'Current user',
-    createdAt: new Date().toISOString(),
-    items: draftLines
-  });
-}
-
-function createLowStockGrvLinesFromReport(options = {}, { requestedItemId = '', selectedKeys = new Set() } = {}) {
-  const locations = appState.analytics?.source?.locations || appState.grv?.locations || [];
-  const locationByName = new Map(locations.map((location) => [
-    String(location.name || location.displayName || '').trim().toLowerCase(),
-    location
-  ]));
-  const defaultLocation = resolveDefaultLowStockDraftLocation(locations);
-  const defaultLocationId = String(defaultLocation?.id || DEFAULT_STOCK_LOCATION_ID).trim() || DEFAULT_STOCK_LOCATION_ID;
-  const defaultLocationName = defaultLocation?.displayName || defaultLocation?.name || DEFAULT_STOCK_LOCATION_NAME;
-  const filterLocationId = String(appState.analytics?.filters?.locationId || '').trim();
-  const explicitOptionLocation = String(options.locationName || '').trim();
-  const hasExplicitLocationScope = Boolean(filterLocationId || explicitOptionLocation || selectedKeys.size);
-  const rows = [
-    ...(options.selectedRows?.length ? options.selectedRows : options.reportData?.rows || []),
-    ...(appState.dashboard?.insights?.lowStockRows || [])
-  ];
-  const seen = new Set();
-
-  return rows.flatMap((row) => {
-    const itemId = String(row._id || row.id || row.stockItemId || row.Item || row.name || '').trim();
-    const rowLocationName = String(row.Location || row.location || row.locationName || '').trim();
-    const locationName = hasExplicitLocationScope
-      ? String(rowLocationName || explicitOptionLocation || defaultLocationName)
-      : defaultLocationName;
-    const resolvedLocation = locationByName.get(locationName.trim().toLowerCase()) ||
-      (normalizeLowStockLocationKey(locationName) === normalizeLowStockLocationKey(defaultLocationName) ? defaultLocation : null);
-    const rowLocationId = String(row._locationId || row.locationId || '').trim();
-    const locationId = String(
-      (hasExplicitLocationScope ? rowLocationId : '') ||
-      filterLocationId ||
-      resolvedLocation?.id ||
-      defaultLocationId
-    ).trim();
-    const lineKey = `${itemId}::${locationId || locationName}`;
-    if (!itemId || seen.has(lineKey)) return [];
-    if (requestedItemId && itemId !== requestedItemId && String(row.Item || row.name || '') !== requestedItemId) return [];
-    if (selectedKeys.size && !selectedKeys.has(createLowStockSelectionKey(row))) return [];
-    if (!locationId || locationName.toLowerCase() === 'all locations') return [];
-    seen.add(lineKey);
-
-    const currentStock = parseMoneyLike(row['Current Stock'] ?? row.stock ?? 0);
-    const threshold = parseMoneyLike(row.Threshold ?? row.threshold ?? 5) || 5;
-    const deficitQty = Math.max(0, threshold - currentStock);
-    if (!(deficitQty > 0)) return [];
-
-    return [{
-      id: itemId,
-      stockItemId: itemId,
-      stockItemName: row.Item || row.name || row.stockItemName || 'Unnamed Stock Item',
-      unit: row.Unit || row.unit || 'ea',
-      orderedQty: Number(deficitQty.toFixed(4)),
-      receivedQty: Number(deficitQty.toFixed(4)),
-      packSize: 1,
-      unitCost: parseMoneyLike(row['Unit Cost'] ?? row.unitCost ?? row.cost ?? 0),
-      vatEnabled: row.vatEnabled !== false,
-      locationId,
-      targetLocation: locationId,
-      locationName,
-      targetLocationName: locationName,
-      sourceReport: 'Low Stock Alerts',
-      sourceItem: row.Item || row.name || row.stockItemName || 'Unnamed Stock Item',
-      sourceLocation: locationName,
-      suggestedReorderQty: Number(deficitQty.toFixed(4)),
-      selectedReorderQty: Number(deficitQty.toFixed(4)),
-      defaultGrvLocation: locationId,
-      createdBy: appState.currentUser?.email || appState.user?.email || 'Current user',
-      createdAt: new Date().toISOString()
-    }];
-  });
-}
-
-function createLowStockSelectionKey(row = {}) {
-  return [
-    row._id || row.id || row.stockItemId || row.Item || row.name || '',
-    row._locationId || row.locationId || row.Location || row.locationName || ''
-  ].map((value) => String(value || '').trim()).join('::');
-}
-
-function parseMoneyLike(value) {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
-  const text = String(value ?? '').replace(/\s/g, '').replace(/[^\d,.-]/g, '');
-  if (!text) return 0;
-  const comma = text.lastIndexOf(',');
-  const dot = text.lastIndexOf('.');
-  const normalized = comma > dot ? text.replace(/\./g, '').replace(',', '.') : text.replace(/,/g, '');
-  const numeric = Number(normalized);
-  return Number.isFinite(numeric) ? numeric : 0;
-}
-
-function getLowStockLocationBalances(item = {}, { selectedLocationId = '', locationIds = new Set(), defaultLocationId = DEFAULT_STOCK_LOCATION_ID } = {}) {
-  const balances = item.balances && typeof item.balances === 'object' ? item.balances : {};
-  const fallbackLocationId = selectedLocationId ||
-    [defaultLocationId, item.defaultLocationId, item.locationId, item.targetLocationId, item.targetLocation]
-      .map((value) => String(value || '').trim())
-      .find((locationId) => locationId && !isAggregateLocationId(locationId) && (!locationIds.size || locationIds.has(locationId))) ||
-    DEFAULT_STOCK_LOCATION_ID;
-
-  if (!selectedLocationId) {
-    return [{
-      locationId: fallbackLocationId,
-      stock: Number(item.stock || 0) || 0
-    }];
-  }
-
-  const rows = Object.entries(balances)
-    .map(([locationId, qty]) => ({
-      locationId: String(locationId || '').trim(),
-      stock: Number(qty || 0) || 0
-    }))
-    .filter(({ locationId }) => locationId && !isAggregateLocationId(locationId))
-    .filter(({ locationId }) => !locationIds.size || locationIds.has(locationId))
-    .filter(({ locationId }) => !selectedLocationId || locationId === selectedLocationId);
-
-  if (rows.length) return rows;
-
-  return [{
-    locationId: fallbackLocationId,
-    stock: Number(item.stock || 0) || 0
-  }];
-}
-
-function resolveLowStockDraftThreshold(item = {}) {
-  const value = Number(item.lowStockThreshold || item.threshold || item.parLevel || 5);
-  return Number.isFinite(value) && value > 0 ? value : 5;
-}
-
-function resolveDefaultLowStockDraftLocation(locations = []) {
-  const normalizedMain = normalizeLowStockLocationKey(DEFAULT_STOCK_LOCATION_NAME);
-  return locations.find((location) => (
-    location?.isDefault === true ||
-    Number(location?.is_default || 0) === 1 ||
-    String(location?.id || location?.locationId || '').trim() === DEFAULT_STOCK_LOCATION_ID
-  )) ||
-    locations.find((location) => normalizeLowStockLocationKey(location?.displayName || location?.name || location?.locationName) === normalizedMain) ||
-    locations.find((location) => String(location?.type || location?.kind || '').toLowerCase() === 'storage') ||
-    { id: DEFAULT_STOCK_LOCATION_ID, name: DEFAULT_STOCK_LOCATION_NAME, displayName: DEFAULT_STOCK_LOCATION_NAME };
-}
-
-function normalizeLowStockLocationKey(value = '') {
-  return String(value || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
-}
-
-function isAggregateLocationId(locationId = '') {
-  const normalized = String(locationId || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
-  return !normalized || ['all', 'alllocations', 'total', 'aggregate', 'combined'].includes(normalized);
-}
 
 function normalizeSupplierLookupName(value = '') {
   return String(value || '').trim().toLowerCase();
@@ -8996,6 +8103,7 @@ async function openGrvFromPurchaseOrder(orderId) {
     const lineLocationId = String(line.locationId || line.targetLocation || locationId || fallbackLocationId);
     const lineLocationName = line.locationName || line.targetLocationName || getGrvLocationName(lineLocationId, locationName);
     const stockItem = getGrvStockItemById(line.stockItemId);
+    if (stockItem && !isOrderableStockItem(stockItem)) return [];
     return [{
       id: line.id || line.stockItemId,
       purchaseOrderLineId: line.id || '',
@@ -9354,6 +8462,10 @@ function addGrvLine(stockItemId) {
   const draft = appState.grv.draftReceipt || createEmptyGrvDraft();
   const stockItem = getGrvStockItemById(stockItemId);
   if (!draft || !stockItem) return;
+  if (!isOrderableStockItem(stockItem)) {
+    showGrvToast('Only Standard and Non Stock items can be added to GRV.', 'warning');
+    return;
+  }
 
   const items = [...(draft.items || [])];
   if (items.some((line) => String(line.stockItemId) === String(stockItem.id))) return;
@@ -9388,7 +8500,7 @@ function addMultipleGrvLines(stockItemIds = []) {
   [...new Set((stockItemIds || []).map(String).filter(Boolean))].forEach((stockItemId) => {
     if (existingIds.has(stockItemId)) return;
     const stockItem = getGrvStockItemById(stockItemId);
-    if (!stockItem) return;
+    if (!stockItem || !isOrderableStockItem(stockItem)) return;
     nextItems.push(buildGrvDraftLine(stockItem, draft));
     existingIds.add(stockItemId);
   });
@@ -9790,6 +8902,8 @@ async function saveGrvReceipt(options = {}) {
       supplierName: resolvedSupplier?.name || supplierName,
       submittedByUserId: appState.user?.uid || appState.user?.id || '',
       submittedByName: appState.user?.displayName || appState.user?.email || '',
+      overrideCostPrice: draft.overrideCostPrice !== false,
+      costingMethod: String(appState.source?.settings?.costingMethod || appState.settings?.business?.costingMethod || 'last'),
       items: hydratedItems
     };
     const savedReceipt = await saveGoodsReceipt(appState.workspace?.id, receiptPayload);
@@ -9809,6 +8923,7 @@ async function saveGrvReceipt(options = {}) {
         selectedLineIndexes: [],
         calendarCursor: '',
         openDropdown: '',
+        headerLocationQuery: '',
         overlay: ''
       }
     };
@@ -9919,22 +9034,29 @@ function hydrateCreditNoteFromGrv(receiptId) {
     || receipt.targetLocationName
     || getLocationNameById(appState.creditNotes.locations || [], defaultLocationId, existingDraft.locationName || 'Main Store');
 
-  const items = (receipt.items || []).map((line) => ({
-    stockItemId: resolveStockItemIdFromLine(line),
-    id: line.id || '',
-    stockItemName: line.stockItemName || line.name || '',
-    unit: line.unit || 'ea',
-    selectedUom: line.selectedUom || line.receivingUom || line.purchaseUom || line.unit || 'ea',
-    returnUom: line.selectedUom || line.receivingUom || line.purchaseUom || line.unit || 'ea',
-    uomConfigurations: normalizeLineUomConfigurations(line.uomConfigurations || line.uomConfig || line.uomConversions),
-    returnedQty: Number(line.receivedQty ?? line.packQty ?? line.orderedQty ?? 0) || 0,
-    packQty: Number(line.receivedQty ?? line.packQty ?? line.orderedQty ?? 0) || 0,
-    packSize: getPositivePackSizeValue(line.packSize),
-    unitCost: Number(line.unitCost || 0) || 0,
-    vatEnabled: line.vatEnabled !== false,
-    locationId: String(line.locationId || line.targetLocation || defaultLocationId),
-    locationName: line.locationName || line.targetLocationName || defaultLocationName
-  }));
+  const items = (receipt.items || []).flatMap((line) => {
+    const stockItemId = resolveStockItemIdFromLine(line);
+    const stockItem = getCreditNoteStockItemById(stockItemId);
+    if (stockItem && !isOrderableStockItem(stockItem)) return [];
+    return [{
+      stockItemId,
+      id: line.id || '',
+      stockItemName: line.stockItemName || line.name || '',
+      unit: line.unit || stockItem?.unit || 'ea',
+      selectedUom: line.selectedUom || line.receivingUom || line.purchaseUom || line.unit || stockItem?.unit || 'ea',
+      returnUom: line.selectedUom || line.receivingUom || line.purchaseUom || line.unit || stockItem?.unit || 'ea',
+      uomConfigurations: normalizeLineUomConfigurations(line.uomConfigurations || stockItem?.uomConfigurations || stockItem?.uomConfig || stockItem?.uomConversions),
+      returnedQty: Number(line.receivedQty ?? line.packQty ?? line.orderedQty ?? 0) || 0,
+      packQty: Number(line.receivedQty ?? line.packQty ?? line.orderedQty ?? 0) || 0,
+      originalOrderQty: Number(line.orderedQty ?? line.qty ?? line.quantity ?? line.receivedQty ?? line.packQty ?? 0) || 0,
+      maxReturnQty: Number(line.orderedQty ?? line.qty ?? line.quantity ?? line.receivedQty ?? line.packQty ?? 0) || 0,
+      packSize: getPositivePackSizeValue(line.packSize),
+      unitCost: Number(line.unitCost || 0) || 0,
+      vatEnabled: line.vatEnabled !== false && stockItem?.vatEnabled !== false,
+      locationId: String(line.locationId || line.targetLocation || defaultLocationId),
+      locationName: line.locationName || line.targetLocationName || defaultLocationName
+    }];
+  });
 
   appState.creditNotes = {
     ...appState.creditNotes,
@@ -10116,7 +9238,7 @@ function addCreditNoteSelectedStock() {
   const items = [...(draft.items || [])];
   const existingKeys = new Set(items.map((line) => `${String(line.stockItemId || '')}::${String(line.locationId || draft.locationId || '')}`));
   (appState.creditNotes.stockItems || [])
-    .filter((item) => ids.has(String(item.id)))
+    .filter((item) => ids.has(String(item.id)) && isOrderableStockItem(item))
     .forEach((item) => {
       const locationId = draft.locationId || 'main';
       const key = `${String(item.id)}::${String(locationId)}`;
@@ -10302,6 +9424,8 @@ function applyCreditNoteLineDetail() {
       packSize,
       unitCost: Number(entry.unitCost || 0) || 0,
       vatEnabled: entry.vatEnabled !== false,
+      originalOrderQty: Number(entry.originalOrderQty ?? entry.maxReturnQty ?? 0) || 0,
+      maxReturnQty: Number(entry.maxReturnQty ?? entry.originalOrderQty ?? 0) || 0,
       locationId: entry.locationId || detail.locationId || draft.locationId || 'main',
       locationName: entry.locationName || detail.locationName || draft.locationName || 'Main Store'
     };
@@ -10382,6 +9506,27 @@ function removeCreditNoteLine(index) {
   renderApp();
 }
 
+function getCreditNotePurchaseOrderQuantityError(draft = {}) {
+  if (!String(draft.sourcePoId || '').trim()) return '';
+  const totals = new Map();
+  for (const line of draft.items || []) {
+    const stockItemId = resolveStockItemIdFromLine(line);
+    if (!stockItemId) continue;
+    const returnedQty = Number(parseDecimalInputValue(line.returnedQty ?? line.packQty ?? 0)) || 0;
+    const maxReturnQty = Number(line.maxReturnQty ?? line.originalOrderQty ?? 0) || 0;
+    const current = totals.get(stockItemId) || { returnedQty: 0, maxReturnQty: 0, name: line.stockItemName || 'This item' };
+    current.returnedQty += returnedQty;
+    current.maxReturnQty += maxReturnQty;
+    totals.set(stockItemId, current);
+  }
+  for (const entry of totals.values()) {
+    if (entry.maxReturnQty > 0 && entry.returnedQty > entry.maxReturnQty + 0.000001) {
+      return `${entry.name} cannot return more than the original purchase order quantity of ${formatDocumentQuantity(entry.maxReturnQty)}.`;
+    }
+  }
+  return '';
+}
+
 async function saveCreditNoteDraft() {
   const draft = appState.creditNotes.draftNote || createEmptyCreditNoteDraft();
   if (!String(draft.notes || '').trim()) {
@@ -10397,6 +9542,11 @@ async function saveCreditNoteDraft() {
   const creditItems = draft.items || [];
   if (!String(draft.locationId || '').trim() && !creditItems.some((line) => String(line.locationId || '').trim())) {
     showCreditNoteToast('Select a location before committing the credit note.', 'error');
+    return;
+  }
+  const purchaseOrderQtyError = getCreditNotePurchaseOrderQuantityError(draft);
+  if (purchaseOrderQtyError) {
+    showCreditNoteToast(purchaseOrderQtyError, 'error');
     return;
   }
   // Stable id persisted on the draft so a retry / re-save reuses it and the backend's
@@ -10578,13 +9728,14 @@ function selectAllVisibleAdjustmentStock() {
   const query = String(filters.stockSearch || '').trim().toLowerCase();
   const category = String(filters.stockCategory || '').trim();
   const matchedItems = (appState.adjustments.stockItems || [])
+    .filter(isAdjustmentStockItem)
     .filter((item) => {
       if (category && String(item.category || '') !== category) return false;
       if (!query) return true;
       return (
         String(item.name || '').toLowerCase().includes(query) ||
         String(item.category || '').toLowerCase().includes(query) ||
-        (item.barcodes || []).some((barcode) => String(barcode).toLowerCase().includes(query))
+        matchesBarcodeQuery(item, query)
       );
     });
   const currentPage = Math.max(Number(filters.stockPage || 1) || 1, 1);
@@ -10607,7 +9758,7 @@ function addAdjustmentSelectedStock() {
   if (!ids.size) return;
   const draft = normalizeAdjustmentDraftLocation(appState.adjustments.draftAdjustment || createEmptyAdjustmentDraft());
   const entries = (appState.adjustments.stockItems || [])
-    .filter((item) => ids.has(String(item.id)))
+    .filter((item) => ids.has(String(item.id)) && isAdjustmentStockItem(item))
     .map((item) => ({
       stockItemId: String(item.id),
       stockItemName: item.name || '',
@@ -10983,9 +10134,23 @@ function updateWastageQty(index, value) {
 async function saveWastageDraft() {
   const draft = appState.adjustments.wastageDraft || createEmptyWastageDraft();
   const locations = appState.adjustments.locations || [];
-  const locationObj = getLocationById(locations, draft.locationId) || getDefaultLocation(locations);
-  const locationId = locationObj?.id || draft.locationId || '';
-  const locationName = locationId ? getLocationNameById(locations, locationId, locationObj?.name || 'Main Store') : (locationObj?.name || 'Main Store');
+  const locationObj = getLocationById(locations, draft.locationId);
+  const locationId = String(draft.locationId || '').trim();
+  const locationName = locationId ? getLocationNameById(locations, locationId, locationObj?.name || 'Main Store') : '';
+  const items = Array.isArray(draft.items) ? draft.items : [];
+  let validationError = '';
+  if (!items.length) validationError = 'Select at least one menu item to waste.';
+  else if (!locationId || !locationObj) validationError = 'Select a valid location before recording wastage.';
+  else if (!String(draft.wasteReason || '').trim()) validationError = 'Select a waste reason before recording wastage.';
+  else {
+    const invalidItem = items.find((item) => !(Number(parseDecimalInputValue(item.quantity)) > 0));
+    if (invalidItem) validationError = `Enter a quantity greater than zero for ${invalidItem.productName || 'every menu item'}.`;
+  }
+  if (validationError) {
+    appState.adjustments = { ...appState.adjustments, wastageStatus: '', wastageError: validationError };
+    renderApp();
+    return;
+  }
 
   if (!draft.id) draft.id = makeStableSubmitId('wst_adj');
   appState.adjustments = { ...appState.adjustments, wastageDraft: draft, wastageStatus: 'saving', wastageError: '' };
@@ -11274,7 +10439,23 @@ function clearRestaurantBackground() {
 }
 
 async function saveSettingsDraft(options = {}) {
-  const draft = options.draft || appState.settings.draft || createDefaultSettingsDraft();
+  if (settingsDraftRenderTimer) {
+    clearTimeout(settingsDraftRenderTimer);
+    settingsDraftRenderTimer = null;
+  }
+  const baseDraft = options.draft || appState.settings.draft || createDefaultSettingsDraft();
+  const draft = options.draftPatch
+    ? {
+        ...baseDraft,
+        ...options.draftPatch,
+        companyTaxInfo: options.draftPatch.companyTaxInfo
+          ? {
+              ...(baseDraft.companyTaxInfo && typeof baseDraft.companyTaxInfo === 'object' ? baseDraft.companyTaxInfo : {}),
+              ...options.draftPatch.companyTaxInfo
+            }
+          : baseDraft.companyTaxInfo
+      }
+    : baseDraft;
   if (isClearlyInvalidVatNumber(draft.companyTaxInfo?.vatNumber)) {
     showSettingsToast('VAT number looks invalid. Leave it blank or enter a valid tax identifier.', 'error');
     return false;
@@ -11289,7 +10470,7 @@ async function saveSettingsDraft(options = {}) {
   showGlobalSaving('Saving Settings');
 
   try {
-    const saved = await saveWorkspaceSettings(appState.workspace?.id, draft);
+    const saved = await saveWorkspaceSettings(appState.workspace?.id, draft, { includePersonal: false });
     appState.settings = {
       ...appState.settings,
       status: 'ready',
@@ -11300,8 +10481,12 @@ async function saveSettingsDraft(options = {}) {
       appearanceModal: options.closeAppearanceModal ? '' : appState.settings.appearanceModal
     };
     applyWorkspaceSettingsEffects(saved);
+    const previousSiteName = String(appState.workspace?.siteName || '').trim();
     updateWorkspaceSiteName(saved.siteName);
-    await syncDefaultWorkspaceSiteName(saved.siteName);
+    const nextSiteName = String(saved.siteName || '').trim();
+    if (options.syncSiteName !== false && nextSiteName && nextSiteName !== previousSiteName) {
+      await syncDefaultWorkspaceSiteName(nextSiteName);
+    }
     showSettingsToast(options.successMessage || 'Settings saved.', 'success');
     return true;
   } catch (error) {
@@ -11318,7 +10503,63 @@ async function saveSettingsDraft(options = {}) {
 }
 
 async function saveAppearanceSettingsDraft() {
-  await saveSettingsDraft({ closeAppearanceModal: true });
+  const draft = appState.settings.draft || createDefaultSettingsDraft();
+  appState.settings = {
+    ...appState.settings,
+    actionStatus: 'saving',
+    actionError: ''
+  };
+  renderApp();
+  showGlobalSaving('Saving My Appearance');
+  try {
+    const saved = await savePersonalSettings(appState.workspace?.id, draft);
+    appState.settings = {
+      ...appState.settings,
+      status: 'ready',
+      values: { ...(appState.settings.values || {}), ...saved },
+      draft: { ...draft, ...saved },
+      actionStatus: '',
+      actionError: '',
+      appearanceModal: ''
+    };
+    applyWorkspaceSettingsEffects(appState.settings.values);
+    showSettingsToast('Your personal appearance settings were saved.', 'success');
+  } catch (error) {
+    appState.settings = {
+      ...appState.settings,
+      actionStatus: '',
+      actionError: error.message || 'Could not save your appearance settings.'
+    };
+    renderApp();
+  } finally {
+    hideGlobalSaving();
+  }
+}
+
+async function confirmGoLiveStockDepletion() {
+  const confirmed = await showBrandConfirmDialog({
+    eyebrow: 'Business Settings',
+    title: 'Go live with stock depletion?',
+    message: 'Once live, completed Yoco sales will start depleting stock automatically.',
+    confirmLabel: 'Confirm Go Live',
+    cancelLabel: 'Cancel',
+    tone: 'info'
+  });
+  if (!confirmed) return;
+  await goLiveStockDepletion();
+}
+
+async function goLiveStockDepletion() {
+  const draft = appState.settings.draft || createDefaultSettingsDraft();
+  const nextDraft = {
+    ...draft,
+    stockDepletionEnabled: true,
+    stockDepletionEnabledAt: new Date().toISOString()
+  };
+  await saveSettingsDraft({
+    draft: nextDraft,
+    successMessage: 'You are live. Completed Yoco sales will now deplete stock.'
+  });
 }
 
 async function exportSettingsSnapshot() {
@@ -11489,9 +10730,9 @@ function applyRestaurantGlassSurfaces() {
   const computed = getComputedStyle(root);
   const isDark = appState.theme === 'dark';
   const surfaceAlphas = [
-    ['--surface-primary', isDark ? 0.84 : 0.88],
-    ['--surface-secondary', isDark ? 0.72 : 0.78],
-    ['--surface-elevated', isDark ? 0.88 : 0.92]
+    ['--surface-primary', isDark ? 0.92 : 0.92],
+    ['--surface-secondary', isDark ? 0.82 : 0.84],
+    ['--surface-elevated', isDark ? 0.97 : 0.98]
   ];
 
   surfaceAlphas.forEach(([name, alpha]) => {
@@ -11500,9 +10741,11 @@ function applyRestaurantGlassSurfaces() {
     if (glassColor) root.style.setProperty(name, glassColor);
   });
 
-  root.style.setProperty('--restaurant-theme-page-tint', isDark ? 'rgba(7, 17, 31, 0.54)' : 'rgba(246, 248, 251, 0.58)');
-  root.style.setProperty('--restaurant-theme-page-tint-soft', isDark ? 'rgba(7, 17, 31, 0.28)' : 'rgba(246, 248, 251, 0.34)');
-  root.style.setProperty('--surface-glass-blur', isDark ? '10px' : '8px');
+  root.style.setProperty('--restaurant-theme-overlay', isDark ? 'rgba(15, 19, 25, 0.12)' : 'rgba(242, 245, 249, 0.08)');
+  root.style.setProperty('--restaurant-theme-panel', isDark ? 'rgba(24, 30, 38, 0.58)' : 'rgba(255, 255, 255, 0.62)');
+  root.style.setProperty('--restaurant-theme-page-tint', isDark ? 'rgba(15, 19, 25, 0.66)' : 'rgba(242, 245, 249, 0.68)');
+  root.style.setProperty('--restaurant-theme-page-tint-soft', isDark ? 'rgba(15, 19, 25, 0.40)' : 'rgba(242, 245, 249, 0.40)');
+  root.style.setProperty('--surface-glass-blur', isDark ? '12px' : '10px');
 }
 
 function toAlphaColor(colorValue = '', alpha = 1) {
@@ -11772,6 +11015,37 @@ function updateTransferLocation(side, locationId) {
   });
 }
 
+
+async function scanTransferSearch(target = 'stock') {
+  const mode = target === 'template' ? 'template' : 'stock';
+  try {
+    const { openBarcodeScanner } = await import('./services/barcodeScanner.js');
+    await openBarcodeScanner({
+      title: mode === 'template' ? 'Scan Template Item' : 'Scan Transfer Item',
+      helper: mode === 'template'
+        ? 'Scan a stock barcode to filter the transfer template picker.'
+        : 'Scan a stock barcode to filter transferable stock items.',
+      onScan: (barcode) => {
+        const value = String(barcode || '').trim();
+        if (!value) return;
+        appState.transfers = {
+          ...appState.transfers,
+          filters: {
+            ...appState.transfers.filters,
+            [mode === 'template' ? 'templateSearch' : 'stockSearch']: value
+          }
+        };
+        renderApp();
+        showTransferToast(mode === 'template'
+          ? `Barcode ${value} loaded into transfer template search.`
+          : `Barcode ${value} loaded into transfer search.`, 'success');
+      }
+    });
+  } catch (error) {
+    showTransferToast(error.message || 'Could not start the transfer scanner.', 'error');
+  }
+}
+
 function toggleTransferStockSelection(stockItemId, checked) {
   const ids = new Set((appState.transfers.filters?.selectedStockIds || []).map(String));
   if (checked) ids.add(String(stockItemId));
@@ -11785,19 +11059,9 @@ function selectAllVisibleTransferStock() {
   const category = String(filters.stockCategory || '').trim();
   const selected = (appState.transfers.stockItems || [])
     .filter((item) => {
-      // Mirror the transfer picker's isPhysicalStockItem exclusions so Select-All can't pull in
-      // sub recipes / non-stock items that are hidden from the list.
-      if (item.isStocked === false || item.isSubRecipe === true) return false;
-      const type = String(item.itemType || item.stockItemType || item.specificationType || '')
-        .trim().toLowerCase().replace(/[\s-]+/g, '_');
-      if (['recipe_source', 'non_stock', 'virtual', 'sub_recipe'].includes(type)) return false;
+      if (!isTransferEligibleStockItem(item)) return false;
       if (category && String(item.category || '') !== category) return false;
-      if (!query) return true;
-      return (
-        String(item.name || '').toLowerCase().includes(query) ||
-        String(item.category || '').toLowerCase().includes(query) ||
-        (item.barcodes || []).some((barcode) => String(barcode).toLowerCase().includes(query))
-      );
+      return transferItemMatchesQuery(item, query);
     })
     .map((item) => String(item.id))
     .filter(Boolean);
@@ -11814,7 +11078,7 @@ function addTransferSelectedStock() {
   const items = [...(draft.items || [])];
 
   (appState.transfers.stockItems || [])
-    .filter((item) => ids.has(String(item.id)))
+    .filter((item) => ids.has(String(item.id)) && isTransferEligibleStockItem(item))
     .forEach((item) => {
       const existingIndex = items.findIndex((line) => String(line.stockItemId) === String(item.id));
       if (existingIndex >= 0) return;
@@ -11915,9 +11179,13 @@ async function saveTransferDraft() {
       await postExternalTransfer({
         id: draft.id,
         from_site_id: appState.workspace?.id,
+        from_site_name: appState.workspace?.name || draft.fromSiteName || '',
         to_site_id: draft.externalSiteId,
+        to_site_name: draft.externalSiteName || '',
         from_location_id: draft.fromLocationId,
+        from_location_name: draft.fromLocationName || '',
         to_location_id: draft.externalLocationId,
+        to_location_name: draft.externalLocationName || '',
         note: draft.note,
         items: draft.items
       });
@@ -11996,6 +11264,23 @@ function getTransferDraftValidation(draft = {}, transferScope = 'internal') {
     };
   }
 
+  const stockItems = appState.transfers.stockItems || [];
+  const invalidItemIndex = (draft.items || []).findIndex((item) => {
+    const stockItem = stockItems.find((entry) => String(entry.id) === String(item.stockItemId));
+    return stockItem && !isTransferEligibleStockItem(stockItem);
+  });
+  if (invalidItemIndex >= 0) {
+    const line = draft.items[invalidItemIndex] || {};
+    const stockItem = stockItems.find((entry) => String(entry.id) === String(line.stockItemId));
+    const name = line.stockItemName || stockItem?.name || 'This item';
+    const message = `${name} cannot be transferred. Transfers only allow Standard, Non Stock and Manufacturing items.`;
+    return {
+      field: `lineQty:${invalidItemIndex}`,
+      message,
+      toast: message
+    };
+  }
+
   const missingQuantityIndex = (draft.items || []).findIndex((item) => parseTransferDraftQuantity(item.quantity) <= 0);
   if (missingQuantityIndex >= 0) {
     return {
@@ -12006,7 +11291,6 @@ function getTransferDraftValidation(draft = {}, transferScope = 'internal') {
   }
 
   // Block the transfer when any line exceeds the stock available at the source location.
-  const stockItems = appState.transfers.stockItems || [];
   const locations = appState.transfers.locations || [];
   const insufficientIndex = (draft.items || []).findIndex((item) => {
     const stockItem = stockItems.find((entry) => String(entry.id) === String(item.stockItemId));
@@ -12038,13 +11322,48 @@ function parseTransferDraftQuantity(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+
+function getTransferItemBarcodeCandidates(item = {}) {
+  const uomRows = [
+    ...(Array.isArray(item.uomConfigurations) ? item.uomConfigurations : []),
+    ...(Array.isArray(item.uomConfig) ? item.uomConfig : []),
+    ...(Array.isArray(item.uomConversions) ? item.uomConversions : []),
+    ...(Array.isArray(item.customUnits) ? item.customUnits : [])
+  ];
+  return [
+    item.id,
+    item.stockItemId,
+    item.name,
+    item.sku,
+    item.SKU,
+    item.code,
+    item.itemCode,
+    item.stockCode,
+    item.barcode,
+    ...(Array.isArray(item.barcodes) ? item.barcodes : []),
+    ...uomRows.flatMap((row = {}) => [row.barcode, row.customBarcode, row.customUomBarcode, row.uomBarcode, row.sku])
+  ].filter((value) => String(value || '').trim());
+}
+
+function transferItemMatchesQuery(item = {}, query = '') {
+  const q = String(query || '').trim().toLowerCase();
+  if (!q) return true;
+  return getTransferItemBarcodeCandidates(item).some((value) => String(value || '').toLowerCase().includes(q)) ||
+    String(item.category || '').toLowerCase().includes(q);
+}
+
 async function exportTransferTemplate(format = 'csv', templateId = '') {
   const normalizedFormat = ['csv', 'xlsx'].includes(String(format || '').toLowerCase()) ? String(format).toLowerCase() : 'csv';
   const timestamp = getExportTimestamp();
   const template = (appState.transfers.templates || []).find((entry) => String(entry.id) === String(templateId || ''));
   const locationHelper = getTransferLocationHelperList();
-  const rows = template?.items?.length
-    ? template.items.map((item) => ({
+  const stockById = new Map((appState.transfers.stockItems || []).map((item) => [String(item.id), item]));
+  const validTemplateItems = (template?.items || []).filter((item = {}) => {
+    const stockItem = stockById.get(String(item.stockItemId || item.id || '')) || item;
+    return isTransferEligibleStockItem(stockItem);
+  });
+  const rows = validTemplateItems.length
+    ? validTemplateItems.map((item) => ({
         'Item_ID/SKU': item.sku || item.stockItemId || '',
         Stock_Item: item.stockItemName || '',
         From_Location: '',
@@ -12078,6 +11397,10 @@ async function exportTransferTemplate(format = 'csv', templateId = '') {
   } catch (error) {
     showTransferToast(error.message || 'Could not export bulk transfer template.', 'error');
   }
+}
+
+function slugifyExportName(value = '') {
+  return String(value || 'export').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'export';
 }
 
 function getTransferLocationHelperList() {
@@ -12130,17 +11453,7 @@ function selectAllVisibleTransferTemplateStock() {
   const query = String(appState.transfers.filters?.templateSearch || '').trim().toLowerCase();
   const ids = new Set((current.selectedStockIds || []).map(String));
   (appState.transfers.stockItems || [])
-    .filter((item) => {
-      if (!query) return true;
-      return [
-        item.name,
-        item.category,
-        item.sku,
-        item.SKU,
-        item.code,
-        ...(Array.isArray(item.barcodes) ? item.barcodes : [])
-      ].some((value) => String(value || '').toLowerCase().includes(query));
-    })
+    .filter((item) => isTransferEligibleStockItem(item) && transferItemMatchesQuery(item, query))
     .forEach((item) => ids.add(String(item.id)));
   updateTransferTemplateDraft({ selectedStockIds: [...ids] });
 }
@@ -12176,7 +11489,7 @@ function useTransferTemplateForBulk(templateId = '') {
         barcodes: Array.isArray(stockItem.barcodes) ? stockItem.barcodes : []
       };
     })
-    .filter((item) => item.stockItemId);
+    .filter((item) => item.stockItemId && isTransferEligibleStockItem(stockById.get(String(item.stockItemId)) || item));
 
   const currentDraft = hydrateTransferDraft(appState.transfers.draftTransfer, appState.transfers.locations || [], appState.transfers.sites || []);
   appState.transfers = {
@@ -12201,10 +11514,24 @@ function useTransferTemplateForBulk(templateId = '') {
 }
 
 async function saveTransferTemplateDraft() {
+  // renderApp() replaces the button node while a save is in progress. Without a state guard a
+  // second click (or rapid double-click) can still start another large write before the disabled
+  // replacement is painted, which previously made bulk template saves appear to hang.
+  if (appState.transfers.actionStatus === 'saving-template') return;
+
   const draft = appState.transfers.templateDraft || createEmptyTransferTemplateDraft();
   const selectedIds = new Set((draft.selectedStockIds || []).map(String));
+  const invalidSelected = (appState.transfers.stockItems || [])
+    .filter((item) => selectedIds.has(String(item.id)) && !isTransferEligibleStockItem(item));
+  if (invalidSelected.length) {
+    const message = 'Transfer templates only allow Standard, Non Stock and Manufacturing items.';
+    appState.transfers = { ...appState.transfers, actionError: message };
+    renderApp();
+    showTransferToast(message, 'error');
+    return;
+  }
   const selectedItems = (appState.transfers.stockItems || [])
-    .filter((item) => selectedIds.has(String(item.id)))
+    .filter((item) => selectedIds.has(String(item.id)) && isTransferEligibleStockItem(item))
     .map((item) => ({
       stockItemId: String(item.id),
       stockItemName: item.name || '',
@@ -12212,6 +11539,15 @@ async function saveTransferTemplateDraft() {
       category: item.category || '',
       unit: item.unit || ''
     }));
+
+  // Typing in the template name/notes stores a pending focus snapshot. The first save render can
+  // otherwise restore that text-field focus, after which renderApp() intentionally suppresses the
+  // success render and leaves the user looking at a permanent "Saving..." button even though the
+  // API has committed the template. Release both the live and queued focus before starting.
+  pendingFocusField = null;
+  if (typeof document !== 'undefined' && document.activeElement && typeof document.activeElement.blur === 'function') {
+    document.activeElement.blur();
+  }
 
   appState.transfers = {
     ...appState.transfers,
@@ -12239,6 +11575,13 @@ async function saveTransferTemplateDraft() {
       items: saved.items || selectedItems
     };
     const withoutOld = (appState.transfers.templates || []).filter((t) => String(t.id) !== String(savedTemplate.id));
+    // Force the completion render even if the user clicked back into the name or notes field while
+    // the network request was pending. Otherwise renderApp() will intentionally defer the route
+    // change and the completed save still looks frozen.
+    pendingFocusField = null;
+    if (typeof document !== 'undefined' && document.activeElement && typeof document.activeElement.blur === 'function') {
+      document.activeElement.blur();
+    }
     appState.transfers = {
       ...appState.transfers,
       templates: [...withoutOld, savedTemplate].sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''))),
@@ -12254,12 +11597,19 @@ async function saveTransferTemplateDraft() {
     renderApp();
     showTransferToast('Transfer template saved.', 'success');
   } catch (error) {
+    const message = error.message || 'Could not save transfer template.';
+    // Error feedback must also replace the saving state immediately instead of waiting for blur.
+    pendingFocusField = null;
+    if (typeof document !== 'undefined' && document.activeElement && typeof document.activeElement.blur === 'function') {
+      document.activeElement.blur();
+    }
     appState.transfers = {
       ...appState.transfers,
       actionStatus: '',
-      actionError: error.message || 'Could not save transfer template.'
+      actionError: message
     };
     renderApp();
+    showTransferToast(message, 'error');
   }
 }
 
@@ -12382,11 +11732,12 @@ function parseBulkTransferRows(rows = [], { stockItems = [], locations = [] } = 
     const quantity = Number(String(rawQty || '').replace(',', '.'));
 
     if (!item) errors.push(`Row ${lineNumber}: stock item "${rawItem}" was not found.`);
+    if (item && !isTransferEligibleStockItem(item)) errors.push(`Row ${lineNumber}: "${item.name || rawItem}" cannot be transferred. Transfers only allow Standard, Non Stock and Manufacturing items.`);
     if (!fromLocation) errors.push(`Row ${lineNumber}: from location "${rawFrom}" was not found.`);
     if (!toLocation) errors.push(`Row ${lineNumber}: to location "${rawTo}" was not found.`);
     if (!Number.isFinite(quantity) || quantity <= 0) errors.push(`Row ${lineNumber}: quantity must be greater than zero.`);
     if (fromLocation && toLocation && String(fromLocation.id) === String(toLocation.id)) errors.push(`Row ${lineNumber}: from and to locations must be different.`);
-    if (!item || !fromLocation || !toLocation || !Number.isFinite(quantity) || quantity <= 0 || String(fromLocation.id) === String(toLocation.id)) return;
+    if (!item || !isTransferEligibleStockItem(item) || !fromLocation || !toLocation || !Number.isFinite(quantity) || quantity <= 0 || String(fromLocation.id) === String(toLocation.id)) return;
 
     lines.push({
       stockItemId: String(item.id),
@@ -12458,7 +11809,8 @@ function findStockItemForImport(stockItems = [], value = '') {
       item.itemCode,
       item.stockCode,
       item.name,
-      ...(Array.isArray(item.barcodes) ? item.barcodes : [])
+      ...(Array.isArray(item.barcodes) ? item.barcodes : []),
+      ...getTransferItemBarcodeCandidates(item)
     ];
     return candidates.some((candidate) => normalizeImportLookupKey(candidate) === normalizedNeedle);
   }) || null;
@@ -13614,7 +12966,9 @@ async function saveManufacturingBlueprint() {
         componentType: ''
       }
     };
+    renderApp();
     showManufacturingToast('Manufacturing blueprint saved.', 'success');
+    refreshActiveTabFromApi().catch(() => {});
   } catch (error) {
     appState.manufacturing = {
       ...appState.manufacturing,
@@ -13622,6 +12976,7 @@ async function saveManufacturingBlueprint() {
       actionError: error.message || 'Could not save manufacturing blueprint.'
     };
     renderApp();
+    showManufacturingToast(error.message || 'Could not save manufacturing blueprint.', 'error');
   }
 }
 
@@ -13752,12 +13107,31 @@ async function saveManufacturingBatch() {
   const draft = appState.manufacturing.batchDraft || createEmptyManufacturingBatchDraft();
   if (!draft.id) draft.id = makeStableSubmitId('mfg');
   const multiplier = Math.max(parseDecimalInputValue(draft.batchMultiplier, 1) || 1, 1);
+  const manufacturedItem = (appState.manufacturing.manufacturedItems || [])
+    .find((item) => String(item.id) === String(draft.manufacturedItemId || ''));
+  const expectedQty = (parseDecimalInputValue(draft.expectedQty, 0) || 0) * multiplier;
+  const producedQty = (parseDecimalInputValue(draft.producedQty, 0) || 0) * multiplier;
+  const impact = manufacturedItem
+    ? getManufacturingProductionImpactForSave(manufacturedItem, multiplier, expectedQty, producedQty, draft.locationId)
+    : null;
   const payload = {
     ...draft,
     id: draft.id,
-    expectedQty: (parseDecimalInputValue(draft.expectedQty, 0) || 0) * multiplier,
-    producedQty: (parseDecimalInputValue(draft.producedQty, 0) || 0) * multiplier,
-    batchMultiplier: multiplier
+    itemId: draft.manufacturedItemId || draft.itemId || '',
+    expectedQty,
+    producedQty,
+    batchMultiplier: multiplier,
+    batchCount: multiplier,
+    unit: manufacturedItem?.unit || draft.unit || 'ea',
+    itemName: manufacturedItem?.name || draft.itemName || '',
+    unitCost: (impact?.expectedUnitCost ?? Number(draft.unitCost || 0)) || 0,
+    expectedUnitCost: (impact?.expectedUnitCost ?? Number(draft.unitCost || 0)) || 0,
+    actualUnitCost: (impact?.actualUnitCost ?? Number(draft.unitCost || 0)) || 0,
+    batchCost: impact?.batchCost ?? 0,
+    variance: impact?.variance ?? (expectedQty - producedQty),
+    wastageQty: impact?.wastageQty ?? Math.max(expectedQty - producedQty, 0),
+    wastageValue: impact?.wastageValue ?? 0,
+    components: impact?.components || []
   };
   appState.manufacturing = {
     ...appState.manufacturing,
@@ -13950,9 +13324,11 @@ async function saveManufacturingProductionEvent() {
   try {
     const { postManufacturingBatch } = await import('./services/manufacturingService.js');
     for (const { item, batchCount, expected, produced } of items) {
+      const impact = getManufacturingProductionImpactForSave(item, batchCount, expected, produced, draft.locationId);
       await postManufacturingBatch(appState.workspace?.id, {
         id: submitIds[item.id],
         manufacturedItemId: item.id,
+        itemId: item.id,
         itemName: item.name || '',
         siteId: draft.siteId,
         siteName: draft.siteName,
@@ -13960,9 +13336,16 @@ async function saveManufacturingProductionEvent() {
         locationName: draft.locationName,
         batchMultiplier: 1,
         unit: item.unit || 'ea',
-        unitCost: item.unitCost || item.cost || 0,
+        unitCost: impact.expectedUnitCost,
+        expectedUnitCost: impact.expectedUnitCost,
+        actualUnitCost: impact.actualUnitCost,
+        batchCost: impact.batchCost,
         expectedQty: expected,
         producedQty: produced,
+        variance: impact.variance,
+        wastageQty: impact.wastageQty,
+        wastageValue: impact.wastageValue,
+        components: impact.components,
         batchCount,
         date: draft.date,
         note: draft.note
@@ -13995,17 +13378,27 @@ function getManufacturingProductionImpactForSave(item = {}, batchCount = 0, expe
   const stockItems = appState.manufacturing.stockItems || [];
   const componentMap = new Map(stockItems.map((entry) => [String(entry.id), entry]));
   const recipe = Array.isArray(item.recipe) ? item.recipe : [];
-  const yieldBatch = Math.max(parseDecimalInputValue(item.yieldBatch, 0) || 0, 0);
+  const fallbackUnitCost = Number(item.unitCost || item.cost || 0) || 0;
+  const standardYield = Math.max(parseDecimalInputValue(item.yieldBatch, 0) || 0, 0);
+  const recipeBatchCost = Number(item.batchCost || 0) || ((standardYield > 0 ? standardYield : expectedQty) * fallbackUnitCost);
+  const batchCost = recipeBatchCost * Math.max(batchCount || 0, 0);
+  const expectedUnitCost = expectedQty > 0 ? batchCost / expectedQty : (standardYield > 0 ? recipeBatchCost / standardYield : fallbackUnitCost);
+  const actualUnitCost = producedQty > 0 ? batchCost / producedQty : expectedUnitCost;
+  const yieldBatch = standardYield;
   const components = recipe.map((line) => {
     const component = componentMap.get(String(line.ingId || line.id || line.stockItemId || ''));
     const componentQty = Math.max(parseDecimalInputValue(line.qty || line.quantity || 0, 0) || 0, 0);
     const usage = yieldBatch > 0 ? (componentQty / yieldBatch) * expectedQty : 0;
     const before = getManufacturingLocationQuantity(component, locationId);
     const after = before - usage;
+    const cost = Number(component?.cost || component?.unitCost || component?.lastPurchasePrice || 0) || 0;
     return {
       id: String(component?.id || line.ingId || ''),
       name: component?.name || 'Missing ingredient',
       unit: String(component?.unit || '').toLowerCase(),
+      qty: usage,
+      cost,
+      unitCost: cost,
       before,
       usage,
       after,
@@ -14015,9 +13408,16 @@ function getManufacturingProductionImpactForSave(item = {}, batchCount = 0, expe
   });
   return {
     itemName: item.name || 'Production item',
+    itemId: String(item.id || '').trim(),
     batchCount,
     expectedQty,
     producedQty,
+    variance: expectedQty - producedQty,
+    wastageQty: Math.max(expectedQty - producedQty, 0),
+    wastageValue: Math.max(expectedQty - producedQty, 0) * expectedUnitCost,
+    batchCost,
+    expectedUnitCost,
+    actualUnitCost,
     components,
     hasMissingRecipe: !recipe.length,
     hasInsufficientStock: components.some((line) => line.missing || line.insufficient)
@@ -14045,8 +13445,8 @@ async function importManufacturingFile(file) {
 
   try {
     const rows = await parseDataFile(file, { preferredSheetNames: ['Manufacturing_Import'] });
-    const { items, report } = mapManufacturingImportRows(rows, appState.manufacturing.stockItems || []);
-    if (!items.length) throw new Error(formatImportFailure('No valid manufactured item rows were found in this file.', report.errors));
+    const { items, review } = mapManufacturingImportRows(rows, appState.manufacturing.stockItems || []);
+    if (!items.length) throw new Error(formatImportFailure('No valid manufactured item rows were found in this file.', review.errors));
 
     const { importManufacturedItems } = await import('./services/manufacturingService.js');
     const result = await importManufacturedItems(appState.workspace?.id, items);
@@ -14055,16 +13455,16 @@ async function importManufacturingFile(file) {
       actionStatus: '',
       actionError: ''
     };
-    const skippedCount = Number(report.errors.length || 0);
+    const skippedCount = Number(review.errors.length || 0);
     if (skippedCount) {
       showImportNotification({
         moduleLabel: 'Manufacturing Import',
         title: 'Manufacturing Import Needs Attention',
         message: `${result.importedCount || 0} blueprint${Number(result.importedCount || 0) === 1 ? '' : 's'} imported, but ${skippedCount} row${skippedCount === 1 ? '' : 's'} need fixing. Confirm this message, fix the errors, and try again.`,
-        errors: report.errors,
+        errors: review.errors,
         importedCount: result.importedCount || 0,
         skippedCount,
-        totalRows: report.totalRows,
+        totalRows: review.totalRows,
         tone: 'warning',
         confirmLabel: 'Confirm & Fix Errors'
       });
@@ -14185,12 +13585,12 @@ function mapManufacturingImportRows(rows = [], stockItems = []) {
   });
   const existingManufacturedById = new Map((stockItems || []).map((item) => [normalizeImportKey(item.id), item]));
   const groups = new Map();
-  const report = createImportReport(rows);
+  const review = createImportReview(rows);
 
   getImportDataRows(rows).forEach(({ row, rowNumber }) => {
     const rawName = norm(getColumn(row, 'Name', 'Manufactured_Item', 'Manufactured Item', 'Item', 'Product'));
     if (!rawName) {
-      report.errors.push(createImportError('ERR_MISSING_NAME', rowNumber, 'Name is required.'));
+      review.errors.push(createImportError('ERR_MISSING_NAME', rowNumber, 'Name is required.'));
       return;
     }
     const itemType = normalizeManufacturingImportType(getColumn(row, 'Item_Type', 'Item Type', 'Type', 'Specification'));
@@ -14201,7 +13601,7 @@ function mapManufacturingImportRows(rows = [], stockItems = []) {
     const batchYieldRaw = getColumn(row, 'Batch_Yield', 'BatchYield', 'Batch Yield');
     const batchYield = parseImportNumber(batchYieldRaw, 1);
     if (batchYield === null || batchYield <= 0) {
-      report.errors.push(createImportError('ERR_BATCH_YIELD', rowNumber, 'Batch_Yield must be a number greater than zero.'));
+      review.errors.push(createImportError('ERR_BATCH_YIELD', rowNumber, 'Batch_Yield must be a number greater than zero.'));
       return;
     }
     if (!groups.has(name)) {
@@ -14231,21 +13631,21 @@ function mapManufacturingImportRows(rows = [], stockItems = []) {
     if (!componentName) return;
     const component = ingredientByName.get(normalizeImportKey(componentName));
     if (!component) {
-      report.errors.push(createImportError('ERR_COMPONENT_LOOKUP', rowNumber, `Component "${componentName}" was not found in stock items.`));
+      review.errors.push(createImportError('ERR_COMPONENT_LOOKUP', rowNumber, `Component "${componentName}" was not found in stock items.`));
       return;
     }
     const qty = parseImportNumber(getColumn(row, 'Quantity_Needed', 'Quantity', 'Qty', 'Quantity Needed'), null);
     if (qty === null || qty <= 0) {
-      report.errors.push(createImportError('ERR_QUANTITY', rowNumber, 'Quantity_Needed must be a number greater than zero.'));
+      review.errors.push(createImportError('ERR_QUANTITY', rowNumber, 'Quantity_Needed must be a number greater than zero.'));
       return;
     }
     group.recipe.push({ ingId: component.id, qty });
   });
 
   const items = [...groups.values()];
-  report.importedCount = items.length;
-  report.skippedCount = report.errors.length;
-  return { items, report };
+  review.importedCount = items.length;
+  review.skippedCount = review.errors.length;
+  return { items, review };
 }
 
 function normalizeManufacturingImportCategory(itemName = '', value = '') {
@@ -14344,7 +13744,9 @@ function closeStockTakeOverlay() {
       overlay: '',
       openDropdown: '',
       templateSelectionQuery: '',
-      templateListQuery: ''
+      templateListQuery: '',
+      exportTemplateId: '',
+      exportLocationId: ''
     }
   };
   renderApp();
@@ -14890,7 +14292,7 @@ function getStockTakeScopedItems() {
   const draft = hydrateStockTakeDraft(appState.stockTake.draftSession, appState.stockTake.locations || []);
   const scope = String(draft.templateScope || '').trim();
   const selections = new Set((draft.templateSelections || []).map(String));
-  return (appState.stockTake.stockItems || []).filter((item) => {
+  return (appState.stockTake.stockItems || []).filter(isStockTakeCountableItem).filter((item) => {
     if (draft.sessionMode === 'template' && scope === 'category' && selections.size) {
       return selections.has(String(item.category || '').trim());
     }
@@ -14906,6 +14308,7 @@ function getStockTakeTemplateItems(template, stockItems = []) {
   const scope = String(template.scope || '').trim() === 'items' ? 'items' : 'category';
   const selections = new Set((template.selections || []).map(String));
   return (stockItems || [])
+    .filter(isStockTakeCountableItem)
     .filter((item) => {
       if (!selections.size) return true;
       if (scope === 'items') return selections.has(String(item.id || ''));
@@ -14913,6 +14316,10 @@ function getStockTakeTemplateItems(template, stockItems = []) {
     })
     .slice()
     .sort((left, right) => String(left.name || '').localeCompare(String(right.name || '')));
+}
+
+function isStockTakeCountableItem(item = {}) {
+  return isStockCountableItem(item);
 }
 
 function getStockTakeTemplateLocationIds(template = {}) {
@@ -15096,7 +14503,22 @@ function confirmStockTakeScanCountEntry() {
   const selection = getLineUomSelection(matched, current.selectedUom || matched.unit || 'ea');
   const ratio = Number(selection.ratio || current.uomRatio || 1);
   const baseQuantity = quantity * (Number.isFinite(ratio) && ratio > 0 ? ratio : 1);
-  incrementStockTakeCountWithOptions(matched.id, baseQuantity, { focusField: true, setQuery: false });
+  const countBreakdown = [{
+    key: getStockTakeCameraUomKey(selection.selectedUom || matched.unit || 'ea', ratio),
+    uomName: selection.selectedUom || matched.unit || 'ea',
+    baseUom: selection.baseUom || matched.unit || 'ea',
+    ratio: Number.isFinite(ratio) && ratio > 0 ? ratio : 1,
+    count: quantity,
+    scans: quantity,
+    lastBarcode: current.barcode || ''
+  }];
+  incrementStockTakeCountWithOptions(matched.id, baseQuantity, {
+    focusField: true,
+    setQuery: false,
+    selectedUom: selection.selectedUom || matched.unit || 'ea',
+    uomCounts: countBreakdown,
+    scanBreakdown: countBreakdown
+  });
   appState.stockTake = {
     ...appState.stockTake,
     scanCount: createEmptyStockTakeScanCountDraft()
@@ -15667,23 +15089,6 @@ async function scanStockTakeBarcode(mode = 'focus') {
   }
 }
 
-function restoreSavedStockTakeDraft() {
-  const drafts = appState.stockTake.savedDrafts || [];
-  if (!drafts.length) {
-    showStockTakeToast('No saved stock take draft is available.', 'warning');
-    return;
-  }
-  appState.stockTake = {
-    ...appState.stockTake,
-    filters: {
-      ...appState.stockTake.filters,
-      overlay: 'resume-drafts',
-      openDropdown: ''
-    }
-  };
-  renderApp();
-}
-
 function restoreSpecificStockTakeDraft(draftId = '') {
   const savedDraft = (appState.stockTake.savedDrafts || []).find((entry) => String(entry.id) === String(draftId));
   if (!savedDraft) {
@@ -15725,7 +15130,8 @@ async function discardSpecificStockTakeDraft(draftId = '') {
       savedDrafts: remainingDrafts,
       filters: {
         ...appState.stockTake.filters,
-        overlay: remainingDrafts.length ? 'resume-drafts' : ''
+        overlay: '',
+        openDropdown: ''
       }
     };
     renderApp();
@@ -15737,94 +15143,270 @@ async function discardSpecificStockTakeDraft(draftId = '') {
 }
 
 async function saveStockTakeSessionDraft() {
-  const draft = hydrateStockTakeDraft(appState.stockTake.draftSession, appState.stockTake.locations || []);
-  appState.stockTake = {
-    ...appState.stockTake,
-    actionStatus: 'saving-draft',
-    actionError: ''
+  // A count field can remain the active element after a button click in Safari. renderApp()
+  // deliberately skips DOM replacement while a text input is focused, which made a successful
+  // draft save look permanently stuck and also hid any API error. Release both live and queued
+  // focus before starting, and guard against rapid duplicate submissions.
+  if (appState.stockTake.actionStatus === 'saving-draft') return;
+  pendingFocusField = null;
+  if (typeof document !== 'undefined' && document.activeElement && typeof document.activeElement.blur === 'function') {
+    document.activeElement.blur();
+  }
+
+  const hydratedDraft = hydrateStockTakeDraft(appState.stockTake.draftSession, appState.stockTake.locations || []);
+  const draft = {
+    ...hydratedDraft,
+    // Keep one stable id across retries so a response timeout cannot create duplicate drafts.
+    id: String(hydratedDraft.id || makeStableSubmitId('std'))
   };
-  renderApp();
+
+  if (!draft.locationId) {
+    const message = 'Choose a stock take location before saving a draft.';
+    appState.stockTake = { ...appState.stockTake, actionError: message };
+    renderApp();
+    showStockTakeToast(message, 'error');
+    return;
+  }
 
   try {
+    appState.stockTake = {
+      ...appState.stockTake,
+      draftSession: draft,
+      actionStatus: 'saving-draft',
+      actionError: '',
+      filters: {
+        ...appState.stockTake.filters,
+        openDropdown: ''
+      }
+    };
+    renderApp();
+
     const { saveStockTakeDraftSession } = await import('./services/stockTakeService.js');
-    const savedDraft = await saveStockTakeDraftSession(appState.workspace?.id, appState.user?.uid || appState.user?.id || '', draft);
+    const savedDraft = await saveStockTakeDraftSession(
+      appState.workspace?.id,
+      appState.user?.uid || appState.user?.id || '',
+      draft
+    );
+    const nextSavedDrafts = [
+      savedDraft,
+      ...(appState.stockTake.savedDrafts || []).filter((entry) => String(entry.id) !== String(savedDraft.id))
+    ].sort((left, right) => String(right.savedAt || '').localeCompare(String(left.savedAt || '')));
+
+    // The user may have clicked back into a field while the request was in flight. Force the
+    // completion render so the active session closes and the Active Sessions table updates now.
+    pendingFocusField = null;
+    if (typeof document !== 'undefined' && document.activeElement && typeof document.activeElement.blur === 'function') {
+      document.activeElement.blur();
+    }
     appState.stockTake = {
       ...appState.stockTake,
       actionStatus: '',
       actionError: '',
-      draftSession: hydrateStockTakeDraft(savedDraft, appState.stockTake.locations || [])
+      sessionActive: false,
+      savedDrafts: nextSavedDrafts,
+      draftSession: hydrateStockTakeDraft(createEmptyStockTakeDraft(), appState.stockTake.locations || []),
+      sessionSetup: createEmptyStockTakeSessionSetup(),
+      filters: {
+        ...appState.stockTake.filters,
+        overlay: '',
+        openDropdown: '',
+        query: ''
+      }
     };
-    showStockTakeToast('Draft saved.', 'success');
+    renderApp();
+    showStockTakeToast('Draft saved to Active Sessions.', 'success');
+    refreshActiveTabFromApi().catch(() => {});
   } catch (error) {
+    const message = error?.message || 'Could not save stock take draft.';
+    pendingFocusField = null;
+    if (typeof document !== 'undefined' && document.activeElement && typeof document.activeElement.blur === 'function') {
+      document.activeElement.blur();
+    }
     appState.stockTake = {
       ...appState.stockTake,
       actionStatus: '',
-      actionError: error.message || 'Could not save stock take draft.'
+      actionError: message
     };
     renderApp();
+    showStockTakeToast(message, 'error');
   }
 }
 
-async function exportStockTakeTemplatePdf(templateId) {
+async function exportStockTakeTemplatePdf(templateId, selectedLocationId = '') {
   const template = (appState.stockTake.templates || []).find((entry) => String(entry.id) === String(templateId));
   if (!template) {
     showStockTakeToast('Template could not be found.', 'error');
     return;
   }
 
-  const locationIds = getStockTakeTemplateLocationIds(template);
-  const exportLocationIds = locationIds.length ? locationIds : [appState.stockTake.locations?.[0]?.id || 'main'];
-  const locationNames = exportLocationIds.map((locationId) => getLocationNameById(appState.stockTake.locations || [], locationId, 'Main Store'));
+  const linkedLocationIds = getStockTakeTemplateLocationIds(template);
+  const exportLocationIds = linkedLocationIds.length ? linkedLocationIds : [appState.stockTake.locations?.[0]?.id || 'main'];
+  const requestedLocationId = String(selectedLocationId || '').trim();
+
+  if (!requestedLocationId && exportLocationIds.length > 1) {
+    openStockTakeTemplateExportLocationPicker(template.id);
+    return;
+  }
+
+  const locationId = requestedLocationId || exportLocationIds[0] || appState.stockTake.locations?.[0]?.id || 'main';
+  if (exportLocationIds.length && !exportLocationIds.map(String).includes(String(locationId))) {
+    showStockTakeToast('Choose a location linked to this template first.', 'warning');
+    openStockTakeTemplateExportLocationPicker(template.id);
+    return;
+  }
+
+  const locationName = getLocationNameById(appState.stockTake.locations || [], locationId, 'Main Store');
   const scopedItems = getStockTakeTemplateItems(template, appState.stockTake.stockItems || []);
-  const rows = [
-    ['Template', 'Location', 'Category', 'Item', 'Unit', 'System Qty', 'Count'],
-    ...exportLocationIds.flatMap((locationId) => {
-      const locationName = getLocationNameById(appState.stockTake.locations || [], locationId, 'Main Store');
-      return scopedItems.map((item) => [
-        template.name,
-        locationName,
-        item.category || '',
-        item.name || '',
-        item.unit || 'ea',
-        formatStockTakeNumber(getLocationStock(item, locationId)),
-        ''
-      ]);
+  const rows = [['Product Name', 'UOM', 'Count', 'UOM', 'Count', 'UOM', 'Count', 'UOM', 'Count']];
+  let lastCategory = '';
+
+  scopedItems
+    .slice()
+    .sort((left, right) => {
+      const categoryCompare = String(left.category || '').localeCompare(String(right.category || ''));
+      if (categoryCompare !== 0) return categoryCompare;
+      return String(left.name || '').localeCompare(String(right.name || ''));
     })
-  ];
+    .forEach((item) => {
+      const category = String(item.category || 'General').trim() || 'General';
+      if (lastCategory !== category) {
+        rows.push([`CATEGORY: ${category}`, '', '', '', '', '', '', '', '']);
+        lastCategory = category;
+      }
+      const uomConfigs = normalizeLineUomConfigurations(item.uomConfigurations || item.uomConfig || item.uomConversions).slice(0, 3);
+      const uoms = [
+        String(item.unit || item.baseUom || 'ea').toUpperCase(),
+        uomConfigs[0]?.customUom || '',
+        uomConfigs[1]?.customUom || '',
+        uomConfigs[2]?.customUom || ''
+      ];
+      rows.push([
+        item.name || '',
+        uoms[0], '',
+        uoms[1], '',
+        uoms[2], '',
+        uoms[3], ''
+      ]);
+    });
 
   try {
     await exportAoaRows({
       format: 'pdf',
-      filename: `kcp-stocktake-template-${template.name.toLowerCase().replace(/\s+/g, '-')}`,
-      sheetName: 'Stock Take Template',
-      title: template.name,
-      subtitle: `${locationNames.join(', ')} · Printable Count Sheet`,
+      filename: `kcp-stock-count-sheet-${slugifyExportName(template.name || 'template')}-${slugifyExportName(locationName)}`,
+      sheetName: 'Stock Count Sheet',
+      title: 'Stock Count Sheet',
+      subtitle: `${template.name || 'Template'} | ${appState.workspace?.siteName || appState.workspace?.name || 'KCP'} | ${locationName} | ${new Date().toLocaleString('en-ZA')}`,
       rows,
       headerRowIndex: 0,
-      branding: getPdfBranding()
+      branding: getPdfBranding(),
+      orientation: 'landscape',
+      tableOptions: {
+        theme: 'grid',
+        tableWidth: 'auto',
+        horizontalPageBreak: false,
+        ruleColor: [148, 163, 184],
+        styles: {
+          fontSize: 9,
+          cellPadding: { top: 8, right: 6, bottom: 8, left: 6 },
+          lineWidth: 0.45,
+          lineColor: [190, 200, 214],
+          valign: 'middle',
+          minCellHeight: 26,
+          textColor: [0, 0, 0],
+          overflow: 'linebreak'
+        },
+        headStyles: {
+          fillColor: [232, 238, 246],
+          textColor: [0, 0, 0],
+          fontStyle: 'bold',
+          lineColor: [165, 176, 193],
+          minCellHeight: 28
+        },
+        alternateRowStyles: { fillColor: [255, 255, 255] },
+        margin: { left: 28, right: 28 },
+        columnStyles: {
+          0: { cellWidth: 230, fontStyle: 'bold', halign: 'left' },
+          1: { cellWidth: 65, halign: 'center' },
+          2: { cellWidth: 70, halign: 'center' },
+          3: { cellWidth: 65, halign: 'center' },
+          4: { cellWidth: 70, halign: 'center' },
+          5: { cellWidth: 65, halign: 'center' },
+          6: { cellWidth: 70, halign: 'center' },
+          7: { cellWidth: 65, halign: 'center' },
+          8: { cellWidth: 70, halign: 'center' }
+        },
+        didParseCell: (data) => {
+          const firstCell = String(data.row.raw?.[0] || '');
+          const isCategoryRow = data.section === 'body' && firstCell.startsWith('CATEGORY:');
+          if (isCategoryRow) {
+            data.cell.styles.fontStyle = 'bold';
+            data.cell.styles.fillColor = [238, 242, 247];
+            data.cell.styles.textColor = [0, 0, 0];
+            data.cell.styles.minCellHeight = 24;
+            if (data.column.index > 0) data.cell.text = [''];
+          }
+          if (data.section === 'body' && !isCategoryRow && [2, 4, 6, 8].includes(data.column.index)) {
+            data.cell.styles.fillColor = [255, 255, 255];
+            data.cell.styles.textColor = [0, 0, 0];
+            data.cell.styles.lineColor = [165, 176, 193];
+            data.cell.styles.minCellHeight = 30;
+          }
+          if (data.section === 'body' && !isCategoryRow && [1, 3, 5, 7].includes(data.column.index)) {
+            data.cell.styles.fontStyle = 'bold';
+            data.cell.styles.textColor = [0, 0, 0];
+            data.cell.styles.fillColor = [250, 252, 255];
+          }
+        },
+        didDrawCell: () => {
+          // Keep count cells clean. The grid border provides the writable count area.
+        }
+      }
     });
+    updateStockTakeFilters({ overlay: '', exportTemplateId: '', exportLocationId: '' });
     showStockTakeToast(`${template.name} exported as PDF.`, 'success');
   } catch (error) {
     showStockTakeToast(error.message || 'Could not export the stock take template.', 'error');
   }
 }
 
-async function exportStockTakeCountTemplate(format = 'csv') {
+function openStockTakeTemplateExportLocationPicker(templateId = '') {
+  updateStockTakeFilters({
+    overlay: 'template-export-location',
+    exportTemplateId: String(templateId || ''),
+    exportLocationId: '',
+    openDropdown: ''
+  });
+}
+
+function openStockTakeCountTemplateLocationPicker(format = 'xlsx') {
+  updateStockTakeFilters({ overlay: 'count-template-location', exportFormat: ['csv', 'xlsx'].includes(String(format || '').toLowerCase()) ? String(format).toLowerCase() : 'xlsx', exportLocationId: '', exportTemplateId: '' });
+}
+
+async function exportStockTakeCountTemplate(format = 'csv', locationId = '') {
   const normalizedFormat = ['csv', 'xlsx'].includes(String(format || '').toLowerCase()) ? String(format).toLowerCase() : 'csv';
   const timestamp = getExportTimestamp();
   const locations = (appState.stockTake.locations || []).length ? appState.stockTake.locations : [{ id: 'main', name: 'Main Store' }];
+  if (!String(locationId || '').trim()) {
+    openStockTakeCountTemplateLocationPicker(normalizedFormat);
+    return;
+  }
+  const selectedLocation = locations.find((location) => String(location.id) === String(locationId)) || null;
+  if (!selectedLocation) {
+    showStockTakeToast('Please select a count location first.', 'warning');
+    openStockTakeCountTemplateLocationPicker(normalizedFormat);
+    return;
+  }
+  const locationName = selectedLocation.name || selectedLocation.displayName || selectedLocation.locationName || 'Main Store';
   const columns = getStockTakeCountTemplateColumns();
   const rows = [];
-  locations.forEach((location) => {
-    (appState.stockTake.stockItems || []).forEach((item) => {
-      rows.push(buildStockTakeCountTemplateRow({
-        item,
-        location,
-        locations,
-        rowNumber: rows.length + 2,
-        format: normalizedFormat
-      }));
-    });
+  (appState.stockTake.stockItems || []).filter(isStockTakeCountableItem).forEach((item) => {
+    rows.push(buildStockTakeCountTemplateRow({
+      item,
+      location: selectedLocation,
+      locations,
+      rowNumber: rows.length + 2,
+      format: normalizedFormat
+    }));
   });
 
   if (!rows.length) {
@@ -15835,14 +15417,15 @@ async function exportStockTakeCountTemplate(format = 'csv') {
   try {
     await exportObjectRows({
       format: normalizedFormat,
-      filename: `kcp-stock-take-count-template-${timestamp}`,
+      filename: `kcp-stock-take-count-template-${slugifyExportName(locationName)}-${timestamp}`,
       sheetName: 'Stock_Take_Import',
-      title: 'Stock Take Count Template',
-      subtitle: 'Enter Base_Count and optional UOM count columns. Total and variance calculate in the base UOM for import review.',
+      title: `Stock Take Count Template - ${locationName}`,
+      subtitle: `Location: ${locationName}. Enter counts only in Base_Count and the custom UOM count columns. Unit columns are labels and should not be edited.`,
       rows,
       columns,
       branding: getPdfBranding()
     });
+    updateStockTakeFilters({ overlay: '', exportLocationId: '' });
     showStockTakeToast(`Stock take count template exported as ${normalizedFormat.toUpperCase()}.`, 'success');
   } catch (error) {
     showStockTakeToast(error.message || 'Could not export stock take count template.', 'error');
@@ -15854,51 +15437,50 @@ function getStockTakeCountTemplateColumns() {
     'Item_Name',
     'Location',
     'Category',
-    'Base_UOM',
-    'System_Qty',
+    'System',
+    'Base_Unit',
     'Base_Count',
-    'UOM1_Name',
-    'UOM1_Qty_Per_Base',
-    'UOM1_Count',
-    'UOM2_Name',
-    'UOM2_Qty_Per_Base',
-    'UOM2_Count',
-    'UOM3_Name',
-    'UOM3_Qty_Per_Base',
-    'UOM3_Count',
-    'Total_Count_Base_UOM',
+    'Custom_UOM_1_Unit',
+    'Custom_UOM_1_Count',
+    'Custom_UOM_2_Unit',
+    'Custom_UOM_2_Count',
+    'Custom_UOM_3_Unit',
+    'Custom_UOM_3_Count',
     'Variance',
-    'Notes',
-    'Item_ID/SKU',
-    'Location_ID'
+    'Impact_Ex_VAT'
   ];
 }
 
 function buildStockTakeCountTemplateRow({ item = {}, location = {}, locations = [], rowNumber = 2, format = 'csv' } = {}) {
   const uomConfigs = normalizeLineUomConfigurations(item.uomConfigurations || item.uomConfig || item.uomConversions).slice(0, 3);
   const systemQty = getLocationStock(item, location.id, locations);
+  const ratio1 = Number(uomConfigs[0]?.ratio || 0) > 0 ? Number(uomConfigs[0].ratio) : 0;
+  const ratio2 = Number(uomConfigs[1]?.ratio || 0) > 0 ? Number(uomConfigs[1].ratio) : 0;
+  const ratio3 = Number(uomConfigs[2]?.ratio || 0) > 0 ? Number(uomConfigs[2].ratio) : 0;
+  const unitCost = Number(item.cost || item.unitCost || 0) || 0;
+  const varianceFormula = `IFERROR((N(F${rowNumber})+(N(H${rowNumber})*${formatFormulaNumber(ratio1)})+(N(J${rowNumber})*${formatFormulaNumber(ratio2)})+(N(L${rowNumber})*${formatFormulaNumber(ratio3)}))-${formatFormulaNumber(systemQty)},0)`;
+  const impactFormula = `IFERROR(M${rowNumber}*${formatFormulaNumber(unitCost)},0)`;
   return {
     Item_Name: item.name || '',
     Location: location.name || location.displayName || 'Main Store',
     Category: item.category || item.inventoryCategory || '',
-    Base_UOM: item.unit || 'ea',
-    System_Qty: systemQty,
+    System: `${formatStockTakeNumber(systemQty)} ${item.unit || 'ea'}`,
+    Base_Unit: item.unit || 'ea',
     Base_Count: '',
-    UOM1_Name: uomConfigs[0]?.customUom || '',
-    UOM1_Qty_Per_Base: uomConfigs[0]?.ratio || '',
-    UOM1_Count: '',
-    UOM2_Name: uomConfigs[1]?.customUom || '',
-    UOM2_Qty_Per_Base: uomConfigs[1]?.ratio || '',
-    UOM2_Count: '',
-    UOM3_Name: uomConfigs[2]?.customUom || '',
-    UOM3_Qty_Per_Base: uomConfigs[2]?.ratio || '',
-    UOM3_Count: '',
-    Total_Count_Base_UOM: createStockTakeFormulaValue(format, `IFERROR(N(F${rowNumber})+(N(H${rowNumber})*N(I${rowNumber}))+(N(K${rowNumber})*N(L${rowNumber}))+(N(N${rowNumber})*N(O${rowNumber})),0)`),
-    Variance: createStockTakeFormulaValue(format, `IFERROR(P${rowNumber}-E${rowNumber},0)`),
-    Notes: '',
-    'Item_ID/SKU': item.id || item.sku || item.name || '',
-    Location_ID: location.id || ''
+    Custom_UOM_1_Unit: uomConfigs[0]?.customUom || '',
+    Custom_UOM_1_Count: '',
+    Custom_UOM_2_Unit: uomConfigs[1]?.customUom || '',
+    Custom_UOM_2_Count: '',
+    Custom_UOM_3_Unit: uomConfigs[2]?.customUom || '',
+    Custom_UOM_3_Count: '',
+    Variance: createStockTakeFormulaValue(format, varianceFormula),
+    Impact_Ex_VAT: createStockTakeFormulaValue(format, impactFormula)
   };
+}
+
+function formatFormulaNumber(value = 0) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) ? String(Number(number.toFixed(6))) : '0';
 }
 
 function createStockTakeFormulaValue(format = 'csv', formula = '') {
@@ -15951,7 +15533,8 @@ async function importStockTakeCountTemplate(file) {
         items: group.lines.map((line) => ({
           stockItemId: line.stockItemId,
           shelfCount: line.shelfCount,
-          unit: line.unit
+          unit: line.unit,
+          uomCounts: line.uomCounts || {}
         }))
       });
       if (result?.duplicate || result?.skipped) {
@@ -16024,7 +15607,7 @@ function parseStockTakeCountRows(rows = [], { stockItems = [], locations = [] } 
     const baseCountInput = getImportRowValue(row, ['Base_Count', 'Base Count', 'Base_Units', 'Base Units']);
     const uomInputs = [1, 2, 3].map((slot) => ({
       slot,
-      name: getImportRowValue(row, [`UOM${slot}_Name`, `UOM${slot} Name`, `Custom_UOM_${slot}`, `Custom UOM ${slot}`]),
+      name: getImportRowValue(row, [`UOM${slot}_Name`, `UOM${slot} Name`, `Custom_UOM_${slot}`, `Custom UOM ${slot}`, `Custom_UOM_${slot}_Unit`, `Custom UOM ${slot} Unit`]),
       ratio: getImportRowValue(row, [`UOM${slot}_Qty_Per_Base`, `UOM${slot} Qty Per Base`, `UOM${slot}_Ratio`, `UOM${slot} Ratio`, `Custom_UOM_${slot}_Ratio`, `Custom UOM ${slot} Ratio`]),
       count: getImportRowValue(row, [`UOM${slot}_Count`, `UOM${slot} Count`, `Custom_UOM_${slot}_Count`, `Custom UOM ${slot} Count`])
     }));
@@ -16035,9 +15618,10 @@ function parseStockTakeCountRows(rows = [], { stockItems = [], locations = [] } 
     if (!hasSplitCountInput && !hasLegacyCountInput && !hasManualTotalInput) return;
 
     const item = findStockItemForImport(stockItems, rawItem);
+    const countableItem = item && isStockTakeCountableItem(item) ? item : null;
     const location = findLocationForImport(locations, rawLocation) || ((locations || []).length ? null : { id: 'main', name: 'Main Store' });
-    const uomConfigs = item
-      ? normalizeLineUomConfigurations(item.uomConfigurations || item.uomConfig || item.uomConversions)
+    const uomConfigs = countableItem
+      ? normalizeLineUomConfigurations(countableItem.uomConfigurations || countableItem.uomConfig || countableItem.uomConversions)
       : [];
     let shelfCount = NaN;
     if (hasSplitCountInput) {
@@ -16055,18 +15639,37 @@ function parseStockTakeCountRows(rows = [], { stockItems = [], locations = [] } 
       shelfCount = parseStockTakeImportNumber(rawLegacyCount);
     }
     if (!item) errors.push(`Row ${lineNumber}: stock item "${rawItem}" was not found.`);
+    if (item && !countableItem) errors.push(`Row ${lineNumber}: "${item.name || rawItem}" cannot be counted in stock takes.`);
     if (!location) errors.push(`Row ${lineNumber}: location "${rawLocation}" was not found.`);
     if (!Number.isFinite(shelfCount) || shelfCount < 0) errors.push(`Row ${lineNumber}: count must be zero or greater.`);
-    if (!item || !location || !Number.isFinite(shelfCount) || shelfCount < 0) return;
+    if (!countableItem || !location || !Number.isFinite(shelfCount) || shelfCount < 0) return;
     lines.push({
-      stockItemId: String(item.id),
-      stockItemName: item.name || '',
+      stockItemId: String(countableItem.id),
+      stockItemName: countableItem.name || '',
       locationId: String(location.id),
       shelfCount,
-      unit: item.unit || 'ea'
+      unit: countableItem.unit || 'ea',
+      uomCounts: buildStockTakeImportUomCounts({ baseCountInput, uomInputs, uomConfigs, baseUom: countableItem.unit || 'ea' })
     });
   });
   return { lines, errors };
+}
+
+
+function buildStockTakeImportUomCounts({ baseCountInput = '', uomInputs = [], uomConfigs = [], baseUom = 'ea' } = {}) {
+  const result = {};
+  if (isImportCellFilled(baseCountInput)) {
+    const baseCount = parseStockTakeImportNumber(baseCountInput);
+    if (Number.isFinite(baseCount) && baseCount >= 0) result.base = baseCount;
+  }
+  (uomInputs || []).forEach((entry = {}) => {
+    if (!isImportCellFilled(entry.count)) return;
+    const count = parseStockTakeImportNumber(entry.count);
+    if (!Number.isFinite(count) || count < 0) return;
+    const name = String(entry.name || uomConfigs?.[Number(entry.slot || 0) - 1]?.customUom || `UOM${entry.slot || ''}` || baseUom).trim();
+    if (name) result[name] = count;
+  });
+  return result;
 }
 
 function calculateStockTakeSplitCount({ baseCountInput = '', uomInputs = [], uomConfigs = [], lineNumber = 0, errors = [] } = {}) {
@@ -16166,6 +15769,7 @@ function updateStockTakeTemplateDraft(updates = {}, options = {}) {
   }
   appState.stockTake = {
     ...appState.stockTake,
+    actionError: '',
     templateDraft: nextDraft
   };
   if (options.render !== false) renderApp();
@@ -16238,11 +15842,12 @@ function bulkStockTakeTemplateSelection(selectAll) {
   const scope = current.scope === 'items' ? 'items' : 'category';
   const matches = scope === 'items'
     ? (appState.stockTake.stockItems || [])
+      .filter(isStockTakeCountableItem)
       .filter((item) => !query
         || String(item.name || '').toLowerCase().includes(query)
         || String(item.category || '').toLowerCase().includes(query))
       .map((item) => String(item.id))
-    : [...new Set((appState.stockTake.stockItems || []).map((item) => String(item.category || '').trim()).filter(Boolean))]
+    : [...new Set((appState.stockTake.stockItems || []).filter(isStockTakeCountableItem).map((item) => String(item.category || '').trim()).filter(Boolean))]
       .filter((category) => !query || category.toLowerCase().includes(query));
 
   const selections = selectAll ? new Set((current.selections || []).map(String)) : new Set((current.selections || []).map(String));
@@ -16381,29 +15986,60 @@ function refreshStockTakeSessionComputed() {
   }
 }
 
-function updateStockTakeCount(stockItemId, value) {
+function updateStockTakeCount(stockItemId, value, uomKey = 'base') {
   const draft = hydrateStockTakeDraft(appState.stockTake.draftSession, appState.stockTake.locations || []);
   const raw = String(value ?? '').trim();
   const items = [...(draft.items || [])];
   const index = items.findIndex((item) => String(item.stockItemId) === String(stockItemId));
+  
+  const stockItem = (appState.stockTake.stockItems || []).find((item) => String(item.id) === String(stockItemId));
+  if (!stockItem) return;
+
+  const existingEntry = index >= 0 ? items[index] : {
+    stockItemId: String(stockItem.id),
+    stockItemName: stockItem.name || '',
+    unit: stockItem.unit || 'ea',
+    shelfCount: 0,
+    uomCounts: {}
+  };
+
+  const uomCounts = { ...(existingEntry.uomCounts || {}) };
+  // Populate 'base' fallback if legacy count exists without detailed breakdown.
+  if (existingEntry.shelfCount > 0 && Object.keys(uomCounts).length === 0) {
+    uomCounts['base'] = existingEntry.shelfCount;
+  }
+
   if (!raw) {
+    delete uomCounts[uomKey];
+  } else {
+    const val = parseDecimalInputValue(raw, NaN);
+    if (!Number.isFinite(val) || val < 0) return;
+    uomCounts[uomKey] = val;
+  }
+
+  if (Object.keys(uomCounts).length === 0) {
     if (index >= 0) items.splice(index, 1);
   } else {
-    const shelfCount = Number(raw);
-    if (!Number.isFinite(shelfCount) || shelfCount < 0) return;
-    const stockItem = (appState.stockTake.stockItems || []).find((item) => String(item.id) === String(stockItemId));
-    if (!stockItem) return;
+    const uomConfigs = normalizeLineUomConfigurations(stockItem.uomConfigurations || stockItem.uomConfig || stockItem.uomConversions);
+    let shelfCount = Number(uomCounts['base'] || 0);
+    uomConfigs.forEach((cfg) => {
+      const key = String(cfg.customUom || '').trim();
+      if (key && uomCounts[key] !== undefined) {
+        shelfCount += Number(uomCounts[key] || 0) * (Number(cfg.ratio || 1) || 1);
+      }
+    });
+
     const systemStock = getLocationStock(stockItem, draft.locationId, appState.stockTake.locations || []);
     const variance = shelfCount - systemStock;
     const nextEntry = {
-      stockItemId: String(stockItem.id),
-      stockItemName: stockItem.name || '',
-      unit: stockItem.unit || 'ea',
+      ...existingEntry,
       shelfCount,
       systemStock,
       variance,
-      varianceImpactEx: variance * (Number(stockItem.cost || 0) || 0)
+      varianceImpactEx: variance * (Number(stockItem.cost || 0) || 0),
+      uomCounts
     };
+
     if (index >= 0) items[index] = nextEntry;
     else items.push(nextEntry);
   }
@@ -16415,16 +16051,38 @@ function updateStockTakeCount(stockItemId, value) {
       items
     }
   };
-  // renderApp() is suppressed while the count input (type=text) is focused, so
-  // refresh every computed element directly from the draft in one pass.
   refreshStockTakeSessionComputed();
   renderApp();
 }
 
 async function saveStockTakeDraft() {
+  const activeElement = document.activeElement;
+  if (activeElement && (activeElement.tagName === 'INPUT' || activeElement.tagName === 'TEXTAREA')) {
+    activeElement.blur?.();
+  }
+
   const draft = hydrateStockTakeDraft(appState.stockTake.draftSession, appState.stockTake.locations || []);
+  const commitDraft = normalizeStockTakeCommitDraft(draft);
+  if (!commitDraft.locationId) {
+    appState.stockTake = {
+      ...appState.stockTake,
+      actionError: 'Choose a stock take location before committing.'
+    };
+    renderApp();
+    return;
+  }
+  if (!(commitDraft.items || []).length) {
+    appState.stockTake = {
+      ...appState.stockTake,
+      actionError: 'Enter at least one shelf count before committing.'
+    };
+    renderApp();
+    return;
+  }
+
   appState.stockTake = {
     ...appState.stockTake,
+    draftSession: commitDraft,
     actionStatus: 'saving',
     actionError: ''
   };
@@ -16432,16 +16090,26 @@ async function saveStockTakeDraft() {
 
   try {
     const { deleteStockTakeDraftSession, saveStockTake } = await import('./services/stockTakeService.js');
-    await saveStockTake(appState.workspace?.id, draft);
-    if (appState.user?.uid || appState.user?.id) {
-      await deleteStockTakeDraftSession(appState.workspace?.id, appState.user?.uid || appState.user?.id || '', draft.id || '');
+    const result = await saveStockTake(appState.workspace?.id, commitDraft);
+    const committedId = result?.id || commitDraft.id || '';
+    const committedDraft = {
+      ...commitDraft,
+      id: committedId || commitDraft.id,
+      timestamp: new Date().toISOString(),
+      lineCount: (commitDraft.items || []).length
+    };
+    if ((appState.user?.uid || appState.user?.id) && commitDraft.id) {
+      await deleteStockTakeDraftSession(appState.workspace?.id, appState.user?.uid || appState.user?.id || '', commitDraft.id);
     }
+    const nextStockItems = applyStockTakeCommitToStockItems(appState.stockTake.stockItems || [], committedDraft);
     appState.stockTake = {
       ...appState.stockTake,
+      stockItems: nextStockItems,
+      stockTakes: [committedDraft, ...(appState.stockTake.stockTakes || []).filter((entry) => String(entry.id || '') !== String(committedDraft.id || ''))],
       actionStatus: '',
       actionError: '',
       sessionActive: false,
-      savedDrafts: (appState.stockTake.savedDrafts || []).filter((entry) => String(entry.id) !== String(draft.id || '')),
+      savedDrafts: (appState.stockTake.savedDrafts || []).filter((entry) => String(entry.id) !== String(commitDraft.id || '')),
       draftSession: hydrateStockTakeDraft(createEmptyStockTakeDraft(), appState.stockTake.locations || []),
       sessionSetup: createEmptyStockTakeSessionSetup(),
       filters: {
@@ -16451,7 +16119,8 @@ async function saveStockTakeDraft() {
         overlay: ''
       }
     };
-    showStockTakeToast('Stock take committed.', 'success');
+    showStockTakeToast(result?.duplicate || result?.skipped ? 'Stock take was already committed.' : 'Stock take committed.', result?.duplicate || result?.skipped ? 'warning' : 'success');
+    refreshActiveTabFromApi().catch(() => {});
   } catch (error) {
     appState.stockTake = {
       ...appState.stockTake,
@@ -16460,6 +16129,72 @@ async function saveStockTakeDraft() {
     };
     renderApp();
   }
+}
+
+function normalizeStockTakeCommitDraft(draft = {}) {
+  const locationId = String(draft.locationId || '').trim();
+  const normalizedItems = (draft.items || [])
+    .map((line = {}) => {
+      const shelfCount = parseDecimalInputValue(line.shelfCount, NaN);
+      return {
+        ...line,
+        stockItemId: String(line.stockItemId || line.itemId || line.ingId || '').trim(),
+        shelfCount,
+        unit: String(line.unit || '').trim(),
+        uomCounts: normalizeCommitUomCounts(line.uomCounts || line.countBreakdown || line.scanBreakdown),
+        scanBreakdown: normalizeCommitUomCounts(line.scanBreakdown || line.countBreakdown || line.uomCounts)
+      };
+    })
+    .filter((line) => line.stockItemId && Number.isFinite(line.shelfCount) && line.shelfCount >= 0);
+
+  return {
+    ...draft,
+    id: String(draft.id || createStableStockTakeCommitId(draft, normalizedItems)).trim(),
+    locationId,
+    locationName: draft.locationName || getLocationNameById(appState.stockTake.locations || [], locationId, 'Main Store'),
+    date: draft.date || todayLocal(),
+    items: normalizedItems
+  };
+}
+
+function normalizeCommitUomCounts(value = {}) {
+  const rows = Array.isArray(value)
+    ? value
+    : Object.entries(value || {}).map(([key, count]) => ({ key, uomName: key === 'base' ? 'base' : key, count, ratio: key === 'base' ? 1 : undefined }));
+  return rows
+    .map((row = {}) => ({
+      ...row,
+      key: String(row.key || row.uomName || row.selectedUom || row.unit || '').trim(),
+      uomName: String(row.uomName || row.selectedUom || row.unit || row.key || '').trim(),
+      count: parseDecimalInputValue(row.count ?? row.quantity ?? row.scans, 0),
+      ratio: parseDecimalInputValue(row.ratio ?? row.qtyInBase ?? row.qty_in_base ?? row.packSize, 1) || 1,
+      baseUom: String(row.baseUom || row.baseUnit || '').trim()
+    }))
+    .filter((row) => row.uomName && Number(row.count || 0) > 0);
+}
+
+function createStableStockTakeCommitId() {
+  return makeStableSubmitId('st');
+}
+
+function applyStockTakeCommitToStockItems(stockItems = [], draft = {}) {
+  const locationId = String(draft.locationId || '').trim();
+  if (!locationId) return stockItems;
+  const countedById = new Map((draft.items || []).map((line) => [String(line.stockItemId), Number(line.shelfCount || 0) || 0]));
+  if (!countedById.size) return stockItems;
+  return (stockItems || []).map((item) => {
+    const itemId = String(item.id || '');
+    if (!countedById.has(itemId)) return item;
+    const nextBalances = { ...(item.balances && typeof item.balances === 'object' ? item.balances : {}) };
+    nextBalances[locationId] = countedById.get(itemId);
+    const nextStock = Object.values(nextBalances).reduce((sum, value) => sum + (Number(value || 0) || 0), 0);
+    return {
+      ...item,
+      balances: nextBalances,
+      stock: nextStock,
+      updatedAt: new Date().toISOString()
+    };
+  });
 }
 
 function dismissStockTakeToast() {
@@ -17183,7 +16918,9 @@ function createCreditNoteLineDetailEntry(line, index) {
     vatEnabled: line.vatEnabled !== false,
     locationId: line.locationId || '',
     locationName: line.locationName || '',
-    sourceIndex: index
+    sourceIndex: index,
+    originalOrderQty: Number(line.originalOrderQty ?? line.maxReturnQty ?? 0) || 0,
+    maxReturnQty: Number(line.maxReturnQty ?? line.originalOrderQty ?? 0) || 0
   };
 }
 
@@ -17233,7 +16970,7 @@ function createEmptyAdjustmentDraft(seed = {}) {
     locationId: 'main',
     locationName: 'Main Store',
     note: '',
-    wasteReason: 'Other',
+    wasteReason: '',
     items: [],
     ...seed
   };
@@ -17343,11 +17080,13 @@ function createDefaultSettingsDraft(seed = {}) {
     siteName: '',
     vatRate: 15,
     tradingTime: '23:59',
+    reportingDayFromHour: 0,
+    reportingDayToHour: 0,
+    tradingDayStartHour: 0,
+    tradingDayStartMinutes: 0,
     uiScale: 'normal',
     logoutTimeout: 30,
     costingMethod: 'last',
-    lowStockEmailFrequency: 'off',
-    lowStockEmailDispatchTime: '08:00',
     yocoCategoryMap: {},
     stockCategoryRoutingMap: {},
     restaurantThemeId: DEFAULT_RESTAURANT_THEME_ID,
@@ -17359,6 +17098,8 @@ function createDefaultSettingsDraft(seed = {}) {
     orgId: '',
     corpId: '',
     viewingOnly: false,
+    stockDepletionEnabled: false,
+    stockDepletionEnabledAt: '',
     ...seed
   });
 }
@@ -17503,6 +17244,23 @@ function getDefaultSiteIdForLocations(sites = [], locations = []) {
 
 function renderApp() {
   if (!app) return;
+
+  // Do not mount protected workspace modules until the authenticated user's workspace
+  // role and permissions have resolved. Rendering with the temporary empty access state
+  // causes false "no permission" screens and forces users to leave and re-enter tabs.
+  if (appState.user && appState.workspace && appState.access?.status === 'loading') {
+    const mountedProtectedMain = app.querySelector('[data-app-main]');
+    const canPreserveMountedModule = ['dashboard', 'reporting', 'reporting-scheduling'].includes(appState.route.active)
+      && mountedProtectedMain?.dataset.activeModule === appState.route.active
+      && mountedProtectedMain.dataset.workspaceId === String(appState.workspace.id || '');
+    if (canPreserveMountedModule) {
+      // Access subscriptions can briefly re-enter loading while refreshing. Keep the already
+      // authenticated module mounted instead of replacing the whole app with a boot screen.
+      return;
+    }
+    renderBoot('Loading your workspace permissions...');
+    return;
+  }
   // Never replace the DOM while the user is actively typing in a text field.
   // The silent-update pattern keeps appState in sync; the next render after blur picks it up.
   const _active = document.activeElement;
@@ -17523,6 +17281,21 @@ function renderApp() {
     appState.route.active === 'integrations' &&
     window.__KCP_SUPPRESS_INTEGRATIONS_RENDER__ === true
   ) {
+    return;
+  }
+  const mountedMain = app.querySelector('[data-app-main]');
+  if (
+    appState.user &&
+    appState.workspace &&
+    ['dashboard', 'reporting', 'reporting-scheduling'].includes(appState.route.active) &&
+    mountedMain?.dataset.activeModule === appState.route.active &&
+    mountedMain.dataset.workspaceId === String(appState.workspace.id || '') &&
+    mountedMain.dataset.accessRevision === getAccessRenderRevision(appState.access)
+  ) {
+    // Dashboard and Reporting both manage their own async data, filters, charts, and
+    // interaction state. Unrelated background snapshots must not replace their DOM.
+    mountImportNotificationModal();
+    syncAppModalScrollLock();
     return;
   }
   const activeField = captureActiveField() || pendingFocusField;
@@ -17599,11 +17372,6 @@ function renderApp() {
     onWorkspaceSelect: (workspace) => selectWorkspace(workspace),
     onAutoLoginToggle: toggleAutoLoginPreference,
     onThemeToggle: toggleTheme,
-    onDashboardRangeChange: updateDashboardRange,
-    onDashboardRefresh: refreshDashboardDirect,
-    onDashboardChartTab: setDashboardChartTab,
-    onDashboardLocationChange: updateDashboardLocation,
-    onDashboardSiteChange: updateDashboardSite,
     onMenuFilterChange: updateMenuFilters,
     onMenuAction: {
       onSelect: updateMenuSelection,
@@ -17706,7 +17474,11 @@ function renderApp() {
       onCancelDelete: cancelStockDelete,
       onImport: importStockFile,
       onExport: exportStockItems,
-      onDismissImportReport: dismissStockImportReport,
+      onLocationCostingExport: exportLocationCostingSheet,
+      onLocationCostingImport: importLocationCostingFile,
+      onLocationCostingConfirm: confirmLocationCostingImport,
+      onLocationCostingCancel: cancelLocationCostingImport,
+      onDismissImportReview: dismissStockImportReview,
       onDismissToast: dismissStockToast
     },
     onSupplierFilterChange: updateSupplierFilters,
@@ -17731,12 +17503,14 @@ function renderApp() {
       onSelect: updatePurchaseOrderSelection,
       onSelectAll: updateAllPurchaseOrderSelection,
       onNew: () => openPurchaseOrderDraft(null),
+      onCreateFromLowStock: openPurchaseOrderFromReportingLowStock,
       onEdit: openPurchaseOrderDraft,
       onClose: closePurchaseOrderDraft,
       onPreserveFocus: preserveFieldFocus,
       onDraftChange: updatePurchaseOrderDraft,
       onDraftChangeSilent: updatePurchaseOrderDraftSilent,
       onAddLine: addPurchaseOrderLine,
+      onScanBarcode: scanPurchaseOrderBarcode,
       onUpdateLine: updatePurchaseOrderLine,
       onUpdateLineSilent: updatePurchaseOrderLineSilent,
       onRemoveLine: withPermission('purchaseOrders', ACTION_PERMISSION_MAP.deleteRecords, removePurchaseOrderLine, 'You do not have permission to remove purchase order lines.'),
@@ -17827,6 +17601,7 @@ function renderApp() {
       onToggleStockSelection: toggleAdjustmentStockSelection,
       onSelectAllVisibleStock: selectAllVisibleAdjustmentStock,
       onAddSelectedStock: addAdjustmentSelectedStock,
+      onScanBarcode: scanAdjustmentBarcode,
       onEditLine: openAdjustmentLineDetail,
       onLineDetailMetaChange: updateAdjustmentLineDetailMeta,
       onRemoveLine: withPermission('adjustments', ACTION_PERMISSION_MAP.deleteRecords, removeAdjustmentLine, 'You do not have permission to remove adjustment lines.'),
@@ -17849,6 +17624,7 @@ function renderApp() {
       onDraftChange: updateTransferDraft,
       onDraftLocationChange: updateTransferLocation,
       onToggleStockSelection: toggleTransferStockSelection,
+      onScanStockSearch: scanTransferSearch,
       onSelectAllVisibleStock: selectAllVisibleTransferStock,
       onAddSelectedStock: addTransferSelectedStock,
       onLineChange: updateTransferLine,
@@ -17877,7 +17653,6 @@ function renderApp() {
       onOpenBulkScan: openStockTakeBulkScan,
       onOpenTemplateManager: openStockTakeTemplateManager,
       onOpenTemplateEditor: openStockTakeTemplateEditor,
-      onRestoreSavedDraft: restoreSavedStockTakeDraft,
       onDiscardSpecificDraft: discardSpecificStockTakeDraft,
       onCloseOverlay: closeStockTakeOverlay,
       onCloseScanCount: closeStockTakeScanCountModal,
@@ -17889,6 +17664,7 @@ function renderApp() {
       onCancelSession: cancelStockTakeSession,
       onSaveDraftSession: saveStockTakeSessionDraft,
       onExportTemplatePdf: exportStockTakeTemplatePdf,
+      onOpenCountTemplateLocationPicker: openStockTakeCountTemplateLocationPicker,
       onExportCountTemplate: exportStockTakeCountTemplate,
       onImportCountTemplate: importStockTakeCountTemplate,
       onRestoreSpecificDraft: restoreSpecificStockTakeDraft,
@@ -17980,19 +17756,6 @@ function renderApp() {
       onExport: exportManufacturingItems,
       onDismissToast: dismissManufacturingToast
     },
-    onAnalyticsFilterChange: updateAnalyticsFilters,
-    onAnalyticsAction: {
-      onPreserveFocus: preserveFieldFocus,
-      onSaveCurrent: saveCurrentCustomReport,
-      onTogglePinned: togglePinnedCustomReport,
-      onDeleteSaved: removeSavedCustomReport,
-      onManageSaved: manageSavedCustomReport,
-      onOpenSaved: openSavedCustomReport,
-      onApplyTemplate: applyCustomReportTemplate,
-      onOpenRecipe: openRecipeSetupFromMenu,
-      onUpdateStockTake: updateStockTakeCountFromReport
-    },
-    onCreateLowStockGrvDraft: openLowStockGrvDraft,
     onUserManagementFilterChange: updateUserManagementFilters,
     onUserManagementAction: {
       onPreserveFocus: preserveFieldFocus,
@@ -18035,6 +17798,7 @@ function renderApp() {
       onPreserveFocus: preserveFieldFocus,
       onDraftChange: updateSettingsDraft,
       onDraftChangeSilent: updateSettingsDraftSilent,
+      onTaxFieldChangeSilent: updateSettingsTaxFieldSilent,
       onDropdownToggle: toggleSettingsDropdown,
       onOpenStockRoutingModal: openStockRoutingModal,
       onCloseStockRoutingModal: closeStockRoutingModal,
@@ -18050,6 +17814,7 @@ function renderApp() {
       onBackgroundClear: clearRestaurantBackground,
       onSave: saveSettingsDraft,
       onSaveAppearance: saveAppearanceSettingsDraft,
+      onGoLive: confirmGoLiveStockDepletion,
       onExportSnapshot: exportSettingsSnapshot,
       onImportSnapshot: importSettingsSnapshot,
       onRequestResetTotals: requestResetStockTotals,
@@ -18063,6 +17828,7 @@ function renderApp() {
   restoreActiveField(activeField);
   restoreScrollSnapshots(scrollSnapshots);
   syncAppModalScrollLock();
+  scheduleAppDropdownPortalRefresh();
   startLiveClock();
   updateLiveClockNodes();
   scheduleDeferredRealtimeSnapshotFlush();
@@ -18292,10 +18058,6 @@ function shouldAllowRealtimeHydration(key) {
       return appState.locations.status === 'loading' ||
         appState.locations.loaded?.stockItems !== true ||
         !(appState.locations.stockItems || []).length;
-    case 'analytics':
-      return appState.analytics.status === 'loading' ||
-        !appState.analytics.source ||
-        appState.analytics.loaded?.ingredients !== true;
     default:
       return false;
   }
@@ -18320,7 +18082,6 @@ function flushDeferredRealtimeSnapshots() {
 
 function shouldDeferRealtimeSnapshot() {
   if (!appState.user || !appState.workspace) return false;
-  if (appState.route.active === 'analytics' && appState.analytics.filters?.view === 'detail') return true;
 
   return Boolean(
     appState.menu.editingItem ||
@@ -18365,6 +18126,9 @@ function shouldDeferRealtimeSnapshot() {
 
 function renderBoot(message) {
   if (!app) return;
+  const normalizedMessage = String(message || 'Loading...');
+  const existingMessage = app.querySelector('.kcpBootMessage');
+  if (existingMessage?.textContent === normalizedMessage) return;
   app.innerHTML = `
     <main class="app-boot kcpBoot">
       <div class="kcpBootCard">
@@ -18375,7 +18139,7 @@ function renderBoot(message) {
           <span class="kcpBootOrbit"><i class="kcpBootDot"></i></span>
           <span class="kcpBootMark"><span class="kcpBootMarkText">KCP</span></span>
         </div>
-        <p class="kcpBootMessage">${message}</p>
+        <p class="kcpBootMessage">${normalizedMessage}</p>
       </div>
     </main>
   `;
@@ -18701,60 +18465,11 @@ function cssEscape(value = '') {
   return String(value).replaceAll('\\', '\\\\').replaceAll('"', '\\"');
 }
 
-function renderDashboardOnly() {
-  if (
-    !app ||
-    !appState.user ||
-    !appState.workspace ||
-    appState.route.active !== 'dashboard'
-  ) {
-    renderApp();
-    return;
-  }
-
-  const main = app.querySelector('[data-app-main]');
-  if (!main) {
-    renderApp();
-    return;
-  }
-
-  const activeField = captureActiveField() || pendingFocusField;
-  const scrollSnapshots = captureScrollSnapshots();
-  main.replaceChildren(renderDashboard({
-    state: appState,
-    onThemeToggle: toggleTheme,
-    onDashboardRangeChange: updateDashboardRange,
-    onDashboardRefresh: refreshDashboardDirect,
-    onDashboardChartTab: setDashboardChartTab,
-    onDashboardLocationChange: updateDashboardLocation,
-    onDashboardSiteChange: updateDashboardSite,
-    onNavigate: navigateTo
-  }));
-  restoreActiveField(activeField);
-  restoreScrollSnapshots(scrollSnapshots);
-  startLiveClock();
-  updateLiveClockNodes();
-}
-
 function replaceApp(element) {
   if (!app) return;
+  cleanupAppDropdownPortal();
   app.replaceChildren(element);
   mountGlobalImportLoader();
-}
-
-function cleanupWorkspaceSubscription() {
-  dashboardSubscriptionToken += 1;
-  pendingDashboardSnapshot = null;
-
-  if (dashboardSnapshotRenderTimer) {
-    window.clearTimeout(dashboardSnapshotRenderTimer);
-    dashboardSnapshotRenderTimer = null;
-  }
-
-  if (unsubscribeDashboard) {
-    unsubscribeDashboard();
-    unsubscribeDashboard = null;
-  }
 }
 
 function cleanupAccessSubscription() {
@@ -18874,33 +18589,7 @@ function cleanupManufacturingSubscription() {
   }
 }
 
-function cleanupAnalyticsSubscription() {
-  analyticsSubscriptionToken += 1;
 
-  if (unsubscribeAnalytics) {
-    unsubscribeAnalytics();
-    unsubscribeAnalytics = null;
-  }
-}
-
-function createDashboardState(status, workspaceId = '') {
-  return {
-    status,
-    workspaceId,
-    metrics: null,
-    loaded: Object.fromEntries(dashboardNodeKeys.map((key) => [key, false])),
-    errors: {},
-    isReady: false,
-    rangeLoading: false,
-    connection: {
-      status: status === 'ready' ? 'live' : status === 'error' ? 'error' : 'syncing',
-      label: status === 'ready' ? 'Live' : status === 'error' ? 'Attention' : 'Syncing',
-      loadedCount: 0,
-      sourceCount: dashboardNodeKeys.length,
-      lastUpdated: ''
-    }
-  };
-}
 
 function createAccessState(status) {
   return {
@@ -18951,6 +18640,7 @@ function createMenuState(status, filters = {}) {
       catalogueView: 'products',
       category: '',
       status: '',
+      locationId: '',
       view: 'list',
       page: 1,
       pageSize: 25,
@@ -18965,6 +18655,7 @@ function createRecipeState(status, filters = {}) {
     status,
     items: [],
     ingredients: [],
+    locations: [],
     source: '',
     loaded: {},
     updatedAt: '',
@@ -18991,6 +18682,7 @@ function createRecipeState(status, filters = {}) {
       ingredientQuery: '',
       ingredientCategory: '',
       ingredientType: '',
+      locationId: '',
       openDropdown: '',
       categoryDropdownSearch: '',
       ingredientCategoryDropdownSearch: '',
@@ -19017,15 +18709,21 @@ function createStockState(status, filters = {}) {
     confirmDelete: null,
     actionStatus: '',
     actionError: '',
-    importReport: null,
+    importReview: null,
+    locationCostingPreview: null,
     toast: null,
     filters: {
       query: '',
       category: '',
       locationId: '',
+      locationCostingLocationId: '',
+      locationCostingLocationIdDropdownSearch: '',
+      locationCostingPickerKind: '',
+      itemType: '',
       openDropdown: '',
       categoryDropdownSearch: '',
       locationDropdownSearch: '',
+      itemTypeDropdownSearch: '',
       page: 1,
       pageSize: 25,
       ...filters
@@ -19190,6 +18888,7 @@ function createGrvState(status, filters = {}, pendingSourcePoId = '') {
       locationName: 'Main Store',
       notes: '',
       pricesIncludeVat: false,
+      overrideCostPrice: true,
       transportEx: '',
       invoiceDiscountEx: '',
       invoiceTotalEx: '',
@@ -19208,6 +18907,7 @@ function createGrvState(status, filters = {}, pendingSourcePoId = '') {
       calendarCursor: '',
       overlay: '',
       openDropdown: '',
+      headerLocationQuery: '',
       ...filters
     }
   };
@@ -19241,6 +18941,7 @@ function createCreditNoteState(status, filters = {}) {
       calendarCursor: '',
       selectedStockIds: [],
       selectedLineIndexes: [],
+      headerLocationQuery: '',
       ...filters
     }
   };
@@ -19427,38 +19128,7 @@ function createManufacturingState(status, filters = {}) {
   };
 }
 
-function createAnalyticsState(status, filters = {}) {
-  const today = todayLocal();
-  return {
-    status,
-    source: null,
-    savedReports: [],
-    reportConfigError: '',
-    actionStatus: '',
-    loaded: {},
-    updatedAt: '',
-    error: '',
-    filters: {
-      reportId: 'stock',
-      query: '',
-      reportSearch: '',
-      category: '',
-      locationId: '',
-      startDate: today,
-      endDate: today,
-      view: 'hub',
-      openDropdown: '',
-      page: 1,
-      pageSize: 25,
-      rangePickerEdge: 'start',
-      rangePickerComplete: false,
-      rangePickerCursor: '',
-      stockExpandedIds: [],
-      stockTakeEditId: '',
-      ...filters
-    }
-  };
-}
+
 
 function createUserManagementState(status, filters = {}) {
   return {
@@ -19632,6 +19302,21 @@ function getGrvStockItemById(itemId) {
   return (appState.grv.stockItems || []).find((item) => String(item.id) === id) || null;
 }
 
+function getCreditNoteStockItemById(itemId) {
+  const id = String(itemId || '');
+  return (appState.creditNotes.stockItems || []).find((item) => String(item.id) === id) || null;
+}
+
+function isOrderableStockItem(item = {}) {
+  const itemType = getStockItemTypeForFilter(item);
+  return itemType === 'standard' || itemType === 'recipe_source';
+}
+
+function isAdjustmentStockItem(item = {}) {
+  const itemType = getStockItemTypeForFilter(item);
+  return itemType === 'standard' || itemType === 'recipe_source' || itemType === 'manufactured';
+}
+
 function normalizeLineUomConfigurations(value = []) {
   const rows = Array.isArray(value)
     ? value
@@ -19643,7 +19328,8 @@ function normalizeLineUomConfigurations(value = []) {
         baseUom: String(row.baseUom || row.base_uom || row.baseUnit || row.unit || '').trim(),
         customUom: String(row.customUom || row.custom_uom || row.customUnit || row.orderingUom || '').trim(),
         ratio: parseDecimalInputValue(row.ratio ?? row.conversionRatio ?? row.unitsPerCustomUnit ?? row.units_per_custom_unit, 0),
-        barcode: parseBarcodeValues(row.barcode || row.barcodes || row.customBarcode || row.customUomBarcode)[0] || ''
+        barcode: parseBarcodeValues(row.barcode || row.barcodes || row.customBarcode || row.customUomBarcode)[0] || '',
+        isDefaultOrdering: ['true', '1', 'yes', 'on'].includes(String(row.isDefaultOrdering ?? row.defaultOrdering ?? row.is_default_ordering ?? row.defaultOrderUom ?? '').toLowerCase()) || row.isDefaultOrdering === true || row.defaultOrdering === true
       };
     })
     .filter((entry) => entry.customUom && entry.ratio > 0);
@@ -19678,6 +19364,16 @@ function getDefaultLineUomSelection(stockItem = {}, barcode = '') {
       ratio: barcodeMatch.ratio,
       baseUom: barcodeMatch.baseUom || stockItem.unit || 'ea',
       barcode: barcodeMatch.barcode || ''
+    };
+  }
+  const defaultOrderingConfig = normalizeLineUomConfigurations(stockItem.uomConfigurations || stockItem.uomConfig || stockItem.uomConversions)
+    .find((entry) => entry.isDefaultOrdering);
+  if (defaultOrderingConfig) {
+    return {
+      selectedUom: defaultOrderingConfig.customUom,
+      ratio: defaultOrderingConfig.ratio,
+      baseUom: defaultOrderingConfig.baseUom || stockItem.unit || 'ea',
+      barcode: defaultOrderingConfig.barcode || ''
     };
   }
   return getLineUomSelection(stockItem, stockItem.unit || 'ea');
@@ -19722,15 +19418,27 @@ function getFilteredRecipeItems(items, filters = {}) {
 function getFilteredStockItems(items, filters = {}) {
   const query = String(filters.query || '').trim().toLowerCase();
   const locationId = String(filters.locationId || '');
+  const itemTypeFilter = String(filters.itemType || '').trim();
   return (items || []).filter((item) => {
+    const itemType = getStockItemTypeForFilter(item);
     const matchesQuery = !query ||
       String(item.name || '').toLowerCase().includes(query) ||
       String(item.category || '').toLowerCase().includes(query) ||
       matchesBarcodeQuery(item, query);
     const matchesCategory = !filters.category || normalizeStockCategory(item.category) === filters.category;
     const matchesLocation = !locationId || Object.hasOwn(item.balances || {}, locationId);
-    return matchesQuery && matchesCategory && matchesLocation;
+    const matchesType = !itemTypeFilter || itemType === itemTypeFilter;
+    return matchesQuery && matchesCategory && matchesLocation && matchesType;
   });
+}
+
+function getStockItemTypeForFilter(item = {}) {
+  const explicit = String(item.itemType || item.stockItemType || item.specificationType || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  const category = String(item.category || '').toLowerCase();
+  if (['sub_recipe', 'subrecipe'].includes(explicit) || item.isSubRecipe === true || category.includes('sub recipe') || category.includes('sub-recipe')) return 'sub_recipe';
+  if (['manufactured', 'prep', 'prepared', 'manufactured_item'].includes(explicit) || item.isManufactured === true || category.includes('manufactured')) return 'manufactured';
+  if (['recipe_source', 'non_stock', 'virtual'].includes(explicit) || category.includes('recipe source') || category.includes('non-stock') || category.includes('non stock') || category.includes('virtual')) return 'recipe_source';
+  return 'standard';
 }
 
 function normalizeStockCategory(value = '') {
@@ -19882,6 +19590,20 @@ function getLocationsAllowedForCurrentRole(locations = []) {
   const userKeys = new Set(userLocations.map((entry) => normalizeLocationKey(entry)).filter(Boolean));
   const userFiltered = permFiltered.filter((location) => isLocationAllowedByKeys(location, userKeys));
   return userFiltered.length ? userFiltered : permFiltered;
+}
+
+function getDefaultSellingLocationId(locations = []) {
+  const list = Array.isArray(locations) ? locations : [];
+  const active = list.filter((location) => location?.active !== false);
+  const isSellingLocation = (location = {}) => {
+    const type = String(location.kind || location.type || location.locationType || 'selling').trim().toLowerCase();
+    return type === 'selling' || type === 'sale' || type === 'sales' || type === '';
+  };
+  const candidates = getLocationsAllowedForCurrentRole((active.length ? active : list).filter(isSellingLocation));
+  const sorted = [...(candidates.length ? candidates : active.length ? active : list)]
+    .filter((location) => String(location.id || location.locationId || '').trim())
+    .sort((a, b) => String(a.displayName || a.name || a.id || '').localeCompare(String(b.displayName || b.name || b.id || '')));
+  return String(sorted[0]?.id || sorted[0]?.locationId || '');
 }
 
 function isLocationAllowedByKeys(location = {}, allowedKeys = new Set()) {
@@ -20162,7 +19884,36 @@ function showGrvToast(message, type = 'success') {
   }, 4200);
 }
 
+function clearReportingNavigationParameters() {
+  if (typeof window === 'undefined' || !window.history?.replaceState) return;
+  try {
+    const url = new URL(window.location.href);
+    const keys = [
+      'report', 'view', 'from', 'to', 'startDate', 'endDate', 'dateRangeType',
+      'search', 'time', 'locationId', 'category', 'source', 'sourceType',
+      'paymentMethod', 'status', 'receiptNumber', 'menuCategory', 'menuItemId',
+      'inventoryCategory', 'inventoryItemId', 'modifierGroupId', 'modifierType',
+      'modifierName', 'stockDeductionStatus', 'yocoCategory', 'recipeStatus',
+      'riskStatus', 'warningSeverity', 'supplierId', 'itemType', 'onlyCritical',
+      'onlyBelowPar', 'missingSupplier', 'missingCost', 'user', 'action',
+      'entityType', 'entityName'
+    ];
+    keys.forEach((key) => url.searchParams.delete(key));
+    url.searchParams.set('route', 'reporting');
+    window.history.replaceState({}, '', url);
+  } catch (error) {
+    console.warn('[Reporting] Could not reset stale report navigation state:', error);
+  }
+}
+
 function getInitialRoute() {
+  try {
+    const requestedRoute = new URLSearchParams(window.location.search).get('route');
+    if (PERSISTED_ROUTES.includes(requestedRoute)) return requestedRoute;
+  } catch (error) {
+    console.warn('[Route] Could not read route from URL:', error);
+  }
+
   try {
     const storedRoute = localStorage.getItem(ROUTE_STORAGE_KEY);
     if (PERSISTED_ROUTES.includes(storedRoute)) return storedRoute;
@@ -20353,13 +20104,13 @@ function parseCsvRows(text) {
 
 function mapLegacyMenuRows(rows = []) {
   const groups = {};
-  const report = createImportReport(rows);
+  const review = createImportReview(rows);
 
   getImportDataRows(rows).forEach(({ row, rowNumber }) => {
     const pid = norm(getColumn(row, 'ProductID', 'Product_ID', 'ID', 'Id', 'Code', 'SKU'));
     const name = norm(getColumn(row, 'ProductName', 'Product_Name', 'Product Name', 'Name', 'Product'));
     if (!name) {
-      report.errors.push(createImportError('ERR_MISSING_NAME', rowNumber, 'ProductName is required.'));
+      review.errors.push(createImportError('ERR_MISSING_NAME', rowNumber, 'ProductName is required.'));
       return;
     }
     const key = pid || name;
@@ -20383,7 +20134,7 @@ function mapLegacyMenuRows(rows = []) {
       const variantLabel = [v1, v2, v3].filter(Boolean).join(' / ');
 
       if (hasVariants && !variantLabel) {
-        report.errors.push(createImportError('ERR_VARIANT_VALUE', rowNumber, 'Variant value is required because this product has variant rows.'));
+        review.errors.push(createImportError('ERR_VARIANT_VALUE', rowNumber, 'Variant value is required because this product has variant rows.'));
         return null;
       }
 
@@ -20400,7 +20151,7 @@ function mapLegacyMenuRows(rows = []) {
       );
       const sellingPrice = parseImportNumber(priceRaw, 0);
       if (sellingPrice === null || sellingPrice < 0) {
-        report.errors.push(createImportError('ERR_PRICE', rowNumber, 'Selling_Price must be a valid number.'));
+        review.errors.push(createImportError('ERR_PRICE', rowNumber, 'Selling_Price must be a valid number.'));
         return null;
       }
       const name = variantLabel ? `${group.name} (${variantLabel})` : group.name;
@@ -20417,9 +20168,9 @@ function mapLegacyMenuRows(rows = []) {
   });
 
   const items = [...new Map(mapped.map((item) => [item.id, item])).values()];
-  report.importedCount = items.length;
-  report.skippedCount = report.errors.length;
-  return { items, report };
+  review.importedCount = items.length;
+  review.skippedCount = review.errors.length;
+  return { items, review };
 }
 
 function mapLegacyRecipeRows(rows = []) {
@@ -20450,14 +20201,14 @@ function mapLegacyRecipeRows(rows = []) {
   ]).filter(([key]) => key));
   const groups = new Map();
   let missingIngredients = 0;
-  const report = createImportReport(rows);
+  const review = createImportReview(rows);
 
   getImportDataRows(rows).forEach(({ row, rowNumber }) => {
     const productName = norm(getColumn(row, 'Product_Name', 'ProductName', 'Product Name', 'Product', 'Name'));
     const productId = norm(getColumn(row, 'Product_ID', 'Product ID', 'ProductId', 'Menu_Item_ID', 'Menu Item ID', 'MenuItemId', 'Item_ID', 'Item ID'));
     const productSku = norm(getColumn(row, 'SKU', 'Product_SKU', 'Product SKU', 'Code'));
     if (!productName) {
-      report.errors.push(createImportError('ERR_MISSING_PRODUCT', rowNumber, 'Product_Name is required.'));
+      review.errors.push(createImportError('ERR_MISSING_PRODUCT', rowNumber, 'Product_Name is required.'));
       return;
     }
 
@@ -20472,7 +20223,7 @@ function mapLegacyRecipeRows(rows = []) {
       existingMenuBySku.get(normalizeImportKey(productSku)) ||
       existingMenuByName.get(normalizeImportKey(productName));
     if (!existingProduct) {
-      report.errors.push(createImportError('ERR_PRODUCT_LOOKUP', rowNumber, `Menu item "${productName}" was not found. Import the menu item first, then import the recipe.`));
+      review.errors.push(createImportError('ERR_PRODUCT_LOOKUP', rowNumber, `Menu item "${productName}" was not found. Import the menu item first, then import the recipe.`));
       return;
     }
 
@@ -20489,19 +20240,19 @@ function mapLegacyRecipeRows(rows = []) {
     if (category) group.category = category;
 
     if (!ingredientName && !ingredientId) {
-      report.errors.push(createImportError('ERR_MISSING_INGREDIENT', rowNumber, 'Ingredient_Name or Ingredient_ID is required.'));
+      review.errors.push(createImportError('ERR_MISSING_INGREDIENT', rowNumber, 'Ingredient_Name or Ingredient_ID is required.'));
       return;
     }
     const ingredient = ingredientById.get(ingredientId) || ingredientByName.get(ingredientName.toLowerCase());
     if (!ingredient) {
       missingIngredients += 1;
-      report.errors.push(createImportError('ERR_INGREDIENT_LOOKUP', rowNumber, `Ingredient "${ingredientName || ingredientId}" was not found in stock items.`));
+      review.errors.push(createImportError('ERR_INGREDIENT_LOOKUP', rowNumber, `Ingredient "${ingredientName || ingredientId}" was not found in stock items.`));
       return;
     }
 
     const qty = parseImportNumber(qtyRaw, null);
     if (qty === null || qty <= 0) {
-      report.errors.push(createImportError('ERR_QUANTITY', rowNumber, 'Quantity_Needed must be a number greater than zero.'));
+      review.errors.push(createImportError('ERR_QUANTITY', rowNumber, 'Quantity_Needed must be a number greater than zero.'));
       return;
     }
 
@@ -20518,7 +20269,7 @@ function mapLegacyRecipeRows(rows = []) {
     if (uomRaw) {
       const matched = validUoms.find((u) => u.toLowerCase() === uomRaw.toLowerCase());
       if (!matched) {
-        report.errors.push(createImportError('ERR_UOM_INVALID', rowNumber, `UOM "${uomRaw}" is not valid for ${ingredient.name || ingredientName}. Allowed: ${validUoms.join(', ')}.`));
+        review.errors.push(createImportError('ERR_UOM_INVALID', rowNumber, `UOM "${uomRaw}" is not valid for ${ingredient.name || ingredientName}. Allowed: ${validUoms.join(', ')}.`));
         return;
       }
       unit = matched;
@@ -20547,9 +20298,9 @@ function mapLegacyRecipeRows(rows = []) {
     };
   });
 
-  report.importedCount = recipes.length;
-  report.skippedCount = report.errors.length;
-  return { recipes, report, missingIngredients };
+  review.importedCount = recipes.length;
+  review.skippedCount = review.errors.length;
+  return { recipes, review, missingIngredients };
 }
 
 function mapLegacyStockRows(rows = []) {
@@ -20557,8 +20308,12 @@ function mapLegacyStockRows(rows = []) {
     normalizeImportKey(item.id),
     normalizeImportKey(item.sku)
   ]).filter(Boolean));
+  const existingNameKeys = new Set((appState.stock.items || [])
+    .map((item) => normalizeStockItemDuplicateName(item.name))
+    .filter(Boolean));
   const fileKeys = new Set();
-  const report = {
+  const fileNameKeys = new Set();
+  const review = {
     totalRows: rows.length,
     importedCount: 0,
     skippedCount: 0,
@@ -20568,14 +20323,21 @@ function mapLegacyStockRows(rows = []) {
   const items = getImportDataRows(rows).map(({ row, rowNumber }) => {
     let name = norm(getColumn(row, 'Item_Name', 'Item Name', 'Name', 'IngredientName', 'Ingredient'));
     if (!name) {
-      report.errors.push(createImportError('ERR_MISSING_REQ', rowNumber, 'Item_Name is required.'));
+      review.errors.push(createImportError('ERR_MISSING_REQ', rowNumber, 'Item_Name is required.'));
       return null;
     }
 
     const sku = norm(getColumn(row, 'SKU', 'ID', 'Id', 'Code'));
+    const duplicateNameKey = normalizeStockItemDuplicateName(name);
+    if (duplicateNameKey && (fileNameKeys.has(duplicateNameKey) || existingNameKeys.has(duplicateNameKey))) {
+      review.errors.push(createImportError('ERR_DUPLICATE_NAME', rowNumber, `Stock item "${name}" already exists. Stock item names must be unique.`));
+      return null;
+    }
+    if (duplicateNameKey) fileNameKeys.add(duplicateNameKey);
+
     const duplicateKey = normalizeImportKey(sku || name);
     if (duplicateKey && (fileKeys.has(duplicateKey) || (sku && existingKeys.has(duplicateKey)))) {
-      report.skippedCount += 1;
+      review.skippedCount += 1;
       return null;
     }
     if (duplicateKey) fileKeys.add(duplicateKey);
@@ -20584,7 +20346,7 @@ function mapLegacyStockRows(rows = []) {
     // 'Non Stock' is the current label; legacy 'Recipe Source' / 'Non-Stock Item' still accepted.
     const VALID_ITEM_TYPES = ['sub-recipe', 'non stock', 'non-stock', 'recipe source', 'non-stock item', 'non_stock_item', 'non stock item', 'standard', 'manufactured', 'sub_recipe', 'recipe_source'];
     if (itemTypeRaw && !VALID_ITEM_TYPES.includes(itemTypeRaw.toLowerCase())) {
-      report.errors.push(createImportError('ERR_ITEM_TYPE', rowNumber, `Invalid Item_Type "${itemTypeRaw}". Allowed values: Sub-Recipe, Non Stock, Standard, Manufactured.`));
+      review.errors.push(createImportError('ERR_ITEM_TYPE', rowNumber, `Invalid Item_Type "${itemTypeRaw}". Allowed values: Sub-Recipe, Non Stock, Standard, Manufactured.`));
       return null;
     }
     const normalizedItemType = (() => {
@@ -20628,19 +20390,19 @@ function mapLegacyStockRows(rows = []) {
     const vatRaw = norm(getColumn(row, 'VAT_Enabled', 'VAT Enabled', 'VATEnabled', 'Taxable', 'VAT'));
     const vatEnabled = parseStrictBoolean(vatRaw, false);
     if (vatEnabled === null) {
-      report.errors.push(createImportError('ERR_VAT_FORMAT', rowNumber, `Invalid VAT value "${vatRaw}". Use Yes, No, Tax Exempt, Y, N, True, False, 1, or 0.`));
+      review.errors.push(createImportError('ERR_VAT_FORMAT', rowNumber, `Invalid VAT value "${vatRaw}". Use Yes, No, Tax Exempt, Y, N, True, False, 1, or 0.`));
       return null;
     }
     if (!category) {
-      report.errors.push(createImportError('ERR_CAT_MAPPING', rowNumber, 'Category could not be determined.'));
+      review.errors.push(createImportError('ERR_CAT_MAPPING', rowNumber, 'Category could not be determined.'));
       return null;
     }
-    // Track_Inventory is now derived from Item_Type: Recipe Source → false, all others → true.
-    // If the column exists in older files, honour it only for Standard items (backward compat).
+    // Track_Inventory is retained only as legacy input help. Non-stock items can also hold
+    // stock on hand, so Recipe Source rows now default to tracked inventory as well.
     const trackInventoryRaw = norm(getColumn(row, 'Track_Inventory', 'Track Inventory', 'TrackInventory', 'Is_Stocked', 'Is Stocked', 'Stocked'));
     const trackInventory = trackInventoryRaw
       ? (parseStrictBoolean(trackInventoryRaw, true) ?? true)
-      : normalizedItemType !== 'recipe_source';
+      : true;
     const costRaw = getColumn(row, 'Cost_Ex_VAT', 'Cost Ex VAT', 'Ex_VAT_Cost', 'Cost', 'Price');
     const thresholdRaw = getColumn(row, 'Low_Stock_Threshold', 'Threshold', 'MinStock');
     const openingStockRaw = getColumn(row, 'Opening_Stock', 'Opening Stock');
@@ -20664,9 +20426,20 @@ function mapLegacyStockRows(rows = []) {
     const batchYieldRaw = getColumn(row, 'Batch_Yield', 'BatchYield', 'Batch Yield');
     const barcode = getColumn(row, 'Barcode', 'Barcodes', 'EAN', 'UPC');
     const baseUnit = norm(getColumn(row, 'Base_UOM', 'Base UOM', 'Unit', 'UOM')) || 'ea';
-    const errorCountBeforeUom = report.errors.length;
-    const uomConfigurations = parseStockImportUomConfigurations(row, baseUnit, rowNumber, report);
-    if (report.errors.length > errorCountBeforeUom) return null;
+    const defaultOrderingUom = norm(getColumn(
+      row,
+      'Default_Ordering_UOM',
+      'Default Ordering UOM',
+      'Default_Order_UOM',
+      'Default Order UOM',
+      'Ordering_UOM',
+      'Ordering UOM',
+      'Purchase_UOM',
+      'Purchase UOM'
+    ));
+    const errorCountBeforeUom = review.errors.length;
+    const uomConfigurations = parseStockImportUomConfigurations(row, baseUnit, rowNumber, review, defaultOrderingUom);
+    if (review.errors.length > errorCountBeforeUom) return null;
     const siteId = norm(getColumn(row, 'Site_ID', 'SiteId', 'siteId'));
     const siteName = norm(getColumn(row, 'Site', 'Site_Name', 'Store', 'Store_Location'));
     const locationId = norm(getColumn(row, 'Location_ID', 'LocationId', 'Stock_Location_ID', 'stockLocationId'));
@@ -20680,14 +20453,14 @@ function mapLegacyStockRows(rows = []) {
     const yieldBatch = parseImportNumber(batchYieldRaw, 1);
     const openingStock = openingStockProvided ? parseImportNumber(openingStockRaw, 0) : 0;
     if ([cost, lowStockThreshold, parLevel, yieldFactor, yieldBatch, openingStock].some((value) => value === null)) {
-      report.errors.push(createImportError('ERR_NUMBER_FORMAT', rowNumber, 'Numeric fields must contain valid numbers.'));
+      review.errors.push(createImportError('ERR_NUMBER_FORMAT', rowNumber, 'Numeric fields must contain valid numbers.'));
       return null;
     }
     if (stockAdjustmentProvided) {
-      report.errors.push(createImportError('WARN_STOCK_ADJUSTMENT_IGNORED', rowNumber, 'Adjustment found but not processed. Please use the Adjustments Tab.'));
+      review.errors.push(createImportError('WARN_STOCK_ADJUSTMENT_IGNORED', rowNumber, 'Adjustment found but not processed. Please use the Adjustments Tab.'));
     }
     if (yieldFactor <= 0 || yieldBatch <= 0) {
-      report.errors.push(createImportError('ERR_YIELD_FORMAT', rowNumber, 'Yield_Percent and Batch_Yield must be greater than zero.'));
+      review.errors.push(createImportError('ERR_YIELD_FORMAT', rowNumber, 'Yield_Percent and Batch_Yield must be greater than zero.'));
       return null;
     }
 
@@ -20702,7 +20475,7 @@ function mapLegacyStockRows(rows = []) {
       cost,
       stockAdjustmentIgnored: stockAdjustmentProvided,
       isManufactured: normalizedItemType === 'manufactured',
-      isStocked: normalizedItemType === 'recipe_source' ? false : true,
+      isStocked: normalizedItemType === 'sub_recipe' ? false : trackInventory,
       isSubRecipe: normalizedItemType === 'sub_recipe',
       itemType: normalizedItemType,
       vatEnabled,
@@ -20726,13 +20499,13 @@ function mapLegacyStockRows(rows = []) {
     };
   }).filter(Boolean);
 
-  report.importedCount = items.length;
-  report.skippedCount += report.errors.filter((entry) => !String(entry.code || '').startsWith('WARN_')).length;
-  return { items, report };
+  review.importedCount = items.length;
+  review.skippedCount += review.errors.filter((entry) => !String(entry.code || '').startsWith('WARN_')).length;
+  return { items, review };
 }
 
-function parseStockImportUomConfigurations(row = {}, baseUnit = 'ea', rowNumber = 0, report = { errors: [] }) {
-  return [1, 2, 3].map((slot) => {
+function parseStockImportUomConfigurations(row = {}, baseUnit = 'ea', rowNumber = 0, review = { errors: [] }, defaultOrderingUom = '') {
+  const configurations = [1, 2, 3].map((slot) => {
     const customUom = norm(getColumn(
       row,
       `UOM_${slot}_Name`,
@@ -20774,30 +20547,47 @@ function parseStockImportUomConfigurations(row = {}, baseUnit = 'ea', rowNumber 
     if (!hasAnyValue) return null;
     const ratio = parseImportNumber(ratioRaw, null);
     if (!customUom || ratio === null || ratio <= 0) {
-      report.errors.push(createImportError('ERR_UOM_CONFIG', rowNumber, `UOM_${slot}_Name needs a matching UOM_${slot}_Qty_In_Base greater than zero.`));
+      review.errors.push(createImportError('ERR_UOM_CONFIG', rowNumber, `UOM_${slot}_Name needs a matching UOM_${slot}_Qty_In_Base greater than zero.`));
       return null;
     }
     return {
       baseUom: baseUnit || 'ea',
       customUom,
       ratio,
-      barcode
+      barcode,
+      isDefaultOrdering: false
     };
   }).filter(Boolean);
+
+  const requestedDefault = String(defaultOrderingUom || '').trim();
+  if (!requestedDefault || requestedDefault.toLowerCase() === String(baseUnit || 'ea').toLowerCase()) {
+    return configurations;
+  }
+  const matchingConfig = configurations.find((config) => config.customUom.toLowerCase() === requestedDefault.toLowerCase());
+  if (!matchingConfig) {
+    review.errors.push(createImportError(
+      'ERR_DEFAULT_ORDERING_UOM',
+      rowNumber,
+      'Default_Ordering_UOM must match the Base_UOM or one of the UOM_1, UOM_2, or UOM_3 names on the same row.'
+    ));
+    return configurations;
+  }
+  matchingConfig.isDefaultOrdering = true;
+  return configurations;
 }
 
 function mapSupplierImportRows(rows = []) {
-  const report = createImportReport(rows);
+  const review = createImportReview(rows);
   const mappedRows = getImportDataRows(rows).map(({ row, rowNumber }) => {
     const name = norm(getColumn(row, 'Supplier_Name', 'Supplier Name', 'Name', 'SupplierName', 'Supplier'));
     if (!name) {
-      report.errors.push(createImportError('ERR_MISSING_NAME', rowNumber, 'Supplier_Name is required.'));
+      review.errors.push(createImportError('ERR_MISSING_NAME', rowNumber, 'Supplier_Name is required.'));
       return null;
     }
     const leadTimeRaw = getColumn(row, 'Lead_Time_Days', 'Lead Time Days', 'Lead_Time', 'Lead Time', 'LeadTime');
     const leadTime = parseImportNumber(leadTimeRaw, 0);
     if (leadTime === null || leadTime < 0) {
-      report.errors.push(createImportError('ERR_LEAD_TIME', rowNumber, 'Lead_Time_Days must be zero or greater.'));
+      review.errors.push(createImportError('ERR_LEAD_TIME', rowNumber, 'Lead_Time_Days must be zero or greater.'));
       return null;
     }
     const email = norm(getColumn(row, 'Email', 'E-mail', 'Email_Address', 'Email Address'));
@@ -20825,9 +20615,9 @@ function mapSupplierImportRows(rows = []) {
       Notes: norm(getColumn(row, 'Notes', 'Note', 'Comments', 'Comment'))
     };
   }).filter(Boolean);
-  report.importedCount = mappedRows.length;
-  report.skippedCount = report.errors.length;
-  return { rows: mappedRows, report };
+  review.importedCount = mappedRows.length;
+  review.skippedCount = review.errors.length;
+  return { rows: mappedRows, review };
 }
 
 function buildSupplierImportAddress(row = {}) {
@@ -20856,7 +20646,7 @@ function createImportError(code, row, message) {
   return { code, row, message };
 }
 
-function createImportReport(rows = []) {
+function createImportReview(rows = []) {
   return {
     totalRows: Array.isArray(rows) ? rows.length : 0,
     importedCount: 0,
@@ -21076,55 +20866,6 @@ function getInitialTheme() {
   return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
 }
 
-function getInitialDashboardRange() {
-  const urlRange = getDashboardRangeFromUrl();
-  if (urlRange) return normalizeDashboardRange(urlRange);
-
-  try {
-    const storedRange = localStorage.getItem(DASHBOARD_RANGE_STORAGE_KEY);
-    if (storedRange) return normalizeDashboardRange(storedRange);
-  } catch (error) {
-    console.warn('[Dashboard] Could not read range preference:', error);
-  }
-
-  return 'today';
-}
-
-function normalizeDashboardRange(range) {
-  const text = String(range || 'today');
-  if (text === 'today') return 'today';
-  if (text === '30') return '30';
-  if (text === '7') return '7';
-
-  const match = text.match(/^custom:(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2})$/);
-  if (!match) return 'today';
-
-  const startDate = match[1] <= match[2] ? match[1] : match[2];
-  const endDate = match[1] <= match[2] ? match[2] : match[1];
-  return `custom:${startDate}:${endDate}`;
-}
-
-function getDashboardRangeFromUrl() {
-
-  try {
-    const params = new URLSearchParams(window.location.search);
-    return params.get('dashboardRange') || '';
-  } catch (error) {
-    console.warn('[Dashboard] Could not read dashboard range from URL:', error);
-    return '';
-  }
-}
-
-function syncDashboardRangeUrl(range) {
-  try {
-    const url = new URL(window.location.href);
-    url.searchParams.set('dashboardRange', range);
-    window.history.replaceState({}, '', url);
-  } catch (error) {
-    console.warn('[Dashboard] Could not sync dashboard range to URL:', error);
-  }
-}
-
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme === 'dark' ? 'dark' : 'light';
 }
@@ -21151,7 +20892,7 @@ function updateLiveClockNodes() {
     minute: '2-digit',
     second: '2-digit'
   }).format(now);
-  const tradeDateKey = appState.dashboard.metrics?.today || getTradeDateKey(now, appState.source?.settings);
+  const tradeDateKey = appState.dashboard?.metrics?.today || getTradeDateKey(now, appState.source?.settings);
   const dateText = new Intl.DateTimeFormat('en-ZA', {
     weekday: 'short',
     day: '2-digit',

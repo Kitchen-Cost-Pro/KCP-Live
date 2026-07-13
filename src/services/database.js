@@ -1,5 +1,8 @@
-import { callCloudflareWorkspaceRoute } from './cloudflareApi.js';
+import { callCloudflareWorkspaceRoute, callOptionalCloudflareWorkspaceRoute } from './cloudflareApi.js';
+import { normalizeAdjustmentLogs, normalizeWastageResponse } from './adjustmentLog.js';
 import { normalizeSites, normalizeStockLocations } from './locationModel.js';
+import { isWastageAdjustment } from './wastageClassifier.js';
+import { getManufacturingWastageValue, normalizeManufacturingLogs } from './manufacturingLog.js';
 
 const DASHBOARD_LOG_LIMIT = 2000;
 const DASHBOARD_ENTITY_LIMIT = 200;
@@ -164,12 +167,13 @@ async function fetchCloudflareDashboardSource(workspaceId) {
     grvResponse,
     creditNoteResponse,
     adjustmentResponse,
+    wastageResponse,
     stockTakeResponse,
     stockTakeTemplateResponse,
     manufacturingResponse,
     transferResponse,
     dashboardResponse,
-    reportingResponse
+    dashboardActivityResponse
   ] = await Promise.all([
     callCloudflareWorkspaceRoute(workspaceId, 'settings'),
     callCloudflareWorkspaceRoute(workspaceId, 'locations'),
@@ -177,15 +181,16 @@ async function fetchCloudflareDashboardSource(workspaceId) {
     callCloudflareWorkspaceRoute(workspaceId, 'products', { query: { limit: 500 } }),
     callCloudflareWorkspaceRoute(workspaceId, 'suppliers', { query: { limit: 500 } }),
     callCloudflareWorkspaceRoute(workspaceId, 'purchase-orders', { query: { limit: 500 } }),
-    callCloudflareWorkspaceRoute(workspaceId, 'grvs', { query: { limit: 500 } }),
+    callCloudflareWorkspaceRoute(workspaceId, 'grvs', { query: { limit: 500 } }).catch(() => ({})),
     callCloudflareWorkspaceRoute(workspaceId, 'credit-notes', { query: { limit: 500 } }),
     callCloudflareWorkspaceRoute(workspaceId, 'adjustments', { query: { limit: 500 } }),
+    callOptionalCloudflareWorkspaceRoute(workspaceId, 'wastage-adjustments', { query: { limit: 500 }, fallback: {} }),
     callCloudflareWorkspaceRoute(workspaceId, 'stock-takes', { query: { limit: 500 } }),
     callCloudflareWorkspaceRoute(workspaceId, 'stock-take-templates', { query: { limit: 500 } }),
     callCloudflareWorkspaceRoute(workspaceId, 'manufacturing-batches', { query: { limit: 500 } }),
     callCloudflareWorkspaceRoute(workspaceId, 'transfers', { query: { limit: 500 } }),
     callCloudflareWorkspaceRoute(workspaceId, 'dashboard'),
-    callCloudflareWorkspaceRoute(workspaceId, 'reporting-source', { query: { limit: DASHBOARD_LOG_LIMIT } })
+    callCloudflareWorkspaceRoute(workspaceId, 'dashboard-source', { query: { limit: DASHBOARD_LOG_LIMIT } })
   ]);
 
   return normalizeDashboardSource({
@@ -201,16 +206,19 @@ async function fetchCloudflareDashboardSource(workspaceId) {
     dashboardMetrics: dashboardResponse.valuation || {},
     logs_grv: grvResponse.receipts || grvResponse.grvs || [],
     logs_cn: creditNoteResponse.creditNotes || creditNoteResponse.items || [],
-    logs_adj: adjustmentResponse.adjustments || adjustmentResponse.items || [],
+    logs_adj: normalizeAdjustmentLogs([
+      ...(adjustmentResponse.adjustments || adjustmentResponse.items || []),
+      ...normalizeWastageResponse(wastageResponse)
+    ]),
     logs_stocktakes: stockTakeResponse.stockTakes || stockTakeResponse.items || [],
-    logs_inventory_audit: reportingResponse.logs_inventory_audit || [],
+    logs_inventory_audit: dashboardActivityResponse.logs_inventory_audit || [],
     logs_mfg: manufacturingResponse.batches || manufacturingResponse.manufacturingBatches || manufacturingResponse.items || [],
     logs_transfers: [
       ...(transferResponse.transfers || []),
       ...(transferResponse.externalTransfers || [])
     ],
-    logs_sales: reportingResponse.logs_sales || [],
-    logs_sales_errors: reportingResponse.logs_sales_errors || [],
+    logs_sales: dashboardActivityResponse.logs_sales || [],
+    logs_sales_errors: dashboardActivityResponse.logs_sales_errors || [],
     logs_snapshots: [],
     sessionOpeningStock: {}
   });
@@ -351,10 +359,10 @@ function normalizeDashboardSource(source) {
     logs_grv: toArray(source.logs_grv),
     logs_cn: toArray(source.logs_cn),
     logs_stocktakes: toArray(source.logs_stocktakes),
-    logs_adj: toArray(source.logs_adj),
+    logs_adj: normalizeAdjustmentLogs(source.logs_adj),
     logs_inventory_audit: toArray(source.logs_inventory_audit),
     logs_transfers: toArray(source.logs_transfers),
-    logs_mfg: toArray(source.logs_mfg),
+    logs_mfg: normalizeManufacturingLogs(source.logs_mfg),
     logs_sales: toArray(source.logs_sales),
     logs_sales_errors: toArray(source.logs_sales_errors),
     sessionOpeningStock: source.sessionOpeningStock || {},
@@ -433,14 +441,7 @@ export function calculateDashboardMetrics(source, dateKey = isoToday()) {
 
   const manufacturingWastage = toArray(source.logs_mfg)
     .filter((log) => getLogDate(log, tradingDay) === today)
-    .reduce((total, log) => {
-      const variance = Number(log.variance || 0);
-      if (!(variance > 0)) return total;
-      const unitCost = toArray(log.components).reduce((sum, component) => {
-        return sum + (Number(component.qty || 0) / Number(log.expectedQty || 1)) * Number(component.cost || 0);
-      }, 0);
-      return total + variance * unitCost;
-    }, 0);
+    .reduce((total, log) => total + getManufacturingWastageValue(log), 0);
 
   const wastage = manualWastage + manufacturingWastage;
 
@@ -457,7 +458,8 @@ export function calculateDashboardMetrics(source, dateKey = isoToday()) {
       costOfSales: metricValue(costOfSales, 'currency'),
       countVariance: metricValue(countVariance, 'currency', percentOf(countVariance, stockValue)),
       manualAdjustments: metricValue(manualAdjustments, 'currency', percentOf(manualAdjustments, stockValue)),
-      wastage: metricValue(wastage, 'currency', percentOf(wastage, stockValue))
+      wastage: metricValue(wastage, 'currency', percentOf(wastage, stockValue)),
+      manufacturingWastage: metricValue(manufacturingWastage, 'currency', percentOf(manufacturingWastage, stockValue))
     }
   };
 }
@@ -553,15 +555,7 @@ function calculateDailyNetStockValueChange(source, dateKey, tradingDay = getTrad
 
   const manufacturingDelta = toArray(source.logs_mfg)
     .filter((log) => getLogDate(log, tradingDay) === date)
-    .reduce((total, log) => {
-      const variance = Number(log.variance || 0);
-      if (!(variance > 0)) return total;
-      const expectedQty = Number(log.expectedQty || 1) || 1;
-      const unitCost = toArray(log.components).reduce((sum, component) => {
-        return sum + ((Number(component.qty || 0) || 0) / expectedQty) * (Number(component.cost || 0) || 0);
-      }, 0);
-      return total - (variance * unitCost);
-    }, 0);
+    .reduce((total, log) => total - getManufacturingWastageValue(log), 0);
 
   const salesDelta = toArray(source.logs_sales)
     .filter((log) => getLogDate(log, tradingDay) === date)
@@ -681,14 +675,6 @@ function findEarliestSnapshotAfter(logs, dateKey) {
     .sort((left, right) => String(left.date || '').localeCompare(String(right.date || '')))[0] || null;
 }
 
-function isWastageAdjustment(log) {
-  const mode = String(log?.mode || '').toLowerCase();
-  const note = String(log?.note || log?.reason || '').toLowerCase();
-  // Wastage = adjustment_type 'wastage' or an explicit wasteReason. A plain 'remove'
-  // is a manual stock correction, not wastage (keep it in Manual Adjustments).
-  return mode === 'wastage' || Boolean(log?.wasteReason) || note.includes('waste') || note.includes('wastage');
-}
-
 function getLogDate(log, tradingDay = getTradingDayConfig()) {
   const timestamp = getTimestampValue(log?.timestamp ?? log?.createdAt ?? log?.updatedAt ?? log?.modifiedAt);
   if (timestamp) {
@@ -749,8 +735,10 @@ export function getTradingDayConfig(settings = {}) {
   ).trim().toLowerCase();
 
   const candidates = [
-    deriveStartHourFromTradingTime(settings?.tradingTime || settings?.tradingEndTime),
+    settings?.reportingDayFromHour,
+    settings?.reportingFromHour,
     settings?.tradingDayStartHour,
+    deriveStartHourFromTradingTime(settings?.tradingTime || settings?.tradingEndTime),
     settings?.tradeDayStartHour,
     settings?.businessDayStartHour,
     settings?.dayStartHour,

@@ -2,6 +2,7 @@ import '../styles/adjustments.css';
 import '../styles/fieldHelp.css';
 import { bindFieldHelpTooltips, renderFieldHelpLabel } from './fieldHelp.js';
 import { renderLoadingPanel } from './LoadingPanel.js';
+import { isWastageAdjustment } from '../services/wastageClassifier.js';
 
 const WASTE_REASONS = ['Damaged', 'Expired', 'Burnt', 'Prep Error', 'Spillage', 'Theft/Loss', 'Other'];
 const ADJUSTMENT_PAGE_SIZE = 25;
@@ -47,7 +48,7 @@ export function renderAdjustments({ state, onAdjustmentFilterChange, onAdjustmen
         ${icon('clipboard')} Stock Adjustment
       </button>
       <button type="button" class="adj-tabBtn ${activeTab === 'wastage' ? 'is-active' : ''}" data-adj-tab="wastage">
-        ${icon('flame')} Wastage Adjustment
+        ${icon('flame')} Product Wastage Adjustment
       </button>
     </div>
 
@@ -201,6 +202,10 @@ function bindAdjustmentEvents(view, adjustments, filters, onAdjustmentFilterChan
     onAdjustmentFilterChange?.({ stockSearch: event.target.value, stockPage: 1 });
   });
 
+  view.querySelector('[data-adj-scan-barcode]')?.addEventListener('click', () => {
+    onAdjustmentAction.onScanBarcode?.();
+  });
+
   view.querySelectorAll('[data-adj-dropdown]').forEach((button) => {
     button.addEventListener('click', () => {
       const id = button.dataset.adjDropdown;
@@ -244,12 +249,21 @@ function bindAdjustmentEvents(view, adjustments, filters, onAdjustmentFilterChan
     });
   });
 
+  view.querySelectorAll('[data-adj-stock-row]').forEach((row) => {
+    row.addEventListener('click', (event) => {
+      if (event.target.closest('input, button, a, select, label')) return;
+      const checkbox = row.querySelector('[data-adj-stock-select]');
+      if (!checkbox || checkbox.disabled) return;
+      onAdjustmentAction.onToggleStockSelection?.(row.dataset.adjStockRow, !checkbox.checked);
+    });
+  });
+
   view.querySelector('[data-adj-stock-select-all]')?.addEventListener('click', () => {
     onAdjustmentAction.onSelectAllVisibleStock?.();
   });
 
   view.querySelector('[data-adj-stock-add]')?.addEventListener('click', () => onAdjustmentAction.onAddSelectedStock?.());
-  view.querySelector('[data-adj-edit-line]')?.addEventListener('click', () => {});
+  view.querySelector('[data-adj-edit-line]')?.addEventListener('click', () => { });
   view.querySelectorAll('[data-adj-edit-line]').forEach((button) => {
     button.addEventListener('click', () => onAdjustmentAction.onEditLine?.(Number(button.dataset.adjEditLine)));
   });
@@ -349,18 +363,21 @@ function renderStockOverlay(stockItems, filters, selectedStockIds, allStockItems
         <div class="adj-overlayFilters">
           <label class="adj-overlaySearchLabel">
             ${renderFieldHelpLabel('Search', 'Search stock items you want to add into this manual adjustment.')}
-            <input type="search" value="${escapeAttribute(filters.stockSearch || '')}" placeholder="Type name..." data-adj-stock-search data-focus-key="adj-stock-search" />
+            <div class="adj-searchShell">
+              <input type="search" value="${escapeAttribute(filters.stockSearch || '')}" placeholder="Type name or scan barcode..." data-adj-stock-search data-focus-key="adj-stock-search" />
+              <button type="button" data-adj-scan-barcode aria-label="Scan barcode" title="Scan barcode">${icon('camera')}</button>
+            </div>
           </label>
           <label>
             ${renderFieldHelpLabel('Category', 'Filter the adjustment picker by category to find items faster.')}
             ${renderOverlayDropdown({
-              id: 'stock-category',
-              action: 'stockCategory',
-              selectedValue: filters.stockCategory || '',
-              fallbackLabel: 'All categories',
-              options: categoryOptions,
-              openDropdown: filters.openDropdown
-            })}
+    id: 'stock-category',
+    action: 'stockCategory',
+    selectedValue: filters.stockCategory || '',
+    fallbackLabel: 'All categories',
+    options: categoryOptions,
+    openDropdown: filters.openDropdown
+  })}
           </label>
         </div>
         <div class="adj-pickerTable" data-scroll-key="adjustments-stock-picker">
@@ -375,16 +392,17 @@ function renderStockOverlay(stockItems, filters, selectedStockIds, allStockItems
             </thead>
             <tbody>
               ${pagination.items.map((item) => {
-                const isSelected = selectedStockIds.has(String(item.id));
-                const isLockedOut = !isBulk && selectedStockIds.size > 0 && !isSelected;
-                return `
-                <tr class="${item.alreadyAdded ? 'is-added' : ''}">
+    const isSelected = selectedStockIds.has(String(item.id));
+    const isLockedOut = !isBulk && selectedStockIds.size > 0 && !isSelected;
+    return `
+                <tr class="${item.alreadyAdded ? 'is-added' : ''}" data-adj-stock-row="${escapeAttribute(item.id)}">
                   <td><input type="checkbox" data-adj-stock-select="${escapeAttribute(item.id)}" ${isSelected ? 'checked' : ''} ${isLockedOut ? 'disabled' : ''} /></td>
                   <td><strong>${escapeHtml(item.name || '')}</strong>${item.alreadyAdded ? '<span>Already added</span>' : ''}</td>
                   <td>${escapeHtml(item.category || '')}</td>
                   <td>${escapeHtml(String(item.unit || '').toUpperCase())}</td>
                 </tr>
-              `; }).join('') || '<tr><td colspan="4"><div class="adj-empty"><span>No stock items match.</span></div></td></tr>'}
+              `;
+  }).join('') || '<tr><td colspan="4"><div class="adj-empty"><span>No stock items match.</span></div></td></tr>'}
             </tbody>
           </table>
         </div>
@@ -442,38 +460,38 @@ function renderLineDetailOverlay(detailDraft, sites, locations, filters = {}, st
             <label>
               ${renderFieldHelpLabel('Location Group', 'Choose the trading location group for this stock correction.')}
               ${renderOverlayDropdown({
-                id: 'detail-siteId',
-                action: 'detail:siteId',
-                selectedValue: siteId,
-                fallbackLabel: 'Select location group',
-                options: siteOptions,
-                openDropdown: filters.openDropdown
-              })}
+    id: 'detail-siteId',
+    action: 'detail:siteId',
+    selectedValue: siteId,
+    fallbackLabel: 'Select location group',
+    options: siteOptions,
+    openDropdown: filters.openDropdown
+  })}
             </label>
           ` : ''}
 
           <label>
             ${renderFieldHelpLabel('Location', 'Choose which selling location is being corrected.')}
             ${renderOverlayDropdown({
-              id: 'detail-locationId',
-              action: 'detail:locationId',
-              selectedValue: detailDraft.locationId || 'main',
-              fallbackLabel: 'Select location',
-              options: locationOptions,
-              openDropdown: filters.openDropdown
-            })}
+    id: 'detail-locationId',
+    action: 'detail:locationId',
+    selectedValue: detailDraft.locationId || 'main',
+    fallbackLabel: 'Select location',
+    options: locationOptions,
+    openDropdown: filters.openDropdown
+  })}
           </label>
 
           <label>
             ${renderFieldHelpLabel('Correction Type', 'Choose whether stock is being removed, added, or overridden to a target balance.')}
             ${renderOverlayDropdown({
-              id: 'detail-mode',
-              action: 'detail:mode',
-              selectedValue: modeSelected,
-              fallbackLabel: 'Select Correction Type...',
-              options: modeOptions,
-              openDropdown: filters.openDropdown
-            })}
+    id: 'detail-mode',
+    action: 'detail:mode',
+    selectedValue: modeSelected,
+    fallbackLabel: 'Select Correction Type...',
+    options: modeOptions,
+    openDropdown: filters.openDropdown
+  })}
           </label>
 
           <label>
@@ -491,15 +509,15 @@ function renderLineDetailOverlay(detailDraft, sites, locations, filters = {}, st
         ${modeSelected === 'remove' ? `
           <div class="adj-detailWasteRow">
             <label>
-              ${renderFieldHelpLabel('Waste Reason', 'Classify wastage so reporting can separate true waste from other stock corrections.')}
+              ${renderFieldHelpLabel('Waste Reason', 'Classify wastage so dashboards can separate true waste from other stock corrections.')}
               ${renderOverlayDropdown({
-                id: 'detail-wasteReason',
-                action: 'detail:wasteReason',
-                selectedValue: detailDraft.wasteReason || 'Other',
-                fallbackLabel: 'Select waste reason',
-                options: wasteOptions,
-                openDropdown: filters.openDropdown
-              })}
+    id: 'detail-wasteReason',
+    action: 'detail:wasteReason',
+    selectedValue: detailDraft.wasteReason || 'Other',
+    fallbackLabel: 'Select waste reason',
+    options: wasteOptions,
+    openDropdown: filters.openDropdown
+  })}
             </label>
           </div>
         ` : ''}
@@ -600,9 +618,9 @@ function renderOverlayDropdown({ id, action, selectedValue, fallbackLabel, optio
           <button
             type="button"
             ${isWastageDropdown
-              ? `data-wastage-option data-wastage-option-field="${escapeAttribute(fieldName)}" data-wastage-option-value="${escapeAttribute(option.value)}"`
-              : `data-adj-option data-adj-option-action="${escapeAttribute(action)}" data-adj-option-value="${escapeAttribute(option.value)}"`
-            }
+      ? `data-wastage-option data-wastage-option-field="${escapeAttribute(fieldName)}" data-wastage-option-value="${escapeAttribute(option.value)}"`
+      : `data-adj-option data-adj-option-action="${escapeAttribute(action)}" data-adj-option-value="${escapeAttribute(option.value)}"`
+    }
             class="${String(option.value) === String(selectedValue) ? 'is-active' : ''}"
           >
             ${escapeHtml(option.label)}
@@ -638,7 +656,7 @@ function getStockMatches(stockItems = [], query = '', category = '', currentLine
       return (
         String(item.name || '').toLowerCase().includes(q) ||
         String(item.category || '').toLowerCase().includes(q) ||
-        (item.barcodes || []).some((barcode) => String(barcode).toLowerCase().includes(q))
+        stockItemHasBarcode(item, q)
       );
     })
     .map((item) => ({ ...item, alreadyAdded: currentKeys.has(String(item.id)) }));
@@ -648,21 +666,35 @@ function getCategoryOptions(stockItems = []) {
   return [...new Set(stockItems.filter(isPhysicalStockItem).map((item) => String(item.category || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
 }
 
+function stockItemHasBarcode(item = {}, query = '') {
+  const needle = String(query || '').trim().toLowerCase();
+  if (!needle) return false;
+  const directBarcodes = [item.barcode, ...(Array.isArray(item.barcodes) ? item.barcodes : [])];
+  if (directBarcodes.some((barcode) => String(barcode || '').toLowerCase().includes(needle))) return true;
+  return normalizeUomConfigurations(item.uomConfigurations || item.uomConfig || item.uomConversions)
+    .some((config) => config.barcode && config.barcode.toLowerCase().includes(needle));
+}
+
+function normalizeUomConfigurations(value = []) {
+  const rows = Array.isArray(value) ? value : (value && typeof value === 'object' ? [value] : []);
+  return rows
+    .map((entry = {}) => ({
+      barcode: String(entry.barcode || entry.customBarcode || entry.customUomBarcode || '').trim(),
+      isDefaultOrdering: ['true', '1', 'yes', 'on'].includes(String(entry.isDefaultOrdering ?? entry.defaultOrdering ?? entry.is_default_ordering ?? entry.defaultOrderUom ?? '').toLowerCase()) || entry.isDefaultOrdering === true || entry.defaultOrdering === true
+    }))
+    .filter((entry) => entry.barcode);
+}
+
 function isPhysicalStockItem(item = {}) {
-  if (item.isStocked === false) return false;
-  // Sub recipes are made in-house and cannot be manually adjusted.
+  // Adjustments can use Standard, Non Stock and Manufactured items, but not Sub-Recipe items.
   if (item.isSubRecipe === true) return false;
   const type = String(item.itemType || item.stockItemType || item.specificationType || '')
     .trim()
     .toLowerCase()
     .replace(/[\s-]+/g, '_');
-  if (['recipe_source', 'non_stock', 'virtual', 'sub_recipe'].includes(type)) return false;
+  if (['sub_recipe', 'subrecipe'].includes(type)) return false;
   const category = String(item.category || '').toLowerCase();
-  return !category.includes('recipe source') &&
-    !category.includes('non-stock') &&
-    !category.includes('non stock') &&
-    !category.includes('virtual') &&
-    !category.includes('sub recipe') &&
+  return !category.includes('sub recipe') &&
     !category.includes('sub-recipe');
 }
 
@@ -743,6 +775,8 @@ function renderWastageTab(adjustments, filters, onAdjustmentFilterChange, onAdju
   const locationOptions = locations.map((loc) => ({ value: loc.id, label: loc.displayName || loc.name }));
   const wasteOptions = WASTE_REASONS.map((r) => ({ value: r, label: r }));
   const totalCostImpact = (draft.items || []).reduce((sum, item) => sum + Number(item.estimatedCost || 0), 0);
+  const wastageValidationMessage = getWastageValidationMessage(draft);
+  const canRecordWastage = !wastageValidationMessage && !isSaving;
 
   if (filters.overlay === 'wastage-picker') {
     return renderWastagePickerOverlay(products, filters);
@@ -756,7 +790,7 @@ function renderWastageTab(adjustments, filters, onAdjustmentFilterChange, onAdju
           <section class="adj-card adj-engineIntro">
             <div class="adj-engineIcon">${icon('flame')}</div>
             <div class="adj-engineHead">
-              <h3 class="adj-title">Wastage Adjustment</h3>
+              <h3 class="adj-title">Product Wastage Adjustment</h3>
             </div>
             <p class="adj-engineLead">Select menu items that were wasted. KCP will automatically deduct all recipe ingredients from the selected location's stock and record the wastage.</p>
             <div class="adj-engineActions">
@@ -810,28 +844,28 @@ function renderWastageTab(adjustments, filters, onAdjustmentFilterChange, onAdju
               <label>
                 <span>Location</span>
                 ${renderOverlayDropdown({
-                  id: 'wastage-location',
-                  action: '',
-                  selectedValue: draft.locationId || '',
-                  fallbackLabel: 'Select location…',
-                  options: locationOptions,
-                  openDropdown: filters.openDropdown,
-                  fieldPrefix: 'wastage',
-                  fieldName: 'locationId'
-                })}
+    id: 'wastage-location',
+    action: '',
+    selectedValue: draft.locationId || '',
+    fallbackLabel: 'Select location…',
+    options: locationOptions,
+    openDropdown: filters.openDropdown,
+    fieldPrefix: 'wastage',
+    fieldName: 'locationId'
+  })}
               </label>
               <label>
                 <span>Waste Reason</span>
                 ${renderOverlayDropdown({
-                  id: 'wastage-reason',
-                  action: '',
-                  selectedValue: draft.wasteReason || '',
-                  fallbackLabel: 'Select reason…',
-                  options: wasteOptions,
-                  openDropdown: filters.openDropdown,
-                  fieldPrefix: 'wastage',
-                  fieldName: 'wasteReason'
-                })}
+    id: 'wastage-reason',
+    action: '',
+    selectedValue: draft.wasteReason || '',
+    fallbackLabel: 'Select reason…',
+    options: wasteOptions,
+    openDropdown: filters.openDropdown,
+    fieldPrefix: 'wastage',
+    fieldName: 'wasteReason'
+  })}
               </label>
               <label>
                 <span>Note (optional)</span>
@@ -850,7 +884,7 @@ function renderWastageTab(adjustments, filters, onAdjustmentFilterChange, onAdju
                 <span>Est. Stock Cost</span>
                 <strong data-wastage-total>${formatCurrency(totalCostImpact)}</strong>
               </div>
-              <button type="button" class="adj-primary" data-wastage-save ${isSaving ? 'disabled' : ''}>${isSaving ? 'Saving…' : 'Record Wastage'}</button>
+              <button type="button" class="adj-primary ${canRecordWastage ? '' : 'adj-primary--blocked'}" data-wastage-save aria-disabled="${canRecordWastage ? 'false' : 'true'}" data-wastage-validation="${escapeAttribute(wastageValidationMessage)}" ${isSaving ? 'disabled' : ''}>${isSaving ? 'Saving…' : 'Record Wastage'}</button>
             </div>
           </section>
         `}
@@ -860,12 +894,19 @@ function renderWastageTab(adjustments, filters, onAdjustmentFilterChange, onAdju
   `;
 }
 
+function getWastageValidationMessage(draft = {}) {
+  const items = Array.isArray(draft.items) ? draft.items : [];
+  if (!items.length) return 'Select at least one menu item to waste.';
+  if (!String(draft.locationId || '').trim()) return 'Select a location before recording wastage.';
+  if (!String(draft.wasteReason || '').trim()) return 'Select a waste reason before recording wastage.';
+  const invalidItem = items.find((item) => !(Number(String(item.quantity ?? '').replace(',', '.')) > 0));
+  if (invalidItem) return `Enter a quantity greater than zero for ${invalidItem.productName || 'every menu item'}.`;
+  return '';
+}
+
 function renderWastageLog(adjustments) {
   const allAdj = adjustments.adjustments || [];
-  const wastageLines = allAdj.filter((log) => {
-    const mode = String(log.mode || '').toLowerCase();
-    return mode === 'wastage' || (mode === 'remove' && log.wasteReason);
-  });
+  const wastageLines = allAdj.filter((log) => isWastageAdjustment(log));
   if (!wastageLines.length) return '';
 
   // Group by adjustmentId so one record = one wastage event
@@ -941,7 +982,7 @@ function renderWastagePickerOverlay(products, filters) {
       <section class="adj-overlayCard adj-overlayCard--picker">
         <header>
           <div>
-            <p>Wastage Adjustment</p>
+            <p>Product Wastage Adjustment</p>
             <h3>Choose menu items to waste</h3>
           </div>
           <button type="button" class="adj-iconButton" data-wastage-picker-close aria-label="Close">${icon('x')}</button>
@@ -954,13 +995,13 @@ function renderWastagePickerOverlay(products, filters) {
           <label>
             <span>Category</span>
             ${renderOverlayDropdown({
-              id: 'wastage-category',
-              action: 'wastageCategory',
-              selectedValue: cat,
-              fallbackLabel: 'All categories',
-              options: [{ value: '', label: 'All categories' }, ...categoryOptions.map((c) => ({ value: c, label: c }))],
-              openDropdown: filters.openDropdown
-            })}
+    id: 'wastage-category',
+    action: 'wastageCategory',
+    selectedValue: cat,
+    fallbackLabel: 'All categories',
+    options: [{ value: '', label: 'All categories' }, ...categoryOptions.map((c) => ({ value: c, label: c }))],
+    openDropdown: filters.openDropdown
+  })}
           </label>
         </div>
         <div class="adj-pickerTable" data-scroll-key="wastage-picker">
@@ -970,14 +1011,14 @@ function renderWastagePickerOverlay(products, filters) {
             </thead>
             <tbody>
               ${paginated.items.map((p) => {
-                const isSelected = selectedIds.has(String(p.id));
-                return `
+    const isSelected = selectedIds.has(String(p.id));
+    return `
                 <tr>
                   <td><input type="checkbox" data-wastage-select="${escapeAttribute(p.id)}" ${isSelected ? 'checked' : ''} /></td>
                   <td><strong>${escapeHtml(p.name || '')}</strong></td>
                   <td>${escapeHtml(p.category || '')}</td>
                 </tr>`;
-              }).join('') || '<tr><td colspan="3"><div class="adj-empty"><span>No menu items found.</span></div></td></tr>'}
+  }).join('') || '<tr><td colspan="3"><div class="adj-empty"><span>No menu items found.</span></div></td></tr>'}
             </tbody>
           </table>
         </div>
@@ -1012,7 +1053,7 @@ function createEmptyDraft() {
     locationId: 'main',
     locationName: 'Main Store',
     note: '',
-    wasteReason: 'Other',
+    wasteReason: '',
     items: []
   };
 }
@@ -1045,6 +1086,7 @@ function icon(name) {
     x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>',
     plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>',
     chevronDown: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>',
+    camera: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 4h-5L8 6H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-3l-1.5-2Z"/><circle cx="12" cy="12.5" r="3.5"/></svg>',
     clipboard: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg>',
     list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/></svg>',
     flame: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/></svg>'

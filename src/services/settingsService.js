@@ -1,5 +1,6 @@
 import { callCloudflareWorkspaceRoute } from './cloudflareApi.js';
 import { downloadFileBlob } from './dataService.js';
+import { isStockRoutingEligibleItem } from './stockCountEligibility.js';
 import {
   DEFAULT_RESTAURANT_BACKGROUND_ID,
   DEFAULT_RESTAURANT_THEME_ID,
@@ -45,12 +46,25 @@ const ARRAY_DEFAULT_KEYS = new Set([
   'logs_snapshots'
 ]);
 
-const LOW_STOCK_EMAIL_FREQUENCIES = new Set(['off', '1_day', '2_day', '1_week', '2_week', '1_month']);
+const PERSONAL_SETTING_KEYS = new Set([
+  'uiScale',
+  'restaurantThemeId',
+  'restaurantBackgroundId',
+  'restaurantBackgroundDataUrl',
+  'restaurantBackgroundName'
+]);
+
 
 export async function getWorkspaceSettingsSnapshot(workspaceId) {
   const workspaceKey = requireWorkspaceId(workspaceId);
-  const response = await callCloudflareWorkspaceRoute(workspaceKey, 'settings');
-  return normalizeSettings(response.settings || {});
+  const [workspaceResponse, personalResponse] = await Promise.all([
+    callCloudflareWorkspaceRoute(workspaceKey, 'settings'),
+    callCloudflareWorkspaceRoute(workspaceKey, 'user-preferences').catch(() => ({ preferences: {} }))
+  ]);
+  return normalizeSettings({
+    ...(workspaceResponse.settings || {}),
+    ...(personalResponse.preferences || {})
+  });
 }
 
 export async function getYocoCategoryOptions(workspaceId) {
@@ -78,6 +92,28 @@ export async function getYocoCategoryOptions(workspaceId) {
   return [...categories.values()].sort((left, right) => left.name.localeCompare(right.name));
 }
 
+export async function getGoLiveReadiness(workspaceId) {
+  const workspaceKey = requireWorkspaceId(workspaceId);
+  const [productResponse, locationResponse] = await Promise.all([
+    callCloudflareWorkspaceRoute(workspaceKey, 'products', { query: { limit: 500 } }),
+    callCloudflareWorkspaceRoute(workspaceKey, 'locations')
+  ]);
+  const products = productResponse.products || productResponse.items || [];
+  const locations = locationResponse.locations || [];
+  const recipeCount = products.filter((product = {}) => {
+    const recipe = product.recipe || product.recipeLines || product.recipe_lines;
+    if (Array.isArray(recipe) && recipe.length > 0) return true;
+    if (product.missingRecipe === false || product.missing_recipe === 0) return true;
+    const status = String(product.recipeStatus || product.recipe_status || '').toLowerCase();
+    return status === 'complete' || status === 'complete_via_linked_stock_item';
+  }).length;
+  return {
+    productCount: products.length,
+    recipeCount,
+    locationCount: locations.filter((location = {}) => location.active !== false && Number(location.active ?? 1) !== 0).length
+  };
+}
+
 export async function getStockCategoryOptions(workspaceId) {
   const workspaceKey = requireWorkspaceId(workspaceId);
   const response = await callCloudflareWorkspaceRoute(workspaceKey, 'stock-items', {
@@ -87,6 +123,7 @@ export async function getStockCategoryOptions(workspaceId) {
   const categories = new Map();
 
   entries.forEach((item = {}) => {
+    if (!isStockRoutingEligibleItem(item)) return;
     if (!item || typeof item !== 'object') return;
     const raw = String(item.category || 'General').trim() || 'General';
     const name = normalizeStockCategoryBase(raw);
@@ -102,14 +139,42 @@ export async function getStockCategoryOptions(workspaceId) {
   return [...categories.values()].sort((left, right) => left.name.localeCompare(right.name));
 }
 
-export async function saveWorkspaceSettings(workspaceId, draft = {}) {
+export async function savePersonalSettings(workspaceId, draft = {}) {
+  const workspaceKey = requireWorkspaceId(workspaceId);
+  const normalized = normalizeSettings(draft);
+  const preferences = Object.fromEntries(
+    Object.entries(normalized).filter(([key]) => PERSONAL_SETTING_KEYS.has(key))
+  );
+  const response = await callCloudflareWorkspaceRoute(workspaceKey, 'user-preferences', {
+    method: 'PATCH',
+    payload: { preferences }
+  });
+  return normalizeSettings({ ...normalized, ...(response.preferences || preferences) });
+}
+
+export async function saveWorkspaceSettings(workspaceId, draft = {}, { includePersonal = false } = {}) {
   const workspaceKey = requireWorkspaceId(workspaceId);
   const nextSettings = normalizeSettings(draft);
-  const response = await callCloudflareWorkspaceRoute(workspaceKey, 'settings', {
-    method: 'PATCH',
-    payload: { settings: nextSettings }
+  const workspaceSettings = {};
+  const personalSettings = {};
+  Object.entries(nextSettings).forEach(([key, value]) => {
+    if (PERSONAL_SETTING_KEYS.has(key)) personalSettings[key] = value;
+    else workspaceSettings[key] = value;
   });
-  return normalizeSettings(response.settings || nextSettings);
+  const workspaceResponse = await callCloudflareWorkspaceRoute(workspaceKey, 'settings', {
+    method: 'PATCH',
+    payload: { settings: workspaceSettings }
+  });
+  const personalResponse = includePersonal
+    ? await callCloudflareWorkspaceRoute(workspaceKey, 'user-preferences', {
+        method: 'PATCH',
+        payload: { preferences: personalSettings }
+      })
+    : { preferences: personalSettings };
+  return normalizeSettings({
+    ...(workspaceResponse.settings || workspaceSettings),
+    ...(personalResponse.preferences || personalSettings)
+  });
 }
 
 export async function exportWorkspaceSnapshot(workspaceId, workspaceName = 'workspace') {
@@ -190,20 +255,23 @@ export async function importWorkspaceSnapshot(workspaceId, file) {
 
 export function normalizeSettings(value = {}) {
   const source = value && typeof value === 'object' ? value : {};
-  const tradingTime = normalizeTime(source.tradingTime || source.tradingEndTime || '23:59');
+  const legacyTradingTime = normalizeTime(source.tradingTime || source.tradingEndTime || '23:59');
+  const reportingDayFromHour = normalizeHour(
+    source.reportingDayFromHour
+      ?? source.reportingFromHour
+      ?? source.tradingDayStartHour
+      ?? source.tradeDayStartHour
+      ?? deriveStartHourFromTradingTime(legacyTradingTime),
+    0
+  );
+  // A KCP reporting day is always a complete 24-hour period. Persist both UI values
+  // as the same boundary so an invalid partial-day range can never reach reports.
+  const reportingDayToHour = reportingDayFromHour;
+  const tradingTime = legacyTradingTimeFromStartHour(reportingDayFromHour);
   const logoutTimeout = Math.max(1, Math.min(1440, parseInt(source.logoutTimeout ?? source.autoLogoutMinutes ?? 30, 10) || 30));
   const vatRate = clampNumber(source.vatRate ?? source.vatPercentage ?? 15, 0, 100, 15);
   const uiScale = String(source.uiScale || 'normal') === 'large' ? 'large' : 'normal';
   const costingMethod = String(source.costingMethod || 'last').toLowerCase() === 'wac' ? 'wac' : 'last';
-  const lowStockEmailFrequency = LOW_STOCK_EMAIL_FREQUENCIES.has(String(source.lowStockEmailFrequency || '').trim())
-    ? String(source.lowStockEmailFrequency || '').trim()
-    : 'off';
-  const lowStockEmailDispatchTime = normalizeTime(
-    source.lowStockEmailDispatchTime ||
-    source.alertDispatchTime ||
-    source.Alert_Dispatch_Time ||
-    '08:00'
-  );
   const yocoStoreLocationsAsStockLocations = source.yocoStoreLocationsAsStockLocations === true ||
     String(source.yocoStoreLocationsAsStockLocations || '').toLowerCase() === 'true';
   const viewingOnly = source.viewingOnly === true || source.viewOnly === true;
@@ -216,6 +284,12 @@ export function normalizeSettings(value = {}) {
   const restaurantBackgroundDataUrl = normalizeLogoDataUrl(source.restaurantBackgroundDataUrl || source.backgroundDataUrl || source.customerBackgroundDataUrl || '', 1800000);
   const restaurantBackgroundName = String(source.restaurantBackgroundName || source.backgroundName || '').trim();
   const companyTaxInfo = normalizeTaxInfo(source.companyTaxInfo || source.taxInfo || source.company_tax_info || {});
+  const stockDepletionEnabled = source.stockDepletionEnabled === true ||
+    String(source.stockDepletionEnabled || '').toLowerCase() === 'true';
+  const stockDepletionEnabledAtValue = String(source.stockDepletionEnabledAt || source.stock_depletion_enabled_at || '').trim();
+  const stockDepletionEnabledAt = stockDepletionEnabled && Number.isFinite(Date.parse(stockDepletionEnabledAtValue))
+    ? new Date(stockDepletionEnabledAtValue).toISOString()
+    : '';
 
   return {
     ...source,
@@ -226,12 +300,13 @@ export function normalizeSettings(value = {}) {
     viewingOnly,
     linkedSiteCount: Number(source.linkedSiteCount ?? source.linked_site_count ?? 0) || 0,
     tradingTime,
-    tradingDayStartHour: deriveStartHourFromTradingTime(tradingTime),
+    reportingDayFromHour,
+    reportingDayToHour,
+    tradingDayStartHour: reportingDayFromHour,
+    tradingDayStartMinutes: reportingDayFromHour * 60,
     uiScale,
     logoutTimeout,
     costingMethod,
-    lowStockEmailFrequency,
-    lowStockEmailDispatchTime,
     yocoStoreLocationsAsStockLocations,
     yocoCategoryMap,
     stockCategoryRoutingMap,
@@ -241,7 +316,9 @@ export function normalizeSettings(value = {}) {
     restaurantLogoName,
     restaurantBackgroundDataUrl,
     restaurantBackgroundName,
-    companyTaxInfo
+    companyTaxInfo,
+    stockDepletionEnabled,
+    stockDepletionEnabledAt
   };
 }
 
@@ -357,6 +434,19 @@ function normalizeTime(value) {
 function deriveStartHourFromTradingTime(time) {
   const [hours, minutes] = normalizeTime(time).split(':').map(Number);
   return Math.ceil(((hours || 0) * 60 + (minutes || 0)) / 60) % 24;
+}
+
+function normalizeHour(value, fallback = 0) {
+  const match = String(value ?? '').trim().match(/^(\d{1,2})(?::\d{2})?$/);
+  const number = match ? Number(match[1]) : Number(value);
+  if (!Number.isFinite(number)) return Math.max(0, Math.min(23, Number(fallback) || 0));
+  return Math.max(0, Math.min(23, Math.round(number)));
+}
+
+function legacyTradingTimeFromStartHour(startHour = 0) {
+  const hour = normalizeHour(startHour, 0);
+  const previousHour = (hour + 23) % 24;
+  return `${String(previousHour).padStart(2, '0')}:59`;
 }
 
 function clampNumber(value, min, max, fallback) {

@@ -122,11 +122,25 @@ export async function saveTransferTemplate(workspaceId, payload = {}) {
   if (!template.name) throw new Error('Enter a template name.');
   if (!template.items.length) throw new Error('Select at least one stock item for this template.');
 
-  await callCloudflareWorkspaceRoute(workspaceKey, 'transfer-templates', {
+  const response = await callCloudflareWorkspaceRoute(workspaceKey, 'transfer-templates', {
     method: 'POST',
-    payload: { template }
+    // The API only needs the selected IDs. Avoid sending the full stock catalogue metadata for
+    // large templates because it needlessly increases request parsing and Durable Object work.
+    payload: {
+      template: {
+        id: template.id,
+        name: template.name,
+        notes: template.notes,
+        items: template.items.map((item) => ({ stockItemId: item.stockItemId }))
+      }
+    }
   });
-  return template;
+  return {
+    ...template,
+    id: String(response?.id || response?.template?.id || template.id),
+    createdAt: response?.createdAt || response?.template?.createdAt || template.createdAt,
+    updatedAt: response?.updatedAt || response?.template?.updatedAt || template.updatedAt
+  };
 }
 
 export async function deleteTransferTemplate(workspaceId, templateId) {

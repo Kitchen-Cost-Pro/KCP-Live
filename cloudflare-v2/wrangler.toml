@@ -1,0 +1,52 @@
+# KCP production API — shared D1 control plane with one SQLite Durable Object per workspace.
+account_id = "cfd7b868a65d660879a7b8597fb15676"
+name = "kcp-api-v2"
+main = "src/index.ts"
+compatibility_date = "2026-05-23"
+
+
+# Resolve shared export dependencies from this Worker package.
+[alias]
+xlsx = "./node_modules/xlsx/xlsx.mjs"
+jspdf = "./node_modules/jspdf/dist/jspdf.es.min.js"
+jspdf-autotable = "./node_modules/jspdf-autotable/dist/jspdf.plugin.autotable.mjs"
+
+# --- Durable Objects: one WorkspaceDO (SQLite) per workspace -------------------------------------
+[[durable_objects.bindings]]
+name = "WORKSPACE"
+class_name = "WorkspaceDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["WorkspaceDO"]
+
+# --- Low stock email cron: mirrors the old Firebase `sendLowStockSummaryEmails` schedule ---------
+# (every 15 minutes; per-workspace frequency/send-window/dedupe logic lives in
+# src/legacy/low-stock-email.ts, so this just needs to fire often enough to hit each
+# workspace's configured send window).
+[triggers]
+crons = ["*/15 * * * *"]
+
+# --- Central plane: shared D1 for identity / registry / members / cross-tenant coordination ------
+[[d1_databases]]
+binding = "CENTRAL_DB"
+database_name = "kcp_central"
+database_id = "279a7882-ca9d-4bae-b308-e47fe6d24071"
+
+[vars]
+ENVIRONMENT = "production"
+ALLOWED_ORIGINS = "http://localhost:*,http://127.0.0.1:*,https://kcp-live.pages.dev,https://*.kcp-live.pages.dev"
+ADMIN_BOOTSTRAP_EMAILS = "superuser@yoco.com"
+APP_BASE_URL = "https://kcp-live.pages.dev"
+# Integration callback and webhook base URLs:
+YOCO_WEBHOOK_BASE_URL = "https://kcp-api-v2.adminkitchencostpro.workers.dev"
+GMAIL_OAUTH_REDIRECT_URI = "https://kcp-api-v2.adminkitchencostpro.workers.dev/api/gmail/oauth/callback"
+GDRIVE_OAUTH_REDIRECT_URI = "https://kcp-api-v2.adminkitchencostpro.workers.dev/api/gdrive/oauth/callback"
+# Shared Turnstile public site key for the main and admin login surfaces.
+TURNSTILE_SITE_KEY = "0x4AAAAAADwZO_so4RnTHBV8"
+ADMIN_TURNSTILE_MODE = "enforce"
+APP_TURNSTILE_MODE = "enforce"
+# Production secrets are configured with `wrangler secret put`; never store them here.
+
+# Secrets to configure with `wrangler secret put`:
+#   YOCO_KEY_ENCRYPTION_SECRET, GMAIL_* , GDRIVE_* , TURNSTILE_SECRET_KEY, etc.

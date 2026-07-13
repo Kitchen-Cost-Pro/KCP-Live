@@ -55,7 +55,7 @@ export function renderGRVEntry({ state, onGrvFilterChange, onGrvAction = {} } = 
             <div class="grv-stack">
               <div class="grv-inputWrap" data-grv-dropdown-root>
                 <input
-                  type="text"
+                  type="search"
                   class="grv-input"
                   value="${escapeAttribute(draft.supplierName || '')}"
                   placeholder="Supplier Name"
@@ -97,6 +97,16 @@ export function renderGRVEntry({ state, onGrvFilterChange, onGrvAction = {} } = 
                 <span class="grv-muted">Prices include VAT</span>
               </label>
 
+              <label class="grv-pill">
+                <input
+                  type="checkbox"
+                  class="grv-check"
+                  ${draft.overrideCostPrice !== false ? 'checked' : ''}
+                  data-grv-override-cost
+                />
+                <span class="grv-muted">${renderFieldHelpLabel('Override Cost Price', 'When enabled, this GRV updates the item cost for the receiving location using the business costing method. Turn it off for once-off supplier price changes that should not change recipe or stock valuation costs.')}</span>
+              </label>
+
               <label class="grv-pill grv-pill--split">
                 <input
                   type="checkbox"
@@ -108,7 +118,7 @@ export function renderGRVEntry({ state, onGrvFilterChange, onGrvAction = {} } = 
                 <span class="grv-muted">Split by Location</span>
               </label>
 
-              ${renderGrvLocationPicker(draft, grv.locations || [], filters.openDropdown)}
+              ${renderGrvLocationPicker(draft, grv.locations || [], filters.openDropdown, filters.headerLocationQuery || '')}
 
               <button type="button" class="grv-add-btn" data-grv-load-last>
                 ${icon('history')}
@@ -154,7 +164,7 @@ export function renderGRVEntry({ state, onGrvFilterChange, onGrvAction = {} } = 
       </div>
     </div>
 
-    ${filters.overlay === 'draft' ? renderDraftDrawer(statusLabel, totals, draft, vatRate, selectedLineIndexes, headerReady, grv.actionStatus, grv.locations || [], filters.openDropdown || '') : ''}
+    ${filters.overlay === 'draft' ? renderDraftDrawer(statusLabel, totals, draft, vatRate, selectedLineIndexes, headerReady, grv.actionStatus, grv.actionError || '', grv.locations || [], filters.openDropdown || '') : ''}
     ${filters.overlay === 'po' ? renderPurchaseOrderOverlay(convertibleOrders, filters.poQuery || '') : ''}
     ${filters.overlay === 'stock' ? renderStockOverlay(stockMatches, filters.lineQuery || '', headerReady, selectedStockIds) : ''}
     ${filters.overlay === 'calendar' ? renderCustomCalendarOverlay({
@@ -193,16 +203,18 @@ function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, 
       const payload = { [field.dataset.grvDraftField]: field.value };
       if (field.hasAttribute('data-grv-supplier-input')) {
         payload.supplierId = '';
+        if (filters.openDropdown !== 'supplier') onGrvFilterChange?.({ openDropdown: 'supplier' });
       }
       onGrvAction.onDraftChange?.(payload);
     };
     field.addEventListener('input', apply);
     field.addEventListener('change', apply);
     if (field.hasAttribute('data-grv-supplier-input')) {
-      field.addEventListener('click', () => {
-        if (filters.openDropdown === 'supplier') return;
-        onGrvFilterChange?.({ openDropdown: 'supplier' });
-      });
+      const openSupplierDropdown = () => {
+        if (filters.openDropdown !== 'supplier') onGrvFilterChange?.({ openDropdown: 'supplier' });
+      };
+      field.addEventListener('focus', openSupplierDropdown);
+      field.addEventListener('click', openSupplierDropdown);
     }
     if (field.inputMode === 'decimal') {
       field.addEventListener('focus', () => selectAllOnFocusForZero(field));
@@ -213,8 +225,26 @@ function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, 
     onGrvAction.onDraftChange?.({ pricesIncludeVat: event.currentTarget.checked });
   });
 
+  view.querySelector('[data-grv-override-cost]')?.addEventListener('change', (event) => {
+    onGrvAction.onDraftChange?.({ overrideCostPrice: event.currentTarget.checked });
+  });
+
   view.querySelector('[data-grv-split-location]')?.addEventListener('change', (event) => {
     onGrvAction.onDraftChange?.({ splitByLocation: event.currentTarget.checked });
+  });
+
+  view.querySelectorAll('[data-grv-location-input]').forEach((field) => {
+    const openLocationDropdown = () => {
+      if (filters.openDropdown !== 'grv-header-location') {
+        onGrvFilterChange?.({ openDropdown: 'grv-header-location', headerLocationQuery: field.value });
+      }
+    };
+    field.addEventListener('focus', openLocationDropdown);
+    field.addEventListener('click', openLocationDropdown);
+    field.addEventListener('input', () => onGrvFilterChange?.({
+      openDropdown: 'grv-header-location',
+      headerLocationQuery: field.value
+    }));
   });
 
   view.querySelectorAll('[data-grv-dropdown]').forEach((button) => {
@@ -246,7 +276,7 @@ function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, 
         locationId: button.dataset.grvHeaderLocation || '',
         locationName: button.dataset.grvHeaderLocationName || ''
       });
-      onGrvFilterChange?.({ openDropdown: '' });
+      onGrvFilterChange?.({ openDropdown: '', headerLocationQuery: '' });
     });
   });
 
@@ -273,7 +303,7 @@ function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, 
     if (!filters.openDropdown) return;
     if (event.target.closest('[data-grv-dropdown-root]')) return;
     blurActiveDraftField();
-    onGrvFilterChange?.({ openDropdown: '' });
+    onGrvFilterChange?.({ openDropdown: '', headerLocationQuery: '' });
   });
 
   view.querySelector('[data-grv-load-last]')?.addEventListener('click', () => onGrvAction.onLoadLastInvoice?.());
@@ -588,6 +618,9 @@ function renderDraftLauncher(statusLabel, totals, draft, headerReady) {
         <h3>${escapeHtml(statusLabel)}</h3>
         <span>Open the full GRV workspace in a wide slide-out drawer.</span>
       </div>
+      <button type="button" class="grv-add-primary" data-grv-open-draft ${headerReady ? '' : 'disabled'}>
+        Open Draft Table
+      </button>
       <div class="grv-draftLauncherMetrics">
         <div>
           <span>Subtotal</span>
@@ -602,28 +635,25 @@ function renderDraftLauncher(statusLabel, totals, draft, headerReady) {
           <strong>${formatCurrency(totals.totalIncl)}</strong>
         </div>
       </div>
-      <button type="button" class="grv-add-primary" data-grv-open-draft ${headerReady ? '' : 'disabled'}>
-        Open Draft Table
-      </button>
       ${!headerReady ? '<small>Complete supplier, invoice number, date, and location first.</small>' : ''}
     </section>
   `;
 }
 
-function renderDraftDrawer(statusLabel, totals, draft, vatRate, selectedLineIndexes, headerReady, actionStatus, locations = [], openDropdown = '') {
+function renderDraftDrawer(statusLabel, totals, draft, vatRate, selectedLineIndexes, headerReady, actionStatus, actionError = '', locations = [], openDropdown = '') {
   return `
     <div class="grv-overlay grv-overlay--drawer" data-grv-overlay>
       <section class="grv-overlayCard grv-overlayCard--draft grv-draft-panel" role="dialog" aria-modal="true">
         <button type="button" class="grv-removeBtn grv-draftDrawerClose" data-grv-overlay-close aria-label="Close draft table">
           ${icon('x')}
         </button>
-        ${renderDraftPanelContent(statusLabel, totals, draft, vatRate, selectedLineIndexes, headerReady, actionStatus, locations, openDropdown)}
+        ${renderDraftPanelContent(statusLabel, totals, draft, vatRate, selectedLineIndexes, headerReady, actionStatus, actionError, locations, openDropdown)}
       </section>
     </div>
   `;
 }
 
-function renderDraftPanelContent(statusLabel, totals, draft, vatRate, selectedLineIndexes, headerReady, actionStatus, locations = [], openDropdown = '') {
+function renderDraftPanelContent(statusLabel, totals, draft, vatRate, selectedLineIndexes, headerReady, actionStatus, actionError = '', locations = [], openDropdown = '') {
   return `
     <div class="grv-topbar">
       <div class="grv-topbarTitle">
@@ -645,6 +675,8 @@ function renderDraftPanelContent(statusLabel, totals, draft, vatRate, selectedLi
         </button>
       </div>
     </div>
+
+    ${actionError ? `<div class="grv-drawerNotice">${renderNotice(actionError, 'error')}</div>` : ''}
 
     <div class="grv-draft-scroll">
       ${(draft.items || []).length ? renderDraftTable(draft, vatRate, selectedLineIndexes, locations, openDropdown) : `
@@ -1237,7 +1269,8 @@ function normalizeUomConfigurations(value = []) {
       baseUom: String(entry.baseUom || entry.base_uom || entry.baseUnit || '').trim(),
       customUom: String(entry.customUom || entry.custom_uom || entry.customUnit || entry.orderingUom || '').trim(),
       ratio: Number(entry.ratio ?? entry.conversionRatio ?? entry.unitsPerCustomUnit ?? 0) || 0,
-      barcode: String(entry.barcode || entry.customBarcode || entry.customUomBarcode || '').trim()
+      barcode: String(entry.barcode || entry.customBarcode || entry.customUomBarcode || '').trim(),
+      isDefaultOrdering: ['true', '1', 'yes', 'on'].includes(String(entry.isDefaultOrdering ?? entry.defaultOrdering ?? entry.is_default_ordering ?? entry.defaultOrderUom ?? '').toLowerCase()) || entry.isDefaultOrdering === true || entry.defaultOrdering === true
     }))
     .filter((entry) => entry.customUom && entry.ratio > 0);
 }
@@ -1437,27 +1470,38 @@ function renderToast(toast) {
   `;
 }
 
-function renderGrvLocationPicker(draft, locations = [], openDropdown = '') {
+function renderGrvLocationPicker(draft, locations = [], openDropdown = '', query = '') {
   const locationId = String(draft.locationId || '');
-  const options = locations.filter((l) => String(l.id || '').trim()).map((l) => ({ id: String(l.id), name: l.displayName || l.name || l.id }));
+  const options = locations
+    .filter((l) => String(l.id || '').trim())
+    .map((l) => ({ id: String(l.id), name: l.displayName || l.name || l.id }))
+    .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
   const selected = options.find((o) => o.id === locationId) || null;
   const isOpen = openDropdown === 'grv-header-location';
+  const searchValue = isOpen ? String(query || '') : (selected ? selected.name : '');
+  const needle = String(query || '').trim().toLowerCase();
+  const visibleOptions = options.filter((opt) => !needle || String(opt.name || '').toLowerCase().includes(needle));
   return `
     <div class="grv-locationPickerWrap" data-grv-dropdown-root>
       <label class="grv-locationPickerLabel">Destination Location</label>
-      <button type="button"
-        class="grv-input grv-selectLike grv-locationTrigger ${selected ? 'grv-locationTrigger--set' : 'grv-locationTrigger--empty'}"
-        data-grv-dropdown="grv-header-location"
-        aria-expanded="${isOpen}"
-        aria-haspopup="listbox"
-      >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
-        <span>${selected ? escapeHtml(selected.name) : 'Select your location'}</span>
+      <div class="grv-locationSearchShell">
+        <input
+          type="search"
+          class="grv-input grv-locationInput ${selected ? 'grv-locationTrigger--set' : 'grv-locationTrigger--empty'}"
+          value="${escapeAttribute(searchValue)}"
+          placeholder="Search or select your location"
+          autocomplete="off"
+          role="combobox"
+          aria-expanded="${isOpen}"
+          aria-haspopup="listbox"
+          data-focus-key="grv-header-location"
+          data-grv-location-input
+        />
         ${icon('chevron')}
-      </button>
+      </div>
       ${isOpen ? `
         <div class="grv-locationMenu" role="listbox">
-          ${options.length ? options.map((opt) => `
+          ${visibleOptions.length ? visibleOptions.map((opt) => `
             <button type="button" role="option"
               class="grv-locationOption ${opt.id === locationId ? 'is-selected' : ''}"
               data-grv-header-location="${escapeAttribute(opt.id)}"
@@ -1496,6 +1540,7 @@ function getDraft(grv) {
     locationName,
     notes: '',
     pricesIncludeVat: false,
+    overrideCostPrice: true,
     transportEx: '',
     invoiceDiscountEx: '',
     invoiceTotalEx: '',
@@ -1568,20 +1613,15 @@ function getStockMatches(stockItems, query, currentItems = []) {
 }
 
 function isPhysicalStockItem(item = {}) {
-  if (item.isStocked === false) return false;
-  // Manufactured items and sub recipes are produced in-house, not purchased/received/credited.
+  // GRV can only receive Standard and Non Stock items.
   if (item.isSubRecipe === true || item.isManufactured === true) return false;
   const type = String(item.itemType || item.stockItemType || item.specificationType || '')
     .trim()
     .toLowerCase()
     .replace(/[\s-]+/g, '_');
-  if (['recipe_source', 'non_stock', 'virtual', 'sub_recipe', 'manufactured'].includes(type)) return false;
+  if (['sub_recipe', 'subrecipe', 'manufactured', 'manufactured_item', 'prep', 'prepared'].includes(type)) return false;
   const category = String(item.category || '').toLowerCase();
-  return !category.includes('recipe source') &&
-    !category.includes('non-stock') &&
-    !category.includes('non stock') &&
-    !category.includes('virtual') &&
-    !category.includes('sub recipe') &&
+  return !category.includes('sub recipe') &&
     !category.includes('sub-recipe') &&
     !category.includes('manufactured');
 }

@@ -324,7 +324,6 @@ function renderCreateModal(draft, roleOptions, filters = {}, canAssignLowStockTa
     renderRolePicker({ label: 'Assigned Role', roleOptions, activeRole: draft.role || 'member', dataPrefix: 'user-create', disabled: !canManagePermissions, searchKey: 'createRoleSearch', searchValue: filters.createRoleSearch || '', typeKey: 'createRoleType', typeValue: filters.createRoleType || 'all' }) +
     '<div class="userMgmtSupplementalOptions">' +
     renderAccessModeToggle(draft.viewingOnly) +
-    renderLowStockAlertToggle(draft.lowStockAlert, false, canAssignLowStockTag) +
     '</div>' +
     '<div class="userMgmtModalActions">' +
     '<button type="button" class="userMgmtGhostButton" data-user-prev-step>' + icon('chevronLeft') + '<span>Back</span></button>' +
@@ -522,7 +521,7 @@ function renderLowStockAlertToggle(lowStockAlert = false, isEdit = false, canAss
       />
       <span>
         <strong>Low Stock Alert Tag</strong>
-        <small>${canAssign ? 'Receives scheduled low-stock summary emails with the PDF report attachment for this workspace.' : 'You need the Low Stock Email Tag permission to change this assignment.'}</small>
+        <small>${canAssign ? 'Receives scheduled low-stock summary emails with the PDF summary attachment for this workspace.' : 'You need the Low Stock Email Tag permission to change this assignment.'}</small>
       </span>
     </label>
   `;
@@ -618,28 +617,28 @@ function renderDeleteDialog(member) {
 
 const ROLE_PICKER_EXAMPLES = [
   { value: 'owner', label: 'Owner', badge: 'System', description: 'Full control over all settings and access.', icon: 'crown', tone: 'blue' },
-  { value: 'admin', label: 'Admin', badge: 'System', description: 'Manage team members, stock, and reports.', icon: 'shield', tone: 'blue' },
+  { value: 'admin', label: 'Admin', badge: 'System', description: 'Manage team members, stock, and workspace operations.', icon: 'shield', tone: 'blue' },
   { value: 'finance-admin', label: 'Finance Admin', badge: 'System', description: 'Manage billing, invoices, and payments.', icon: 'coin', tone: 'green' },
   { value: 'inventory-manager', label: 'Inventory Manager', badge: 'System', description: 'Oversee stock, suppliers, and inventory.', icon: 'box', tone: 'purple' },
   { value: 'operations-manager', label: 'Operations Manager', badge: 'System', description: 'Manage operations and store activities.', icon: 'briefcase', tone: 'amber' },
   { value: 'store-supervisor', label: 'Store Supervisor', badge: 'System', description: 'Supervise store staff and daily tasks.', icon: 'store', tone: 'cyan' },
   { value: 'cashier', label: 'Cashier', badge: 'System', description: 'Process sales and manage transactions.', icon: 'receipt', tone: 'blue' },
-  { value: 'analyst', label: 'Analyst', badge: 'System', description: 'View data and generate reports.', icon: 'chart', tone: 'green' },
+  { value: 'analyst', label: 'Analyst', badge: 'System', description: 'View dashboards and operational data.', icon: 'chart', tone: 'green' },
   { value: 'support', label: 'Support', badge: 'System', description: 'Assist users and resolve issues.', icon: 'headset', tone: 'purple' },
   { value: 'viewer', label: 'Viewer', badge: 'System', description: 'View-only access to most data.', icon: 'eye', tone: 'slate' }
 ];
 
 const ROLE_PERMISSION_PREVIEWS = {
-  owner: ['Manage team members', 'Manage stock', 'View and export reports', 'Manage settings'],
-  admin: ['Manage team members', 'Manage stock', 'View and export reports', 'Manage settings'],
-  'finance-admin': ['View and export reports', 'Manage settings', 'Review purchasing records', 'Manage billing'],
-  'inventory-manager': ['Manage stock', 'Manage suppliers', 'View and export reports', 'Manage stock counts'],
-  'operations-manager': ['Manage stock', 'Manage transfers', 'View and export reports', 'Manage daily operations'],
-  'store-supervisor': ['Manage stock', 'Manage stock counts', 'View and export reports', 'Manage store activity'],
-  cashier: ['View dashboard', 'Process sales records', 'View assigned reports', 'Limited settings access'],
-  analyst: ['View and export reports', 'View inventory data', 'View sales analytics', 'Read-only dashboard access'],
+  owner: ['Manage team members', 'Manage stock', 'Manage settings'],
+  admin: ['Manage team members', 'Manage stock', 'Manage settings'],
+  'finance-admin': ['Manage settings', 'Review purchasing records', 'Manage billing'],
+  'inventory-manager': ['Manage stock', 'Manage suppliers', 'Manage stock counts'],
+  'operations-manager': ['Manage stock', 'Manage transfers', 'Manage daily operations'],
+  'store-supervisor': ['Manage stock', 'Manage stock counts', 'Manage store activity'],
+  cashier: ['View dashboard', 'Process sales records', 'Limited settings access'],
+  analyst: ['View inventory data', 'Read-only dashboard access'],
   support: ['View team members', 'Assist users', 'View operational data', 'Limited settings access'],
-  viewer: ['View dashboard', 'View reports', 'Read-only access', 'No write permissions']
+  viewer: ['View dashboard', 'Read-only access', 'No write permissions']
 };
 
 function renderRolePicker({
@@ -790,16 +789,16 @@ function filterRolePickerOptions(roles = [], { search = '', type = 'all' } = {})
 
 function inferRolePermissionPreview(role = {}) {
   const value = String(role.value || '').toLowerCase();
-  if (value.includes('stock') || value.includes('inventory')) return ['Manage stock', 'Manage suppliers', 'View and export reports', 'Manage stock counts'];
-  if (value.includes('report') || value.includes('analyst') || value.includes('viewer')) return ['View dashboard', 'View and export reports', 'View inventory data', 'Read-only access'];
-  if (value.includes('manager') || value.includes('supervisor')) return ['Manage stock', 'View and export reports', 'Manage store activity', 'Review team activity'];
-  return ['View dashboard', 'View assigned reports', 'Use permitted modules', 'Follow assigned access rules'];
+  if (value.includes('stock') || value.includes('inventory')) return ['Manage stock', 'Manage suppliers', 'View and export operational data', 'Manage stock counts'];
+  if (value.includes('analyst') || value.includes('viewer')) return ['View dashboard', 'View and export operational data', 'View inventory data', 'Read-only access'];
+  if (value.includes('manager') || value.includes('supervisor')) return ['Manage stock', 'View and export operational data', 'Manage store activity', 'Review team activity'];
+  return ['View dashboard', 'View assigned operational data', 'Use permitted modules', 'Follow assigned access rules'];
 }
 
 function roleDescriptionFor(label = '', badge = '') {
   const text = String(label || '').toLowerCase();
   if (text.includes('owner')) return 'Full control over all settings and access.';
-  if (text.includes('admin')) return 'Manage team members, stock, and reports.';
+  if (text.includes('admin')) return 'Manage team members, stock, and workspace operations.';
   if (text.includes('manager')) return 'Manage daily operations and team workflows.';
   if (text.includes('viewer')) return 'View-only access to assigned data.';
   if (String(badge || '').toLowerCase().includes('custom')) return 'Custom permission set for this workspace.';

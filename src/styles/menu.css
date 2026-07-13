@@ -1420,3 +1420,31 @@
     white-space: normal;
   }
 }
+
+.menuCatalogue__nameLine {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
+}
+
+.menuCatalogue__pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 3px 7px;
+  font-size: 0.55rem;
+  line-height: 1;
+  font-style: normal;
+  font-weight: 950;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.menuCatalogue__pill--modifier {
+  background: color-mix(in srgb, var(--accent-blue) 14%, transparent);
+  color: var(--accent-blue);
+  border: 1px solid color-mix(in srgb, var(--accent-blue) 24%, transparent);
+}

@@ -8,21 +8,6 @@
     <link rel="shortcut icon" href="admin-favicon.svg"/>
     <script>
         window.KCP_CONFIG = window.KCP_CONFIG || {};
-        (function () {
-            const cleanInjectedValue = (value) => {
-                let raw = String(value || '').trim();
-                if (!raw || /^__KCP_[A-Z0-9_]+__$/.test(raw)) return '';
-                raw = raw.replace(/^[`'"]+|[`'"]+$/g, '').trim();
-                raw = raw.replace(/[`'"]+$/g, '').trim();
-                return raw;
-            };
-
-            const injectedEndpointBase = cleanInjectedValue('__KCP_YOCO_PROXY_BASE__');
-            const injectedAnonKey = cleanInjectedValue('__KCP_SUPABASE_ANON_KEY__');
-
-            if (injectedEndpointBase) window.KCP_CONFIG.yocoProxyBase = injectedEndpointBase;
-            if (injectedAnonKey) window.KCP_CONFIG.supabaseAnonKey = injectedAnonKey;
-        })();
 
         window.tailwind = {
             config: {
@@ -938,7 +923,6 @@
             100% { left: 100%; width: 30%; }
         }
     </style>
-    <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 </head>
 <body class="h-[100dvh] w-full flex overflow-hidden">
 
@@ -992,8 +976,10 @@
                 </div>
             </form>
 
-            <div class="mt-5 flex justify-center">
-                <div class="cf-turnstile" id="admin-turnstile-widget" data-sitekey="0x4AAAAAADwZO_so4RnTHBV8" data-theme="dark" data-callback="onAdminTurnstileSuccess" data-expired-callback="onAdminTurnstileExpired"></div>
+            <div id="admin-turnstile-panel" class="mt-5 flex flex-col items-center gap-2">
+                <div id="admin-turnstile-widget"></div>
+                <p id="admin-turnstile-status" class="text-[10px] text-slate-500 font-bold text-center">Security check loading...</p>
+                <button id="admin-turnstile-retry" type="button" onclick="initAdminTurnstile(true)" class="hidden login-panel-link">Retry security check</button>
             </div>
 
             <button onclick="adminLogin()" id="admin-login-btn" class="btn-primary w-full mt-6 flex items-center justify-center gap-3 group">
@@ -1253,7 +1239,7 @@
                     <p class="text-sm text-slate-400 font-semibold mt-2">Live Yoco health, manual sync controls, and connection recovery across workspaces.</p>
                 </div>
                 <div class="flex flex-col sm:flex-row gap-3 w-full xl:w-auto">
-                    <select id="integration-workspace-select" onchange="renderIntegrationControlTower()" class="w-full sm:w-80"></select>
+                    <select id="integration-workspace-select" onchange="refreshIntegrationControlTower()" class="w-full sm:w-80"></select>
                     <button onclick="refreshIntegrationControlTower()" class="btn-ghost text-[10px] font-black uppercase tracking-widest px-4 py-3">
                         <i class="fa-solid fa-arrows-rotate mr-2"></i>Refresh
                     </button>
@@ -1301,8 +1287,8 @@
             <section class="glass-card p-0 overflow-hidden">
                 <div class="px-5 py-4 border-b border-white/5 flex items-center justify-between gap-3">
                     <div>
-                        <h4 class="text-sm font-black text-white">Webhook Queue</h4>
-                        <p class="text-xs text-slate-500 font-semibold mt-1">Realtime queue rows for the selected workspace.</p>
+                        <h4 class="text-sm font-black text-white">Webhook Event Log</h4>
+                        <p class="text-xs text-slate-500 font-semibold mt-1">Recent webhook processing records from the selected workspace database.</p>
                     </div>
                     <span id="integration-queue-count" class="badge bg-white/5 text-slate-300 border border-white/10">0 entries</span>
                 </div>
@@ -1336,9 +1322,9 @@
                     <input type="text" id="new-admin-surname" placeholder="Surname" class="w-full text-xs">
                     <input type="email" id="new-admin-email" placeholder="Admin Email" class="w-full text-xs">
                     <input type="text" id="new-admin-pwd" placeholder="Initial Password" class="w-full text-xs font-mono">
-                    <button onclick="addAdmin()" class="btn-primary w-full text-[10px] font-black uppercase tracking-widest py-3">Create Admin</button>
+                    <button onclick="addAdmin(this)" class="btn-primary w-full text-[10px] font-black uppercase tracking-widest py-3">Create Admin</button>
                 </div>
-                <p class="text-[9px] text-slate-500 italic">This will create a permanent Firebase Authentication account and grant root access.</p>
+                <p class="text-[9px] text-slate-500 italic">This creates a central D1 admin account with system-wide superuser access.</p>
             </div>
 
             <div class="flex items-center justify-between px-2">
@@ -1409,8 +1395,8 @@
             <div class="flex items-center justify-between px-6 py-4 bg-white/[0.02] border-t border-white/5 rounded-b-2xl">
                 <p id="log-pagination-info" class="text-[9px] font-bold text-slate-500 uppercase tracking-widest"></p>
                 <div class="flex items-center gap-2">
-                    <button onclick="changeAuditPage(-1)" class="w-8 h-8 flex items-center justify-center rounded-lg bg-white/5 border border-white/10 text-slate-400 hover:text-white hover:border-blue-500/50 transition-all"><i class="fa-solid fa-chevron-left text-[10px]"></i></button>
-                    <button onclick="changeAuditPage(1)" class="w-8 h-8 flex items-center justify-center rounded-lg bg-white/5 border border-white/10 text-slate-400 hover:text-white hover:border-blue-500/50 transition-all"><i class="fa-solid fa-chevron-right text-[10px]"></i></button>
+                    <button onclick="changeAuditLogPage(-1)" class="w-8 h-8 flex items-center justify-center rounded-lg bg-white/5 border border-white/10 text-slate-400 hover:text-white hover:border-blue-500/50 transition-all"><i class="fa-solid fa-chevron-left text-[10px]"></i></button>
+                    <button onclick="changeAuditLogPage(1)" class="w-8 h-8 flex items-center justify-center rounded-lg bg-white/5 border border-white/10 text-slate-400 hover:text-white hover:border-blue-500/50 transition-all"><i class="fa-solid fa-chevron-right text-[10px]"></i></button>
                 </div>
             </div>
         </div>
@@ -1465,6 +1451,42 @@
                         <button onclick="disconnectSystemGmail()" id="gmail-disconnect-btn" class="btn-ghost text-red-400 hidden"><i class="fa-solid fa-unlink mr-2"></i>Disconnect</button>
                     </div>
                 </div>
+                <div class="glass-card p-6 space-y-4 md:col-span-2">
+                    <div class="flex items-center mb-2">
+                        <h4 class="text-xs font-black uppercase tracking-widest text-rose-400"><i class="fa-solid fa-key mr-2"></i>System Email — Gmail App Password (SMTP)</h4>
+                        <i class="fa-solid fa-circle-info info-icon" onclick="showInfo('System Email (SMTP)', 'Send system emails (password resets, low stock alerts) via Gmail SMTP using an app password instead of OAuth. Generate an app password at myaccount.google.com/apppasswords.')"></i>
+                    </div>
+                    <div id="email-config-status" class="text-xs text-slate-400">Loading current config…</div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div>
+                            <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Provider</label>
+                            <select id="email-config-provider" class="w-full text-xs">
+                                <option value="gmail_smtp">Gmail SMTP (App Password)</option>
+                                <option value="resend">Resend</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">From Name</label>
+                            <input type="text" id="email-config-from-name" placeholder="Kitchen Cost Pro" class="w-full text-xs">
+                        </div>
+                        <div>
+                            <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">From / Gmail Address</label>
+                            <input type="email" id="email-config-from-email" placeholder="alerts@yourdomain.com" class="w-full text-xs">
+                        </div>
+                        <div>
+                            <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">SMTP Username (usually same as From)</label>
+                            <input type="text" id="email-config-smtp-username" placeholder="alerts@yourdomain.com" class="w-full text-xs">
+                        </div>
+                        <div class="md:col-span-2">
+                            <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Gmail App Password</label>
+                            <input type="password" id="email-config-smtp-password" placeholder="Leave blank to keep current password" class="w-full text-xs">
+                        </div>
+                    </div>
+                    <div class="flex gap-2 flex-wrap">
+                        <button onclick="saveEmailConfig()" class="btn-primary"><i class="fa-solid fa-floppy-disk mr-2"></i>Save Email Config</button>
+                        <button onclick="sendTestEmail()" class="btn-ghost text-blue-300"><i class="fa-solid fa-paper-plane mr-2"></i>Send Test Email</button>
+                    </div>
+                </div>
                 <div class="glass-card p-6 space-y-4">
                     <div class="flex items-center mb-2">
                         <h4 class="text-xs font-black uppercase tracking-widest text-blue-400 group"><i class="fa-solid fa-link mr-2"></i>Quick Access</h4>
@@ -1482,13 +1504,12 @@
                         <h4 class="text-xs font-black uppercase tracking-widest text-amber-400"><i class="fa-solid fa-broom mr-2"></i>Maintenance</h4>
                         <i class="fa-solid fa-circle-info info-icon" onclick="showInfo('System Maintenance', 'Tools to ensure database consistency. Use with caution.')"></i>
                     </div>
-                    <button onclick="scanOrphans()" class="btn-ghost w-full"><i class="fa-solid fa-magnifying-glass mr-2"></i>Scan Orphaned Data</button>
-                    <button onclick="fixBrokenAccess()" class="btn-primary w-full text-center mt-2 mb-2"><i class="fa-solid fa-wrench mr-2"></i>Fix Broken Workspace Access</button>
+                    <button onclick="scanOrphans()" class="btn-ghost w-full"><i class="fa-solid fa-magnifying-glass mr-2"></i>Run Database Integrity Audit</button>
+                    <button onclick="fixBrokenAccess()" class="btn-primary w-full text-center mt-2 mb-2"><i class="fa-solid fa-wrench mr-2"></i>Repair Identity & Tenant Baselines</button>
                     <button id="sync-admin-btn" onclick="syncAdminProfile()" class="btn-ghost w-full text-blue-400 font-bold"><i class="fa-solid fa-user-gear mr-2"></i>Sync My Admin Profile</button>
                     <button onclick="loadAllData();showToast('Data refreshed')" class="btn-ghost w-full"><i class="fa-solid fa-arrows-rotate mr-2"></i>Reload All Data</button>
                     <button onclick="sendTestEmail()" class="btn-ghost w-full text-blue-300"><i class="fa-solid fa-paper-plane mr-2"></i>Send Test Email</button>
                     <button onclick="console.table(allSignupRequests); showInfo('Debug Info', 'Logged ' + Object.keys(allSignupRequests).length + ' requests to console.')" class="btn-ghost w-full text-blue-300 opacity-50 text-[8px] mt-4">Debug: Log State to Console</button>
-                    <button id="sync-access-btn" onclick="syncGlobalAccess()" class="btn-ghost w-full text-amber-400 hidden"><i class="fa-solid fa-shield-halved mr-2"></i>Sync Global Access</button>
                     <div id="orphan-results" class="text-[10px] text-slate-400 space-y-1"></div>
                 </div>
                 <div class="glass-card p-6 space-y-4">
@@ -1513,6 +1534,7 @@
                             <div id="accent-swatch-row" class="flex flex-wrap gap-3"></div>
                         </div>
                     </div>
+                </div>
                 <div class="glass-card p-6 space-y-4">
                     <div class="flex items-center mb-2">
                         <h4 class="text-xs font-black uppercase tracking-widest text-blue-500"><i class="fa-solid fa-bullhorn mr-2"></i>System Broadcast</h4>
@@ -1529,13 +1551,13 @@
 
                 <div class="glass-card p-6 space-y-4">
                     <div class="flex items-center mb-2">
-                        <h4 class="text-xs font-black uppercase tracking-widest text-amber-500"><i class="fa-solid fa-wand-magic-sparkles mr-2"></i>Database Migration</h4>
-                        <i class="fa-solid fa-circle-info info-icon" onclick="showInfo('UID Migration', 'Converts all legacy email-based keys to UID-based keys for better security and stability.')"></i>
+                        <h4 class="text-xs font-black uppercase tracking-widest text-amber-500"><i class="fa-solid fa-wand-magic-sparkles mr-2"></i>D1 Identity Repair</h4>
+                        <i class="fa-solid fa-circle-info info-icon" onclick="showInfo('D1 Identity Repair', 'Repairs central user links, workspace owner links, workspace settings baselines, and default locations.')"></i>
                     </div>
                     <div class="p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl">
-                        <p class="text-[10px] text-amber-200/80 leading-relaxed font-bold italic">This will scan all workspaces and update team identifiers to match user UIDs where registered.</p>
+                        <p class="text-[10px] text-amber-200/80 leading-relaxed font-bold italic">This safely repairs stale identity links and missing workspace database baselines without creating superuser memberships.</p>
                     </div>
-                    <button id="btn-migrate-uid" onclick="runUidMigration()" class="w-full btn-ghost border-amber-500/20 text-amber-400 hover:bg-amber-500/10"><i class="fa-solid fa-database mr-2"></i>Run UID Migration</button>
+                    <button id="btn-migrate-uid" onclick="runUidMigration()" class="w-full btn-ghost border-amber-500/20 text-amber-400 hover:bg-amber-500/10"><i class="fa-solid fa-database mr-2"></i>Run D1 Integrity Repair</button>
                 </div>
                 <div class="glass-card p-6 space-y-4">
                     <h4 class="text-xs font-black uppercase tracking-widest text-emerald-400"><i class="fa-solid fa-database mr-2"></i>Data Sources Loaded</h4>
@@ -1609,7 +1631,7 @@ async function callAdminApi(method, path, body) {
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
         if (response.status === 401) {
-            adminSignOut();
+            clearAdminSession();
             throw new Error('Session expired. Please sign in again.');
         }
         throw new Error(payload?.message || payload?.error || `Admin API ${method} ${path} failed (${response.status})`);
@@ -1687,111 +1709,28 @@ async function saveSecuritySettings() {
     resetInactivityTimer();
 }
 
-async function migrateAdminsToUids() { /* no-op: D1 uses stable IDs */ }
-
 function isAdmin(user){ return Boolean(adminUser); }
 function isSuperUser(user){ return adminIsSuper; }
 
-function cleanAdminConfigValue(value) {
-    let raw = String(value || '').trim();
-    if (!raw || /^__KCP_[A-Z0-9_]+__$/.test(raw)) return '';
-    raw = raw.replace(/^[`'"]+|[`'"]+$/g, '').trim();
-    raw = raw.replace(/[`'"]+$/g, '').trim();
-    return raw;
-}
-
-function normalizeAdminEndpointBase(value) {
-    return cleanAdminConfigValue(value).replace(/\/$/, '');
-}
-
-function getAdminYocoEndpointBase() {
-    const managedVal = normalizeAdminEndpointBase(window.KCP_CONFIG?.yocoProxyBase || '');
-    if (managedVal) return managedVal;
-    const storedVal = normalizeAdminEndpointBase(localStorage.getItem('kcp_yoco_endpoint_base') || '');
-    if (storedVal) return storedVal;
-    return 'https://fhxpxrzgxxwhnpfzxotx.supabase.co/functions/v1/yoco-api';
-}
-
-function getAdminSupabaseAnonKey() {
-    const managedVal = cleanAdminConfigValue(window.KCP_CONFIG?.supabaseAnonKey || '');
-    if (managedVal) return managedVal;
-    const storedVal = cleanAdminConfigValue(localStorage.getItem('kcp_yoco_supabase_anon_key') || '');
-    if (storedVal) return storedVal;
-    return 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZoeHB4cnpneHh3aG5wZnp4b3R4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyOTI5OTIsImV4cCI6MjA5MTg2ODk5Mn0.QrpHMp2dRYOSCihHKf8OPr8wntk-Kcp0yeeXgRxzdes';
-}
-
-function isAdminSupabaseYocoEndpoint() {
-    const base = getAdminYocoEndpointBase();
-    return /supabase\.co\/functions\/v1\//i.test(base);
-}
-
-function buildAdminYocoEndpointUrl(path = '', params = {}) {
-    const base = getAdminYocoEndpointBase();
-    if (isAdminSupabaseYocoEndpoint()) {
-        const url = new URL(base);
-        const rawPath = String(path || '');
-        const route = rawPath.includes('webhook/subscription/ensure')
-            ? 'webhook/subscription/ensure'
-            : (rawPath.includes('webhook/pending')
-                ? 'webhook/pending'
-                : (rawPath.includes('webhook/ack') ? 'webhook/ack' : ''));
-        if (route) url.searchParams.set('route', route);
-        Object.entries(params).forEach(([key, value]) => {
-            if (value !== undefined && value !== null && value !== '') url.searchParams.append(key, value);
+async function refreshAdminIntegrationQueueSnapshot(wsId = '') {
+    const targetWsId = String(wsId || getIntegrationSelectedWorkspaceId() || '').trim();
+    if (!targetWsId) {
+        KCPStore.setState('integrationQueue', {});
+        return;
+    }
+    try {
+        const payload = await callAdminApi('GET', `/api/admin/workspaces/${encodeURIComponent(targetWsId)}/yoco/events?limit=25`);
+        const current = { ...(KCPStore.state.integrationQueue || {}) };
+        Object.keys(current).forEach(key => {
+            if (String(current[key]?.workspaceId || '') === targetWsId) delete current[key];
         });
-        return url;
+        (payload.events || []).forEach(event => {
+            current[event.id] = { ...event, workspaceId: targetWsId };
+        });
+        KCPStore.setState('integrationQueue', current);
+    } catch (error) {
+        console.warn('[Admin] Could not read Yoco webhook events', error);
     }
-
-    const url = new URL(path, base);
-    Object.entries(params).forEach(([key, value]) => {
-        if (value !== undefined && value !== null && value !== '') url.searchParams.append(key, value);
-    });
-    return url;
-}
-
-async function callAdminYocoFunctionJson(path, options = {}) {
-    const anonKey = getAdminSupabaseAnonKey();
-    const personalApiToken = sanitizeIntegrationToken(options?.personalApiToken || '');
-    const method = String(options?.method || 'GET').toUpperCase();
-    const params = options?.params || {};
-    const body = options?.body;
-    const url = buildAdminYocoEndpointUrl(path, params);
-
-    const headers = {
-        'Accept': 'application/json'
-    };
-    if (body != null) headers['Content-Type'] = 'application/json';
-    if (anonKey && isAdminSupabaseYocoEndpoint()) {
-        headers['apikey'] = anonKey;
-        headers['Authorization'] = `Bearer ${anonKey}`;
-    }
-    if (personalApiToken) headers['x-yoco-personal-api-key'] = personalApiToken;
-
-    const response = await fetch(url.toString(), {
-        method,
-        headers,
-        body: body != null ? JSON.stringify(body) : undefined
-    });
-    const text = await response.text();
-    let payload = {};
-    try { payload = text ? JSON.parse(text) : {}; } catch (e) { payload = { message: text }; }
-    if (!response.ok) {
-        throw new Error(payload?.message || payload?.error?.message || `${response.status} ${response.statusText}`);
-    }
-    return payload;
-}
-
-async function callAdminFetchPendingWebhookEvents(limit = 10) {
-    const payload = await callAdminYocoFunctionJson('/api/yoco/webhook/pending', {
-        method: 'GET',
-        params: { limit }
-    });
-    return Array.isArray(payload?.data) ? payload.data : [];
-}
-
-async function refreshAdminIntegrationQueueSnapshot() {
-    // Webhook queue migrated to D1 — no longer fetched from Firebase
-    KCPStore.setState('integrationQueue', {});
 }
 
 let workspaceEmailQueues = {};
@@ -1821,8 +1760,7 @@ function getWorkspaceSiteName(wsId) {
 function getWorkspaceIntegrationDomIds(wsId) {
     const safeWsId = String(wsId || '').replace(/[^a-z0-9_-]/gi, '_');
     return {
-        secretKey: `integration-secret-key-${safeWsId}`,
-        personalToken: `integration-personal-token-${safeWsId}`
+        secretKey: `integration-secret-key-${safeWsId}`
     };
 }
 
@@ -1878,7 +1816,7 @@ function getYocoIntegrationSummaryForWorkspace(wsId) {
         sync,
         credentials,
         queueRows,
-        queuedCount: 0,
+        queuedCount: queueRows.filter(row => ['received', 'pending', 'retry', 'failed'].includes(String(row.status || '').toLowerCase())).length,
         lastSyncAt,
         status,
         detail
@@ -1909,14 +1847,14 @@ function renderWorkspaceIntegrationPanel(wsId, options = {}) {
             <td class="px-3 py-3 text-[9px] text-slate-400">${row.orderId || '—'}</td>
             <td class="px-3 py-3 text-[9px] font-black uppercase text-slate-300">${row.status || 'Queued'}</td>
         </tr>
-    `).join('') || '<tr><td colspan="4" class="px-3 py-6 text-center text-slate-500 text-[10px]">No queue events found for this workspace</td></tr>';
+    `).join('') || '<tr><td colspan="4" class="px-3 py-6 text-center text-slate-500 text-[10px]">No webhook events recorded for this workspace</td></tr>';
 
     const queuePanel = options.queueType === 'email'
         ? renderWorkspaceEmailQueuePanel(wsId)
         : `
             <div class="space-y-3">
                 <div class="flex items-center justify-between">
-                    <h5 class="text-[9px] font-black text-slate-500 uppercase tracking-widest">Realtime Queue</h5>
+                    <h5 class="text-[9px] font-black text-slate-500 uppercase tracking-widest">Webhook Event Log</h5>
                     <span class="text-[9px] font-black uppercase tracking-widest text-slate-500">${queueRows.length} entr${queueRows.length === 1 ? 'y' : 'ies'}</span>
                 </div>
                 <div class="overflow-x-auto rounded-xl border border-white/5">
@@ -1967,16 +1905,12 @@ function renderWorkspaceIntegrationPanel(wsId, options = {}) {
                     <p class="text-[10px] font-bold ${webhookEnabled ? 'text-emerald-300' : 'text-amber-300'} normal-case mt-1">${webhookEnabled ? 'Active' : 'Needs check'}</p>
                 </div>
                 <div class="p-3 rounded-xl bg-black/10">
-                    <p class="text-[8px] text-slate-500 uppercase">Queue Pending</p>
+                    <p class="text-[8px] text-slate-500 uppercase">Events Needing Attention</p>
                     <p class="text-[10px] font-bold text-slate-200 normal-case mt-1">${summary.queuedCount || 0} pending events</p>
                 </div>
                 <div class="p-3 rounded-xl bg-black/10">
-                    <p class="text-[8px] text-slate-500 uppercase">Saved Secret</p>
-                    <p class="text-[10px] font-bold text-slate-200 normal-case mt-1">${maskSensitiveToken(creds.secretKey)}</p>
-                </div>
-                <div class="p-3 rounded-xl bg-black/10">
-                    <p class="text-[8px] text-slate-500 uppercase">Saved Personal Token</p>
-                    <p class="text-[10px] font-bold text-slate-200 normal-case mt-1">${maskSensitiveToken(creds.personalApiToken)}</p>
+                    <p class="text-[8px] text-slate-500 uppercase">Credential State</p>
+                    <p class="text-[10px] font-bold ${sync.connectionActive ? 'text-emerald-300' : 'text-amber-300'} normal-case mt-1">${sync.connectionActive ? 'Encrypted and stored' : 'Not connected'}</p>
                 </div>
             </div>
             <div class="p-3 rounded-xl bg-black/10">
@@ -1989,24 +1923,22 @@ function renderWorkspaceIntegrationPanel(wsId, options = {}) {
                     <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">YOCO_SECRET_KEY</label>
                     <input type="password" id="${ids.secretKey}" placeholder="Paste secret key" class="w-full text-xs">
                 </div>
-                <div>
-                    <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">PERSONAL_API_TOKEN</label>
-                    <input type="password" id="${ids.personalToken}" placeholder="Paste personal token" class="w-full text-xs">
-                </div>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    <button onclick="saveIntegrationCredentials(${adminInlineString(wsId)})" class="btn-primary w-full"><i class="fa-solid fa-key mr-2"></i>Save Keys</button>
-                    <button onclick="connectYocoIntegrationFromAdmin(${adminInlineString(wsId)})" class="btn-ghost w-full text-emerald-300"><i class="fa-solid fa-plug-circle-bolt mr-2"></i>Connect / Restart</button>
+                    <button onclick="saveIntegrationCredentials(${adminInlineString(wsId)})" class="btn-primary w-full"><i class="fa-solid fa-key mr-2"></i>Save Secret Key</button>
+                    <button onclick="connectYocoIntegrationFromAdmin(${adminInlineString(wsId)})" class="btn-ghost w-full text-emerald-300"><i class="fa-solid fa-plug-circle-bolt mr-2"></i>Connect / Rotate Key</button>
                 </div>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <button onclick="syncYocoCatalogueFromAdmin(${adminInlineString(wsId)})" class="btn-ghost w-full text-blue-400"><i class="fa-solid fa-boxes-stacked mr-2"></i>Sync Products & Locations</button>
                     <button onclick="syncYocoSalesFromAdmin(${adminInlineString(wsId)})" class="btn-ghost w-full text-blue-400"><i class="fa-solid fa-receipt mr-2"></i>Sync Sales</button>
+                    <button onclick="syncYocoSalesLast14DaysFromAdmin(${adminInlineString(wsId)})" class="btn-ghost w-full text-blue-400"><i class="fa-solid fa-calendar-week mr-2"></i>Sales Sync 2 Weeks</button>
                 </div>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <button onclick="sendLowStockSummaryFromAdmin(${adminInlineString(wsId)})" class="btn-ghost w-full text-emerald-300"><i class="fa-solid fa-envelope-circle-check mr-2"></i>Send Low Stock Email</button>
                     <button onclick="syncYocoFullFromAdmin(${adminInlineString(wsId)})" class="btn-ghost w-full text-sky-300"><i class="fa-solid fa-arrows-spin mr-2"></i>Restart Sync</button>
                 </div>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    <button onclick="forceRetryIntegrationWorkspace(${adminInlineString(wsId)})" class="btn-ghost w-full text-blue-400"><i class="fa-solid fa-rotate mr-2"></i>Force Retry Queue</button>
+                    <button onclick="retryAllErroredYocoOrders(${adminInlineString(wsId)})" class="btn-ghost w-full text-red-300"><i class="fa-solid fa-triangle-exclamation mr-2"></i>Resync Errored Orders</button>
+                    <button onclick="forceRetryIntegrationWorkspace(${adminInlineString(wsId)})" class="btn-ghost w-full text-blue-400"><i class="fa-solid fa-rotate mr-2"></i>Reconcile Recent Sales</button>
                     <button onclick="resetWebhookSubscriptionForWorkspace(${adminInlineString(wsId)})" class="btn-ghost w-full text-amber-400"><i class="fa-solid fa-tower-broadcast mr-2"></i>Webhook Reset</button>
                 </div>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -2245,12 +2177,14 @@ function renderWorkspaceVisualIntegrationSections(wsId) {
                     <h4 class="text-base font-black text-white">Actions</h4>
                 </div>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <button onclick="connectYocoIntegrationFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn bg-blue-600/90 !text-white border-blue-400/30"><i class="fa-solid fa-plug-circle-bolt mr-2"></i>Connect / Restart</button>
+                    <button onclick="connectYocoIntegrationFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn bg-blue-600/90 !text-white border-blue-400/30"><i class="fa-solid fa-plug-circle-bolt mr-2"></i>Connect / Rotate Key</button>
                     <button onclick="syncYocoCatalogueFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn"><i class="fa-solid fa-boxes-stacked mr-2"></i>Sync Products & Locations</button>
                     <button onclick="syncYocoSalesFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn"><i class="fa-solid fa-chart-simple mr-2"></i>Sync Sales</button>
+                    <button onclick="syncYocoSalesLast14DaysFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn"><i class="fa-solid fa-calendar-week mr-2"></i>Sales Sync 2 Weeks</button>
                     <button onclick="sendLowStockSummaryFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn !text-emerald-300 border-emerald-500/30"><i class="fa-solid fa-envelope-circle-check mr-2"></i>Send Low Stock Email</button>
                     <button onclick="syncYocoFullFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn"><i class="fa-solid fa-arrows-rotate mr-2"></i>Restart Sync</button>
-                    <button onclick="forceRetryIntegrationWorkspace(${adminInlineString(wsId)})" class="workspace-action-btn"><i class="fa-solid fa-rotate mr-2"></i>Force Retry Queue</button>
+                    <button onclick="retryAllErroredYocoOrders(${adminInlineString(wsId)})" class="workspace-action-btn !text-red-300 border-red-500/30"><i class="fa-solid fa-triangle-exclamation mr-2"></i>Resync Errored Orders</button>
+                    <button onclick="forceRetryIntegrationWorkspace(${adminInlineString(wsId)})" class="workspace-action-btn"><i class="fa-solid fa-rotate mr-2"></i>Reconcile Recent Sales</button>
                     <button onclick="resetWebhookSubscriptionForWorkspace(${adminInlineString(wsId)})" class="workspace-action-btn !text-amber-300 border-amber-500/30"><i class="fa-solid fa-tower-broadcast mr-2"></i>Webhook Reset</button>
                 </div>
             </section>
@@ -2302,15 +2236,6 @@ async function resendWorkspaceEmailQueue(wsId, queueKey, emailKey) {
     }
 }
 
-async function callAdminYocoEnsureWebhook(personalApiToken = '') {
-    const apiToken = sanitizeIntegrationToken(personalApiToken);
-    if (!apiToken) throw new Error('Save a PERSONAL_API_TOKEN first for webhook reset.');
-    return callAdminYocoFunctionJson('/api/yoco/webhook/subscription/ensure', {
-        method: 'POST',
-        personalApiToken: apiToken
-    });
-}
-
 function renderIntegrationControlTower() {
     const select = document.getElementById('integration-workspace-select');
     const workspaces = Object.keys(KCPStore.state.workspaces || {}).sort((a, b) => getWorkspaceSiteName(a).localeCompare(getWorkspaceSiteName(b)));
@@ -2351,7 +2276,7 @@ function renderIntegrationControlTower() {
         tbody.innerHTML = summaries.map(item => {
             const pres = getYocoStatusPresentation(item.status);
             return `
-                <tr class="tbl-row border-b border-white/5 cursor-pointer" onclick="document.getElementById('integration-workspace-select').value=${adminInlineString(item.wsId)}; renderIntegrationControlTower()">
+                <tr class="tbl-row border-b border-white/5 cursor-pointer" onclick="document.getElementById('integration-workspace-select').value=${adminInlineString(item.wsId)}; refreshIntegrationControlTower()">
                     <td class="px-4 py-4">
                         <div class="text-xs font-bold">${item.siteName}</div>
                         <div class="text-[9px] text-slate-500">${item.wsId}</div>
@@ -2401,28 +2326,43 @@ function renderIntegrationControlTower() {
     if (credentialMeta) {
         const creds = selectedSummary?.credentials || {};
         credentialMeta.innerHTML = selectedSummary
-            ? `Saved secret: <span class="text-white">${maskSensitiveToken(creds.secretKey)}</span><br>Saved personal token: <span class="text-white">${maskSensitiveToken(creds.personalApiToken)}</span><br>Updated: ${formatAdminDateTime(creds.updatedAt, 'Never')}`
+            ? `Yoco credentials are encrypted in the workspace database. Enter a new secret only when reconnecting or rotating it.<br>Last integration update: ${formatAdminDateTime(selectedSummary.sync?.updatedAt || selectedSummary.lastSyncAt, 'Never')}`
             : 'Select a workspace to inspect or manage credentials.';
     }
 }
 
 async function refreshAdminWorkspaceRecord(wsId) {
     const targetWsId = String(wsId || '').trim();
-    if (!targetWsId) return;
+    if (!targetWsId) return null;
     try {
-        const record = await readWorkspaceRecord(targetWsId);
-        if (record) {
-            if (KCPStore.state.workspaces?.[targetWsId]) {
-                KCPStore.patchItem('workspaces', targetWsId, () => record);
-            } else {
-                KCPStore.setState('workspaces', {
-                    ...(KCPStore.state.workspaces || {}),
-                    [targetWsId]: record
-                });
-            }
+        let current = KCPStore.state.workspaces?.[targetWsId] || null;
+        if (!current) {
+            const overview = await callAdminApi('GET', '/api/admin');
+            KCPStore.setState('workspaces', overview.workspaces || {});
+            if (overview.members) KCPStore.setState('_memberRows', overview.members);
+            current = KCPStore.state.workspaces?.[targetWsId] || null;
         }
+        const yoco = await callAdminApi('GET', `/api/admin/workspaces/${encodeURIComponent(targetWsId)}/yoco/status`);
+        if (current) {
+            const next = {
+                ...current,
+                data: {
+                    ...(current.data || {}),
+                    integrations: {
+                        ...(current.data?.integrations || {}),
+                        yoco
+                    }
+                }
+            };
+            if (KCPStore.state.workspaces?.[targetWsId]) KCPStore.patchItem('workspaces', targetWsId, () => next);
+            else KCPStore.setState('workspaces', { ...(KCPStore.state.workspaces || {}), [targetWsId]: next });
+            current = next;
+        }
+        await refreshAdminIntegrationQueueSnapshot(targetWsId);
+        return current;
     } catch (e) {
         console.warn('[Admin] Could not refresh workspace record', targetWsId, e);
+        return KCPStore.state.workspaces?.[targetWsId] || null;
     }
 }
 
@@ -2430,31 +2370,14 @@ async function refreshIntegrationControlTower() {
     const wsId = getIntegrationSelectedWorkspaceId();
     showSync('Refreshing Integrations...', 'Reading live workspace integration status...');
     if (wsId) await refreshAdminWorkspaceRecord(wsId);
-    await refreshAdminIntegrationQueueSnapshot();
     renderIntegrationControlTower();
     hideSync();
     showToast('Integration status refreshed', 'success');
 }
 
-async function ensureCurrentAdminWorkspaceAccess(wsId) {
-    if (!adminUser || !wsId || !adminIsSuper) return;
-    const email = String(adminUser.email || '').toLowerCase();
-    const adminProfile = Object.values(ADMIN_PROFILES).find(p => p.email?.toLowerCase() === email) || {};
-    const displayName = `${adminProfile.name || ''} ${adminProfile.surname || ''}`.trim() || email.split('@')[0];
-    try {
-        await callAdminApi('POST', '/api/admin/members', {
-            workspaceId: wsId, email, displayName, roleKey: 'owner'
-        });
-    } catch(e) {
-        console.warn('[Admin] ensureCurrentAdminWorkspaceAccess failed', e.message);
-    }
-}
-
 function getAdminYocoApiKeyForWorkspace(wsId) {
     const ids = getWorkspaceIntegrationDomIds(wsId);
-    const current = KCPStore.state.integrationCredentials?.[wsId] || {};
-    const inputValue = sanitizeIntegrationToken(document.getElementById(ids.secretKey)?.value || '');
-    return inputValue || sanitizeIntegrationToken(current.secretKey || '');
+    return sanitizeIntegrationToken(document.getElementById(ids.secretKey)?.value || '');
 }
 
 async function runAdminYocoAction(wsId, label, task) {
@@ -2462,7 +2385,6 @@ async function runAdminYocoAction(wsId, label, task) {
     if (!targetWsId) return showToast('Select a workspace first', 'error');
     showSync(label, `${getWorkspaceSiteName(targetWsId)} is being updated from Yoco...`);
     try {
-        await ensureCurrentAdminWorkspaceAccess(targetWsId);
         const result = await task(targetWsId);
         await refreshAdminWorkspaceRecord(targetWsId);
         renderIntegrationControlTower();
@@ -2481,7 +2403,7 @@ async function runAdminYocoAction(wsId, label, task) {
 async function connectYocoIntegrationFromAdmin(wsId = '') {
     const targetWsId = wsId || getIntegrationSelectedWorkspaceId();
     const apiKey = getAdminYocoApiKeyForWorkspace(targetWsId);
-    if (!apiKey) return showToast('Enter or save the YOCO_SECRET_KEY before connecting.', 'error');
+    if (!apiKey) return showToast('Enter the YOCO_SECRET_KEY before connecting or rotating credentials.', 'error');
     try {
         const result = await runAdminYocoAction(targetWsId, 'Connecting Yoco Integration...', async (workspaceId) => {
             return callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(workspaceId)}/yoco/connect`, { apiKey });
@@ -2508,10 +2430,19 @@ async function syncYocoSalesFromAdmin(wsId = '') {
     } catch (e) { }
 }
 
+async function syncYocoSalesLast14DaysFromAdmin(wsId = '') {
+    try {
+        const result = await runAdminYocoAction(wsId, 'Syncing last 14 days of sales...', async (workspaceId) => {
+            return callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(workspaceId)}/yoco/sync-sales`, { sinceDays: 14 });
+        });
+        showToast(`2-week sales sync complete. ${result?.ordersProcessed || 0} orders and ${result?.refundsProcessed || 0} refunds processed.`, 'success');
+    } catch (e) { }
+}
+
 async function sendLowStockSummaryFromAdmin(wsId = '') {
     const targetWsId = wsId || getIntegrationSelectedWorkspaceId();
     if (!targetWsId) return showToast('Select a workspace first', 'error');
-    showSync('Sending Low Stock Email...', `${getWorkspaceSiteName(targetWsId)} low-stock report is being sent...`);
+    showSync('Sending Low Stock Email...', `${getWorkspaceSiteName(targetWsId)} low-stock summary is being sent...`);
     try {
         const result = await callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(targetWsId)}/actions/send-low-stock-email`);
         await refreshAdminWorkspaceRecord(targetWsId);
@@ -2580,17 +2511,32 @@ async function factoryResetIntegrationCredentials(wsId = '') {
     }
 }
 
+async function retryAllErroredYocoOrders(wsId = '') {
+    const targetWsId = wsId || getIntegrationSelectedWorkspaceId();
+    if (!targetWsId) return showToast('Select a workspace first', 'error');
+    try {
+        const result = await runAdminYocoAction(targetWsId, 'Resyncing Errored Orders...', async (workspaceId) => {
+            return callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(workspaceId)}/yoco/retry-failed-orders`);
+        });
+        if (result?.status === 'nothing_to_retry') {
+            showToast('No errored Yoco orders require resync.', 'success');
+        } else {
+            showToast(`Errored-order resync complete. ${result?.ordersProcessed || 0} orders and ${result?.refundsProcessed || 0} refunds recovered.`, result?.errors?.length ? 'error' : 'success');
+        }
+    } catch (e) { }
+}
+
 async function forceRetryIntegrationWorkspace(wsId = '') {
     const targetWsId = wsId || getIntegrationSelectedWorkspaceId();
     if (!targetWsId) return showToast('Select a workspace first', 'error');
     try {
-        await callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(targetWsId)}/yoco/sync-sales`);
+        await callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(targetWsId)}/yoco/reconcile-sales`, { sinceDays: 2 });
         if (window.currentAdminWorkspaceDetailId === targetWsId) showWsDetail(targetWsId);
-        showToast('Sales sync triggered for workspace', 'success');
+        showToast('Recent Yoco sales reconciled for workspace', 'success');
         await refreshAdminWorkspaceRecord(targetWsId);
     } catch (e) {
         console.error('[Admin] Failed to force retry workspace integration', e);
-        showToast(`Sync trigger failed: ${e.message}`, 'error');
+        showToast(`Sales reconciliation failed: ${e.message}`, 'error');
     }
 }
 
@@ -2690,8 +2636,116 @@ function hideSync() {
 
 // ─── Turnstile ───
 let adminTurnstileToken = '';
-function onAdminTurnstileSuccess(token) { adminTurnstileToken = token; }
-function onAdminTurnstileExpired() { adminTurnstileToken = ''; }
+let adminTurnstileEnabled = false;
+let adminTurnstileSiteKey = '';
+let adminTurnstileWidgetId = null;
+let adminTurnstileScriptPromise = null;
+
+function setAdminTurnstileStatus(message = '', { retry = false, hidden = false } = {}) {
+    const panel = document.getElementById('admin-turnstile-panel');
+    const status = document.getElementById('admin-turnstile-status');
+    const retryButton = document.getElementById('admin-turnstile-retry');
+    if (panel) panel.classList.toggle('hidden', hidden);
+    if (status) status.innerText = message;
+    if (retryButton) retryButton.classList.toggle('hidden', !retry);
+}
+
+function loadAdminTurnstileScript() {
+    if (window.turnstile?.render) return Promise.resolve();
+    if (adminTurnstileScriptPromise) return adminTurnstileScriptPromise;
+
+    adminTurnstileScriptPromise = new Promise((resolve, reject) => {
+        window.onKcpAdminTurnstileLoad = () => resolve();
+        const existing = document.querySelector('script[data-kcp-admin-turnstile-script]');
+        if (existing) existing.remove();
+
+        const script = document.createElement('script');
+        script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?onload=onKcpAdminTurnstileLoad&render=explicit';
+        script.async = true;
+        script.defer = true;
+        script.dataset.kcpAdminTurnstileScript = 'true';
+        script.onerror = () => {
+            script.remove();
+            adminTurnstileScriptPromise = null;
+            reject(new Error('Turnstile script could not load. Allow challenges.cloudflare.com and retry.'));
+        };
+        document.head.appendChild(script);
+    });
+
+    return adminTurnstileScriptPromise;
+}
+
+function removeAdminTurnstileWidget() {
+    if (adminTurnstileWidgetId !== null && window.turnstile?.remove) {
+        try { window.turnstile.remove(adminTurnstileWidgetId); } catch (_) {}
+    }
+    const widget = document.getElementById('admin-turnstile-widget');
+    if (widget) widget.innerHTML = '';
+    adminTurnstileWidgetId = null;
+    adminTurnstileToken = '';
+}
+
+function resetAdminTurnstile() {
+    adminTurnstileToken = '';
+    if (adminTurnstileWidgetId !== null && window.turnstile?.reset) {
+        try { window.turnstile.reset(adminTurnstileWidgetId); } catch (_) { removeAdminTurnstileWidget(); }
+    }
+    setAdminTurnstileStatus(adminTurnstileEnabled ? 'Security check loading...' : '', {
+        hidden: !adminTurnstileEnabled
+    });
+}
+
+async function initAdminTurnstile(force = false) {
+    setAdminTurnstileStatus('Security configuration loading...', { retry: false, hidden: false });
+    if (force) removeAdminTurnstileWidget();
+
+    try {
+        const response = await fetch('/api/admin/security-config', { cache: 'no-store' });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || result.ok === false) {
+            throw new Error(result.message || result.error || `Security configuration failed (${response.status}).`);
+        }
+
+        const config = result.turnstile || {};
+        adminTurnstileSiteKey = String(config.siteKey || '').trim();
+        adminTurnstileEnabled = Boolean(config.enabled && adminTurnstileSiteKey);
+
+        if (!adminTurnstileEnabled) {
+            const message = config.siteKeyConfigured && !config.secretConfigured
+                ? 'Turnstile site key found, but TURNSTILE_SECRET_KEY is missing from the Worker.'
+                : 'Turnstile is not configured for the admin console.';
+            setAdminTurnstileStatus(message, { retry: true, hidden: false });
+            return;
+        }
+
+        await loadAdminTurnstileScript();
+        const widget = document.getElementById('admin-turnstile-widget');
+        if (!widget || !window.turnstile?.render) throw new Error('Turnstile could not initialize.');
+
+        removeAdminTurnstileWidget();
+        adminTurnstileWidgetId = window.turnstile.render(widget, {
+            sitekey: adminTurnstileSiteKey,
+            theme: 'dark',
+            callback: (token) => {
+                adminTurnstileToken = token || '';
+                setAdminTurnstileStatus(adminTurnstileToken ? 'Security check ready' : 'Security check loading...');
+            },
+            'expired-callback': () => {
+                adminTurnstileToken = '';
+                setAdminTurnstileStatus('Security check expired. Please retry.', { retry: true });
+            },
+            'error-callback': () => {
+                adminTurnstileToken = '';
+                setAdminTurnstileStatus('Security check failed. Confirm the widget hostnames and retry.', { retry: true });
+            }
+        });
+        setAdminTurnstileStatus('Security check loading...');
+    } catch (error) {
+        adminTurnstileEnabled = false;
+        adminTurnstileToken = '';
+        setAdminTurnstileStatus(error?.message || 'Security check could not load.', { retry: true, hidden: false });
+    }
+}
 
 // ─── Auth ───
 function loadAdminListFromData(admins) {
@@ -2718,7 +2772,7 @@ async function adminLogin(){
     const btn=document.getElementById('admin-login-btn');
     if(!email||!pass){err.innerText='Enter credentials';err.classList.remove('hidden');return}
 
-    if (window.turnstile && !adminTurnstileToken) {
+    if (adminTurnstileEnabled && !adminTurnstileToken) {
         err.innerText = 'Please complete the security check first.';
         err.classList.remove('hidden');
         return;
@@ -2777,11 +2831,11 @@ async function adminLogin(){
         }
         err.classList.remove('hidden'); btn.disabled=false; document.getElementById('admin-login-text').innerText='Sign In To Admin Console';
         adminTurnstileToken = '';
-        if (window.turnstile) window.turnstile.reset('#admin-turnstile-widget');
+        resetAdminTurnstile();
     }
 }
 
-function adminSignOut(){
+function clearAdminSession(){
     adminToken = null; adminUser = null; adminIsSuper = false;
     sessionStorage.removeItem('kcp_admin_token');
     document.getElementById('login-view').classList.remove('hidden');
@@ -2796,6 +2850,18 @@ function adminSignOut(){
     stopRealtimeListeners();
 }
 
+async function adminSignOut(){
+    const token = adminToken;
+    if (token) {
+        try {
+            await fetch('/api/auth/logout', { method: 'POST', headers: { 'Authorization': `Bearer ${token}` } });
+        } catch (error) {
+            console.warn('[Admin] Server sign-out failed; clearing local session', error);
+        }
+    }
+    clearAdminSession();
+}
+
 function onAdminAuthenticated() {
     const sidebar = document.getElementById('sidebar');
     const main = document.getElementById('main-area');
@@ -2808,10 +2874,8 @@ function onAdminAuthenticated() {
     document.getElementById('admin-email-display').innerText = adminUser?.email || '';
     if (adminIsSuper) {
         document.getElementById('superuser-badge').classList.remove('hidden');
-        document.getElementById('sync-access-btn')?.classList.remove('hidden');
     } else {
         document.getElementById('superuser-badge').classList.add('hidden');
-        document.getElementById('sync-access-btn')?.classList.add('hidden');
     }
 
     fetchSecuritySettings();
@@ -2832,6 +2896,7 @@ function onAdminAuthenticated() {
 
 async function initAuth() {
     const boot = document.getElementById('boot-loader');
+    initAdminTurnstile().catch((error) => console.warn('[Admin] Turnstile initialization failed:', error));
     const storedToken = sessionStorage.getItem('kcp_admin_token');
     if (storedToken) {
         adminToken = storedToken;
@@ -2921,7 +2986,7 @@ async function renderAdmins() {
     tbody.innerHTML = html;
 }
 
-async function addAdmin() {
+async function addAdmin(btn) {
     const name = document.getElementById('new-admin-name').value?.trim();
     const surname = document.getElementById('new-admin-surname').value?.trim();
     const email = document.getElementById('new-admin-email').value?.trim().toLowerCase();
@@ -2929,10 +2994,10 @@ async function addAdmin() {
 
     if(!name || !surname) { showToast('Enter name and surname'); return; }
     if(!email || !email.includes('@')) { showToast('Invalid email'); return; }
-    if(!pwd || pwd.length < 6) { showToast('Password must be at least 6 characters'); return; }
+    if(!pwd || pwd.length < 8) { showToast('Password must be at least 8 characters'); return; }
     if(ADMIN_EMAILS.includes(email)) { showToast('Admin already exists'); return; }
 
-    const btn = event.currentTarget;
+    if (!btn) return showToast('Create Admin button unavailable', 'error');
     const oldText = btn.innerHTML;
     btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
     btn.disabled = true;
@@ -2950,7 +3015,6 @@ async function addAdmin() {
         document.getElementById('new-admin-pwd').value = '';
         await fetchAdminList();
         renderAdmins();
-        syncGlobalAccess(true);
     } catch(e) {
         console.error(e);
         showToast('Error: ' + e.message);
@@ -3080,8 +3144,9 @@ async function removeAdmin(key) {
 async function executeRemoveAdmin(key) {
     try {
         await callAdminApi('DELETE', `/api/admin/users/${key}`, undefined);
+        const removedEmail = String(ADMIN_PROFILES[key]?.email || '').toLowerCase();
         delete ADMIN_PROFILES[key];
-        ADMIN_EMAILS = ADMIN_EMAILS.filter(e => e !== (ADMIN_PROFILES[key]?.email || '').toLowerCase());
+        ADMIN_EMAILS = ADMIN_EMAILS.filter(e => e !== removedEmail);
         closeModal();
         showToast('Superuser removed successfully');
         renderAdmins();
@@ -3089,67 +3154,6 @@ async function executeRemoveAdmin(key) {
         console.error(e);
         showToast('Error: ' + e.message, 'error');
     }
-}
-
-async function syncGlobalAccess(auto = false){
-    if(!adminIsSuper) return;
-    if(!auto) {
-        openModal(`
-            <div class="text-center space-y-4">
-                <div class="w-16 h-16 bg-blue-500/10 rounded-full flex items-center justify-center mx-auto mb-4 border border-blue-500/20">
-                    <i class="fa-solid fa-arrows-spin text-2xl text-blue-500"></i>
-                </div>
-                <h3 class="text-lg font-black uppercase tracking-widest text-white">Global Access Sync</h3>
-                <p class="text-xs text-slate-400">
-                    This will grant Owner permissions to ALL current superusers across ALL discovered workspaces.
-                    Continue?
-                </p>
-                <div class="flex gap-3 pt-4">
-                    <button onclick="closeModal()" class="flex-1 btn-ghost py-2 text-[10px] font-black uppercase">Cancel</button>
-                    <button onclick="executeSyncGlobalAccess()" class="flex-1 btn-primary py-2 text-[10px] font-black uppercase">Proceed</button>
-                </div>
-            </div>
-        `);
-        return;
-    }
-    await executeSyncGlobalAccess(true);
-}
-
-async function executeSyncGlobalAccess(auto = false) {
-    closeModal();
-    const btn = document.getElementById('sync-access-btn');
-    if(btn) { btn.disabled = true; btn.innerText = 'Syncing...'; }
-    if(auto) showToast("Auto-Syncing global access for all admins...");
-
-    let wsCount = 0;
-    await fetchAdminList();
-
-    const wsIds = Object.keys(allWorkspaces);
-    if(!auto) showSync("Syncing Global Access...", `Updating ${wsIds.length} workspaces...`);
-
-    let idx = 0;
-    for(const wsId of wsIds){
-        idx++;
-        if(!auto) updateSyncProgress((idx / wsIds.length) * 100, `Syncing Workspace ${idx} of ${wsIds.length}...`);
-        wsCount++;
-        for(const [, profile] of Object.entries(ADMIN_PROFILES)){
-            const email = profile.email?.toLowerCase();
-            if (!email) continue;
-            const displayName = `${profile.name || ''} ${profile.surname || ''}`.trim() || email.split('@')[0];
-            try {
-                await callAdminApi('POST', '/api/admin/members', {
-                    workspaceId: wsId, email, displayName, roleKey: 'owner'
-                });
-            } catch(e) { console.warn('[Admin] Sync failed for '+wsId, e); }
-        }
-    }
-
-    if(auto) showToast(`Global Access Sync Complete (${wsCount} workspaces)`);
-    else showToast(`Synced ${ADMIN_EMAILS.length} admins across ${wsCount} workspaces`);
-
-    if(btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-shield-halved mr-2"></i>Sync Global Access'; }
-    if(!auto) hideSync();
-    loadAllData();
 }
 
 async function sendTestEmail() {
@@ -3206,6 +3210,51 @@ async function loadSystemGmailStatus() {
     }
 }
 
+async function loadEmailConfig() {
+    const statusEl = document.getElementById('email-config-status');
+    try {
+        const res = await callAdminApi('GET', '/api/admin/system-settings').catch(() => null);
+        const config = res?.emailConfig || {};
+        document.getElementById('email-config-provider').value = config.provider || 'gmail_smtp';
+        document.getElementById('email-config-from-name').value = config.fromName || '';
+        document.getElementById('email-config-from-email').value = config.fromEmail || '';
+        document.getElementById('email-config-smtp-username').value = config.smtpUsername || '';
+        if (statusEl) {
+            statusEl.innerHTML = config.hasSmtpPassword
+                ? `<span class="text-emerald-400"><i class="fa-solid fa-circle-check mr-1"></i>App password is set (provider: ${adminEscapeHtml(config.provider || 'unknown')}).</span>`
+                : `<span class="text-slate-500"><i class="fa-solid fa-circle-xmark mr-1"></i>No app password saved yet — low stock/system emails will not send via SMTP.</span>`;
+        }
+    } catch (e) {
+        if (statusEl) statusEl.innerHTML = `<span class="text-red-400">Could not load email config.</span>`;
+    }
+}
+
+async function saveEmailConfig() {
+    const provider = document.getElementById('email-config-provider').value;
+    const fromName = document.getElementById('email-config-from-name').value.trim();
+    const fromEmail = document.getElementById('email-config-from-email').value.trim();
+    const smtpUsername = document.getElementById('email-config-smtp-username').value.trim();
+    const smtpPassword = document.getElementById('email-config-smtp-password').value;
+    if (!fromEmail) return showToast('From/Gmail address is required.', 'error');
+    showSync('Saving email config...');
+    try {
+        await callAdminApi('PATCH', '/api/admin/system-settings/email', {
+            provider,
+            fromName,
+            fromEmail,
+            smtpUsername,
+            ...(smtpPassword ? { smtpPassword } : {})
+        });
+        document.getElementById('email-config-smtp-password').value = '';
+        showToast('Email config saved.', 'success');
+        loadEmailConfig();
+    } catch (e) {
+        showToast('Failed to save email config: ' + (e.message || e), 'error');
+    } finally {
+        hideSync();
+    }
+}
+
 async function connectSystemGmail() {
     try {
         const res = await callAdminApi('GET', '/api/admin/gmail/connect');
@@ -3227,7 +3276,7 @@ async function disconnectSystemGmail() {
 }
 
 async function syncAdminProfile() {
-    // Legacy Firebase profile sync — replaced by D1 session management
+    // Refresh the current central D1 admin profile and workspace registry
     const btn = document.getElementById('sync-admin-btn');
     if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin mr-2"></i>Syncing...'; }
     try {
@@ -3260,7 +3309,9 @@ async function readWorkspaceRecord(wsId) {
     const cached = KCPStore.state.workspaces?.[wsId];
     if (cached) return cached;
     try {
-        await refreshAdminWorkspaceRecord(wsId);
+        const overview = await callAdminApi('GET', '/api/admin');
+        KCPStore.setState('workspaces', overview.workspaces || {});
+        if (overview.members) KCPStore.setState('_memberRows', overview.members);
         return KCPStore.state.workspaces?.[wsId] || null;
     } catch (e) {
         recordDataWarning(`[Admin] Could not read workspace ${wsId}.`, e);
@@ -3400,7 +3451,7 @@ function switchTab(tab){
     if (tab === 'logs') fetchAuditLogs();
     if (tab === 'orgs' && !orgManagerLoaded) fetchOrgManagerSites();
     if (tab === 'integrations') renderIntegrationControlTower();
-    if (tab === 'tools') { renderAccentSwatches(); loadSystemGmailStatus(); }
+    if (tab === 'tools') { renderAccentSwatches(); loadSystemGmailStatus(); loadEmailConfig(); }
     if (tab === 'billing') { renderBillingTable(); fetchAllBillingStatuses(); }
     if (tab === 'invitations') { fetchSignupRequests().then(() => { fetchInvitations().then(renderInvitations); }); }
     // Close mobile sidebar
@@ -5333,7 +5384,10 @@ async function adminWorkerFetch(path, options = {}) {
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${adminToken}`, ...(options.headers || {}) }
     });
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(payload?.message || payload?.error || `${response.status}`);
+    if (!response.ok) {
+        if (response.status === 401) clearAdminSession();
+        throw new Error(payload?.message || payload?.error || `${response.status}`);
+    }
     return payload;
 }
 
@@ -5538,18 +5592,27 @@ async function deleteWorkspace(wsId) {
 }
 
 async function getWorkspaceDeleteGroupBlock(wsId) {
-    const ws = allWorkspaces[wsId] || KCPStore.state.workspaces?.[wsId] || {};
-    const registry = {};
+    // Read the CURRENT source of truth from the backend (org fields now come from the workspace's
+    // own DO settings), not cached local state — otherwise a workspace already removed from its org
+    // stays blocked because the browser cache still carries a stale orgId/corpId.
+    let site = null;
+    try {
+        const res = await callAdminApi('GET', '/api/admin/org-sites');
+        site = (res?.sites || []).find((s) => String(s.id) === String(wsId)) || null;
+    } catch (e) {
+        site = null; // On fetch failure, fall back to cached state below rather than hard-blocking.
+    }
 
+    const ws = allWorkspaces[wsId] || KCPStore.state.workspaces?.[wsId] || {};
     const profile = ws?.profile || {};
     const settings = ws?.data?.settings || ws?.settings || {};
-    const groupMetadata = registry.groupMetadata || settings.groupMetadata || profile.groupMetadata || null;
-    const orgId = String(registry.orgId || registry.org_id || settings.orgId || settings.org_id || profile.orgId || profile.org_id || '').trim();
-    const corpId = String(registry.corpId || registry.corp_id || settings.corpId || settings.corp_id || profile.corpId || profile.corp_id || '').trim();
-    const linkedSites = {
-        ...(profile.linkedSites || {}),
-        ...(settings.linkedSites || {})
-    };
+    const source = site || {};
+    const groupMetadata = source.groupMetadata ?? (site ? null : (settings.groupMetadata || profile.groupMetadata || null));
+    const orgId = String(source.orgId ?? (site ? '' : (settings.orgId || settings.org_id || profile.orgId || profile.org_id || ''))).trim();
+    const corpId = String(source.corpId ?? (site ? '' : (settings.corpId || settings.corp_id || profile.corpId || profile.corp_id || ''))).trim();
+    const linkedSites = site
+        ? (source.linkedSites || {})
+        : { ...(profile.linkedSites || {}), ...(settings.linkedSites || {}) };
     const linkType = groupMetadata?.linkType || (corpId ? 'corp' : (orgId ? 'org' : 'group'));
     const linkId = linkType === 'corp' ? corpId : orgId;
     const groupName = groupMetadata?.name || linkId || 'linked organization group';
@@ -5668,39 +5731,41 @@ async function cleanupDeletedWorkspaceAccess(wsId, siteName = '') {
     return { usersTouched: 0, usersRemoved: 0, invitationsTouched: 0, welcomeEmailsTouched: 0, queueTouched: 0 };
 }
 
-// ─── Orphan Scanner ───
+// ─── Database Integrity Audit & Repair ───
 async function scanOrphans(){
-    const res=document.getElementById('orphan-results');
-    res.innerHTML='<p class="text-blue-400 animate-pulse">Scanning...</p>';
-    let issues=[];
-    // Check for workspaces with no team members
-    for(const[wsId,ws] of Object.entries(allWorkspaces)){
-        const team=ws?.data?.team||{};
-        if(Object.keys(team).length===0)issues.push(`Workspace "${ws?.data?.settings?.siteName||wsId}" has no team members`);
+    const res = document.getElementById('orphan-results');
+    res.innerHTML = '<p class="text-blue-400 animate-pulse"><i class="fa-solid fa-circle-notch fa-spin mr-1"></i>Auditing central and workspace databases...</p>';
+    try {
+        const report = await callAdminApi('GET', '/api/admin/maintenance/integrity');
+        const issues = Array.isArray(report.issues) ? report.issues : [];
+        if (!issues.length) {
+            res.innerHTML = `<p class="text-emerald-400"><i class="fa-solid fa-check mr-1"></i> ${report.workspaceCount || 0} workspaces checked. No integrity issues found.</p>`;
+            return report;
+        }
+        res.innerHTML = issues.map(issue => {
+            const tone = issue.severity === 'error' ? 'text-red-300' : 'text-amber-300';
+            return `<p class="${tone}"><i class="fa-solid fa-triangle-exclamation mr-1"></i>${adminEscapeHtml(issue.message || issue.code || 'Integrity issue')}</p>`;
+        }).join('');
+        showToast(`${issues.length} database issue(s) found`, issues.some(issue => issue.severity === 'error') ? 'error' : 'info');
+        return report;
+    } catch (error) {
+        res.innerHTML = `<p class="text-red-300"><i class="fa-solid fa-circle-xmark mr-1"></i>${adminEscapeHtml(error.message)}</p>`;
+        showToast(`Integrity audit failed: ${error.message}`, 'error');
+        return null;
     }
-    // Check for empty invitations
-    for(const[key,inv] of Object.entries(allInvitations)){
-        if(!inv.workspaceId)issues.push(`Invitation ${key.replace(/_/g,'.')} has no workspace reference`);
-    }
-    if(!issues.length)res.innerHTML='<p class="text-emerald-400"><i class="fa-solid fa-check mr-1"></i> No orphaned data found</p>';
-    else res.innerHTML=issues.map(i=>`<p class="text-amber-400"><i class="fa-solid fa-triangle-exclamation mr-1"></i>${i}</p>`).join('');
 }
 
-// ─── Data Repair Tool ───
 async function fixBrokenAccess(){
     openModal(`
         <div class="text-center space-y-4">
             <div class="w-16 h-16 bg-amber-500/10 rounded-full flex items-center justify-center mx-auto mb-4 border border-amber-500/20">
-                <i class="fa-solid fa-toolbox text-2xl text-amber-500"></i>
+                <i class="fa-solid fa-database text-2xl text-amber-500"></i>
             </div>
-            <h3 class="text-lg font-black uppercase tracking-widest text-white">Access Repair Tool</h3>
-            <p class="text-xs text-slate-400">
-                Wait! This will scan ALL users and forcefully sync their workspace team nodes. 
-                This operation is intensive. Proceed?
-            </p>
+            <h3 class="text-lg font-black uppercase tracking-widest text-white">Repair D1 Integrity</h3>
+            <p class="text-xs text-slate-400">This repairs stale app-user links, workspace owner links, missing workspace settings, and missing default locations. It does not create superuser workspace memberships.</p>
             <div class="flex gap-3 pt-4">
                 <button onclick="closeModal()" class="flex-1 btn-ghost py-2 text-[10px] font-black uppercase">Cancel</button>
-                <button onclick="executeFixBrokenAccess()" class="flex-1 btn-primary py-2 text-[10px] font-black uppercase">Start Repair</button>
+                <button onclick="executeFixBrokenAccess()" class="flex-1 btn-primary py-2 text-[10px] font-black uppercase">Run Repair</button>
             </div>
         </div>
     `);
@@ -5709,8 +5774,24 @@ async function fixBrokenAccess(){
 async function executeFixBrokenAccess() {
     closeModal();
     const res = document.getElementById('orphan-results');
-    // Access repair via Firebase RTDB is no longer applicable — member data is in D1
-    res.innerHTML = '<p class="text-slate-400"><i class="fa-solid fa-info-circle mr-1"></i> Access repair is managed via D1. Use the member management controls to add or update workspace access.</p>';
+    showSync('Repairing Database Integrity...', 'Repairing central identity links and workspace baselines...');
+    try {
+        const result = await callAdminApi('POST', '/api/admin/maintenance/repair', {});
+        await loadAllData();
+        hideSync();
+        res.innerHTML = `<p class="text-emerald-400"><i class="fa-solid fa-check mr-1"></i> Repaired ${Number(result.appUsersCreated || 0) + Number(result.memberIdentityLinks || 0) + Number(result.adminIdentityLinks || 0) + Number(result.workspaceOwnerLinks || 0) + Number(result.tenantBaselines || 0)} database link/baseline issue(s).</p>`;
+        if ((result.tenantFailures || []).length) {
+            res.innerHTML += `<p class="text-amber-300 mt-1">Tenant repair failed for: ${adminEscapeHtml(result.tenantFailures.join(', '))}</p>`;
+        }
+        showToast('D1 integrity repair completed', 'success');
+        await scanOrphans();
+        return result;
+    } catch (error) {
+        hideSync();
+        res.innerHTML = `<p class="text-red-300"><i class="fa-solid fa-circle-xmark mr-1"></i>${adminEscapeHtml(error.message)}</p>`;
+        showToast(`Integrity repair failed: ${error.message}`, 'error');
+        return null;
+    }
 }
 
 // ─── Modal ───
@@ -5740,8 +5821,7 @@ function closeModal(){
 }
 
 async function runUidMigration() {
-    // Firebase UID migration is no longer applicable — team data is managed in D1
-    showToast('UID migration is not applicable — workspace team data is managed in D1.', 'info');
+    return fixBrokenAccess();
 }
 
 // ─── Toast ───
@@ -5912,7 +5992,7 @@ function stopSessionTimer() {
     if (el) el.innerText = 'Session: --:--';
 }
 
-// ─── Polling (replaces Firebase realtime listeners) ───
+// ─── Admin integration status polling ───
 let yocoPollingInterval = null;
 
 function startRealtimeListeners() {
@@ -5933,7 +6013,7 @@ function startYocoIntegrationStatusListeners() {
             const current = KCPStore.state.workspaces?.[wsId]?.data?.integrations?.yoco;
             if (!current?.connectionActive) continue;
             try {
-                const result = await callAdminApi('GET', `/api/admin/workspaces/${wsId}/yoco/status`);
+                const result = await callAdminApi('GET', `/api/admin/workspaces/${encodeURIComponent(wsId)}/yoco/status`);
                 setWorkspaceYocoIntegration(wsId, result);
             } catch(e) { /* silent */ }
         }

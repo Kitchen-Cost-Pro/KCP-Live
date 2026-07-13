@@ -1,6 +1,7 @@
 import { callCloudflareWorkspaceRoute } from './cloudflareApi.js';
 import { deleteStockItem, fetchStock, normalizeIngredient, upsertStockItem } from './stockService.js';
 import { DEFAULT_SITE_ID, normalizeSites, normalizeStockLocations } from './locationModel.js';
+import { getManufacturingExpectedUnitCost, getManufacturingVarianceQty, getManufacturingWastageValue, normalizeManufacturingLogs as normalizeManufacturingLogCollection } from './manufacturingLog.js';
 import { todayLocal } from '../utils/date.js';
 
 const DEFAULT_UOMS = ['ea', 'kg', 'g', 'l', 'ml', 'pack', 'case', 'bottle', 'bag', 'box', 'tray', 'portion', 'batch'];
@@ -242,18 +243,51 @@ function getManufacturingItemType(item = {}) {
 }
 
 function normalizeBatchPayload(payload = {}) {
-  return {
+  const expectedQty = parseDecimal(payload.expectedQty ?? payload.expectedOutput, 0) || 0;
+  const producedQty = parseDecimal(payload.producedQty ?? payload.actualQty ?? payload.qty, 0) || 0;
+  const components = Array.isArray(payload.components) ? payload.components : Object.values(payload.components || {});
+  const base = {
     id: String(payload.id || '').trim(),
     manufacturedItemId: String(payload.manufacturedItemId || '').trim(),
+    itemId: String(payload.itemId || payload.manufacturedItemId || '').trim(),
+    itemName: String(payload.itemName || payload.manufacturedItemName || '').trim(),
     siteId: String(payload.siteId || '').trim(),
     siteName: String(payload.siteName || '').trim(),
     locationId: String(payload.locationId || '').trim(),
     locationName: String(payload.locationName || '').trim(),
-    producedQty: parseDecimal(payload.producedQty, 0) || 0,
-    expectedQty: parseDecimal(payload.expectedQty, 0) || 0,
+    producedQty,
+    expectedQty,
     batchCount: parseDecimal(payload.batchCount ?? payload.batchMultiplier, 0) || 0,
     date: String(payload.date || todayLocal()).trim(),
-    note: String(payload.note || '').trim()
+    note: String(payload.note || '').trim(),
+    unit: String(payload.unit || '').trim(),
+    batchCost: parseDecimal(payload.batchCost, 0) || 0,
+    expectedUnitCost: parseDecimal(payload.expectedUnitCost ?? payload.unitCost, 0) || 0,
+    actualUnitCost: parseDecimal(payload.actualUnitCost ?? payload.unitCost, 0) || 0,
+    unitCost: parseDecimal(payload.unitCost ?? payload.expectedUnitCost, 0) || 0,
+    variance: parseDecimal(payload.variance, expectedQty - producedQty) || 0,
+    wastageQty: parseDecimal(payload.wastageQty, Math.max(expectedQty - producedQty, 0)) || 0,
+    wastageValue: parseDecimal(payload.wastageValue, 0) || 0,
+    components: components.map((component = {}) => ({
+      ...component,
+      id: String(component.id || component.ingId || component.itemId || component.stockItemId || '').trim(),
+      ingId: String(component.ingId || component.id || component.itemId || component.stockItemId || '').trim(),
+      itemId: String(component.itemId || component.id || component.ingId || component.stockItemId || '').trim(),
+      qty: parseDecimal(component.qty ?? component.usage ?? component.quantity, 0) || 0,
+      usage: parseDecimal(component.usage ?? component.qty ?? component.quantity, 0) || 0,
+      cost: parseDecimal(component.cost ?? component.unitCost, 0) || 0,
+      unitCost: parseDecimal(component.unitCost ?? component.cost, 0) || 0,
+      unit: String(component.unit || '').trim(),
+      name: String(component.name || component.itemName || '').trim()
+    }))
+  };
+
+  return {
+    ...base,
+    variance: getManufacturingVarianceQty(base),
+    wastageValue: getManufacturingWastageValue(base),
+    expectedUnitCost: getManufacturingExpectedUnitCost(base),
+    unitCost: getManufacturingExpectedUnitCost(base)
   };
 }
 
@@ -384,34 +418,10 @@ function normalizeCategoryNames(value) {
 }
 
 function normalizeManufacturingLogs(value) {
-  if (!value) return [];
-  const entries = Array.isArray(value)
-    ? value.map((item, index) => [item?.id || String(index), item])
-    : Object.entries(value);
-
-  return entries
-    .filter(([, item]) => item && typeof item === 'object')
-    .map(([id, item]) => ({
-      ...item,
-      id: String(item.id || id || createId('mfg')),
-      itemId: String(item.itemId || '').trim(),
-      itemName: String(item.itemName || '').trim(),
-      producedQty: Number(item.producedQty || 0) || 0,
-      expectedQty: Number(item.expectedQty || 0) || 0,
-      variance: Number(item.variance || 0) || 0,
-      wastageQty: Number(item.wastageQty || 0) || 0,
-      wastageValue: Number(item.wastageValue || 0) || 0,
-      expectedUnitCost: Number(item.expectedUnitCost || item.unitCost || 0) || 0,
-      actualUnitCost: Number(item.actualUnitCost || item.unitCost || 0) || 0,
-      batchCost: Number(item.batchCost || 0) || 0,
-      unit: String(item.unit || '').trim(),
-      date: String(item.date || '').trim(),
-      timestamp: item.timestamp || '',
-      locationId: String(item.locationId || '').trim(),
-      locationName: String(item.locationName || '').trim(),
-      note: String(item.note || '').trim(),
-      components: Array.isArray(item.components) ? item.components : Object.values(item.components || {})
-    }));
+  return normalizeManufacturingLogCollection(value).map((item) => ({
+    ...item,
+    id: item.id || createId('mfg')
+  }));
 }
 
 function normalizeCloudflareLocation(row = {}) {

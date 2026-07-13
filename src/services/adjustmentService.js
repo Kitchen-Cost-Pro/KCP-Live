@@ -1,6 +1,7 @@
-import { callCloudflareWorkspaceRoute } from './cloudflareApi.js';
+import { callCloudflareWorkspaceRoute, callOptionalCloudflareWorkspaceRoute } from './cloudflareApi.js';
 import { fetchStock } from './stockService.js';
 import { getStockValuationUnitCost } from './database.js';
+import { normalizeAdjustmentLogs, normalizeWastageResponse } from './adjustmentLog.js';
 import { DEFAULT_SITE_ID, normalizeSites, normalizeStockLocations } from './locationModel.js';
 import { todayLocal } from '../utils/date.js';
 
@@ -30,8 +31,9 @@ export async function fetchAdjustmentsWorkspace(workspaceId) {
   const workspaceKey = String(workspaceId || '').trim();
   if (!workspaceKey) throw new Error('Workspace id is required for adjustments.');
 
-  const [adjustmentResponse, stockResponse, locationResponse, siteResponse, productResponse] = await Promise.all([
+  const [adjustmentResponse, wastageResponse, stockResponse, locationResponse, siteResponse, productResponse] = await Promise.all([
     callCloudflareWorkspaceRoute(workspaceKey, 'adjustments', { query: { limit: 500 } }),
+    callOptionalCloudflareWorkspaceRoute(workspaceKey, 'wastage-adjustments', { query: { limit: 500 }, fallback: {} }),
     fetchStock(workspaceKey),
     callCloudflareWorkspaceRoute(workspaceKey, 'locations'),
     callCloudflareWorkspaceRoute(workspaceKey, 'site-configuration'),
@@ -45,7 +47,10 @@ export async function fetchAdjustmentsWorkspace(workspaceId) {
   return {
     status: 'ready',
     source: 'Live adjustments',
-    adjustments: sortAdjustments(normalizeAdjustmentLogs(adjustmentResponse.adjustments || [])),
+    adjustments: sortAdjustments(normalizeAdjustmentLogs([
+      ...(adjustmentResponse.adjustments || adjustmentResponse.items || []),
+      ...normalizeWastageResponse(wastageResponse)
+    ])),
     stockItems: sortByName(stockResponse.items || []),
     products: sortByName(normalizeProductsForWastage(
       productResponse.products || productResponse.items || [],
@@ -93,46 +98,6 @@ export async function saveManualAdjustments(workspaceId, payload = {}) {
   });
 }
 
-export function normalizeAdjustmentLogs(value) {
-  if (!value) return [];
-  const entries = Array.isArray(value)
-    ? value.map((item, index) => [item?.id || String(index), item])
-    : Object.entries(value);
-
-  return entries
-    .filter(([, item]) => item && typeof item === 'object')
-    .map(([id, item]) => normalizeAdjustmentLog(id, item));
-}
-
-function normalizeAdjustmentLog(id, item = {}) {
-  return {
-    ...item,
-    id: String(item.id || id || createId('adj')),
-    itemId: String(item.itemId || item.stockItemId || '').trim(),
-    itemName: String(item.itemName || item.stockItemName || '').trim(),
-    stockItemId: String(item.stockItemId || item.itemId || '').trim(),
-    stockItemName: String(item.stockItemName || item.itemName || '').trim(),
-    category: String(item.category || item.stockItemCategory || '').trim() || 'General',
-    locationId: String(item.locationId || '').trim(),
-    locationName: String(item.locationName || '').trim(),
-    createdBy: String(item.createdBy || item.created_by || '').trim(),
-    createdByName: String(item.createdByName || item.user || item.createdByEmail || '').trim(),
-    user: String(item.user || item.createdByName || item.createdByEmail || item.createdBy || '').trim(),
-    mode: String(item.mode || '').trim() || 'remove',
-    qty: Number(item.qty || item.quantity || 0) || 0,
-    unit: String(item.unit || '').trim(),
-    prevStock: Number(item.prevStock || 0) || 0,
-    impactQty: Number(item.impactQty || 0) || 0,
-    impactEx: Number(item.impactEx || 0) || 0,
-    newStock: Number(item.newStock || 0) || 0,
-    note: String(item.note || item.reason || '').trim(),
-    wasteReason: String(item.wasteReason || '').trim(),
-    date: String(item.date || item.timestamp || '').slice(0, 10),
-    timestamp: item.timestamp || item.createdAt || item.date || '',
-    createdAt: item.createdAt || item.timestamp || item.date || ''
-  };
-}
-
 function normalizeAdjustmentPayload(payload = {}) {
   const mode = String(payload.mode || '').trim();
   return {
@@ -142,7 +107,7 @@ function normalizeAdjustmentPayload(payload = {}) {
     locationId: String(payload.locationId || '').trim(),
     locationName: String(payload.locationName || '').trim(),
     note: String(payload.note || '').trim(),
-    wasteReason: String(payload.wasteReason || '').trim(),
+    wasteReason: mode === 'remove' ? String(payload.wasteReason || '').trim() : '',
     items: (payload.items || []).map((item) => ({
       stockItemId: String(item.stockItemId || item.itemId || item.ingId || '').trim(),
       stockItemName: String(item.stockItemName || item.itemName || item.name || '').trim(),

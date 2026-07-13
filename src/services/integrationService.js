@@ -33,12 +33,16 @@ export async function connectYocoIntegration(workspaceId, apiKey) {
   }
 }
 
-export async function syncYocoCatalogue(workspaceId) {
-  return callCloudflareYocoRoute(workspaceId, 'sync-catalogue');
+export async function syncYocoCatalogue(workspaceId, options = {}) {
+  return callCloudflareYocoRoute(workspaceId, 'sync-catalogue', {
+    resetWebhook: options.resetWebhook === true
+  });
 }
 
-export async function syncYocoSales(workspaceId) {
-  return callCloudflareYocoRoute(workspaceId, 'sync-sales');
+export async function syncYocoSales(workspaceId, options = {}) {
+  return callCloudflareYocoRoute(workspaceId, 'sync-sales', {
+    resetWebhook: options.resetWebhook === true
+  });
 }
 
 export async function disconnectYocoIntegration(workspaceId) {

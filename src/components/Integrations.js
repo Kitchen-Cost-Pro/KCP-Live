@@ -71,6 +71,7 @@ const gmailDrawerState = {
 export function renderIntegrations({ state } = {}) {
   const workspaceName = state?.workspace?.siteName || 'Workspace';
   const workspaceId = state?.workspace?.id || '';
+  const canDisconnectYoco = state?.access?.currentIsKcpSuperUser === true;
   const cachedYocoStatus = getCachedYocoStatus(workspaceId);
   const cachedGmailStatus = getCachedGmailStatus(workspaceId);
   const integrations = getRenderedIntegrations(cachedYocoStatus, cachedGmailStatus);
@@ -129,7 +130,7 @@ export function renderIntegrations({ state } = {}) {
         <span>Clear the search or choose a broader category.</span>
       </div>
 
-      ${renderYocoModal()}
+      ${renderYocoModal({ canDisconnectYoco })}
       ${renderGmailModal()}
     </div>
   `;
@@ -239,7 +240,7 @@ function bindIntegrationEvents(view) {
 
   view.querySelector('[data-yoco-sync-sales]')?.addEventListener('click', async () => {
     await runYocoAction(view, 'Syncing Yoco sales...', async () => {
-      const result = await syncYocoSales(view.dataset.workspaceId || '');
+      const result = await syncYocoSales(view.dataset.workspaceId || '', { resetWebhook: true });
       setYocoSummary(view, result);
       setYocoModalStatus(view, 'Yoco sales sync complete.', 'success');
     });
@@ -247,7 +248,7 @@ function bindIntegrationEvents(view) {
 
   view.querySelector('[data-yoco-sync-catalogue]')?.addEventListener('click', async () => {
     await runYocoAction(view, 'Syncing Yoco catalogue...', async () => {
-      const result = await syncYocoCatalogue(view.dataset.workspaceId || '');
+      const result = await syncYocoCatalogue(view.dataset.workspaceId || '', { resetWebhook: true });
       setYocoSummary(view, result);
       setYocoModalStatus(view, 'Yoco catalogue sync complete.', 'success');
     });
@@ -399,7 +400,7 @@ function renderIntegrationCard(item) {
   `;
 }
 
-function renderYocoModal() {
+function renderYocoModal({ canDisconnectYoco = false } = {}) {
   const noticeTone = yocoDrawerState.tone ? ` data-tone="${escapeAttribute(yocoDrawerState.tone)}"` : '';
   return `
     <div class="yocoModalBackdrop" data-yoco-modal ${yocoDrawerState.open ? '' : 'hidden'}>
@@ -479,10 +480,15 @@ function renderYocoModal() {
                 <span class="yocoActionIcon">${icon('boxes')}</span>
                 <span><strong>Sync Catalogue</strong><small>Menu items and locations</small></span>
               </button>
+              ${canDisconnectYoco ? `
               <button type="button" class="yocoActionButton yocoActionButton--danger" data-yoco-disconnect>
                 <span class="yocoActionIcon">${icon('unlink')}</span>
-                <span><strong>Disconnect</strong><small>Pause Yoco access</small></span>
-              </button>
+                <span><strong>Disconnect</strong><small>Super user action</small></span>
+              </button>` : `
+              <div class="yocoActionLock" title="Only a KCP super user can disconnect this integration.">
+                <span class="yocoActionIcon">${icon('lock')}</span>
+                <span><strong>Connection locked</strong><small>Contact a KCP super user to disconnect or replace the API key.</small></span>
+              </div>`}
             </div>
           </section>
 

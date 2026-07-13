@@ -4,10 +4,13 @@ import styles from './styles/auth.module.css';
 let authTurnstileSiteKey = '';
 let authTurnstileEnabled = false;
 let authTurnstileWidgetId = null;
+let authTurnstileWidgetHost = null;
 let authTurnstileToken = '';
 let authTurnstileConfigLoaded = false;
 let authTurnstileConfigPromise = null;
 let authTurnstileLoadTimer = null;
+let authTurnstileConfigError = null;
+let authTurnstileConfigurationIssue = '';
 
 export function renderLogin({
   authState = {},
@@ -219,21 +222,41 @@ function getAuthTurnstileElements(root = document) {
 function bootAuthTurnstile(root) {
   const { retry } = getAuthTurnstileElements(root);
   retry?.addEventListener('click', () => reloadAuthTurnstile(root));
-  loadAuthTurnstileConfig(root).catch(() => markAuthTurnstileUnavailable(root));
+  loadAuthTurnstileConfig(root).catch((error) => {
+    markAuthTurnstileUnavailable(
+      root,
+      error?.message
+        ? `Security configuration could not load: ${error.message}`
+        : 'Security configuration could not load. Check the API connection, then retry.'
+    );
+  });
 }
 
-async function loadAuthTurnstileConfig(root) {
+async function loadAuthTurnstileConfig(root, { force = false } = {}) {
+  if (force) {
+    authTurnstileConfigLoaded = false;
+    authTurnstileConfigPromise = null;
+    authTurnstileConfigError = null;
+    authTurnstileConfigurationIssue = '';
+  }
+
   if (!authTurnstileConfigLoaded) {
-    authTurnstileConfigPromise ||= getAuthSecurityConfig()
+    authTurnstileConfigPromise ||= getAuthSecurityConfig({ force })
       .then((config = {}) => {
         authTurnstileSiteKey = String(config.siteKey || '').trim();
         authTurnstileEnabled = Boolean(config.enabled && authTurnstileSiteKey);
+        authTurnstileConfigurationIssue = authTurnstileSiteKey && !authTurnstileEnabled
+          ? 'Turnstile is configured with a site key, but the Worker secret is missing. Set TURNSTILE_SECRET_KEY and redeploy.'
+          : '';
+        authTurnstileConfigError = null;
         authTurnstileConfigLoaded = true;
         return config;
       })
       .catch((error) => {
-        authTurnstileConfigLoaded = true;
+        authTurnstileConfigLoaded = false;
         authTurnstileEnabled = false;
+        authTurnstileConfigError = error;
+        authTurnstileConfigPromise = null;
         throw error;
       });
     await authTurnstileConfigPromise;
@@ -261,7 +284,13 @@ function renderAuthTurnstile(root = document) {
   const { panel, widget, status, retry } = getAuthTurnstileElements(root);
   if (!panel || !widget) return;
   if (!authTurnstileEnabled || !authTurnstileSiteKey) {
-    panel.hidden = true;
+    if (authTurnstileConfigurationIssue || authTurnstileConfigError) {
+      panel.hidden = false;
+      if (status) status.textContent = authTurnstileConfigurationIssue || 'Security configuration could not load.';
+      retry?.classList.add(styles.isVisible);
+    } else {
+      panel.hidden = true;
+    }
     return;
   }
 
@@ -285,7 +314,8 @@ function renderAuthTurnstile(root = document) {
     window.clearTimeout(authTurnstileLoadTimer);
     authTurnstileLoadTimer = null;
   }
-  if (authTurnstileWidgetId !== null && widget.childElementCount > 0) return;
+  if (authTurnstileWidgetId !== null && authTurnstileWidgetHost === widget && widget.childElementCount > 0) return;
+  removeAuthTurnstileWidget();
   authTurnstileToken = '';
   widget.innerHTML = '';
   retry?.classList.remove(styles.isVisible);
@@ -307,13 +337,14 @@ function renderAuthTurnstile(root = document) {
       retry?.classList.add(styles.isVisible);
     }
   });
+  authTurnstileWidgetHost = widget;
 }
 
 function markAuthTurnstileUnavailable(root, message = 'Security check could not load. Allow challenges.cloudflare.com, then retry.') {
   window.KCP_APP_TURNSTILE_LOAD_FAILED = true;
   authTurnstileToken = '';
   const { panel, status, retry } = getAuthTurnstileElements(root);
-  if (panel && authTurnstileEnabled) panel.hidden = false;
+  if (panel) panel.hidden = false;
   if (status) status.textContent = message;
   retry?.classList.add(styles.isVisible);
 }
@@ -321,11 +352,24 @@ function markAuthTurnstileUnavailable(root, message = 'Security check could not 
 function reloadAuthTurnstile(root = document) {
   window.KCP_APP_TURNSTILE_LOAD_FAILED = false;
   authTurnstileToken = '';
-  authTurnstileWidgetId = null;
+  removeAuthTurnstileWidget();
   const { widget, status, retry } = getAuthTurnstileElements(root);
   if (widget) widget.innerHTML = '';
   if (status) status.textContent = 'Security check loading...';
   retry?.classList.remove(styles.isVisible);
+
+  if (!authTurnstileConfigLoaded || authTurnstileConfigError || authTurnstileConfigurationIssue) {
+    loadAuthTurnstileConfig(root, { force: true }).catch((error) => {
+      markAuthTurnstileUnavailable(
+        root,
+        error?.message
+          ? `Security configuration could not load: ${error.message}`
+          : 'Security configuration could not load. Check the API connection, then retry.'
+      );
+    });
+    return;
+  }
+
   renderAuthTurnstile(root);
 }
 
@@ -339,6 +383,19 @@ function resetAuthTurnstile(root = document) {
     renderAuthTurnstile(root);
   }
   if (status && authTurnstileEnabled) status.textContent = 'Security check loading...';
+}
+
+function removeAuthTurnstileWidget() {
+  if (authTurnstileWidgetId !== null && window.turnstile?.remove) {
+    try {
+      window.turnstile.remove(authTurnstileWidgetId);
+    } catch {
+      // Ignore stale widget cleanup failures; the element will still be cleared.
+    }
+  }
+  if (authTurnstileWidgetHost) authTurnstileWidgetHost.innerHTML = '';
+  authTurnstileWidgetId = null;
+  authTurnstileWidgetHost = null;
 }
 
 async function requireAuthTurnstileToken(root) {
@@ -681,4 +738,3 @@ function icon(name) {
   };
   return icons[name] || '';
 }
-

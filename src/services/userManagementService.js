@@ -24,7 +24,7 @@ export function subscribeWorkspaceAccess(workspaceId, user, { onSnapshot, onErro
       const customRoles = sanitizeCloudflareRoles(response.customRoles || []);
       const superUsers = normalizeSuperUsers(response.superUsers || []);
       const currentRole = response.currentRole || resolveCurrentRole(team, user) || 'member';
-      const currentIsSuperUser = response.currentIsSuperUser === true || isListedSuperUser(user, superUsers);
+      const currentIsSuperUser = response.currentIsSuperUser === true || response.currentIsKcpSuperUser === true || isSuperUserRoleName(currentRole) || isListedSuperUser(user, superUsers);
       const currentIsKcpSuperUser = response.currentIsKcpSuperUser === true;
       const roleDefinition = resolveRoleDefinition(currentRole, customRoles);
       // User-assigned locations (the physical locations the employee is assigned to work at)

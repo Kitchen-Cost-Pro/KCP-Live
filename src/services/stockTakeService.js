@@ -32,9 +32,9 @@ export async function fetchStockTakeWorkspace(workspaceId, { draftUserId = '' } 
   const [stockTakeResponse, templateResponse, draftResponse, stockState, locationResponse, siteResponse] = await Promise.all([
     callCloudflareWorkspaceRoute(workspaceKey, 'stock-takes', { query: { limit: 500 } }),
     callCloudflareWorkspaceRoute(workspaceKey, 'stock-take-templates'),
-    String(draftUserId || '').trim()
-      ? callCloudflareWorkspaceRoute(workspaceKey, 'stock-take-drafts', { query: { userId: String(draftUserId).trim() } })
-      : Promise.resolve({ drafts: [] }),
+    callCloudflareWorkspaceRoute(workspaceKey, 'stock-take-drafts', {
+      query: String(draftUserId || '').trim() ? { userId: String(draftUserId).trim() } : undefined
+    }),
     fetchStock(workspaceKey),
     callCloudflareWorkspaceRoute(workspaceKey, 'locations'),
     callCloudflareWorkspaceRoute(workspaceKey, 'site-configuration')
@@ -129,7 +129,6 @@ export async function saveStockTakeDraftSession(workspaceId, userId, payload = {
   const workspaceKey = String(workspaceId || '').trim();
   const uid = String(userId || '').trim();
   if (!workspaceKey) throw new Error('Workspace id is required to save stock take drafts.');
-  if (!uid) throw new Error('User id is required to save stock take drafts.');
 
   const draft = normalizeStockTakePayload(payload);
   if (!draft.locationId) throw new Error('Choose a stock take location before saving a draft.');
@@ -144,7 +143,10 @@ export async function saveStockTakeDraftSession(workspaceId, userId, payload = {
 
   const result = await callCloudflareWorkspaceRoute(workspaceKey, 'stock-take-drafts', {
     method: 'POST',
-    payload: { userId: uid, draft: savedDraft }
+    // The Worker derives the current user from the authenticated session when uid is omitted.
+    payload: uid ? { userId: uid, draft: savedDraft } : { draft: savedDraft },
+    // A dead connection must not leave the count session showing Saving Draft indefinitely.
+    timeoutMs: 15000
   });
   return normalizeStockTakeSavedDraft(result.draft || savedDraft);
 }
@@ -154,9 +156,10 @@ export async function deleteStockTakeDraftSession(workspaceId, userId, draftId =
   const uid = String(userId || '').trim();
   const normalizedDraftId = String(draftId || '').trim();
   if (!workspaceKey) throw new Error('Workspace id is required to delete stock take drafts.');
-  if (!uid) throw new Error('User id is required to delete stock take drafts.');
 
-  const route = `stock-take-drafts/${encodeURIComponent(uid)}${normalizedDraftId ? `/${encodeURIComponent(normalizedDraftId)}` : ''}`;
+  // The Worker ignores this legacy path identity and uses the authenticated session owner.
+  const routeUser = uid || 'current';
+  const route = `stock-take-drafts/${encodeURIComponent(routeUser)}${normalizedDraftId ? `/${encodeURIComponent(normalizedDraftId)}` : ''}`;
   await callCloudflareWorkspaceRoute(workspaceKey, route, { method: 'DELETE' });
 }
 

@@ -27,7 +27,15 @@ export const navigationGroups = [
   {
     label: 'Analysis',
     items: [
-      { id: 'analytics', label: 'Reports', icon: 'analytics' },
+      {
+        id: 'reporting-suite',
+        label: 'Reporting',
+        icon: 'dashboard',
+        children: [
+          { id: 'reporting', label: 'Reports', icon: 'dashboard' },
+          { id: 'reporting-scheduling', label: 'Scheduling', icon: 'clock' }
+        ]
+      },
       { id: 'integrations', label: 'Integrations', icon: 'plug' },
       { id: 'user-management', label: 'User Management', icon: 'team' },
       { id: 'custom-roles', label: 'Roles', icon: 'shield' }
@@ -73,8 +81,8 @@ export function renderNavigation({
   const canSwitchWorkspace = (workspaceOptions || []).length > 1;
   const view = document.createElement('aside');
   view.className = styles.sidebar;
-  // Stable, non-hashed hook so cross-module CSS (appShell) can recolor the nav
-  // per section (e.g. solid on the Reports tab). CSS-module class names are hashed.
+  view.dataset.activeSection = activeSection || '';
+  // Stable, non-hashed hook so cross-module CSS can recolor the nav per section.
   view.setAttribute('data-app-sidebar', '');
   const logoDataUrl = String(settings.restaurantLogoDataUrl || settings.logoDataUrl || '').trim();
   view.innerHTML = `
@@ -328,7 +336,6 @@ function renderChildItem(item, activeSection) {
 
 function icon(name) {
   const icons = {
-    analytics: '<path d="M4 19V5"/><path d="M4 19h16"/><path d="M8 16v-5"/><path d="M12 16V8"/><path d="M16 16v-9"/>',
     checklist: '<path d="m4 6 1.5 1.5L8 5"/><path d="M11 6h9"/><path d="m4 12 1.5 1.5L8 11"/><path d="M11 12h9"/><path d="m4 18 1.5 1.5L8 17"/><path d="M11 18h9"/>',
     clipboard: '<path d="M9 4h6l1 2h3v14H5V6h3z"/><path d="M9 11h6"/><path d="M9 15h4"/>',
     dashboard: '<path d="M4 13a8 8 0 1 1 16 0"/><path d="M12 13l4-4"/><path d="M6.5 17h11"/>',

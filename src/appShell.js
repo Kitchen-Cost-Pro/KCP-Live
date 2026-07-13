@@ -16,7 +16,9 @@ import { renderUserManagement } from './components/UserManagement.js';
 import { renderCustomRoles } from './components/CustomRoles.js';
 import { renderSettings } from './components/Settings.js';
 import { renderIntegrations } from './components/Integrations.js';
-import { renderAnalytics } from './components/Analytics.js';
+import { renderReportingDashboard } from './modules/reporting/index.js';
+import { renderSchedulingPage } from './modules/reporting/scheduling/SchedulingPage.js';
+import { ACTION_PERMISSION_MAP, getAccessRenderRevision, hasPermission, hasSectionAccess, isSuperUserRoleName } from './services/roleService.js';
 import styles from './styles/appShell.module.css';
 
 const BROADCAST_DISMISSED_KEY = 'kcp:dismissed-broadcasts:v1';
@@ -24,8 +26,8 @@ const BROADCAST_DISMISSED_KEY = 'kcp:dismissed-broadcasts:v1';
 const moduleContracts = {
   dashboard: {
     title: 'Dashboard',
-    datasource: 'workspaces/{workspaceId}/data/dashboardMetrics and live inventory sources',
-    logic: 'High-level valuation, catalogue, low-stock, and theoretical GP indicators.'
+    datasource: 'Shared reporting engine: Operations, Sales Financial, and Stock Control',
+    logic: 'Live inventory overview derived from reporting-engine outputs only.'
   },
   products: {
     title: 'Menu Catalogue',
@@ -87,15 +89,15 @@ const moduleContracts = {
     datasource: 'workspaces/{workspaceId}/data/logs_mfg',
     logic: 'Sub-recipe costing and prep batch production with ingredient drawdown and yield loss.'
   },
-  analytics: {
-    title: 'Reports',
-    datasource: 'workspaces/{workspaceId}/data/logs_*',
-    logic: 'Aggregates operational logs into report-ready datasets.'
+  reporting: {
+    title: 'Reporting',
+    datasource: '/api/workspaces/{workspaceId}/reports/detailed-activity via the shared reporting module',
+    logic: 'Reusable reporting shell with shared calculations, warnings, filters, exports, report registry, and stock ledger mapper.'
   },
-  'sales-sync': {
-    title: 'Sales Sync',
-    datasource: 'workspaces/{workspaceId}/data/logs_sales and processedSalesSignatures',
-    logic: 'Deduplicated sales import events for stock depletion.'
+  'reporting-scheduling': {
+    title: 'Reporting Scheduling',
+    datasource: '/api/workspaces/{workspaceId}/report-schedules and report-saved-views',
+    logic: 'Central saved-view, schedule, subscription, export, and email management for existing reports.'
   },
   integrations: {
     title: 'Integrations',
@@ -136,8 +138,6 @@ export function renderAuthenticatedApp({
   onWorkspaceSelect,
   onAutoLoginToggle,
   onThemeToggle,
-  onDashboardRangeChange,
-  onDashboardRefresh,
   onMenuFilterChange,
   onMenuAction,
   onRecipeFilterChange,
@@ -162,9 +162,6 @@ export function renderAuthenticatedApp({
   onLocationAction,
   onManufacturingFilterChange,
   onManufacturingAction,
-  onAnalyticsFilterChange,
-  onAnalyticsAction,
-  onCreateLowStockGrvDraft,
   onUserManagementFilterChange,
   onUserManagementAction,
   onRoleManagementAction,
@@ -193,14 +190,15 @@ export function renderAuthenticatedApp({
   const main = document.createElement('main');
   main.className = styles.mainPane;
   main.dataset.appMain = '';
+  main.dataset.activeModule = state.route?.active || 'dashboard';
+  main.dataset.workspaceId = String(state.workspace?.id || '');
+  main.dataset.accessRevision = getAccessRenderRevision(state.access);
   main.dataset.scrollKey = 'app-main';
   main.appendChild(renderActiveSection({
     state,
     onNavigate,
     onThemeToggle,
-    onDashboardRangeChange,
-    onDashboardRefresh,
-    onMenuFilterChange,
+        onMenuFilterChange,
     onMenuAction,
     onRecipeFilterChange,
     onRecipeAction,
@@ -224,8 +222,6 @@ export function renderAuthenticatedApp({
     onLocationAction,
     onManufacturingFilterChange,
     onManufacturingAction,
-    onAnalyticsFilterChange,
-    onCreateLowStockGrvDraft,
     onUserManagementFilterChange,
     onUserManagementAction,
     onRoleManagementAction,
@@ -234,7 +230,25 @@ export function renderAuthenticatedApp({
 
   const toast = renderShellToast(state);
   shell.append(navigation, main);
-  if (toast) shell.appendChild(toast);
+  if (toast) {
+    toast.querySelector('[data-app-toast-close]')?.addEventListener('click', () => dismissActiveSectionToast(state, {
+      onMenuAction,
+      onRecipeAction,
+      onStockAction,
+      onSupplierAction,
+      onPurchaseOrderAction,
+      onGrvAction,
+      onCreditNoteAction,
+      onAdjustmentAction,
+      onTransferAction,
+      onStockTakeAction,
+      onLocationAction,
+      onManufacturingAction,
+      onUserManagementAction,
+      onRoleManagementAction
+    }));
+    shell.appendChild(toast);
+  }
 
   const lockOverlay = renderWorkspaceLockOverlay(state);
   if (lockOverlay) shell.appendChild(lockOverlay);
@@ -281,8 +295,34 @@ function renderShellToast(state = {}) {
   const node = document.createElement('div');
   node.className = `${styles.appShellToast} ${styles[`appShellToast_${type}`] || ''}`;
   node.setAttribute('role', type === 'error' ? 'alert' : 'status');
-  node.textContent = toast.message;
+  node.innerHTML = `
+    <span class="${styles.appShellToastMessage}"></span>
+    <button type="button" class="${styles.appShellToastClose}" data-app-toast-close aria-label="Dismiss notification">×</button>
+  `;
+  const message = node.querySelector(`.${styles.appShellToastMessage}`);
+  if (message) message.textContent = toast.message;
   return node;
+}
+
+function dismissActiveSectionToast(state = {}, handlers = {}) {
+  const active = state.route?.active;
+  const map = {
+    products: handlers.onMenuAction,
+    recipes: handlers.onRecipeAction,
+    ingredients: handlers.onStockAction,
+    suppliers: handlers.onSupplierAction,
+    'purchase-orders': handlers.onPurchaseOrderAction,
+    grv: handlers.onGrvAction,
+    'credit-note': handlers.onCreditNoteAction,
+    adjustments: handlers.onAdjustmentAction,
+    transfers: handlers.onTransferAction,
+    'stock-count': handlers.onStockTakeAction,
+    locations: handlers.onLocationAction,
+    'mfg-products': handlers.onManufacturingAction,
+    'user-management': handlers.onUserManagementAction,
+    'custom-roles': handlers.onRoleManagementAction
+  };
+  map[active]?.onDismissToast?.();
 }
 
 function getActiveSectionToast(state = {}) {
@@ -315,10 +355,9 @@ function getActiveSectionToast(state = {}) {
       return state.userManagement?.toast;
     case 'custom-roles':
       return state.roleManagement?.toast;
-    case 'settings':
-    case 'settings-business':
-    case 'settings-customization':
-      return state.settings?.toast;
+    // NOTE: settings routes are intentionally NOT handled here. The Settings view renders its own
+    // toast via a body portal (#kcp-settings-toast-portal in Settings.js). Returning the settings
+    // toast here too caused it to render twice (double toast on save).
     default:
       return null;
   }
@@ -453,12 +492,20 @@ function dismissBroadcastItems(items = [], banner) {
   window.setTimeout(() => banner?.remove(), 220);
 }
 
+function readReportingDeepLinkReportId() {
+  if (typeof window === 'undefined') return '';
+  try {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('route') === 'reporting' ? String(params.get('report') || '').trim() : '';
+  } catch {
+    return '';
+  }
+}
+
 function renderActiveSection({
   state,
   onNavigate,
   onThemeToggle,
-  onDashboardRangeChange,
-  onDashboardRefresh,
   onMenuFilterChange,
   onMenuAction,
   onRecipeFilterChange,
@@ -483,9 +530,6 @@ function renderActiveSection({
   onLocationAction,
   onManufacturingFilterChange,
   onManufacturingAction,
-  onAnalyticsFilterChange,
-  onAnalyticsAction,
-  onCreateLowStockGrvDraft,
   onUserManagementFilterChange,
   onUserManagementAction,
   onRoleManagementAction,
@@ -494,7 +538,12 @@ function renderActiveSection({
   const activeSection = state.route?.active || 'dashboard';
 
   if (activeSection === 'dashboard') {
-    return renderDashboard({ state, onThemeToggle, onDashboardRangeChange, onDashboardRefresh, onNavigate });
+    return renderDashboard({
+      state,
+      onNavigate,
+      onStockFilterChange,
+      onThemeToggle
+    });
   }
 
   if (activeSection === 'products') {
@@ -545,8 +594,67 @@ function renderActiveSection({
     return renderManufacturing({ state, onManufacturingFilterChange, onManufacturingAction });
   }
 
-  if (activeSection === 'analytics') {
-    return renderAnalytics({ state, onAnalyticsFilterChange, onAnalyticsAction, onCreateLowStockGrvDraft });
+  if (activeSection === 'reporting') {
+    const role = state.access?.currentRole || '';
+    const customRoles = state.access?.customRoles || [];
+    const isSuper = state.access?.currentIsSuperUser === true || state.access?.currentIsKcpSuperUser === true || isSuperUserRoleName(role);
+    return renderReportingDashboard({
+      state,
+      workspaceId: state.workspace?.id || '',
+      // Normal navigation clears stale report parameters and opens the directory. A deliberate
+      // emailed/deep report link is still honoured on the initial reporting route.
+      initialReportId: readReportingDeepLinkReportId(),
+      services: {
+        reportingPermissions: {
+          canExportReports: isSuper || hasSectionAccess('reporting', role, customRoles),
+          canSavePersonalViews: true,
+          canSaveWorkspaceViews: isSuper || hasPermission(ACTION_PERMISSION_MAP.saveWorkspaceReportViews, role, customRoles)
+        },
+        reportingActions: {
+          openRecipe: (payload = {}) => onMenuAction?.onOpenRecipe?.({ id: payload.menuItemId || payload.itemId || '', itemId: payload.menuItemId || payload.itemId || '', name: payload.menuItemName || payload.itemName || '' }),
+          createPurchaseOrder: (payload = {}) => onPurchaseOrderAction?.onCreateFromLowStock?.(payload),
+          openStockItem: (payload = {}) => {
+            const target = payload.itemName || payload.itemId || '';
+            onStockFilterChange?.({ query: target });
+            onNavigate?.('ingredients');
+          },
+          openMenuItem: (payload = {}) => {
+            const target = payload.itemName || payload.itemId || '';
+            onMenuFilterChange?.({ query: target });
+            onNavigate?.('products');
+          },
+          openSuppliers: (payload = {}) => {
+            onSupplierFilterChange?.({ query: payload.supplierName || payload.itemName || '' });
+            onNavigate?.('suppliers');
+          }
+        }
+      },
+      onRefresh: () => {}
+    });
+  }
+
+
+  if (activeSection === 'reporting-scheduling') {
+    const role = state.access?.currentRole || '';
+    const customRoles = state.access?.customRoles || [];
+    const isSuper = state.access?.currentIsSuperUser === true || state.access?.currentIsKcpSuperUser === true || isSuperUserRoleName(role);
+    const canSchedule = isSuper || hasPermission(ACTION_PERMISSION_MAP.scheduleReports, role, customRoles);
+    const canEmail = isSuper || hasPermission(ACTION_PERMISSION_MAP.emailReports, role, customRoles);
+    const canManageAll = isSuper || hasPermission(ACTION_PERMISSION_MAP.manageReportSchedules, role, customRoles);
+    const canDelete = isSuper || hasPermission(ACTION_PERMISSION_MAP.deleteReportSchedules, role, customRoles);
+    return renderSchedulingPage({
+      workspaceId: state.workspace?.id || '',
+      state,
+      canManage: canSchedule && canEmail,
+      permissions: {
+        canSchedule,
+        canEmail,
+        canManageAll,
+        canDelete,
+        accessStatus: state.access?.status || 'idle',
+        accessError: state.access?.error || ''
+      }
+    });
   }
 
   if (activeSection === 'user-management') {

@@ -3,15 +3,22 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const source = join(root, 'dist', 'KCP Admin ConsoleByYOCO.html');
-const target = join(root, 'dist', 'admin', 'index.html');
+const adminSource = join(root, 'dist', 'KCP Admin ConsoleByYOCO.html');
+const adminDirectory = join(root, 'dist', 'admin');
+const adminTarget = join(adminDirectory, 'index.html');
 
-if (!existsSync(source)) {
-  throw new Error(`Admin console build artifact not found: ${source}`);
+if (!existsSync(adminSource)) {
+  throw new Error(`Admin console build artifact not found: ${adminSource}`);
 }
 
-mkdirSync(dirname(target), { recursive: true });
-copyFileSync(source, target);
+mkdirSync(adminDirectory, { recursive: true });
+copyFileSync(adminSource, adminTarget);
+
+// The admin HTML uses a relative favicon URL, so retain it under /admin/ too.
+const faviconSource = join(root, 'dist', 'admin-favicon.svg');
+if (existsSync(faviconSource)) {
+  copyFileSync(faviconSource, join(adminDirectory, 'admin-favicon.svg'));
+}
 
 const workerPath = join(root, 'dist', '_worker.js');
 const assetsPath = join(root, 'dist', 'assets');
