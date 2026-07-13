@@ -17,8 +17,9 @@ import {
 import {
   localDateRangeToUtcBounds,
   normalizeReportTimeZone,
+  normalizeTradingDayStartMinutes,
   resolveReportTimestamp,
-  zonedDateTimeStrings,
+  zonedTradingDateTimeStrings,
 } from "../../../src/modules/reporting/engine/timezone.js";
 import {
   historicalTransactionReference,
@@ -49,8 +50,14 @@ export async function getDetailedActivityReport(
   await assertReportLocationScope(env, auth, workspaceId, request);
 
   const url = new URL(request.url);
-  const timeZone = await getWorkspaceReportingTimeZone(env, workspaceId);
-  const filters = { ...readFilters(url), reportingTimeZone: timeZone };
+  const reportingContext = await getWorkspaceReportingContext(env, workspaceId);
+  const timeZone = reportingContext.timeZone;
+  const filters = {
+    ...readFilters(url),
+    reportingTimeZone: timeZone,
+    tradingDayStartMinutes: reportingContext.tradingDayStartMinutes,
+    tradingDayLabel: reportingContext.tradingDayLabel,
+  };
   const requestedLimit = limitFromUrl(url, 500, 5000);
   const offset = offsetFromUrl(url);
   const generatedAt = new Date().toISOString();
@@ -193,10 +200,11 @@ export async function getDetailedActivityReport(
     workspaceId,
     filters.from,
     timeZone,
+    reportingContext.tradingDayStartMinutes,
   );
   const standardizedRows = calculateRunningRows(
     canonicalRawRows.map((row) =>
-      standardizeMovementRow(row, actorMap, warnings, timeZone),
+      standardizeMovementRow(row, actorMap, warnings, timeZone, reportingContext.tradingDayStartMinutes),
     ),
     openingBalances,
     warnings,
@@ -234,8 +242,14 @@ export async function getStockTakeAuditReport(
   await assertReportLocationScope(env, auth, workspaceId, request);
 
   const url = new URL(request.url);
-  const timeZone = await getWorkspaceReportingTimeZone(env, workspaceId);
-  const filters = { ...readFilters(url), reportingTimeZone: timeZone };
+  const reportingContext = await getWorkspaceReportingContext(env, workspaceId);
+  const timeZone = reportingContext.timeZone;
+  const filters = {
+    ...readFilters(url),
+    reportingTimeZone: timeZone,
+    tradingDayStartMinutes: reportingContext.tradingDayStartMinutes,
+    tradingDayLabel: reportingContext.tradingDayLabel,
+  };
   const requestedLimit = limitFromUrl(url, 500, 5000);
   const offset = offsetFromUrl(url);
   const generatedAt = new Date().toISOString();
@@ -406,8 +420,14 @@ export async function getSalesFinancialReport(
   await assertReportLocationScope(env, auth, workspaceId, request);
 
   const url = new URL(request.url);
-  const timeZone = await getWorkspaceReportingTimeZone(env, workspaceId);
-  const filters = { ...readFilters(url), reportingTimeZone: timeZone };
+  const reportingContext = await getWorkspaceReportingContext(env, workspaceId);
+  const timeZone = reportingContext.timeZone;
+  const filters = {
+    ...readFilters(url),
+    reportingTimeZone: timeZone,
+    tradingDayStartMinutes: reportingContext.tradingDayStartMinutes,
+    tradingDayLabel: reportingContext.tradingDayLabel,
+  };
   const requestedLimit = limitFromUrl(url, 500, 5000);
   const offset = offsetFromUrl(url);
   const generatedAt = new Date().toISOString();
@@ -511,7 +531,7 @@ export async function getSalesFinancialReport(
     ? numberValue(sourceRows[0].__total_rows, sourceRows.length)
     : 0;
   const standardizedRows = sourceRows.map((row) =>
-    standardizeSalesFinancialRow(row, warnings, timeZone),
+    standardizeSalesFinancialRow(row, warnings, timeZone, reportingContext.tradingDayStartMinutes),
   );
   addSalesFinancialWarnings(standardizedRows, warnings);
   const integrity = appendIntegrityWarnings(standardizedRows, warnings);
@@ -552,8 +572,14 @@ export async function getSaleStockUsageReport(
   await assertReportLocationScope(env, auth, workspaceId, request);
 
   const url = new URL(request.url);
-  const timeZone = await getWorkspaceReportingTimeZone(env, workspaceId);
-  const filters = { ...readFilters(url), reportingTimeZone: timeZone };
+  const reportingContext = await getWorkspaceReportingContext(env, workspaceId);
+  const timeZone = reportingContext.timeZone;
+  const filters = {
+    ...readFilters(url),
+    reportingTimeZone: timeZone,
+    tradingDayStartMinutes: reportingContext.tradingDayStartMinutes,
+    tradingDayLabel: reportingContext.tradingDayLabel,
+  };
   const requestedLimit = limitFromUrl(url, 500, 5000);
   const offset = offsetFromUrl(url);
   const generatedAt = new Date().toISOString();
@@ -685,7 +711,7 @@ export async function getSaleStockUsageReport(
     clean(row.id),
   );
   const standardizedRows = canonicalUsageRows.map((row) =>
-    standardizeSaleStockUsageRow(row, warnings, timeZone),
+    standardizeSaleStockUsageRow(row, warnings, timeZone, reportingContext.tradingDayStartMinutes),
   );
   const pagedRows = standardizedRows.slice(offset, offset + requestedLimit);
   addSaleStockUsageWarnings(standardizedRows, warnings, sourceScope);
@@ -724,8 +750,14 @@ export async function getModifierSalesReport(
   await assertReportLocationScope(env, auth, workspaceId, request);
 
   const url = new URL(request.url);
-  const timeZone = await getWorkspaceReportingTimeZone(env, workspaceId);
-  const filters = { ...readFilters(url), reportingTimeZone: timeZone };
+  const reportingContext = await getWorkspaceReportingContext(env, workspaceId);
+  const timeZone = reportingContext.timeZone;
+  const filters = {
+    ...readFilters(url),
+    reportingTimeZone: timeZone,
+    tradingDayStartMinutes: reportingContext.tradingDayStartMinutes,
+    tradingDayLabel: reportingContext.tradingDayLabel,
+  };
   const requestedLimit = limitFromUrl(url, 500, 5000);
   const offset = offsetFromUrl(url);
   const generatedAt = new Date().toISOString();
@@ -934,6 +966,7 @@ export async function getModifierSalesReport(
         menuUsageIndex,
         warnings,
         timeZone,
+        reportingContext.tradingDayStartMinutes,
       );
       if (modifierSalesRowMatchesFilters(standardized, filters))
         standardizedRows.push(standardized);
@@ -946,6 +979,7 @@ export async function getModifierSalesReport(
     standardizedRows,
     warnings,
     timeZone,
+    reportingContext.tradingDayStartMinutes,
   )) {
     if (modifierSalesRowMatchesFilters(orphan, filters))
       standardizedRows.push(orphan);
@@ -996,8 +1030,14 @@ export async function getMenuRecipeHealthReport(
   await assertReportLocationScope(env, auth, workspaceId, request);
 
   const url = new URL(request.url);
-  const timeZone = await getWorkspaceReportingTimeZone(env, workspaceId);
-  const filters = { ...readFilters(url), reportingTimeZone: timeZone };
+  const reportingContext = await getWorkspaceReportingContext(env, workspaceId);
+  const timeZone = reportingContext.timeZone;
+  const filters = {
+    ...readFilters(url),
+    reportingTimeZone: timeZone,
+    tradingDayStartMinutes: reportingContext.tradingDayStartMinutes,
+    tradingDayLabel: reportingContext.tradingDayLabel,
+  };
   const requestedLimit = limitFromUrl(url, 500, 5000);
   const offset = offsetFromUrl(url);
   const generatedAt = new Date().toISOString();
@@ -1186,8 +1226,14 @@ export async function getStockControlReport(
   await assertReportLocationScope(env, auth, workspaceId, request);
 
   const url = new URL(request.url);
-  const timeZone = await getWorkspaceReportingTimeZone(env, workspaceId);
-  const filters = { ...readFilters(url), reportingTimeZone: timeZone };
+  const reportingContext = await getWorkspaceReportingContext(env, workspaceId);
+  const timeZone = reportingContext.timeZone;
+  const filters = {
+    ...readFilters(url),
+    reportingTimeZone: timeZone,
+    tradingDayStartMinutes: reportingContext.tradingDayStartMinutes,
+    tradingDayLabel: reportingContext.tradingDayLabel,
+  };
   const requestedLimit = limitFromUrl(url, 500, 5000);
   const offset = offsetFromUrl(url);
   const generatedAt = new Date().toISOString();
@@ -3511,6 +3557,7 @@ function standardizeStockTakeAuditRow(
   row: Row,
   actorMap: Map<string, { name: string; email: string }>,
   timeZone: string,
+  tradingDayStartMinutes = 0,
 ) {
   const sessionRaw = parseJson(row.session_raw_json);
   const expectedQty = numberValue(row.expected_qty, 0);
@@ -3565,7 +3612,7 @@ function standardizeStockTakeAuditRow(
     row.session_created_at,
     timeZone,
   );
-  const local = zonedDateTimeStrings(countedAt, timeZone);
+  const local = zonedTradingDateTimeStrings(countedAt, timeZone, tradingDayStartMinutes);
 
   return {
     id: clean(row.id),
@@ -3862,6 +3909,7 @@ function standardizeSalesFinancialRow(
   row: Row,
   warnings: Array<{ code: string; level: string; message: string }>,
   timeZone: string,
+  tradingDayStartMinutes = 0,
 ) {
   const raw = parseJson(row.raw_json);
   const financials = deriveYocoFinancialAmounts({
@@ -3873,7 +3921,7 @@ function standardizeSalesFinancialRow(
   });
   const locationName = clean(row.location_display_name || row.location_name);
   const saleAt = clean(row.occurred_at || row.created_at);
-  const local = zonedDateTimeStrings(saleAt, timeZone);
+  const local = zonedTradingDateTimeStrings(saleAt, timeZone, tradingDayStartMinutes);
 
   for (const issue of financials.issues || []) {
     warnings.push({
@@ -3926,6 +3974,7 @@ function standardizeSaleStockUsageRow(
   row: Row,
   warnings: Array<{ code: string; level: string; message: string }>,
   timeZone: string,
+  tradingDayStartMinutes = 0,
 ) {
   const metadata = parseJson(row.metadata_json);
   const orderRaw = parseJson(row.order_raw_json);
@@ -3958,7 +4007,7 @@ function standardizeSaleStockUsageRow(
   const vatAmount = lineFinancials.vatAmount;
   const netSaleAmount = lineFinancials.netAmount;
   const saleAt = clean(row.occurred_at || row.created_at);
-  const local = zonedDateTimeStrings(saleAt, timeZone);
+  const local = zonedTradingDateTimeStrings(saleAt, timeZone, tradingDayStartMinutes);
   const modifierId = clean(metadata.modifierId);
   const modifierGroupId = clean(metadata.modifierGroupId);
 
@@ -4645,6 +4694,7 @@ function standardizeModifierSalesRow(
   menuUsageIndex: Map<string, Row[]>,
   warnings: Array<{ code: string; level: string; message: string }>,
   timeZone: string,
+  tradingDayStartMinutes = 0,
 ) {
   const usageRows = matchingModifierUsageRows(row, selection, usageIndex);
   const menuUsageRows = matchingMenuItemUsageRows(row, selection, menuUsageIndex);
@@ -4717,7 +4767,7 @@ function standardizeModifierSalesRow(
         ? "Missing Modifier Usage"
         : "No Stock Mapping Required";
   const saleAt = clean(row.occurred_at);
-  const local = zonedDateTimeStrings(saleAt, timeZone);
+  const local = zonedTradingDateTimeStrings(saleAt, timeZone, tradingDayStartMinutes);
 
   for (const issue of modifierFinancials.issues || []) {
     warnings.push({
@@ -4814,6 +4864,7 @@ function buildOrphanModifierUsageRows(
   linkedRows: Row[],
   warnings: Array<{ code: string; level: string; message: string }>,
   timeZone: string,
+  tradingDayStartMinutes = 0,
 ) {
   const linkedUsageIds = new Set<string>();
   for (const row of linkedRows) {
@@ -4834,7 +4885,7 @@ function buildOrphanModifierUsageRows(
         ),
       );
       const saleAt = clean(row.occurred_at || row.created_at);
-      const local = zonedDateTimeStrings(saleAt, timeZone);
+      const local = zonedTradingDateTimeStrings(saleAt, timeZone, tradingDayStartMinutes);
       warnings.push({
         code: "modifier-usage-not-linked-to-yoco-line",
         level: "warning",
@@ -5243,12 +5294,17 @@ export async function getInventoryAuditReport(
   await assertReportLocationScope(env, auth, workspaceId, request);
 
   const url = new URL(request.url);
-  const timeZone = await getWorkspaceReportingTimeZone(env, workspaceId);
+  const reportingContext = await getWorkspaceReportingContext(env, workspaceId);
+  const timeZone = reportingContext.timeZone;
   const filters = {
     ...readFilters(url),
     reportingTimeZone: timeZone,
+    tradingDayStartMinutes: reportingContext.tradingDayStartMinutes,
+    tradingDayLabel: reportingContext.tradingDayLabel,
   } as ReturnType<typeof readFilters> & {
     reportingTimeZone: string;
+    tradingDayStartMinutes: number;
+    tradingDayLabel: string;
     user?: string;
     action?: string;
     entityType?: string;
@@ -5337,7 +5393,7 @@ export async function getInventoryAuditReport(
       (auditRows.results || []).map((row) => row.actor_uid),
     );
     for (const row of auditRows.results || []) {
-      const expanded = expandAuditEventRow(row, actorMap, timeZone);
+      const expanded = expandAuditEventRow(row, actorMap, timeZone, reportingContext.tradingDayStartMinutes);
       changeRows.push(...expanded.changeRows);
       costChangeRows.push(...expanded.costChangeRows);
       recipeChangeRows.push(...expanded.recipeChangeRows);
@@ -5366,7 +5422,7 @@ export async function getInventoryAuditReport(
     );
     for (const row of sourceRows) {
       changeRows.push(
-        standardizeInventorySourceActionRow(row, actorMap, timeZone),
+        standardizeInventorySourceActionRow(row, actorMap, timeZone, reportingContext.tradingDayStartMinutes),
       );
     }
     await addInventoryAuditDataQualityRows(
@@ -5473,12 +5529,13 @@ function expandAuditEventRow(
   row: Row,
   actorMap: Map<string, { name: string; email: string }>,
   timeZone: string,
+  tradingDayStartMinutes = 0,
 ) {
   const before = parseJson(row.before_json);
   const after = parseJson(row.after_json);
   const fields = changedAuditFields(before, after);
   const timestamp = clean(row.created_at);
-  const local = zonedDateTimeStrings(timestamp, timeZone);
+  const local = zonedTradingDateTimeStrings(timestamp, timeZone, tradingDayStartMinutes);
   const actor = actorMap.get(clean(row.actor_uid));
   const user = clean(actor?.name || actor?.email || row.actor_uid);
   const action = classifyAuditAction(row, fields);
@@ -5669,13 +5726,14 @@ function standardizeInventorySourceActionRow(
   row: Row,
   actorMap: Map<string, { name: string; email: string }>,
   timeZone: string,
+  tradingDayStartMinutes = 0,
 ) {
   const occurredAt = resolveReportTimestamp(
     row.occurred_at,
     row.created_at,
     timeZone,
   );
-  const local = zonedDateTimeStrings(occurredAt, timeZone);
+  const local = zonedTradingDateTimeStrings(occurredAt, timeZone, tradingDayStartMinutes);
   const actor = actorMap.get(clean(row.created_by));
   const documentType = clean(row.document_type);
   return {
@@ -6363,6 +6421,7 @@ function standardizeMovementRow(
   actorMap: Map<string, { name: string; email: string }>,
   warnings: Array<{ code: string; level: string; message: string }>,
   timeZone: string,
+  tradingDayStartMinutes = 0,
 ) {
   const metadata = parseJson(row.metadata_json);
   const transferRaw = parseJson(row.transfer_raw_json);
@@ -6404,7 +6463,7 @@ function standardizeMovementRow(
     row.created_at,
     timeZone,
   );
-  const local = zonedDateTimeStrings(occurredAt, timeZone);
+  const local = zonedTradingDateTimeStrings(occurredAt, timeZone, tradingDayStartMinutes);
   const baseUom =
     clean(row.base_uom || metadata.unit || metadata.baseUom) || "ea";
   const notes = resolveNotes(row, metadata, sourceType);
@@ -6672,10 +6731,11 @@ async function getOpeningBalances(
   workspaceId: string,
   fromDate = "",
   timeZone = "Africa/Johannesburg",
+  tradingDayStartMinutes = 0,
 ) {
   const map = new Map<string, number>();
   if (!fromDate) return map;
-  const { fromUtc } = localDateRangeToUtcBounds({ from: fromDate, timeZone });
+  const { fromUtc } = localDateRangeToUtcBounds({ from: fromDate, timeZone, tradingDayStartMinutes });
   if (!fromUtc) return map;
   try {
     const rows = await env.DB.prepare(
@@ -7197,19 +7257,32 @@ function hasMeaningfulValue(value: unknown) {
   return value !== undefined && value !== null && clean(value) !== "";
 }
 
-async function getWorkspaceReportingTimeZone(env: Env, workspaceId: string) {
+async function getWorkspaceReportingContext(env: Env, workspaceId: string) {
+  let timeZone = normalizeReportTimeZone("Africa/Johannesburg");
+  let settings: Row = {};
   try {
-    const workspace = await env.CENTRAL_DB.prepare(
-      `SELECT timezone FROM workspaces WHERE id = ?1 LIMIT 1`,
-    )
-      .bind(workspaceId)
-      .first<{ timezone?: string }>();
-    return normalizeReportTimeZone(
-      workspace?.timezone || "Africa/Johannesburg",
-    );
+    const [workspace, settingsRow] = await Promise.all([
+      env.CENTRAL_DB.prepare(
+        `SELECT timezone FROM workspaces WHERE id = ?1 LIMIT 1`,
+      ).bind(workspaceId).first<{ timezone?: string }>(),
+      env.DB.prepare(
+        `SELECT raw_json FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`,
+      ).bind(workspaceId).first<{ raw_json?: string }>(),
+    ]);
+    timeZone = normalizeReportTimeZone(workspace?.timezone || "Africa/Johannesburg");
+    settings = parseJson(settingsRow?.raw_json);
   } catch {
-    return normalizeReportTimeZone("Africa/Johannesburg");
+    // Keep safe Johannesburg/calendar-day defaults when either plane is unavailable.
   }
+  const tradingDayStartMinutes = normalizeTradingDayStartMinutes(settings as any);
+  const hour = Math.floor(tradingDayStartMinutes / 60);
+  const minute = tradingDayStartMinutes % 60;
+  const timeLabel = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+  return {
+    timeZone,
+    tradingDayStartMinutes,
+    tradingDayLabel: tradingDayStartMinutes ? `${timeLabel}–${timeLabel}` : "00:00–00:00",
+  };
 }
 
 function addZonedDateRange(
@@ -7223,6 +7296,7 @@ function addZonedDateRange(
     from: filters.from,
     to: filters.to,
     timeZone,
+    tradingDayStartMinutes: numberValue((filters as Row).tradingDayStartMinutes, 0),
   });
   if (fromUtc) {
     binds.push(fromUtc);

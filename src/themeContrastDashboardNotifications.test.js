@@ -15,6 +15,8 @@ test('dashboard bell opens an accessible stock notification centre', () => {
   assert.match(dashboardSource, /function renderNotificationCenter\(/);
   assert.match(dashboardSource, /data-dashboard-notification-item/);
   assert.match(dashboardSource, /criticalItems\.length \+ lowItems\.length/);
+  assert.match(dashboardSource, /data-dashboard-notification-email/);
+  assert.match(dashboardSource, /emailDashboardStockNotifications/);
   assert.match(dashboardCss, /\.notificationMenu\s*\{/);
   assert.match(dashboardCss, /\.notificationCount\s*\{/);
 });

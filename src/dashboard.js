@@ -6,6 +6,7 @@ import {
 import { fetchWorkspaceLocationOptions } from './services/locationService.js';
 import { mergeCanonicalLocations } from './utils/locationDisplayName.js';
 import { positionDashboardSelectMenu } from './utils/dashboardDropdown.js';
+import { emailDashboardStockNotifications } from './services/notificationService.js';
 
 const DASHBOARD_CACHE_TTL = 60_000;
 const dashboardCache = new Map();
@@ -58,7 +59,9 @@ export function renderDashboard({ state = {}, onNavigate, onStockFilterChange, o
     calendarOpen: false,
     calendarCursor: startOfCalendarMonth(initialRange.from),
     pendingRangeStart: '',
-    notificationsOpen: false
+    notificationsOpen: false,
+    notificationEmailState: 'idle',
+    notificationEmailMessage: ''
   };
 
   renderLoading(view, workspaceName);
@@ -708,9 +711,11 @@ function renderNotificationCenter(view, ui, context) {
       </div>
       ${count > attentionItems.length ? `<p class="${styles.notificationMore}">+${count - attentionItems.length} more item${count - attentionItems.length === 1 ? '' : 's'}</p>` : ''}
       <div class="${styles.notificationActions}">
+        <button type="button" data-dashboard-notification-email ${ui.notificationEmailState === 'sending' ? 'disabled' : ''}>${ui.notificationEmailState === 'sending' ? `${icon('refresh', 12)} Sending…` : `${icon('mail', 12)} Email this list`}</button>
         <button type="button" data-dashboard-notification-review>Review on dashboard</button>
         <button type="button" data-dashboard-notification-open-stock>Open Stock Items ${icon('arrowRight', 12)}</button>
       </div>
+      ${ui.notificationEmailMessage ? `<p class="${styles.notificationEmailStatus} ${ui.notificationEmailState === 'error' ? styles.notificationEmailStatusError : ''}">${escapeHtml(ui.notificationEmailMessage)}</p>` : ''}
     ` : `
       <div class="${styles.notificationEmpty}">
         ${icon('check', 20)}
@@ -726,6 +731,21 @@ function renderNotificationCenter(view, ui, context) {
     ui.notificationsOpen = false;
     renderNotificationCenter(view, ui, context);
     bell.focus();
+  });
+  menu.querySelector('[data-dashboard-notification-email]')?.addEventListener('click', async () => {
+    if (ui.notificationEmailState === 'sending') return;
+    ui.notificationEmailState = 'sending';
+    ui.notificationEmailMessage = '';
+    renderNotificationCenter(view, ui, context);
+    try {
+      const result = await emailDashboardStockNotifications(context.workspaceId, ui.inventoryLocationId);
+      ui.notificationEmailState = 'sent';
+      ui.notificationEmailMessage = `Email sent to your account with ${Number(result?.lowStockCount || count)} stock notification${Number(result?.lowStockCount || count) === 1 ? '' : 's'}.`;
+    } catch (cause) {
+      ui.notificationEmailState = 'error';
+      ui.notificationEmailMessage = cause?.message || 'The stock notification email could not be sent.';
+    }
+    renderNotificationCenter(view, ui, context);
   });
   menu.querySelector('[data-dashboard-notification-review]')?.addEventListener('click', () => {
     ui.notificationsOpen = false;
@@ -1112,6 +1132,7 @@ function icon(name, size = 16) {
     filter: '<path d="M4 5h16"/><path d="M7 12h10"/><path d="M10 19h4"/>',
     refresh: '<path d="M20 6v6h-6"/><path d="M4 18v-6h6"/><path d="M18.5 9a7 7 0 0 0-11.8-2.6L4 9"/><path d="M5.5 15a7 7 0 0 0 11.8 2.6L20 15"/>',
     bell: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/>',
+    mail: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/>',
     sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
     moon: '<path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z"/>',
     settings: '<path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.55V21h-4v-.08A1.7 1.7 0 0 0 9 19.37a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.63 15 1.7 1.7 0 0 0 3.08 14H3v-4h.08A1.7 1.7 0 0 0 4.63 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.63 1.7 1.7 0 0 0 10 3.08V3h4v.08A1.7 1.7 0 0 0 15 4.63a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.37 9 1.7 1.7 0 0 0 20.92 10H21v4h-.08A1.7 1.7 0 0 0 19.4 15Z"/>',

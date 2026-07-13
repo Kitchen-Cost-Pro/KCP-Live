@@ -83,6 +83,7 @@ import {
   adminActionDO,
   adminOrgFieldsDO,
   adminUnlinkOrgDO,
+  postDashboardLowStockEmail,
   migrateImport,
   getLocations,
   getManufacturingBatches,
@@ -649,6 +650,10 @@ export async function dispatchWorkspaceRoute(
 
   if (request.method === 'GET' && resource === 'site-configuration') {
     return getSiteConfiguration(request, env, auth, workspaceId);
+  }
+
+  if (request.method === 'POST' && resource === 'notifications/low-stock-email') {
+    return postDashboardLowStockEmail(request, env, auth, workspaceId);
   }
 
   if (request.method === 'GET' && resource === 'settings') {

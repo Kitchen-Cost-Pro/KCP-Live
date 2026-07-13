@@ -1937,6 +1937,7 @@ function renderWorkspaceIntegrationPanel(wsId, options = {}) {
                     <button onclick="syncYocoFullFromAdmin(${adminInlineString(wsId)})" class="btn-ghost w-full text-sky-300"><i class="fa-solid fa-arrows-spin mr-2"></i>Restart Sync</button>
                 </div>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <button onclick="retryAllErroredYocoOrders(${adminInlineString(wsId)})" class="btn-ghost w-full text-red-300"><i class="fa-solid fa-triangle-exclamation mr-2"></i>Resync Errored Orders</button>
                     <button onclick="forceRetryIntegrationWorkspace(${adminInlineString(wsId)})" class="btn-ghost w-full text-blue-400"><i class="fa-solid fa-rotate mr-2"></i>Reconcile Recent Sales</button>
                     <button onclick="resetWebhookSubscriptionForWorkspace(${adminInlineString(wsId)})" class="btn-ghost w-full text-amber-400"><i class="fa-solid fa-tower-broadcast mr-2"></i>Webhook Reset</button>
                 </div>
@@ -2182,6 +2183,7 @@ function renderWorkspaceVisualIntegrationSections(wsId) {
                     <button onclick="syncYocoSalesLast14DaysFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn"><i class="fa-solid fa-calendar-week mr-2"></i>Sales Sync 2 Weeks</button>
                     <button onclick="sendLowStockSummaryFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn !text-emerald-300 border-emerald-500/30"><i class="fa-solid fa-envelope-circle-check mr-2"></i>Send Low Stock Email</button>
                     <button onclick="syncYocoFullFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn"><i class="fa-solid fa-arrows-rotate mr-2"></i>Restart Sync</button>
+                    <button onclick="retryAllErroredYocoOrders(${adminInlineString(wsId)})" class="workspace-action-btn !text-red-300 border-red-500/30"><i class="fa-solid fa-triangle-exclamation mr-2"></i>Resync Errored Orders</button>
                     <button onclick="forceRetryIntegrationWorkspace(${adminInlineString(wsId)})" class="workspace-action-btn"><i class="fa-solid fa-rotate mr-2"></i>Reconcile Recent Sales</button>
                     <button onclick="resetWebhookSubscriptionForWorkspace(${adminInlineString(wsId)})" class="workspace-action-btn !text-amber-300 border-amber-500/30"><i class="fa-solid fa-tower-broadcast mr-2"></i>Webhook Reset</button>
                 </div>
@@ -2507,6 +2509,21 @@ async function factoryResetIntegrationCredentials(wsId = '') {
         console.error('[Admin] Failed to factory reset workspace integration', e);
         showToast(`Could not reset integration: ${e.message}`, 'error');
     }
+}
+
+async function retryAllErroredYocoOrders(wsId = '') {
+    const targetWsId = wsId || getIntegrationSelectedWorkspaceId();
+    if (!targetWsId) return showToast('Select a workspace first', 'error');
+    try {
+        const result = await runAdminYocoAction(targetWsId, 'Resyncing Errored Orders...', async (workspaceId) => {
+            return callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(workspaceId)}/yoco/retry-failed-orders`);
+        });
+        if (result?.status === 'nothing_to_retry') {
+            showToast('No errored Yoco orders require resync.', 'success');
+        } else {
+            showToast(`Errored-order resync complete. ${result?.ordersProcessed || 0} orders and ${result?.refundsProcessed || 0} refunds recovered.`, result?.errors?.length ? 'error' : 'success');
+        }
+    } catch (e) { }
 }
 
 async function forceRetryIntegrationWorkspace(wsId = '') {

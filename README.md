@@ -289,3 +289,17 @@ The front Worker handles central authentication, admin routes, security configur
 - Main Dashboard Location and Date Range menus use a deterministic field width and are pinned to the trigger's measured width before first paint. Menus are kept inside the viewport and recalculated when the window changes size, removing the first-open full-row expansion.
 - Durable Object tenant migration 15 creates `stocktake_drafts` for workspaces that were provisioned before resumable drafts were added to the generated baseline. New and existing tenants therefore use the same draft table and owner index.
 - Validation: 397 automated tests passed, the production frontend build passed, Worker TypeScript validation passed, and the Wrangler deployment dry run passed.
+
+## Phase 57: Whole-hour reporting boundaries
+
+- Business Settings now exposes **Reporting Day Hours** as whole-hour **From** and **To** selectors.
+- Reporting days remain fixed 24-hour windows, so both selectors stay aligned (for example, 07:00 to 07:00 next day).
+- Minute-level boundaries cannot be selected or persisted. Legacy `tradingTime` values are migrated to the equivalent next whole-hour boundary.
+- Interactive reports, exports, dashboards, and scheduled reports continue to consume the shared `tradingDayStartMinutes` value.
+
+
+## Phase 58 — Reporting Hours UI and Go Live Hardening
+- Reporting Day Hours now uses inline, custom whole-hour dropdowns and spans the workspace settings panel cleanly.
+- From and To remain locked to the same 24-hour boundary.
+- Go Live is disabled until Products, Recipes, and Locations are present and shows a saving state.
+- Go Live now records an activation timestamp. All webhook and manual Yoco sales processing honors the workspace setting, ignores pre-activation sales, and refuses to restore refunds unless the original sale was depleted.

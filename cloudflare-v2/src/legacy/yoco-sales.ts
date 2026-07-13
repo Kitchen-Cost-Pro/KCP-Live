@@ -203,6 +203,49 @@ function objectValue(value: unknown) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Row : {};
 }
 
+interface StockDepletionPolicy {
+  enabled: boolean;
+  enabledAt: string;
+}
+
+function parseBoolean(value: unknown) {
+  return value === true || text(value).toLowerCase() === 'true' || numberValue(value, 0) === 1;
+}
+
+async function getStockDepletionPolicy(env: Env, workspaceId: string): Promise<StockDepletionPolicy> {
+  const row = await env.DB.prepare(
+    `SELECT raw_json
+       FROM workspace_settings
+      WHERE workspace_id = ?1
+      LIMIT 1`
+  ).bind(workspaceId).first<{ raw_json?: string | null }>();
+  const settings = objectValue(jsonParse(row?.raw_json));
+  const enabled = parseBoolean(settings.stockDepletionEnabled ?? settings.stock_depletion_enabled);
+  const enabledAtRaw = text(settings.stockDepletionEnabledAt ?? settings.stock_depletion_enabled_at);
+  const enabledAt = Number.isFinite(Date.parse(enabledAtRaw)) ? new Date(enabledAtRaw).toISOString() : '';
+  return { enabled, enabledAt };
+}
+
+function occurredBeforeActivation(occurredAt: string, enabledAt: string) {
+  if (!enabledAt) return false;
+  const occurredMs = Date.parse(occurredAt);
+  const enabledMs = Date.parse(enabledAt);
+  return Number.isFinite(occurredMs) && Number.isFinite(enabledMs) && occurredMs < enabledMs;
+}
+
+async function originalSaleWasDepleted(env: Env, workspaceId: string, orderId: string) {
+  const row = await env.DB.prepare(
+    `SELECT id
+       FROM stock_movements
+      WHERE workspace_id = ?1
+        AND document_type = 'yoco_order'
+        AND document_id = ?2
+        AND movement_type = 'sale_depletion'
+      LIMIT 1`
+  ).bind(workspaceId, orderId).first<{ id?: string }>();
+  return Boolean(row?.id);
+}
+
 function id(prefix: string) {
   return `${prefix}_${crypto.randomUUID()}`;
 }
@@ -1057,6 +1100,20 @@ export async function processYocoOrder(
     return { processed: false, reason: 'order_not_completed', missingRecipes: 0, orderLines: 0, stockMovements: 0 };
   }
 
+  const occurredAt = mode === 'refund'
+    ? text(refund?.processed_at || refund?.created_at || refund?.updated_at || order.closed_at || order.created_at || new Date().toISOString())
+    : text(order.closed_at || order.created_at || order.updated_at || new Date().toISOString());
+  const depletionPolicy = await getStockDepletionPolicy(env, workspaceId);
+  if (!depletionPolicy.enabled) {
+    return { processed: false, reason: 'stock_depletion_disabled', missingRecipes: 0, orderLines: 0, stockMovements: 0 };
+  }
+  if (mode === 'sale' && occurredBeforeActivation(occurredAt, depletionPolicy.enabledAt)) {
+    return { processed: false, reason: 'before_stock_depletion_start', missingRecipes: 0, orderLines: 0, stockMovements: 0 };
+  }
+  if (mode === 'refund' && !(await originalSaleWasDepleted(env, workspaceId, orderId))) {
+    return { processed: false, reason: 'original_sale_not_depleted', missingRecipes: 0, orderLines: 0, stockMovements: 0 };
+  }
+
   const [
     locations,
     products,
@@ -1113,9 +1170,6 @@ export async function processYocoOrder(
       }
     }
   }
-  const occurredAt = mode === 'refund'
-    ? text(refund?.processed_at || refund?.created_at || refund?.updated_at || order.closed_at || order.created_at || new Date().toISOString())
-    : text(order.closed_at || order.created_at || order.updated_at || new Date().toISOString());
   const statements: DbStatementLike[] = [];
   const existingOrder = await env.DB.prepare(
     `SELECT id, location_id

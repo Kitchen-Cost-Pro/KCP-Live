@@ -5,6 +5,9 @@ import { json, limitFromUrl, offsetFromUrl } from "./http";
 import {
   localDateRangeToUtcBounds,
   normalizeReportTimeZone,
+  normalizeTradingDayStartMinutes,
+  zonedTradingDateTimeStrings,
+  zonedTradingDisplayTimestamp,
 } from "../../../src/modules/reporting/engine/timezone.js";
 import {
   historicalTransactionReference,
@@ -24,7 +27,7 @@ export async function getStockOnHandReport(
   await assertWorkspaceAccess(env, auth, workspaceId);
   await assertReportLocationScope(env, auth, workspaceId, request);
   const context = await reportContext(request, env, workspaceId, 3000);
-  const { filters, limit, offset, generatedAt, timeZone } = context;
+  const { filters, limit, offset, generatedAt, timeZone, tradingDayStartMinutes } = context;
   const tables = await tableStatus(env, [
     "stock_items",
     "stock_balances",
@@ -268,7 +271,7 @@ export async function getPurchaseOrdersReport(
   await assertWorkspaceAccess(env, auth, workspaceId);
   await assertReportLocationScope(env, auth, workspaceId, request);
   const context = await reportContext(request, env, workspaceId, 2000);
-  const { filters, limit, offset, timeZone } = context;
+  const { filters, limit, offset, timeZone, tradingDayStartMinutes } = context;
   const tables = await tableStatus(env, [
     "purchase_orders",
     "purchase_order_lines",
@@ -365,7 +368,7 @@ export async function getPurchaseOrdersReport(
       hasLine,
       poId: clean(row.po_id),
       sourceId: clean(row.po_id),
-      poDate: clean(row.ordered_at),
+      poDate: zonedTradingDateTimeStrings(row.ordered_at || row.created_at, timeZone, tradingDayStartMinutes).date,
       poNumber: clean(row.po_number || raw.poNumber || raw.number || row.po_id),
       supplierId: clean(row.supplier_id),
       supplierName: clean(row.supplier_name),
@@ -499,7 +502,7 @@ export async function getGrvLogReport(
   await assertWorkspaceAccess(env, auth, workspaceId);
   await assertReportLocationScope(env, auth, workspaceId, request);
   const context = await reportContext(request, env, workspaceId, 2000);
-  const { filters, limit, offset, timeZone } = context;
+  const { filters, limit, offset, timeZone, tradingDayStartMinutes } = context;
   const tables = await tableStatus(env, [
     "grvs",
     "grv_lines",
@@ -581,7 +584,7 @@ export async function getGrvLogReport(
           row.grv_id,
           row.received_at || row.created_at,
         ),
-      grvDate: clean(row.received_at),
+      grvDate: zonedTradingDisplayTimestamp(row.received_at, timeZone, tradingDayStartMinutes),
       grvNumber: clean(
         raw.grvNumber || raw.grv_number || raw.reference || row.grv_id,
       ),
@@ -609,7 +612,7 @@ export async function getGrvLogReport(
       lineValueInclVat: money(row.line_total_inc),
       status: title(clean(raw.status, "Committed")),
       committedBy: actorName(actors, row.created_by) || clean(row.created_by),
-      committedAt: clean(row.created_at || row.received_at),
+      committedAt: zonedTradingDisplayTimestamp(row.created_at || row.received_at, timeZone, tradingDayStartMinutes),
       ledgerQty: number(row.ledger_qty),
       ledgerValue: money(row.ledger_value),
       ledgerRowCount: number(row.ledger_rows),
@@ -725,7 +728,7 @@ export async function getCreditNotesReport(
   await assertWorkspaceAccess(env, auth, workspaceId);
   await assertReportLocationScope(env, auth, workspaceId, request);
   const context = await reportContext(request, env, workspaceId, 2000);
-  const { filters, limit, offset, timeZone } = context;
+  const { filters, limit, offset, timeZone, tradingDayStartMinutes } = context;
   const tables = await tableStatus(env, [
     "credit_notes",
     "credit_note_lines",
@@ -830,7 +833,7 @@ export async function getCreditNotesReport(
           row.credit_note_id,
           row.credited_at || row.created_at,
         ),
-      creditNoteDate: clean(row.credited_at),
+      creditNoteDate: zonedTradingDisplayTimestamp(row.credited_at, timeZone, tradingDayStartMinutes),
       creditNoteNumber: clean(row.credit_note_number),
       supplierId: clean(row.supplier_id),
       supplierName: clean(row.supplier_name),
@@ -988,7 +991,7 @@ export async function getManufacturingTransactionsReport(
   await assertWorkspaceAccess(env, auth, workspaceId);
   await assertReportLocationScope(env, auth, workspaceId, request);
   const context = await reportContext(request, env, workspaceId, 2500);
-  const { filters, limit, offset, timeZone } = context;
+  const { filters, limit, offset, timeZone, tradingDayStartMinutes } = context;
   const tables = await tableStatus(env, [
     "manufacturing_batches",
     "manufacturing_batch_lines",
@@ -1178,9 +1181,9 @@ export async function getManufacturingTransactionsReport(
             row.posted_at || row.created_at,
           ),
       ),
-      postedAt: clean(row.posted_at),
-      batchDate: clean(row.posted_at),
-      committedAt: clean(row.created_at || row.posted_at),
+      postedAt: zonedTradingDisplayTimestamp(row.posted_at, timeZone, tradingDayStartMinutes),
+      batchDate: zonedTradingDateTimeStrings(row.posted_at, timeZone, tradingDayStartMinutes).date,
+      committedAt: zonedTradingDisplayTimestamp(row.created_at || row.posted_at, timeZone, tradingDayStartMinutes),
       status,
       manufacturedItemId: clean(row.manufactured_item_id),
       itemId: clean(row.manufactured_item_id),
@@ -1280,7 +1283,7 @@ export async function getStockTransferTransactionsReport(
   await assertWorkspaceAccess(env, auth, workspaceId);
   await assertReportLocationScope(env, auth, workspaceId, request);
   const context = await reportContext(request, env, workspaceId, 2500);
-  const { filters, limit, offset, timeZone } = context;
+  const { filters, limit, offset, timeZone, tradingDayStartMinutes } = context;
   const tables = await tableStatus(env, [
     "transfers",
     "transfer_lines",
@@ -1623,6 +1626,8 @@ export async function getStockTransferTransactionsReport(
         returnedQty: returned,
         createdBy: reportActorName(actors, central.created_by) || clean(central.created_by),
         committedBy,
+        timeZone,
+        tradingDayStartMinutes,
         note: clean(central.note),
       }));
     }
@@ -1632,9 +1637,10 @@ export async function getStockTransferTransactionsReport(
     from: filters.from,
     to: filters.to,
     timeZone,
+    tradingDayStartMinutes,
   });
   const filtered = standardized.filter((row) => {
-    const timestamp = clean(row.requestedAt || row.timestamp);
+    const timestamp = clean(row.sourceRequestedAt || row.requestedAt || row.timestamp);
     if (fromUtc && timestamp && new Date(timestamp).getTime() < new Date(fromUtc).getTime()) return false;
     if (toExclusiveUtc && timestamp && new Date(timestamp).getTime() >= new Date(toExclusiveUtc).getTime()) return false;
     if (
@@ -1672,6 +1678,21 @@ export async function getStockTransferTransactionsReport(
 
 function buildTransferReportRow(input: Row): Row {
   const localDirection = input.workspaceRole === "receiver" ? "Transfer In" : "Transfer Out";
+  const requestedLocal = zonedTradingDateTimeStrings(
+    input.requestedAt,
+    clean(input.timeZone, "Africa/Johannesburg"),
+    number(input.tradingDayStartMinutes),
+  );
+  const requestedDisplay = zonedTradingDisplayTimestamp(
+    input.requestedAt,
+    clean(input.timeZone, "Africa/Johannesburg"),
+    number(input.tradingDayStartMinutes),
+  );
+  const acceptedDisplay = zonedTradingDisplayTimestamp(
+    input.acceptedAt,
+    clean(input.timeZone, "Africa/Johannesburg"),
+    number(input.tradingDayStartMinutes),
+  );
   const shippedQty = quantity(input.shippedQty);
   const receivedQty = quantity(input.receivedQty);
   const returnedQty = quantity(input.returnedQty);
@@ -1691,10 +1712,12 @@ function buildTransferReportRow(input: Row): Row {
     transferScope: clean(input.transferType),
     transferTypeLabel: title(input.transferType),
     workspaceRole: clean(input.workspaceRole),
-    requestedAt: clean(input.requestedAt),
-    acceptedAt: clean(input.acceptedAt),
-    timestamp: clean(input.acceptedAt || input.requestedAt),
-    date: clean(input.requestedAt).slice(0, 10),
+    sourceRequestedAt: clean(input.requestedAt),
+    sourceAcceptedAt: clean(input.acceptedAt),
+    requestedAt: requestedDisplay || clean(input.requestedAt),
+    acceptedAt: acceptedDisplay || clean(input.acceptedAt),
+    timestamp: acceptedDisplay || requestedDisplay || clean(input.acceptedAt || input.requestedAt),
+    date: requestedLocal.date,
     status: clean(input.status),
     rawStatus: clean(input.rawStatus),
     fromSiteId: clean(input.fromSiteId),
@@ -1845,11 +1868,16 @@ async function reportContext(
   defaultLimit: number,
 ) {
   const url = new URL(request.url);
-  const timeZone = await workspaceTimeZone(env, workspaceId);
+  const reporting = await workspaceReportingContext(env, workspaceId);
   return {
     url,
-    timeZone,
-    filters: readFilters(url),
+    timeZone: reporting.timeZone,
+    tradingDayStartMinutes: reporting.tradingDayStartMinutes,
+    tradingDayLabel: reporting.tradingDayLabel,
+    filters: {
+      ...readFilters(url),
+      tradingDayStartMinutes: reporting.tradingDayStartMinutes,
+    },
     limit: limitFromUrl(url, defaultLimit, 5000),
     offset: offsetFromUrl(url),
     generatedAt: new Date().toISOString(),
@@ -1901,6 +1929,8 @@ function meta(
     currency: "ZAR",
     timeZone: context.timeZone,
     timezone: context.timeZone,
+    tradingDayStartMinutes: context.tradingDayStartMinutes || 0,
+    tradingDayLabel: context.tradingDayLabel || "00:00–00:00",
     generatedAt: context.generatedAt,
     ...extra,
   };
@@ -1940,17 +1970,32 @@ async function tableExists(env: Env, name: string) {
     return false;
   }
 }
-async function workspaceTimeZone(env: Env, workspaceId: string) {
+async function workspaceReportingContext(env: Env, workspaceId: string) {
+  let timeZone = normalizeReportTimeZone("Africa/Johannesburg");
+  let rawSettings: Row = {};
   try {
-    const row = await env.CENTRAL_DB.prepare(
-      "SELECT timezone FROM workspaces WHERE id=?1 LIMIT 1",
-    )
-      .bind(workspaceId)
-      .first<Row>();
-    return normalizeReportTimeZone(row?.timezone || "Africa/Johannesburg");
+    const [workspace, settings] = await Promise.all([
+      env.CENTRAL_DB.prepare(
+        "SELECT timezone FROM workspaces WHERE id=?1 LIMIT 1",
+      ).bind(workspaceId).first<Row>(),
+      env.DB.prepare(
+        "SELECT raw_json FROM workspace_settings WHERE workspace_id=?1 LIMIT 1",
+      ).bind(workspaceId).first<Row>(),
+    ]);
+    timeZone = normalizeReportTimeZone(workspace?.timezone || "Africa/Johannesburg");
+    rawSettings = parseJson(settings?.raw_json);
   } catch {
-    return normalizeReportTimeZone("Africa/Johannesburg");
+    // Safe fallback is Johannesburg with calendar-day reporting.
   }
+  const tradingDayStartMinutes = normalizeTradingDayStartMinutes(rawSettings as any);
+  const hour = Math.floor(tradingDayStartMinutes / 60);
+  const minute = tradingDayStartMinutes % 60;
+  const label = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+  return {
+    timeZone,
+    tradingDayStartMinutes,
+    tradingDayLabel: tradingDayStartMinutes ? `${label}–${label}` : "00:00–00:00",
+  };
 }
 function addDateRange(
   clauses: string[],
@@ -1963,6 +2008,7 @@ function addDateRange(
     from: filters.from,
     to: filters.to,
     timeZone,
+    tradingDayStartMinutes: number(filters.tradingDayStartMinutes),
   });
   if (fromUtc) {
     binds.push(fromUtc);

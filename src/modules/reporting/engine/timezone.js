@@ -97,6 +97,85 @@ export function zonedDateTimeStrings(value, timeZone = DEFAULT_REPORT_TIMEZONE) 
   return { date, time, dateTime: `${date} ${time}`, timeZone: parts.timeZone };
 }
 
+
+function tradingTimeToStartMinutes(value = '') {
+  const match = String(value || '').trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return null;
+  const hour = Math.max(0, Math.min(23, Number(match[1]) || 0));
+  const minute = Math.max(0, Math.min(59, Number(match[2]) || 0));
+  // The business setting represents the end of the prior trading day. Preserve the
+  // existing KCP convention: 04:59 rolls at 05:00, while 23:59 rolls at midnight.
+  return (Math.ceil((hour * 60 + minute) / 60) * 60) % (24 * 60);
+}
+
+export function normalizeTradingDayStartMinutes(value = 0) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const candidates = typeof value === 'object'
+    ? [
+        Number(source.reportingDayFromHour) * 60,
+        Number(source.reportingFromHour) * 60,
+        source.tradingDayStartMinutes,
+        source.tradeDayStartMinutes,
+        source.businessDayStartMinutes,
+        Number(source.tradingDayStartHour) * 60,
+        Number(source.tradeDayStartHour) * 60,
+        Number(source.businessDayStartHour) * 60,
+        tradingTimeToStartMinutes(source.tradingTime || source.tradingEndTime)
+      ]
+    : [value];
+  const minutes = candidates.map((candidate) => Number(candidate)).find(Number.isFinite);
+  if (!Number.isFinite(minutes)) return 0;
+  // Reporting boundaries are intentionally whole-hour only.
+  return (Math.round(Math.max(0, Math.min(1439, minutes)) / 60) * 60) % 1440;
+}
+
+export function zonedTradingDateTimeStrings(
+  value,
+  timeZone = DEFAULT_REPORT_TIMEZONE,
+  tradingDayStartMinutes = 0
+) {
+  const local = zonedDateTimeStrings(value, timeZone);
+  if (!local.date) return local;
+  const startMinutes = normalizeTradingDayStartMinutes(tradingDayStartMinutes);
+  if (!startMinutes) return { ...local, tradingDayStartMinutes: 0 };
+  const parts = getZonedDateTimeParts(value, timeZone);
+  if (!parts) return local;
+  const localMinutes = parts.hour * 60 + parts.minute;
+  let tradingDate = local.date;
+  if (localMinutes < startMinutes) {
+    const previous = new Date(Date.UTC(parts.year, parts.month - 1, parts.day - 1));
+    tradingDate = previous.toISOString().slice(0, 10);
+  }
+  return {
+    ...local,
+    date: tradingDate,
+    dateTime: `${tradingDate} ${local.time}`,
+    calendarDate: local.date,
+    tradingDayStartMinutes: startMinutes
+  };
+}
+
+export function zonedTradingDisplayTimestamp(
+  value,
+  timeZone = DEFAULT_REPORT_TIMEZONE,
+  tradingDayStartMinutes = 0
+) {
+  const local = zonedTradingDateTimeStrings(value, timeZone, tradingDayStartMinutes);
+  if (!local.date || !local.time) return String(value || '').trim();
+  const dateMatch = local.date.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const timeMatch = local.time.match(/^(\d{2}):(\d{2}):(\d{2})$/);
+  if (!dateMatch || !timeMatch) return String(value || '').trim();
+  return zonedLocalDateTimeToUtc(
+    Number(dateMatch[1]),
+    Number(dateMatch[2]),
+    Number(dateMatch[3]),
+    Number(timeMatch[1]),
+    Number(timeMatch[2]),
+    Number(timeMatch[3]),
+    timeZone
+  ).toISOString();
+}
+
 export function formatReportDateTime(value, timeZone = DEFAULT_REPORT_TIMEZONE, options = {}) {
   const parsed = parseReportInstant(value);
   if (!parsed) return String(value || '').trim() || '-';
@@ -146,8 +225,16 @@ export function zonedLocalDateTimeToUtc(year, month, day, hour = 0, minute = 0, 
   return new Date(guess);
 }
 
-export function localDateRangeToUtcBounds({ from = '', to = '', timeZone = DEFAULT_REPORT_TIMEZONE } = {}) {
+export function localDateRangeToUtcBounds({
+  from = '',
+  to = '',
+  timeZone = DEFAULT_REPORT_TIMEZONE,
+  tradingDayStartMinutes = 0
+} = {}) {
   const zone = normalizeReportTimeZone(timeZone);
+  const startMinutes = normalizeTradingDayStartMinutes(tradingDayStartMinutes);
+  const startHour = Math.floor(startMinutes / 60);
+  const startMinute = startMinutes % 60;
   const parseDate = (value) => {
     const match = String(value || '').trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
     return match ? { year: Number(match[1]), month: Number(match[2]), day: Number(match[3]) } : null;
@@ -155,7 +242,7 @@ export function localDateRangeToUtcBounds({ from = '', to = '', timeZone = DEFAU
   const start = parseDate(from);
   const end = parseDate(to);
   const fromUtc = start
-    ? zonedLocalDateTimeToUtc(start.year, start.month, start.day, 0, 0, 0, zone).toISOString()
+    ? zonedLocalDateTimeToUtc(start.year, start.month, start.day, startHour, startMinute, 0, zone).toISOString()
     : '';
   let toExclusiveUtc = '';
   if (end) {
@@ -164,11 +251,11 @@ export function localDateRangeToUtcBounds({ from = '', to = '', timeZone = DEFAU
       next.getUTCFullYear(),
       next.getUTCMonth() + 1,
       next.getUTCDate(),
-      0,
-      0,
+      startHour,
+      startMinute,
       0,
       zone
     ).toISOString();
   }
-  return { fromUtc, toExclusiveUtc, timeZone: zone };
+  return { fromUtc, toExclusiveUtc, timeZone: zone, tradingDayStartMinutes: startMinutes };
 }

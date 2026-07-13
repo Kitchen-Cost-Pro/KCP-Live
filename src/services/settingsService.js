@@ -92,6 +92,28 @@ export async function getYocoCategoryOptions(workspaceId) {
   return [...categories.values()].sort((left, right) => left.name.localeCompare(right.name));
 }
 
+export async function getGoLiveReadiness(workspaceId) {
+  const workspaceKey = requireWorkspaceId(workspaceId);
+  const [productResponse, locationResponse] = await Promise.all([
+    callCloudflareWorkspaceRoute(workspaceKey, 'products', { query: { limit: 500 } }),
+    callCloudflareWorkspaceRoute(workspaceKey, 'locations')
+  ]);
+  const products = productResponse.products || productResponse.items || [];
+  const locations = locationResponse.locations || [];
+  const recipeCount = products.filter((product = {}) => {
+    const recipe = product.recipe || product.recipeLines || product.recipe_lines;
+    if (Array.isArray(recipe) && recipe.length > 0) return true;
+    if (product.missingRecipe === false || product.missing_recipe === 0) return true;
+    const status = String(product.recipeStatus || product.recipe_status || '').toLowerCase();
+    return status === 'complete' || status === 'complete_via_linked_stock_item';
+  }).length;
+  return {
+    productCount: products.length,
+    recipeCount,
+    locationCount: locations.filter((location = {}) => location.active !== false && Number(location.active ?? 1) !== 0).length
+  };
+}
+
 export async function getStockCategoryOptions(workspaceId) {
   const workspaceKey = requireWorkspaceId(workspaceId);
   const response = await callCloudflareWorkspaceRoute(workspaceKey, 'stock-items', {
@@ -233,7 +255,19 @@ export async function importWorkspaceSnapshot(workspaceId, file) {
 
 export function normalizeSettings(value = {}) {
   const source = value && typeof value === 'object' ? value : {};
-  const tradingTime = normalizeTime(source.tradingTime || source.tradingEndTime || '23:59');
+  const legacyTradingTime = normalizeTime(source.tradingTime || source.tradingEndTime || '23:59');
+  const reportingDayFromHour = normalizeHour(
+    source.reportingDayFromHour
+      ?? source.reportingFromHour
+      ?? source.tradingDayStartHour
+      ?? source.tradeDayStartHour
+      ?? deriveStartHourFromTradingTime(legacyTradingTime),
+    0
+  );
+  // A KCP reporting day is always a complete 24-hour period. Persist both UI values
+  // as the same boundary so an invalid partial-day range can never reach reports.
+  const reportingDayToHour = reportingDayFromHour;
+  const tradingTime = legacyTradingTimeFromStartHour(reportingDayFromHour);
   const logoutTimeout = Math.max(1, Math.min(1440, parseInt(source.logoutTimeout ?? source.autoLogoutMinutes ?? 30, 10) || 30));
   const vatRate = clampNumber(source.vatRate ?? source.vatPercentage ?? 15, 0, 100, 15);
   const uiScale = String(source.uiScale || 'normal') === 'large' ? 'large' : 'normal';
@@ -250,6 +284,12 @@ export function normalizeSettings(value = {}) {
   const restaurantBackgroundDataUrl = normalizeLogoDataUrl(source.restaurantBackgroundDataUrl || source.backgroundDataUrl || source.customerBackgroundDataUrl || '', 1800000);
   const restaurantBackgroundName = String(source.restaurantBackgroundName || source.backgroundName || '').trim();
   const companyTaxInfo = normalizeTaxInfo(source.companyTaxInfo || source.taxInfo || source.company_tax_info || {});
+  const stockDepletionEnabled = source.stockDepletionEnabled === true ||
+    String(source.stockDepletionEnabled || '').toLowerCase() === 'true';
+  const stockDepletionEnabledAtValue = String(source.stockDepletionEnabledAt || source.stock_depletion_enabled_at || '').trim();
+  const stockDepletionEnabledAt = stockDepletionEnabled && Number.isFinite(Date.parse(stockDepletionEnabledAtValue))
+    ? new Date(stockDepletionEnabledAtValue).toISOString()
+    : '';
 
   return {
     ...source,
@@ -260,7 +300,10 @@ export function normalizeSettings(value = {}) {
     viewingOnly,
     linkedSiteCount: Number(source.linkedSiteCount ?? source.linked_site_count ?? 0) || 0,
     tradingTime,
-    tradingDayStartHour: deriveStartHourFromTradingTime(tradingTime),
+    reportingDayFromHour,
+    reportingDayToHour,
+    tradingDayStartHour: reportingDayFromHour,
+    tradingDayStartMinutes: reportingDayFromHour * 60,
     uiScale,
     logoutTimeout,
     costingMethod,
@@ -273,7 +316,9 @@ export function normalizeSettings(value = {}) {
     restaurantLogoName,
     restaurantBackgroundDataUrl,
     restaurantBackgroundName,
-    companyTaxInfo
+    companyTaxInfo,
+    stockDepletionEnabled,
+    stockDepletionEnabledAt
   };
 }
 
@@ -389,6 +434,19 @@ function normalizeTime(value) {
 function deriveStartHourFromTradingTime(time) {
   const [hours, minutes] = normalizeTime(time).split(':').map(Number);
   return Math.ceil(((hours || 0) * 60 + (minutes || 0)) / 60) % 24;
+}
+
+function normalizeHour(value, fallback = 0) {
+  const match = String(value ?? '').trim().match(/^(\d{1,2})(?::\d{2})?$/);
+  const number = match ? Number(match[1]) : Number(value);
+  if (!Number.isFinite(number)) return Math.max(0, Math.min(23, Number(fallback) || 0));
+  return Math.max(0, Math.min(23, Math.round(number)));
+}
+
+function legacyTradingTimeFromStartHour(startHour = 0) {
+  const hour = normalizeHour(startHour, 0);
+  const previousHour = (hour + 23) % 24;
+  return `${String(previousHour).padStart(2, '0')}:59`;
 }
 
 function clampNumber(value, min, max, fallback) {

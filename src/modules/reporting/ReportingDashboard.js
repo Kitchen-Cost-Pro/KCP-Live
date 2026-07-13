@@ -3,6 +3,7 @@ import { listReports, resolveReportRoute, normalizeSectionId } from './reports/i
 import { renderReportViewer } from './ReportViewer.js';
 import { escapeHtml } from './engine/formatters.js';
 import { bindReportTooltips } from './tooltips/tooltipBuilder.js';
+import { normalizeReportTimeZone, normalizeTradingDayStartMinutes } from './engine/timezone.js';
 
 const SECTION_DEFINITIONS = [
   {
@@ -44,7 +45,14 @@ export function renderReportingDashboard({
   const root = document.createElement('section');
   root.className = 'reportingDashboard reportingDashboard--home reportingDashboard--miniBentoHome';
   const reports = listReports();
-  const dataSet = createReportingDataSet(state || sourceData);
+  const sourceState = state || sourceData || {};
+  const dataSet = createReportingDataSet(sourceState);
+  const datePresetContext = {
+    timeZone: normalizeReportTimeZone(
+      sourceState?.workspace?.timezone || sourceState?.settings?.timezone || 'Africa/Johannesburg'
+    ),
+    tradingDayStartMinutes: normalizeTradingDayStartMinutes(sourceState?.settings || {}),
+  };
   const initialRoute = resolveReportRoute(initialReportId);
   let activeReportState = initialRoute
     ? {
@@ -94,6 +102,7 @@ export function renderReportingDashboard({
       initialActiveReportId: activeReportState.initialActiveReportId,
       initialView: activeReportState.initialView,
       allowUrlConfiguration: activeReportState.allowUrlConfiguration === true,
+      datePresetContext,
       onRefresh
     }));
     root.querySelector('[data-report-home]')?.addEventListener('click', () => {

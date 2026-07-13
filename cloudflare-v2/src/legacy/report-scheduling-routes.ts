@@ -30,7 +30,7 @@ import { reportResultsToExcelBytes, reportToExcelBytes } from '../../../src/modu
 // @ts-ignore Shared PDF export mapper used by manual and scheduled reporting.
 import { reportResultsToPdfBytes, reportToPdfBytes } from '../../../src/modules/reporting/exports/exportPdf.js';
 // @ts-ignore Shared timezone formatter for business-facing report timestamps.
-import { formatReportDateTime } from '../../../src/modules/reporting/engine/timezone.js';
+import { formatReportDateTime, normalizeTradingDayStartMinutes } from '../../../src/modules/reporting/engine/timezone.js';
 // @ts-ignore Shared reporting engine used by both interactive and scheduled reports.
 import { runReport } from '../../../src/modules/reporting/engine/reportRunner.js';
 // @ts-ignore Shared adaptive source pagination used by interactive and scheduled reports.
@@ -713,7 +713,14 @@ async function executeSchedule(request: Request, env: Env, auth: AuthContext, wo
     for (const location of locations) await assertLocationAccess(env, auth, workspaceId, clean(location.id), 'scheduled_report_run');
     const outputCount = items.length * locations.length;
     if (schedule.format !== 'report_link' && outputCount > 60) throw new Error('This schedule would create more than 60 attachments. Select fewer report views or locations.');
-    const range = resolveScheduledRelativeRange(schedule.dateRangeType || 'today', schedule.filters || {}, schedule.timezone, new Date());
+    const tradingDayStartMinutes = await getScheduleTradingDayStartMinutes(env, workspaceId);
+    const range = resolveScheduledRelativeRange(
+      schedule.dateRangeType || 'today',
+      schedule.filters || {},
+      schedule.timezone,
+      new Date(),
+      tradingDayStartMinutes,
+    );
     const outputs: Row[] = [];
     let sourceSequence = 0;
 
@@ -1248,6 +1255,17 @@ function mapSavedViewForClient(row: Row) {
     isAvailable: true
   };
 }
+async function getScheduleTradingDayStartMinutes(env: Env, workspaceId: string) {
+  try {
+    const row = await env.DB.prepare(
+      `SELECT raw_json FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`,
+    ).bind(workspaceId).first<Row>();
+    return normalizeTradingDayStartMinutes(parseJson<Row>(row?.raw_json, {}) as any);
+  } catch {
+    return 0;
+  }
+}
+
 function mapSchedule(row: Row) {
   const fallbackItems = clean(row.report_id || row.reportId) && clean(row.view_id || row.viewId)
     ? [{ reportGroupId: clean(row.report_group_id || row.reportGroupId), reportId: clean(row.report_id || row.reportId), viewId: clean(row.view_id || row.viewId) }]

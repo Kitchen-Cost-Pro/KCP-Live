@@ -1,3 +1,5 @@
+import { zonedTradingDateTimeStrings } from "../engine/timezone.js";
+
 export const REPORT_DATE_RANGE_PRESETS = [
   { value: 'today', label: 'Today' },
   { value: 'yesterday', label: 'Yesterday' },
@@ -17,11 +19,18 @@ export function normalizeDateRangeType(value = '') {
   return REPORT_DATE_RANGE_PRESETS.some((preset) => preset.value === normalized) ? normalized : 'today';
 }
 
-export function resolveDateRangePreset(type = 'today', { now = new Date() } = {}) {
+export function resolveDateRangePreset(
+  type = 'today',
+  { now = new Date(), timeZone = 'Africa/Johannesburg', tradingDayStartMinutes = 0 } = {},
+) {
   const normalized = normalizeDateRangeType(type);
   if (normalized === 'custom') return { startDate: '', endDate: '', dateRangeType: 'custom' };
 
-  const local = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const tradingDate = zonedTradingDateTimeStrings(now, timeZone, tradingDayStartMinutes).date;
+  const match = tradingDate.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const local = match
+    ? new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+    : new Date(now.getFullYear(), now.getMonth(), now.getDate());
   let start = new Date(local);
   let end = new Date(local);
 
@@ -59,10 +68,13 @@ export function resolveDateRangePreset(type = 'today', { now = new Date() } = {}
   };
 }
 
-export function applyDateRangePreset(filters = {}, { now = new Date() } = {}) {
+export function applyDateRangePreset(
+  filters = {},
+  { now = new Date(), timeZone = 'Africa/Johannesburg', tradingDayStartMinutes = 0 } = {},
+) {
   const type = normalizeDateRangeType(filters.dateRangeType || inferDateRangeType(filters));
   if (type === 'custom') return { ...filters, dateRangeType: 'custom' };
-  const range = resolveDateRangePreset(type, { now });
+  const range = resolveDateRangePreset(type, { now, timeZone, tradingDayStartMinutes });
   return {
     ...filters,
     dateRangeType: type,

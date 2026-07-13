@@ -10,6 +10,7 @@ import {
 export function renderSettings({ state, onSettingsAction = {} } = {}) {
   const settingsState = state.settings || {};
   const draft = settingsState.draft || createDefaultSettings(state);
+  const reportingDayHour = resolveReportingDayHour(draft);
   const workspaceName = state.workspace?.siteName || draft.siteName || 'Workspace';
   const isSaving = settingsState.actionStatus === 'saving';
   const isImporting = settingsState.actionStatus === 'importing';
@@ -62,10 +63,22 @@ export function renderSettings({ state, onSettingsAction = {} } = {}) {
                 <span>Business Profile Name</span>
                 <input type="text" value="${escapeAttribute(draft.siteName || '')}" placeholder="e.g. Main Kitchen" data-settings-field="siteName" data-focus-key="settings-site-name" />
               </label>
-              <label>
-                <span>Trading Time / End Of Day</span>
-                ${renderTimeSelector('tradingTime', draft.tradingTime || '23:59')}
-              </label>
+              <div class="settingsFormField settingsFormField--wide settingsReportingHoursField">
+                <span>Reporting Day Hours</span>
+                <div class="settingsReportingHours" role="group" aria-label="Reporting day hours">
+                  <span class="settingsReportingHourLabel">From</span>
+                  <div class="settingsReportingHourControl">
+                    ${renderReportingHourSelector('reportingDayFromHour', reportingDayHour, openDropdown, 'Reporting day starts at')}
+                  </div>
+                  <span class="settingsReportingHoursArrow" aria-hidden="true">→</span>
+                  <span class="settingsReportingHourLabel">To</span>
+                  <div class="settingsReportingHourControl">
+                    ${renderReportingHourSelector('reportingDayToHour', reportingDayHour, openDropdown, 'Reporting day ends at on the next day')}
+                  </div>
+                  <span class="settingsReportingHoursNext">next day</span>
+                </div>
+                <p class="settingsFieldHint">Reports always cover a full 24-hour day. Selecting either hour keeps From and To aligned.</p>
+              </div>
               <label>
                 <span>Auto Logout Timeout (Minutes)</span>
                 <input type="text" inputmode="numeric" value="${escapeAttribute(draft.logoutTimeout ?? 30)}" data-settings-field="logoutTimeout" data-focus-key="settings-logout-timeout" />
@@ -91,7 +104,7 @@ export function renderSettings({ state, onSettingsAction = {} } = {}) {
             </div>
           </section>
 
-          ${renderGoLivePanel(draft, state)}
+          ${renderGoLivePanel(draft, state, { isSaving })}
           ${renderCompanyTaxPanel(draft, { isSaving })}
           ${renderProfileLinkingPanel(draft)}
 
@@ -152,7 +165,7 @@ export function renderSettings({ state, onSettingsAction = {} } = {}) {
   return view;
 }
 
-function renderGoLivePanel(draft = {}, state = {}) {
+function renderGoLivePanel(draft = {}, state = {}, { isSaving = false } = {}) {
   if (draft.stockDepletionEnabled) {
     return `
       <section class="settingsPanel settingsPanel--goLive">
@@ -168,12 +181,13 @@ function renderGoLivePanel(draft = {}, state = {}) {
     `;
   }
 
-  const source = state.source || {};
+  const readiness = state.settings?.goLiveReadiness || {};
   const checklist = [
-    { label: 'Products', ready: Object.keys(source.products || {}).length > 0 },
-    { label: 'Recipes', ready: Object.keys(source.recipes || {}).length > 0 || (Array.isArray(source.recipes) && source.recipes.length > 0) },
-    { label: 'Locations', ready: (source.locations || []).length > 0 }
+    { label: 'Products', ready: Number(readiness.productCount || 0) > 0 },
+    { label: 'Recipes', ready: Number(readiness.recipeCount || 0) > 0 },
+    { label: 'Locations', ready: Number(readiness.locationCount || 0) > 0 }
   ];
+  const isReady = checklist.every((item) => item.ready);
 
   return `
     <section class="settingsPanel settingsPanel--goLive">
@@ -193,8 +207,11 @@ function renderGoLivePanel(draft = {}, state = {}) {
           </li>
         `).join('')}
       </ul>
+      ${!isReady ? '<p class="settingsFieldHint settingsGoLiveBlockedHint">Complete the checklist before enabling stock depletion.</p>' : ''}
       <div class="settingsActions settingsActions--goLive">
-        <button type="button" class="settingsPrimaryButton settingsGoLiveButton" data-settings-go-live>Go Live</button>
+        <button type="button" class="settingsPrimaryButton settingsGoLiveButton" data-settings-go-live ${!isReady || isSaving ? 'disabled' : ''}>
+          ${isSaving ? 'Going Live...' : 'Go Live'}
+        </button>
       </div>
     </section>
   `;
@@ -755,8 +772,8 @@ function bindSettingsEvents(view, onSettingsAction, draft = {}, settingsState = 
     } else {
       // Selects, checkboxes: change is safe to re-render (no cursor to disrupt)
       field.addEventListener('change', () => {
-        // Time-part selects are handled by the time-part combiner below
-        if (field.dataset.timePart) return;
+        // Time-part and reporting-hour selects are handled by their dedicated combiners below.
+        if (field.dataset.timePart || field.dataset.reportingHour) return;
         onSettingsAction.onPreserveFocus?.(field);
         onSettingsAction.onDraftChange?.({ [field.dataset.settingsField]: field.value });
       });
@@ -800,7 +817,20 @@ function bindSettingsEvents(view, onSettingsAction, draft = {}, settingsState = 
     button.addEventListener('click', () => {
       const field = button.dataset.settingsOptionField || '';
       const value = button.dataset.settingsOptionValue || '';
-      onSettingsAction.onDraftChange?.({ [field]: value });
+      if (field === 'reportingDayFromHour' || field === 'reportingDayToHour') {
+        const hour = normalizeHourValue(value);
+        const previousHour = (hour + 23) % 24;
+        onSettingsAction.onDraftChange?.({
+          reportingDayFromHour: hour,
+          reportingDayToHour: hour,
+          tradingDayStartHour: hour,
+          tradingDayStartMinutes: hour * 60,
+          // Keep the legacy end-of-day field in sync for older report and snapshot readers.
+          tradingTime: `${String(previousHour).padStart(2, '0')}:59`
+        });
+      } else {
+        onSettingsAction.onDraftChange?.({ [field]: value });
+      }
       onSettingsAction.onDropdownToggle?.('');
     });
   });
@@ -1004,31 +1034,48 @@ function normalizeTaxInfo(value = {}) {
   };
 }
 
-function renderTimeSelector(fieldKey, value = '09:00') {
-  const parts = String(value || '00:00').split(':');
-  const currentHour = Math.min(23, Math.max(0, parseInt(parts[0] || '0', 10)));
-  const currentMinute = Math.min(59, Math.max(0, parseInt(parts[1] || '0', 10)));
-  const hours = Array.from({ length: 24 }, (_, i) => i);
-  const minutes = Array.from({ length: 60 }, (_, i) => i);
-  return `
-    <div class="settingsTimeSelector">
-      <select class="settingsTimePart" data-settings-field="${escapeAttribute(fieldKey)}" data-time-part="hour" data-time-peer="${escapeAttribute(fieldKey)}" aria-label="Hour">
-        ${hours.map((h) => `<option value="${h}" ${h === currentHour ? 'selected' : ''}>${String(h).padStart(2, '0')}</option>`).join('')}
-      </select>
-      <span class="settingsTimeSep">:</span>
-      <select class="settingsTimePart" data-settings-field="${escapeAttribute(fieldKey)}" data-time-part="minute" data-time-peer="${escapeAttribute(fieldKey)}" aria-label="Minute">
-        ${minutes.map((m) => `<option value="${m}" ${m === currentMinute ? 'selected' : ''}>${String(m).padStart(2, '0')}</option>`).join('')}
-      </select>
-    </div>
-  `;
+function renderReportingHourSelector(fieldKey, value = 0, openDropdown = '', ariaLabel = 'Reporting hour') {
+  const currentHour = normalizeHourValue(value);
+  const options = Array.from({ length: 24 }, (_, hour) => ({
+    value: hour,
+    label: `${String(hour).padStart(2, '0')}:00`
+  }));
+  return renderSettingsDropdown({
+    id: fieldKey,
+    selectedValue: currentHour,
+    openDropdown,
+    options,
+    className: 'settingsReportingHourDropdown',
+    ariaLabel
+  });
 }
 
-function renderSettingsDropdown({ id, selectedValue, options = [], openDropdown = '' }) {
+function resolveReportingDayHour(settings = {}) {
+  const direct = settings.reportingDayFromHour
+    ?? settings.reportingFromHour
+    ?? settings.tradingDayStartHour
+    ?? settings.tradeDayStartHour;
+  if (direct !== undefined && direct !== null && direct !== '') return normalizeHourValue(direct);
+  const match = String(settings.tradingTime || settings.tradingEndTime || '23:59').match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return 0;
+  const endHour = normalizeHourValue(match[1]);
+  const endMinute = Math.max(0, Math.min(59, Number(match[2]) || 0));
+  return Math.ceil((endHour * 60 + endMinute) / 60) % 24;
+}
+
+function normalizeHourValue(value, fallback = 0) {
+  const match = String(value ?? '').trim().match(/^(\d{1,2})(?::\d{2})?$/);
+  const number = match ? Number(match[1]) : Number(value);
+  if (!Number.isFinite(number)) return Math.max(0, Math.min(23, Number(fallback) || 0));
+  return Math.max(0, Math.min(23, Math.round(number)));
+}
+
+function renderSettingsDropdown({ id, selectedValue, options = [], openDropdown = '', className = '', ariaLabel = '' }) {
   const selected = options.find((option) => String(option.value) === String(selectedValue));
   const isOpen = openDropdown === id;
   return `
-    <div class="settingsDropdown ${isOpen ? 'settingsDropdown--open' : ''}" data-settings-dropdown-root>
-      <button type="button" data-settings-dropdown="${escapeAttribute(id)}" aria-expanded="${isOpen}">
+    <div class="settingsDropdown ${escapeAttribute(className)} ${isOpen ? 'settingsDropdown--open' : ''}" data-settings-dropdown-root>
+      <button type="button" data-settings-dropdown="${escapeAttribute(id)}" aria-expanded="${isOpen}" ${ariaLabel ? `aria-label="${escapeAttribute(ariaLabel)}"` : ''}>
         <strong>${escapeHtml(selected?.label || 'Select')}</strong>
         ${icon('chevronDown')}
       </button>
@@ -1054,6 +1101,10 @@ function createDefaultSettings(state = {}) {
     vatRate: 15,
     siteName: state.workspace?.siteName || '',
     tradingTime: '23:59',
+    reportingDayFromHour: 0,
+    reportingDayToHour: 0,
+    tradingDayStartHour: 0,
+    tradingDayStartMinutes: 0,
     uiScale: 'normal',
     logoutTimeout: 30,
     costingMethod: 'last',
@@ -1061,6 +1112,7 @@ function createDefaultSettings(state = {}) {
     corpId: '',
     viewingOnly: false,
     stockDepletionEnabled: false,
+    stockDepletionEnabledAt: '',
     yocoCategoryMap: {},
     stockCategoryRoutingMap: {},
     yocoStoreLocationsAsStockLocations: false,

@@ -62,6 +62,7 @@ export function renderReportViewer({
   onDefaultSavedViewApplied,
   onFiltersChange,
   onRefresh,
+  datePresetContext = {},
 } = {}) {
   const root = document.createElement("section");
   root.className = "reportViewer";
@@ -86,13 +87,14 @@ export function renderReportViewer({
       allowUrlConfiguration,
       onFiltersChange,
       onRefresh,
+      datePresetContext,
     });
   }
   const singleReport = getReportDefinition(effectiveReportId) || report;
   let activeFilters = applyDateRangePreset({
     ...filters,
     ...reportLink.filters,
-  });
+  }, datePresetContext);
   let activeView =
     initialView ||
     reportLink.view ||
@@ -118,7 +120,7 @@ export function renderReportViewer({
       ...(savedView.filters || {}),
       dateRangeType:
         savedView.dateRangeType || savedView.filters?.dateRangeType || "custom",
-    });
+    }, datePresetContext);
     if (
       savedView.reportId &&
       savedView.reportId !== effectiveReportId &&
@@ -373,6 +375,7 @@ export function renderReportViewer({
         event.preventDefault();
         activeFilters = applyDateRangePreset(
           readReportFilters(event.currentTarget),
+          datePresetContext,
         );
         activePage = 1;
         onFiltersChange?.(activeFilters);
@@ -489,13 +492,14 @@ function renderGroupedReportViewer({
   allowUrlConfiguration = false,
   onFiltersChange,
   onRefresh,
+  datePresetContext = {},
 } = {}) {
   const root = document.createElement("section");
   root.className = "reportViewer reportViewer--grouped";
   const childReports = (group.reports || []).filter((item) =>
     getReportDefinition(item.id),
   );
-  let sharedFilters = applyDateRangePreset({ ...filters });
+  let sharedFilters = applyDateRangePreset({ ...filters }, datePresetContext);
   let pendingView = initialView || "";
   let pendingSort = null;
   let pendingVisibleColumns = null;
@@ -552,7 +556,7 @@ function renderGroupedReportViewer({
           sharedFilters = applyDateRangePreset({
             ...(savedView.filters || {}),
             dateRangeType: savedView.dateRangeType || "custom",
-          });
+          }, datePresetContext);
           pendingView = savedView.viewId || "";
           pendingSort = savedView.sort || null;
           pendingVisibleColumns = savedView.visibleColumns || null;
@@ -568,6 +572,7 @@ function renderGroupedReportViewer({
           onFiltersChange?.(sharedFilters);
         },
         onRefresh,
+        datePresetContext,
       }),
     );
     root.append(childSlot);

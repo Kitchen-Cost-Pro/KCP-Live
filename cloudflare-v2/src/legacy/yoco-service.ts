@@ -1261,3 +1261,62 @@ export async function syncYocoSales(env: Env, workspaceId: string, options: Yoco
 
   return { ordersProcessed, refundsProcessed, missingRecipes, errors };
 }
+
+
+export async function retryFailedYocoOrders(
+  env: Env,
+  workspaceId: string,
+  options: { automatic?: boolean; maxAutomaticLookbackDays?: number } = {},
+) {
+  const automatic = options.automatic === true;
+  const stats = await env.DB.prepare(
+    `SELECT COUNT(*) AS error_count,
+            MIN(created_at) AS earliest_error_at,
+            MAX(created_at) AS latest_error_at
+       FROM yoco_webhook_events
+      WHERE workspace_id = ?1
+        AND status IN ('failed', 'rejected')`,
+  ).bind(workspaceId).first<Row>();
+  const errorCount = Number(stats?.error_count || 0) || 0;
+  if (!errorCount) {
+    return { status: 'nothing_to_retry', errorCount: 0, ordersProcessed: 0, refundsProcessed: 0, errors: [] };
+  }
+
+  let earliest = text(stats?.earliest_error_at);
+  if (!earliest) earliest = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  if (automatic) {
+    const maxDays = Math.max(1, Number(options.maxAutomaticLookbackDays || 31) || 31);
+    const floor = Date.now() - maxDays * 24 * 60 * 60 * 1000;
+    const parsed = Date.parse(earliest);
+    if (!Number.isFinite(parsed) || parsed < floor) earliest = new Date(floor).toISOString();
+  }
+
+  // Pull a six-hour overlap before the oldest error. Yoco sale/refund ingestion and stock
+  // movements are idempotent, so this safely recovers delayed orders without duplicating deductions.
+  const parsedEarliest = Date.parse(earliest);
+  const sinceIso = new Date((Number.isFinite(parsedEarliest) ? parsedEarliest : Date.now()) - 6 * 60 * 60 * 1000).toISOString();
+  const result = await syncYocoSales(env, workspaceId, { sinceIso });
+  const errors = Array.isArray(result.errors) ? result.errors : [];
+  if (!errors.length) {
+    await env.DB.prepare(
+      `UPDATE yoco_webhook_events
+          SET status = 'processed',
+              processed_at = ?2,
+              error_message = ''
+        WHERE workspace_id = ?1
+          AND status IN ('failed', 'rejected')
+          AND datetime(created_at) >= datetime(?3)`,
+    ).bind(workspaceId, nowIso(), sinceIso).run();
+  }
+  return {
+    status: errors.length ? 'retry_completed_with_errors' : 'retried',
+    errorCount,
+    earliestErrorAt: text(stats?.earliest_error_at),
+    latestErrorAt: text(stats?.latest_error_at),
+    sinceIso,
+    ordersProcessed: Number(result.ordersProcessed || 0),
+    refundsProcessed: Number(result.refundsProcessed || 0),
+    missingRecipes: Number(result.missingRecipes || 0),
+    errors,
+  };
+}

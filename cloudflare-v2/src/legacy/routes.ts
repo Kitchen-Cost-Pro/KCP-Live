@@ -35,6 +35,7 @@ import {
   productLinkedYocoModifierGroup,
   syncYocoCatalogue,
   syncYocoSales,
+  retryFailedYocoOrders,
 } from "./yoco-service";
 import { findRefund, verifyYocoWebhook } from "./yoco-webhooks";
 import {
@@ -50,6 +51,7 @@ import {
 import {
   sendWorkspaceLowStockNow,
   sendWorkspaceLowStockDue,
+  sendWorkspaceLowStockToUser,
 } from "./low-stock-email";
 import { sendEmail } from "./email";
 import {
@@ -2707,6 +2709,10 @@ export async function adminYocoActionDO(
         ...result,
       });
     }
+    if (action === "retry-failed-orders") {
+      const result = await retryFailedYocoOrders(env, workspaceId, { automatic: false });
+      return json(request, env, { ok: true, ...result });
+    }
     if (action === "reset-webhook") {
       const apiKey = await getYocoApiKey(env, workspaceId);
       if (!apiKey)
@@ -2728,6 +2734,21 @@ export async function adminYocoActionDO(
     );
     return error(request, env, 502, message || `Yoco ${action} failed.`);
   }
+}
+
+export async function postDashboardLowStockEmail(
+  request: Request,
+  env: Env,
+  auth: AuthContext,
+  workspaceId: string,
+) {
+  await scoped(request, env, auth, workspaceId);
+  const payload: Record<string, unknown> = await readJson<Record<string, unknown>>(request)
+    .catch((): Record<string, unknown> => ({}));
+  const locationId = text(payload.locationId);
+  if (locationId) await assertLocationAccess(env, auth, workspaceId, locationId, 'dashboard notifications');
+  const result = await sendWorkspaceLowStockToUser(env, workspaceId, auth.email, locationId);
+  return json(request, env, { ok: true, ...result });
 }
 
 export async function adminYocoStatusDO(
@@ -2812,8 +2833,15 @@ export async function adminActionDO(
       return json(request, env, { ok: true, ...result });
     }
     if (action === "yoco-webhook-health") {
-      const result = await checkYocoWebhookSignatureHealth(env, workspaceId);
-      return json(request, env, result);
+      const health = await checkYocoWebhookSignatureHealth(env, workspaceId);
+      const retry = await retryFailedYocoOrders(env, workspaceId, {
+        automatic: true,
+        maxAutomaticLookbackDays: 31,
+      }).catch((caught) => ({
+        status: 'retry_failed',
+        error: caught instanceof Error ? caught.message : String(caught),
+      }));
+      return json(request, env, { ...health, retry });
     }
     if (action === "repair-baseline") {
       let changes = 0;

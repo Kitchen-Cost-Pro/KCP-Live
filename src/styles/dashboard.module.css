@@ -493,6 +493,20 @@
   border-color: color-mix(in srgb, var(--dash-text) 20%, var(--dash-border));
 }
 
+
+.notificationEmailStatus {
+  margin: 0;
+  padding: 9px 12px 11px;
+  border-top: 1px solid var(--border-subtle);
+  color: var(--accent-success, #00e5a0);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.notificationEmailStatusError {
+  color: var(--accent-danger, #ff4455);
+}
+
 .notificationEmpty {
   min-height: 180px;
   display: grid;

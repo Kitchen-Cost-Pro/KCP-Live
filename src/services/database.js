@@ -735,8 +735,10 @@ export function getTradingDayConfig(settings = {}) {
   ).trim().toLowerCase();
 
   const candidates = [
-    deriveStartHourFromTradingTime(settings?.tradingTime || settings?.tradingEndTime),
+    settings?.reportingDayFromHour,
+    settings?.reportingFromHour,
     settings?.tradingDayStartHour,
+    deriveStartHourFromTradingTime(settings?.tradingTime || settings?.tradingEndTime),
     settings?.tradeDayStartHour,
     settings?.businessDayStartHour,
     settings?.dayStartHour,

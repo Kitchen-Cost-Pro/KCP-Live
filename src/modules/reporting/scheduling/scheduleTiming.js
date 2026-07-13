@@ -1,9 +1,17 @@
+import { zonedTradingDateTimeStrings } from "../engine/timezone.js";
+
 const DATE_RANGE_TYPES = new Set([
   'today', 'yesterday', 'last_2_days', 'this_week', 'last_week', 'this_month', 'last_month',
   'last_7_days', 'last_14_days', 'last_30_days', 'custom'
 ]);
 
-export function resolveScheduledRelativeRange(type = 'custom', filters = {}, timezone = 'Africa/Johannesburg', now = new Date()) {
+export function resolveScheduledRelativeRange(
+  type = 'custom',
+  filters = {},
+  timezone = 'Africa/Johannesburg',
+  now = new Date(),
+  tradingDayStartMinutes = 0,
+) {
   const normalized = normalizeDateRangeType(type);
   if (normalized === 'custom') {
     const from = clean(filters.from || filters.startDate);
@@ -11,7 +19,11 @@ export function resolveScheduledRelativeRange(type = 'custom', filters = {}, tim
     return { from, to, startDate: from, endDate: to };
   }
 
-  const parts = zonedDateParts(now, timezone);
+  const tradingDate = zonedTradingDateTimeStrings(now, timezone, tradingDayStartMinutes).date;
+  const tradingMatch = tradingDate.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const parts = tradingMatch
+    ? { year: Number(tradingMatch[1]), month: Number(tradingMatch[2]), day: Number(tradingMatch[3]) }
+    : zonedDateParts(now, timezone);
   let start = new Date(Date.UTC(parts.year, parts.month - 1, parts.day));
   let end = new Date(start);
   const mondayStart = (date) => {

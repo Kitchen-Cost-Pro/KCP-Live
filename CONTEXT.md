@@ -452,3 +452,17 @@ Then confirm:
 - Main Dashboard custom-select fields have deterministic widths. An open Location or Date Range menu is measured from its trigger, assigned an exact pixel width before paint, constrained to the viewport, and recalculated while open on resize.
 - Do not restore `width: max(100%, 220px)` or another percentage-based minimum on an absolutely positioned Dashboard menu inside an auto-sized flex item; this can expand the first-open menu against the whole filter row.
 - Phase 55 validation baseline: 397 passing tests, successful production frontend build, successful Worker TypeScript check, and successful Wrangler deployment dry run.
+
+## Phase 57: Whole-hour reporting boundaries
+
+- Business Settings now exposes **Reporting Day Hours** as whole-hour **From** and **To** selectors.
+- Reporting days remain fixed 24-hour windows, so both selectors stay aligned (for example, 07:00 to 07:00 next day).
+- Minute-level boundaries cannot be selected or persisted. Legacy `tradingTime` values are migrated to the equivalent next whole-hour boundary.
+- Interactive reports, exports, dashboards, and scheduled reports continue to consume the shared `tradingDayStartMinutes` value.
+
+
+## Phase 58 — Reporting Hours UI and Go Live Hardening
+- Reporting Day Hours now uses inline, custom whole-hour dropdowns and spans the workspace settings panel cleanly.
+- From and To remain locked to the same 24-hour boundary.
+- Go Live is disabled until Products, Recipes, and Locations are present and shows a saving state.
+- Go Live now records an activation timestamp. All webhook and manual Yoco sales processing honors the workspace setting, ignores pre-activation sales, and refuses to restore refunds unless the original sale was depleted.

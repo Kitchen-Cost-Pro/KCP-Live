@@ -268,7 +268,7 @@ async function recordRun(env: Env, values: {
   ).run();
 }
 
-async function getLowStockRows(env: Env, workspaceId: string) {
+async function getLowStockRows(env: Env, workspaceId: string, locationId = '') {
   // Per-LOCATION low-stock rows: a location is low when its own on-hand for an item
   // is at/below the item threshold. Previously this GROUP BY si.id collapsed every
   // location into one row (with names concatenated and a 'Main Store' fallback), so
@@ -293,11 +293,12 @@ async function getLowStockRows(env: Env, workspaceId: string) {
       WHERE si.workspace_id = ?1
         AND si.active = 1
         AND si.threshold_qty > 0
+        AND (?2 = '' OR sb.location_id = ?2)
       GROUP BY si.id, sb.location_id
      HAVING currentStock <= threshold
       ORDER BY locationName ASC, deficitValue DESC, si.name ASC
       LIMIT 500`
-  ).bind(workspaceId).all<Record<string, any>>();
+  ).bind(workspaceId, clean(locationId)).all<Record<string, any>>();
   return rows.results || [];
 }
 
@@ -481,4 +482,43 @@ export async function sendWorkspaceLowStockNow(env: Env, workspaceId: string) {
   });
 
   return { workspaceId, status: delivery.sent ? 'sent' : 'email-error', recipients: recipients.length, lowStockCount: rows.length };
+}
+
+
+export async function sendWorkspaceLowStockToUser(
+  env: Env,
+  workspaceId: string,
+  recipient: string,
+  locationId = '',
+) {
+  const email = clean(recipient).toLowerCase();
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new Error('Your signed-in account does not have a valid email address.');
+  }
+  const workspace = await loadWorkspaceLowStockContext(env, workspaceId);
+  if (!workspace) throw new Error('Workspace not found.');
+  const rawSettings = safeJsonParse<Record<string, any>>(workspace.rawJson, {});
+  const rows = await getLowStockRows(env, workspaceId, locationId);
+  const generatedAt = nowIso();
+  const workspaceName = clean(rawSettings.siteName || workspace.name || workspaceId);
+  if (!rows.length) {
+    return { workspaceId, status: 'no_low_stock', recipients: 0, lowStockCount: 0 };
+  }
+  const locationLabel = clean(rows[0]?.locationName);
+  const subject = `Stock Notifications — ${workspaceName}${locationLabel ? ` · ${locationLabel}` : ''} (${rows.length})`;
+  const emailConfig = await getEmailDeliveryConfig(env);
+  const text = buildSummaryText(workspaceName, 'manual', rows, generatedAt);
+  const html = buildSummaryHtml(workspaceName, 'manual', rows, generatedAt);
+  const delivery = await sendEmail(env, emailConfig, { to: email, subject, text, html });
+  await recordRun(env, {
+    workspaceId,
+    scheduledFor: generatedAt,
+    sentAt: delivery.sent ? generatedAt : undefined,
+    status: delivery.sent ? 'sent' : 'email-error',
+    recipientCount: 1,
+    itemCount: rows.length,
+    errorMessage: delivery.sent ? undefined : clean((delivery as any).reason || 'Email delivery failed.'),
+  });
+  if (!delivery.sent) throw new Error(clean((delivery as any).reason || 'Email delivery failed.'));
+  return { workspaceId, status: 'sent', recipients: 1, lowStockCount: rows.length, recipient: email };
 }

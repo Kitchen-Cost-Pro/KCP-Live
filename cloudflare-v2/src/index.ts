@@ -41,7 +41,7 @@ async function dispatchCentral(request: Request, env: Env, url: URL): Promise<Re
     const workspaceId = decodeURIComponent(adminWorkspaceYocoM[1]);
     const action = decodeURIComponent(adminWorkspaceYocoM[2]);
     const allowedGetActions = new Set(['status', 'events']);
-    const allowedPostActions = new Set(['connect', 'disconnect', 'sync-catalogue', 'sync-sales', 'reconcile-sales', 'reset-webhook']);
+    const allowedPostActions = new Set(['connect', 'disconnect', 'sync-catalogue', 'sync-sales', 'reconcile-sales', 'retry-failed-orders', 'reset-webhook']);
     if ((request.method === 'GET' && allowedGetActions.has(action)) || (request.method === 'POST' && allowedPostActions.has(action))) {
       const adminSession = await requireAdmin(request, lenv);
       const auth = adminAuthContext(adminSession);

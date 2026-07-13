@@ -27,6 +27,7 @@ import {
 } from './services/database.js';
 import {
   exportWorkspaceSnapshot,
+  getGoLiveReadiness,
   getStockCategoryOptions,
   getYocoCategoryOptions,
   getWorkspaceSettingsSnapshot,
@@ -1489,13 +1490,14 @@ async function loadSettings(workspaceId) {
   };
 
   try {
-    const [settingsSnapshot, siteConfig, yocoCategories, stockCategories] = await Promise.all([
+    const [settingsSnapshot, siteConfig, yocoCategories, stockCategories, goLiveReadiness] = await Promise.all([
       getWorkspaceSettingsSnapshot(workspaceId),
       import('./services/orgTransferService.js')
         .then(({ getSiteConfiguration }) => getSiteConfiguration(workspaceId))
         .catch(() => null),
       getYocoCategoryOptions(workspaceId).catch(() => []),
-      getStockCategoryOptions(workspaceId).catch(() => [])
+      getStockCategoryOptions(workspaceId).catch(() => []),
+      getGoLiveReadiness(workspaceId).catch(() => ({ productCount: 0, recipeCount: 0, locationCount: 0 }))
     ]);
     const settings = normalizeSettings({
       ...settingsSnapshot,
@@ -1517,6 +1519,7 @@ async function loadSettings(workspaceId) {
       draft: settings,
       yocoCategories,
       stockCategories,
+      goLiveReadiness,
       error: ''
     };
     applyWorkspaceSettingsEffects(settings);
@@ -10548,7 +10551,11 @@ async function confirmGoLiveStockDepletion() {
 
 async function goLiveStockDepletion() {
   const draft = appState.settings.draft || createDefaultSettingsDraft();
-  const nextDraft = { ...draft, stockDepletionEnabled: true };
+  const nextDraft = {
+    ...draft,
+    stockDepletionEnabled: true,
+    stockDepletionEnabledAt: new Date().toISOString()
+  };
   await saveSettingsDraft({
     draft: nextDraft,
     successMessage: 'You are live. Completed Yoco sales will now deplete stock.'
@@ -17073,6 +17080,10 @@ function createDefaultSettingsDraft(seed = {}) {
     siteName: '',
     vatRate: 15,
     tradingTime: '23:59',
+    reportingDayFromHour: 0,
+    reportingDayToHour: 0,
+    tradingDayStartHour: 0,
+    tradingDayStartMinutes: 0,
     uiScale: 'normal',
     logoutTimeout: 30,
     costingMethod: 'last',
@@ -17087,6 +17098,8 @@ function createDefaultSettingsDraft(seed = {}) {
     orgId: '',
     corpId: '',
     viewingOnly: false,
+    stockDepletionEnabled: false,
+    stockDepletionEnabledAt: '',
     ...seed
   });
 }
