@@ -21,7 +21,9 @@ import {
   processYocoOrderReturns,
   resolveRefundReturnBehavior,
   stockValuationUnitCost,
+  yocoWebhookEventDisposition,
   yocoWebhookEventFields,
+  yocoWebhookPaymentSucceeded,
 } from "./yoco-sales";
 import { fetchModifierGroup, fetchOrder, fetchPayment, listOrders, listOrdersPage } from "./yoco-client";
 import {
@@ -14949,11 +14951,12 @@ export async function postYocoWebhook(
   const startedMs = Date.now();
   const receivedAt = nowIso();
   const body = await request.text();
-  const eventId =
+  const headerEventId =
     request.headers.get("webhook-id") ||
     request.headers.get("svix-id") ||
     request.headers.get("x-yoco-event-id") ||
-    id("yoco_evt");
+    "";
+  let eventId = headerEventId || id("yoco_evt");
   let webhookDbId = id("yoco_evt");
   const hash = Array.from(
     new Uint8Array(
@@ -14965,6 +14968,10 @@ export async function postYocoWebhook(
   let payload: Record<string, unknown> = {};
   try {
     payload = body.trim() ? (JSON.parse(body) as Record<string, unknown>) : {};
+    eventId = headerEventId || text(
+      payload.id || payload.event_id || payload.eventId,
+      eventId,
+    );
   } catch {
     await recordYocoWebhookRejection(env, {
       workspaceId,
@@ -14986,6 +14993,7 @@ export async function postYocoWebhook(
     return error(request, env, 400, "Yoco webhook payload was not valid JSON.");
   }
   const { eventType, orderId, paymentId } = yocoWebhookEventFields(payload);
+  const eventDisposition = yocoWebhookEventDisposition(eventType);
   const connection = await getYocoConnection(env, workspaceId);
   if (!connection?.webhook_secret) {
     await recordYocoWebhookRejection(env, {
@@ -15074,15 +15082,109 @@ export async function postYocoWebhook(
   const existing = await env.DB.prepare(
     `SELECT id, status
        FROM yoco_webhook_events
-      WHERE workspace_id = ?1 AND payload_hash = ?2
+      WHERE workspace_id = ?1
+        AND (
+          payload_hash = ?2
+          OR (?3 <> '' AND provider_event_id = ?3)
+        )
+      ORDER BY CASE WHEN payload_hash = ?2 THEN 0 ELSE 1 END
       LIMIT 1`,
   )
-    .bind(workspaceId, hash)
+    .bind(workspaceId, hash, eventId)
     .first<{ id: string; status: string }>();
 
   if (existing?.id) webhookDbId = existing.id;
-  if (existing?.status === "processed") {
+  if (["processed", "ignored"].includes(text(existing?.status).toLowerCase())) {
     return json(request, env, { ok: true, status: "duplicate" });
+  }
+
+  // Atomically claim this delivery before doing any external reads or stock work.
+  // A concurrent retry of the same Yoco event receives 200 but cannot enter the
+  // processing path while the first delivery owns the row. A five-minute lease
+  // lets a later retry recover an event if the Worker was terminated mid-flight.
+  const processingStartedAt = nowIso();
+  const claim = await env.DB.prepare(
+    `UPDATE yoco_webhook_events
+        SET status = 'processing',
+            processed_at = ?2,
+            error_message = NULL
+      WHERE id = ?1
+        AND (
+          status IN ('received', 'failed', 'rejected', 'attention')
+          OR (
+            status = 'processing'
+            AND datetime(COALESCE(processed_at, created_at)) <= datetime(?2, '-5 minutes')
+          )
+        )`,
+  ).bind(webhookDbId, processingStartedAt).run();
+  if (Number(claim.meta?.changes || claim.meta?.rows_written || 0) === 0) {
+    return json(request, env, { ok: true, status: "processing" });
+  }
+
+  if (eventDisposition === "ignored") {
+    const message = `Webhook event ${eventType || "unknown"} is not a stock-changing Yoco event and was safely ignored.`;
+    await env.DB.prepare(
+      `UPDATE yoco_webhook_events
+          SET status = 'ignored',
+              processed_at = ?2,
+              error_message = ?3
+        WHERE id = ?1`,
+    ).bind(webhookDbId, nowIso(), message).run();
+    await recordIntegrationLog(env, workspaceId, {
+      operation: "yoco.webhook.ignore",
+      status: "success",
+      message,
+      details: { eventId, eventType, eventDisposition, signatureVerified: true },
+      startedAt: receivedAt,
+      completedAt: nowIso(),
+      durationMs: Date.now() - startedMs,
+    });
+    return json(request, env, { ok: true, status: "ignored", message });
+  }
+
+  if (eventDisposition === "waiting") {
+    const message = `Webhook event ${eventType} was received. Waiting for the final order.completed event before deducting stock.`;
+    await env.DB.prepare(
+      `UPDATE yoco_webhook_events
+          SET status = 'attention',
+              processed_at = ?2,
+              error_message = ?3
+        WHERE id = ?1`,
+    ).bind(webhookDbId, nowIso(), message).run();
+    await recordIntegrationLog(env, workspaceId, {
+      operation: "yoco.webhook.waiting_for_order_completion",
+      status: "warning",
+      message,
+      details: { eventId, eventType, orderId, paymentId, signatureVerified: true },
+      startedAt: receivedAt,
+      completedAt: nowIso(),
+      durationMs: Date.now() - startedMs,
+    });
+    return json(request, env, { ok: true, status: "attention", message });
+  }
+
+  if (
+    ["payment.succeeded", "payment.successful"].includes(text(eventType).toLowerCase())
+    && !yocoWebhookPaymentSucceeded(payload)
+  ) {
+    const message = `Webhook event ${eventType} did not contain a successful or succeeded payment status and was ignored.`;
+    await env.DB.prepare(
+      `UPDATE yoco_webhook_events
+          SET status = 'ignored',
+              processed_at = ?2,
+              error_message = ?3
+        WHERE id = ?1`,
+    ).bind(webhookDbId, nowIso(), message).run();
+    await recordIntegrationLog(env, workspaceId, {
+      operation: "yoco.webhook.payment_status",
+      status: "warning",
+      message,
+      details: { eventId, eventType, orderId, paymentId, signatureVerified: true },
+      startedAt: receivedAt,
+      completedAt: nowIso(),
+      durationMs: Date.now() - startedMs,
+    });
+    return json(request, env, { ok: true, status: "ignored", message });
   }
 
   let order = extractYocoOrder(payload);
@@ -15137,38 +15239,9 @@ export async function postYocoWebhook(
     ).bind(webhookDbId, resolvedOrderId).run();
   }
 
-  // payment.created is emitted before the order is guaranteed to be closed. It is
-  // retained for compatibility with older subscriptions, but it is not treated as
-  // the final stock trigger. The replacement subscription uses order.completed.
-  if (String(eventType || '').toLowerCase() === 'payment.created') {
-    const message = 'Payment received. Waiting for the final order.completed event before deducting stock.';
-    await env.DB.prepare(
-      `UPDATE yoco_webhook_events
-          SET status = 'attention',
-              yoco_order_id = COALESCE(NULLIF(?3, ''), yoco_order_id),
-              processed_at = ?2,
-              error_message = ?4
-        WHERE id = ?1`,
-    ).bind(webhookDbId, nowIso(), resolvedOrderId, message).run();
-    await recordIntegrationLog(env, workspaceId, {
-      operation: 'yoco.webhook.waiting_for_order_completion',
-      status: 'warning',
-      message,
-      details: { eventId, eventType, orderId: resolvedOrderId || orderId, paymentId },
-      startedAt: receivedAt,
-      completedAt: nowIso(),
-      durationMs: Date.now() - startedMs,
-    });
-    return json(request, env, { ok: true, status: 'attention', message });
-  }
-
   try {
-    const isRefund = String(eventType || "")
-      .toLowerCase()
-      .includes("refund");
-    const isReturn = String(eventType || "")
-      .toLowerCase()
-      .includes("return");
+    const isRefund = eventDisposition === "refund";
+    const isReturn = eventDisposition === "return";
     const refundObj = isRefund ? findRefund(order, paymentId) : null;
     const refundBehavior = refundObj
       ? resolveRefundReturnBehavior(refundObj)

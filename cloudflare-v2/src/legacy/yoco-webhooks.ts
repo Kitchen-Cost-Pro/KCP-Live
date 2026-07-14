@@ -1,4 +1,4 @@
-import { hmacSha256Base64, hmacSha256Hex, timingSafeEqual } from './crypto';
+import { hmacSha256Base64, timingSafeEqual } from './crypto';
 
 function text(value: unknown, fallback = '') {
   return String(value ?? fallback).trim();
@@ -36,21 +36,6 @@ function standardWebhookSecret(secret: string) {
   return base64SecretBytes(value.slice('whsec_'.length));
 }
 
-function fallbackSecretCandidates(secret: string) {
-  const value = text(secret);
-  if (!value) return [];
-  const candidates: Array<string | Uint8Array> = [value];
-  if (value.startsWith('whsec_')) {
-    const afterPrefix = value.slice('whsec_'.length);
-    const decoded = base64SecretBytes(afterPrefix);
-    if (decoded) candidates.unshift(decoded);
-    candidates.push(afterPrefix);
-  }
-  return candidates.filter((candidate, index) => (
-    typeof candidate !== 'string' || candidates.findIndex((entry) => entry === candidate) === index
-  ));
-}
-
 function uniqueSecrets(secrets: string | string[]) {
   return (Array.isArray(secrets) ? secrets : [secrets])
     .map((secret) => text(secret))
@@ -75,40 +60,17 @@ export async function verifyYocoWebhook(rawBody: string, headers: Headers, webho
   const provided = signatureValues(signatureHeader);
   const secrets = uniqueSecrets(webhookSecrets);
   if (!signatureHeader || !provided.length || !secrets.length) return false;
-  if ((webhookId || webhookTimestamp) && (!webhookId || !webhookTimestamp || !webhookTimestampIsFresh(webhookTimestamp))) {
-    return false;
-  }
+  if (!webhookId || !webhookTimestamp || !webhookTimestampIsFresh(webhookTimestamp)) return false;
 
   // Yoco documents the Standard Webhooks v1 format: signed content is
   // webhook-id + '.' + webhook-timestamp + '.' + the raw request body, and the
   // whsec_ prefix is removed before base64-decoding the HMAC key.
-  if (webhookId && webhookTimestamp) {
-    const signedContent = `${webhookId}.${webhookTimestamp}.${rawBody}`;
-    for (const secret of secrets) {
-      const decodedSecret = standardWebhookSecret(secret);
-      if (!decodedSecret) continue;
-      const expected = await hmacSha256Base64(decodedSecret, signedContent);
-      if (provided.some((signature) => timingSafeEqual(expected, signature))) return true;
-    }
-  }
-
-  // Compatibility fallback for older/staged tenants that may have saved a raw
-  // signing key or received an older non-standard signature header. Standard
-  // Yoco deliveries are accepted by the branch above.
-  const fallbackBodies = [
-    webhookId && webhookTimestamp ? `${webhookId}.${webhookTimestamp}.${rawBody}` : '',
-    rawBody
-  ].filter(Boolean);
+  const signedContent = `${webhookId}.${webhookTimestamp}.${rawBody}`;
   for (const secret of secrets) {
-    for (const candidateSecret of fallbackSecretCandidates(secret)) {
-      for (const body of fallbackBodies) {
-        const base64 = await hmacSha256Base64(candidateSecret, body);
-        const hex = await hmacSha256Hex(candidateSecret, body);
-        if (provided.some((sig) => timingSafeEqual(base64, sig) || timingSafeEqual(hex, sig))) {
-          return true;
-        }
-      }
-    }
+    const decodedSecret = standardWebhookSecret(secret);
+    if (!decodedSecret) continue;
+    const expected = await hmacSha256Base64(decodedSecret, signedContent);
+    if (provided.some((signature) => timingSafeEqual(expected, signature))) return true;
   }
   return false;
 }

@@ -490,5 +490,18 @@ CREATE INDEX IF NOT EXISTS idx_integration_logs_workspace_status_date
   `ALTER TABLE yoco_connections ADD COLUMN sales_baseline_at TEXT;
 UPDATE yoco_connections
    SET sales_baseline_at = COALESCE(last_successful_order_updated_at, last_sales_sync_at, created_at)
- WHERE COALESCE(sales_baseline_at, '') = '';`
+ WHERE COALESCE(sales_baseline_at, '') = '';`,
+  // 19 — use Yoco's stable provider event id as the primary webhook replay key.
+  // Payload hashes remain a fallback for older deliveries that omitted an event id.
+  `DELETE FROM yoco_webhook_events
+ WHERE COALESCE(TRIM(provider_event_id), '') <> ''
+   AND rowid NOT IN (
+     SELECT MIN(rowid)
+       FROM yoco_webhook_events
+      WHERE COALESCE(TRIM(provider_event_id), '') <> ''
+      GROUP BY workspace_id, provider_event_id
+   );
+CREATE UNIQUE INDEX IF NOT EXISTS ux_yoco_webhook_events_workspace_provider_event
+  ON yoco_webhook_events(workspace_id, provider_event_id)
+  WHERE COALESCE(TRIM(provider_event_id), '') <> '';`
 ];

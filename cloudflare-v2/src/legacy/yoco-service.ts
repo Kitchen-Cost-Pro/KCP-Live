@@ -1571,12 +1571,16 @@ async function loadWebhookBackedOrders(
     `SELECT id, yoco_order_id, event_type, raw_json, created_at
        FROM yoco_webhook_events event
       WHERE event.workspace_id = ?1
-        AND lower(event.event_type) NOT LIKE '%refund%'
         AND (
           lower(event.event_type) LIKE '%payment%'
           OR lower(event.event_type) LIKE '%order%'
-          OR lower(event.event_type) LIKE '%sale%'
         )
+        AND lower(replace(event.event_type, '_', '.')) IN (
+          'order.completed',
+          'payment.succeeded',
+          'payment.successful'
+        )
+        AND lower(COALESCE(event.status, 'received')) <> 'ignored'
         AND datetime(event.created_at) >= datetime(?2)
         AND (
           COALESCE(event.yoco_order_id, '') = ''

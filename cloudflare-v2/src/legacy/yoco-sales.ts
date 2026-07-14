@@ -110,6 +110,7 @@ export interface YocoProcessResult {
   reason?: string;
   retryable?: boolean;
   missingRecipes: number;
+  insufficientStockItems?: number;
   orderLines: number;
   stockMovements: number;
   skippedDuplicates?: number;
@@ -278,7 +279,8 @@ const FINAL_YOCO_SALE_STATUSES = new Set([
   'refunded',
   'settled',
   'success',
-  'successful'
+  'successful',
+  'succeeded'
 ]);
 
 function yocoOrderStatusValues(order: Row) {
@@ -304,17 +306,7 @@ function yocoOrderStatusValues(order: Row) {
 
 export function yocoOrderReadyForStock(order: Row) {
   const statuses = yocoOrderStatusValues(order);
-  if (!statuses.length) return true;
-  if (statuses.some((status) => FINAL_YOCO_SALE_STATUSES.has(status))) return true;
-  if (statuses.some((status) => (
-    status.includes('approved') ||
-    status.includes('captured') ||
-    status.includes('completed') ||
-    status.includes('paid') ||
-    status.includes('settled') ||
-    status.includes('success')
-  ))) return true;
-  return Boolean(text(
+  const hasCompletionTimestamp = Boolean(text(
     order.paid_at ||
     order.paidAt ||
     order.closed_at ||
@@ -322,6 +314,20 @@ export function yocoOrderReadyForStock(order: Row) {
     order.completed_at ||
     order.completedAt
   ));
+  // An order with neither a final status nor a completion timestamp is not
+  // proven paid. Keep it retryable instead of deducting stock optimistically.
+  if (!statuses.length) return hasCompletionTimestamp;
+  if (statuses.some((status) => FINAL_YOCO_SALE_STATUSES.has(status))) return true;
+  if (statuses.some((status) => (
+    status.includes('approved') ||
+    status.includes('captured') ||
+    status.includes('completed') ||
+    status.includes('paid') ||
+    status.includes('settled') ||
+    status.includes('success') ||
+    status.includes('succeed')
+  ))) return true;
+  return hasCompletionTimestamp;
 }
 
 function refundProportion(order: Row, refund: Row): number {
@@ -1125,46 +1131,146 @@ export async function processYocoOrderReturns(
   return { returnsProcessed: returns.length, totalMovements, results };
 }
 
-export function extractYocoOrder(payload: Row) {
+function webhookEnvelope(payload: Row) {
+  return objectValue(payload.payload);
+}
+
+function webhookMetadata(value: Row) {
+  return objectValue(value.metadata);
+}
+
+function webhookPaymentStatusValues(payload: Row) {
+  const envelope = webhookEnvelope(payload);
   const data = objectValue(payload.data);
+  const payloadPayment = objectValue(payload.payment);
+  const envelopePayment = objectValue(envelope.payment);
+  const dataPayment = objectValue(data.payment);
+  return [
+    envelope.status,
+    envelope.payment_status,
+    envelope.paymentStatus,
+    payloadPayment.status,
+    payloadPayment.payment_status,
+    payloadPayment.paymentStatus,
+    envelopePayment.status,
+    envelopePayment.payment_status,
+    envelopePayment.paymentStatus,
+    dataPayment.status,
+    dataPayment.payment_status,
+    dataPayment.paymentStatus
+  ].map(normalizeText).filter(Boolean);
+}
+
+export function yocoWebhookPaymentSucceeded(payload: Row) {
+  const statuses = webhookPaymentStatusValues(payload);
+  if (!statuses.length) return false;
+  return statuses.some((status) => ['successful', 'succeeded', 'success'].includes(status));
+}
+
+export function yocoWebhookEventDisposition(eventTypeValue: unknown) {
+  const eventType = normalizeText(eventTypeValue).replace(/_/g, '.');
+  if (['order.completed', 'payment.succeeded', 'payment.successful'].includes(eventType)) return 'sale';
+  if (eventType.includes('refund')) return 'refund';
+  if (eventType.includes('return')) return 'return';
+  if (['payment.created', 'order.created', 'order.updated'].includes(eventType)) return 'waiting';
+  return 'ignored';
+}
+
+export function extractYocoOrder(payload: Row) {
+  const envelope = webhookEnvelope(payload);
+  const data = objectValue(payload.data);
+  const envelopeData = objectValue(envelope.data);
   const candidates = [
     objectValue(payload.order),
+    objectValue(envelope.order),
     objectValue(data.order),
+    objectValue(envelopeData.order),
+    objectValue(envelope),
     objectValue(data),
     payload
   ];
-  return candidates.find((candidate) => text(candidate.id || candidate.order_id || candidate.orderId) && getOrderLineItems(candidate).length) || null;
+  return candidates.find((candidate) => (
+    text(candidate.id || candidate.order_id || candidate.orderId || candidate.reference)
+    && getOrderLineItems(candidate).length
+  )) || null;
 }
 
 export function yocoWebhookEventFields(payload: Row) {
+  const envelope = webhookEnvelope(payload);
   const data = objectValue(payload.data);
+  const envelopeData = objectValue(envelope.data);
   const payloadOrder = objectValue(payload.order);
+  const envelopeOrder = objectValue(envelope.order);
   const dataOrder = objectValue(data.order);
+  const envelopeDataOrder = objectValue(envelopeData.order);
   const payloadPayment = objectValue(payload.payment);
+  const envelopePayment = objectValue(envelope.payment);
   const dataPayment = objectValue(data.payment);
-  const eventType = text(payload.event_type || payload.event || payload.type || data.event_type || data.event || data.type);
+  const envelopeDataPayment = objectValue(envelopeData.payment);
+  const envelopeMetadata = webhookMetadata(envelope);
+  const payloadMetadata = webhookMetadata(payload);
+  const eventType = text(
+    payload.event_type ||
+    payload.eventType ||
+    payload.event ||
+    payload.type ||
+    data.event_type ||
+    data.eventType ||
+    data.event ||
+    envelope.event_type ||
+    envelope.eventType ||
+    envelope.event
+  );
   const paymentEvent = normalizeText(eventType).includes('payment');
   return {
     eventType,
     orderId: text(
       payload.order_id ||
       payload.orderId ||
+      payload.reference ||
       payloadOrder.id ||
+      envelope.order_id ||
+      envelope.orderId ||
+      envelope.reference ||
+      envelopeOrder.id ||
       data.order_id ||
       data.orderId ||
+      data.reference ||
       dataOrder.id ||
+      envelopeData.order_id ||
+      envelopeData.orderId ||
+      envelopeData.reference ||
+      envelopeDataOrder.id ||
+      envelopePayment.order_id ||
+      envelopePayment.orderId ||
+      objectValue(envelopePayment.order).id ||
       dataPayment.order_id ||
       dataPayment.orderId ||
-      objectValue(dataPayment.order).id
+      objectValue(dataPayment.order).id ||
+      envelopeDataPayment.order_id ||
+      envelopeDataPayment.orderId ||
+      objectValue(envelopeDataPayment.order).id ||
+      envelopeMetadata.order_id ||
+      envelopeMetadata.orderId ||
+      envelopeMetadata.reference ||
+      payloadMetadata.order_id ||
+      payloadMetadata.orderId ||
+      payloadMetadata.reference
     ),
     paymentId: text(
       payload.payment_id ||
       payload.paymentId ||
       payloadPayment.id ||
+      envelope.payment_id ||
+      envelope.paymentId ||
+      envelopePayment.id ||
       data.payment_id ||
       data.paymentId ||
       dataPayment.id ||
-      (paymentEvent ? data.id : '')
+      envelopeData.payment_id ||
+      envelopeData.paymentId ||
+      envelopeDataPayment.id ||
+      (paymentEvent ? envelope.id || data.id : '')
     )
   };
 }
@@ -1289,9 +1395,11 @@ export async function processYocoOrder(
   const existingSignatureHashes = new Set(existingSignatureRows.map((row) => text(row.signature_hash)).filter(Boolean));
   const yocoOrderDbId = existingOrder?.id || id('yoco_order');
   let missingRecipes = 0;
+  let insufficientStockItems = 0;
   let orderLineCount = 0;
   let movementCount = 0;
   let skippedDuplicates = 0;
+  const plannedMovementIds: string[] = [];
   const orderSellingLocations = new Set<string>();
   const pendingBalanceDeltas = new Map<string, number>();
   const existingSellingLocation = existingOrder?.location_id
@@ -1376,6 +1484,7 @@ export async function processYocoOrder(
       const sourceLocationIds = new Set<string>();
       const lineDbId = id('yoco_line');
       const componentMovementStart = movementCount;
+      const componentMovementIds: string[] = [];
 
       if (!effectiveProduct || !recipe) {
         missingRecipes += 1;
@@ -1392,25 +1501,47 @@ export async function processYocoOrder(
           recipeLines
         );
         if (!depletionLines.length) missingRecipes += 1;
-        for (const depletion of depletionLines) {
-          const sourceLocation = resolveSourceLocation(sellingLocation, depletion.stockItem, locations);
-          const sourceLocationId = text(sourceLocation.id);
-          sourceLocationIds.add(sourceLocationId);
-          // For 'wastage' behavior: item is damaged, don't restore stock — deduct direction like a sale
-          const isWastageBehavior = mode === 'refund' && returnBehavior === 'wastage';
-          const deltaQty = quantitySold * depletion.quantity * (mode === 'refund' && !isWastageBehavior ? 1 : -1);
+	        // Preflight the entire recipe component before queuing any deduction. Without
+	        // this aggregate check a multi-ingredient recipe could deduct its first item,
+	        // fail on a later item, and then be marked partially processed. The SQL guard
+	        // below remains the final race-condition backstop at commit time.
+	        const isWastageBehavior = mode === 'refund' && returnBehavior === 'wastage';
+	        const depletionPlans = depletionLines.map((depletion) => {
+	          const sourceLocation = resolveSourceLocation(sellingLocation, depletion.stockItem, locations);
+	          const sourceLocationId = text(sourceLocation.id);
+	          const deltaQty = quantitySold * depletion.quantity * (mode === 'refund' && !isWastageBehavior ? 1 : -1);
+	          const balanceKey = `${text(depletion.stockItem.id)}:${sourceLocationId}`;
+	          return { depletion, sourceLocation, sourceLocationId, deltaQty, balanceKey };
+	        });
+	        const componentBalanceDeltas = new Map<string, number>();
+	        if (!isWastageBehavior) {
+	          for (const plan of depletionPlans) {
+	            componentBalanceDeltas.set(
+	              plan.balanceKey,
+	              numberValue(componentBalanceDeltas.get(plan.balanceKey), 0) + plan.deltaQty,
+	            );
+	          }
+	        }
+	        const componentInsufficient = !isWastageBehavior && [...componentBalanceDeltas.entries()].some(
+	          ([balanceKey, aggregateDelta]) => aggregateDelta < 0
+	            && numberValue(stockBalanceByKey.get(balanceKey), 0)
+	              + numberValue(pendingBalanceDeltas.get(balanceKey), 0)
+	              + aggregateDelta < 0,
+	        );
+	        if (componentInsufficient) insufficientStockItems += 1;
+
+	        for (const plan of componentInsufficient ? [] : depletionPlans) {
+	          const { depletion, sourceLocation, sourceLocationId, deltaQty, balanceKey } = plan;
+	          sourceLocationIds.add(sourceLocationId);
           const locationCostKey = `${text(depletion.stockItem.id)}:${sourceLocationId}`;
           const unitCost = locationCostByKey.has(locationCostKey)
             ? numberValue(locationCostByKey.get(locationCostKey), 0)
             : stockValuationUnitCost(depletion.stockItem);
           const movementId = id('mov');
-          const balanceKey = `${text(depletion.stockItem.id)}:${sourceLocationId}`;
           let availableBefore: number | null = null;
-          let insufficientStock = false;
           if (deltaQty < 0) {
-            const available = numberValue(stockBalanceByKey.get(balanceKey), 0) + numberValue(pendingBalanceDeltas.get(balanceKey), 0);
-            availableBefore = available;
-            insufficientStock = available + deltaQty < 0;
+	            availableBefore = numberValue(stockBalanceByKey.get(balanceKey), 0)
+	              + numberValue(pendingBalanceDeltas.get(balanceKey), 0);
           }
           // Only track pending balance deltas when stock will actually be updated
           if (!isWastageBehavior) {
@@ -1456,42 +1587,75 @@ export async function processYocoOrder(
             stockCategory: text(depletion.stockItem.category),
             recipeLineId: text(depletion.recipeLine.id),
             stockAvailableBefore: availableBefore,
-            insufficientStock,
+	            insufficientStock: false,
             valuationCostSource: locationCostByKey.has(locationCostKey) ? 'location' : 'stock_item_fallback'
           };
-
-          statements.push(env.DB.prepare(
-            `INSERT INTO stock_movements
-              (id, workspace_id, stock_item_id, location_id, movement_type, document_type, document_id,
-               source_location_id, quantity_delta, unit_cost, value_delta, occurred_at, created_by, metadata_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'yoco_order', ?6, ?7, ?8, ?9, ?10, ?11, 'yoco', ?12, datetime('now'))`
-          ).bind(
-            movementId,
-            workspaceId,
-            text(depletion.stockItem.id),
-            sourceLocationId,
-            resolvedMovementType,
-            orderId,
-            sourceLocationId,
-            deltaQty,
-            unitCost,
-            deltaQty * unitCost,
-            occurredAt,
-            jsonString(metadata)
-          ));
 
           // Damaged/defective: don't restore stock — item can't go back on shelf.
           // The original sale deduction already stands; we just record the wastage movement above.
           if (!isWastageBehavior) {
+            // Ensure a balance row exists, then apply an atomic guarded delta. The
+            // immediately following movement INSERT uses SQLite changes() so a
+            // concurrent/late insufficient balance can never produce a ledger row
+            // without the matching balance update.
             statements.push(env.DB.prepare(
-              `INSERT INTO stock_balances (workspace_id, stock_item_id, location_id, quantity, updated_at)
-               VALUES (?1, ?2, ?3, ?4, datetime('now'))
-               ON CONFLICT(workspace_id, stock_item_id, location_id) DO UPDATE SET
-                quantity = quantity + excluded.quantity,
-                updated_at = datetime('now')`
+              `INSERT OR IGNORE INTO stock_balances
+                (workspace_id, stock_item_id, location_id, quantity, updated_at)
+               VALUES (?1, ?2, ?3, 0, datetime('now'))`
+            ).bind(workspaceId, text(depletion.stockItem.id), sourceLocationId));
+            statements.push(env.DB.prepare(
+              `UPDATE stock_balances
+                  SET quantity = quantity + ?4,
+                      updated_at = datetime('now')
+                WHERE workspace_id = ?1
+                  AND stock_item_id = ?2
+                  AND location_id = ?3
+                  AND (?4 >= 0 OR quantity + ?4 >= 0)`
             ).bind(workspaceId, text(depletion.stockItem.id), sourceLocationId, deltaQty));
+            statements.push(env.DB.prepare(
+              `INSERT INTO stock_movements
+                (id, workspace_id, stock_item_id, location_id, movement_type, document_type, document_id,
+                 source_location_id, quantity_delta, unit_cost, value_delta, occurred_at, created_by, metadata_json, created_at)
+               SELECT ?1, ?2, ?3, ?4, ?5, 'yoco_order', ?6, ?7, ?8, ?9, ?10, ?11, 'yoco', ?12, datetime('now')
+                WHERE changes() = 1`
+            ).bind(
+              movementId,
+              workspaceId,
+              text(depletion.stockItem.id),
+              sourceLocationId,
+              resolvedMovementType,
+              orderId,
+              sourceLocationId,
+              deltaQty,
+              unitCost,
+              deltaQty * unitCost,
+              occurredAt,
+              jsonString(metadata)
+            ));
+          } else {
+            statements.push(env.DB.prepare(
+              `INSERT INTO stock_movements
+                (id, workspace_id, stock_item_id, location_id, movement_type, document_type, document_id,
+                 source_location_id, quantity_delta, unit_cost, value_delta, occurred_at, created_by, metadata_json, created_at)
+               VALUES (?1, ?2, ?3, ?4, ?5, 'yoco_order', ?6, ?7, ?8, ?9, ?10, ?11, 'yoco', ?12, datetime('now'))`
+            ).bind(
+              movementId,
+              workspaceId,
+              text(depletion.stockItem.id),
+              sourceLocationId,
+              resolvedMovementType,
+              orderId,
+              sourceLocationId,
+              deltaQty,
+              unitCost,
+              deltaQty * unitCost,
+              occurredAt,
+              jsonString(metadata)
+            ));
           }
 
+          componentMovementIds.push(movementId);
+          plannedMovementIds.push(movementId);
           movementCount += 1;
         }
       }
@@ -1532,15 +1696,34 @@ export async function processYocoOrder(
       // A component is only terminally deduplicated after it has produced at least one
       // stock movement. Missing product/recipe mappings stay retryable so a later resync can
       // deduct stock after the setup is corrected.
-      if (movementCount > componentMovementStart) {
-        statements.push(env.DB.prepare(
-          `INSERT INTO yoco_processed_signatures
-            (workspace_id, signature_hash, event_type, yoco_order_id, payment_id, raw_signature)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-           ON CONFLICT(workspace_id, signature_hash) DO NOTHING`
-        ).bind(workspaceId, signatureHash, options.eventType || `yoco.${mode}`, orderId, paymentId || null, rawSignature));
-        existingSignatureHashes.add(signatureHash);
-      }
+	      if (movementCount > componentMovementStart) {
+	        if (componentMovementIds.length) {
+	          const movementPlaceholders = componentMovementIds
+	            .map((_, index) => `?${index + 7}`)
+	            .join(', ');
+	          statements.push(env.DB.prepare(
+	            `INSERT INTO yoco_processed_signatures
+	              (workspace_id, signature_hash, event_type, yoco_order_id, payment_id, raw_signature)
+	             SELECT ?1, ?2, ?3, ?4, ?5, ?6
+	              WHERE EXISTS (
+	                SELECT 1
+	                  FROM stock_movements
+	                 WHERE workspace_id = ?1
+	                   AND id IN (${movementPlaceholders})
+	              )
+	             ON CONFLICT(workspace_id, signature_hash) DO NOTHING`
+	          ).bind(
+	            workspaceId,
+	            signatureHash,
+	            options.eventType || `yoco.${mode}`,
+	            orderId,
+	            paymentId || null,
+	            rawSignature,
+	            ...componentMovementIds,
+	          ));
+	          existingSignatureHashes.add(signatureHash);
+	        }
+	      }
 
       orderLineCount += 1;
     }
@@ -1556,16 +1739,36 @@ export async function processYocoOrder(
 
   if (statements.length) await env.DB.batch(statements);
 
-  const retryable = missingRecipes > 0;
+  let actualMovementCount = 0;
+  for (let index = 0; index < plannedMovementIds.length; index += 100) {
+    const ids = plannedMovementIds.slice(index, index + 100);
+    const placeholders = ids.map((_, itemIndex) => `?${itemIndex + 2}`).join(', ');
+    const row = await env.DB.prepare(
+      `SELECT COUNT(*) AS count
+         FROM stock_movements
+        WHERE workspace_id = ?1
+          AND id IN (${placeholders})`
+    ).bind(workspaceId, ...ids).first<{ count?: number }>();
+    actualMovementCount += numberValue(row?.count, 0);
+  }
+
+  const retryable = missingRecipes > 0 || insufficientStockItems > 0;
+  const partial = actualMovementCount > 0;
+  const reason = insufficientStockItems > 0
+    ? (missingRecipes > 0
+      ? (partial ? 'partially_processed_missing_recipe_or_mapping_and_insufficient_stock' : 'missing_recipe_or_mapping_and_insufficient_stock')
+      : (partial ? 'partially_processed_insufficient_stock' : 'insufficient_stock'))
+    : missingRecipes > 0
+      ? (partial ? 'partially_processed_missing_recipe_or_mapping' : 'missing_recipe_or_mapping')
+      : skippedDuplicates && !orderLineCount ? 'duplicate' : undefined;
   return {
-    processed: movementCount > 0 || skippedDuplicates > 0,
-    reason: retryable
-      ? (movementCount > 0 ? 'partially_processed_missing_recipe_or_mapping' : 'missing_recipe_or_mapping')
-      : skippedDuplicates && !orderLineCount ? 'duplicate' : undefined,
+    processed: actualMovementCount > 0 || skippedDuplicates > 0,
+    reason,
     retryable,
     missingRecipes,
+    insufficientStockItems,
     orderLines: orderLineCount,
-    stockMovements: movementCount,
+    stockMovements: actualMovementCount,
     skippedDuplicates
   };
 }

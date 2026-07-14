@@ -22,17 +22,62 @@ function parseJson(value: string) {
   }
 }
 
+const LIST_KEYS = [
+  'items',
+  'results',
+  'locations',
+  'orders',
+  'refunds',
+  'categories',
+  'item_categories',
+  'itemCategories',
+  'brands',
+  'item_brands',
+  'itemBrands',
+  'modifier_groups',
+  'modifierGroups',
+  'subscriptions',
+  'webhooks'
+];
+
 function listData(page: any) {
   if (Array.isArray(page)) return page;
-  for (const key of ['data', 'items', 'results', 'locations', 'orders', 'refunds', 'categories', 'item_categories', 'itemCategories', 'brands', 'item_brands', 'itemBrands', 'modifier_groups', 'modifierGroups']) {
-    if (Array.isArray(page?.[key])) return page[key];
+
+  // Yoco endpoints are not completely uniform. Some return a top-level array,
+  // some return { data: [...] }, and others wrap a named collection inside
+  // data/result/payload. Inspect each supported envelope before concluding that
+  // the API returned zero rows.
+  const containers = [page, page?.data, page?.result, page?.payload]
+    .filter((value, index, values) => (
+      value && typeof value === 'object' && !Array.isArray(value) && values.indexOf(value) === index
+    ));
+
+  for (const container of containers) {
+    if (Array.isArray(container?.data)) return container.data;
+    for (const key of LIST_KEYS) {
+      if (Array.isArray(container?.[key])) return container[key];
+    }
   }
   return [];
+}
+
+function nextCursor(page: any) {
+  const containers = [page, page?.data, page?.result, page?.payload]
+    .filter((value) => value && typeof value === 'object' && !Array.isArray(value));
+  for (const container of containers) {
+    const cursor = container?.next_cursor
+      || container?.nextCursor
+      || container?.pagination?.next_cursor
+      || container?.pagination?.nextCursor;
+    if (cursor) return cursor;
+  }
+  return null;
 }
 
 function objectData(page: any) {
   if (page?.data && typeof page.data === 'object' && !Array.isArray(page.data)) return page.data;
   if (page?.result && typeof page.result === 'object' && !Array.isArray(page.result)) return page.result;
+  if (page?.payload && typeof page.payload === 'object' && !Array.isArray(page.payload)) return page.payload;
   return page;
 }
 
@@ -89,7 +134,7 @@ export async function listAllPages(env: Env, apiKey: string, path: string, param
       }
     }));
     rows.push(...listData(page));
-    cursor = page?.next_cursor || page?.nextCursor || page?.pagination?.next_cursor || null;
+    cursor = nextCursor(page);
   } while (cursor);
   return rows;
 }
@@ -147,7 +192,7 @@ export async function listOrdersPage(env: Env, apiKey: string, params: Record<st
   }));
   return {
     rows: listData(page),
-    nextCursor: page?.next_cursor || page?.nextCursor || page?.pagination?.next_cursor || null
+    nextCursor: nextCursor(page)
   };
 }
 
