@@ -23,8 +23,13 @@ import {
   testWebhookSubscription,
   yocoFetch
 } from './yoco-client';
-import { extractYocoOrder, processYocoOrder, yocoWebhookEventFields } from './yoco-sales';
-import { findRefund } from './yoco-webhooks';
+import {
+  extractYocoOrder,
+  processYocoOrder,
+  resolveRefundReturnBehavior,
+  yocoWebhookEventFields,
+} from './yoco-sales';
+import { findRefund, findRefunds } from './yoco-webhooks';
 import { recordIntegrationLog, runLoggedIntegrationOperation } from './integration-log';
 
 type Row = Record<string, unknown>;
@@ -352,11 +357,6 @@ async function createYocoWebhookWithFallback(env: Env, apiKey: string, webhookUr
   const attempts = [
     // Official Yoco API shape: notification_url + explicit event_types.
     { event_types: YOCO_WEBHOOK_EVENT_TYPES, name, notification_url: webhookUrl },
-    // Alternate shape accepted by some Standard Webhooks based Yoco endpoints.
-    { event_types: YOCO_WEBHOOK_EVENT_TYPES, name, url: webhookUrl },
-    // Legacy fallback kept so older tenant keys do not fail setup unexpectedly.
-    { name, notification_url: webhookUrl },
-    { name, url: webhookUrl }
   ];
   let lastError: unknown = null;
   for (const body of attempts) {
@@ -1663,6 +1663,323 @@ async function loadWebhookBackedOrders(
   return { orders: [...orderMap.values()], failures, candidateCount: (rows.results || []).length, floor };
 }
 
+function webhookObjectRows(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((entry) => entry && typeof entry === 'object' && !Array.isArray(entry)) as Row[]
+    : [];
+}
+
+function webhookRefundId(refund: Row) {
+  return text(refund.id || refund.refund_id || refund.refundId || refund.transaction_id || refund.transactionId);
+}
+
+function webhookRefundStatusIsFinal(refund: Row) {
+  const status = text(refund.status).toLowerCase();
+  return !status || ['approved', 'complete', 'completed', 'refunded', 'succeeded', 'successful', 'success'].includes(status);
+}
+
+function mergePaymentRefundsForRetry(order: Row | null, payment: Row | null) {
+  if (!order) return null;
+  if (!payment) return order;
+  const paymentId = text(payment.id || payment.payment_id || payment.paymentId);
+  const paymentRefunds = webhookObjectRows(payment.refunds)
+    .filter(webhookRefundStatusIsFinal)
+    .map((refund) => paymentId && !text(refund.payment_id || refund.paymentId)
+      ? { ...refund, payment_id: paymentId }
+      : refund);
+  const orderRefunds = webhookObjectRows(order.refunds);
+  const refundMap = new Map<string, Row>();
+  [...orderRefunds, ...paymentRefunds].forEach((refund, index) => {
+    const key = webhookRefundId(refund) || `${text(refund.payment_id || refund.paymentId)}:${index}`;
+    const current = refundMap.get(key);
+    refundMap.set(key, current ? { ...current, ...refund } : refund);
+  });
+  const payments = webhookObjectRows(order.payments);
+  const mergedPayments = paymentId
+    ? [...payments.filter((entry) => text(entry.id || entry.payment_id || entry.paymentId) !== paymentId), payment]
+    : payments;
+  return {
+    ...order,
+    refunds: [...refundMap.values()],
+    payments: mergedPayments,
+  };
+}
+
+async function loadCachedYocoSaleForRetry(env: Env, workspaceId: string, orderId: string) {
+  if (!orderId) return null;
+  const row = await env.DB.prepare(
+    `SELECT raw_json
+       FROM yoco_orders
+      WHERE workspace_id = ?1
+        AND yoco_order_id = ?2
+        AND order_type = 'sale'
+      LIMIT 1`,
+  ).bind(workspaceId, orderId).first<{ raw_json?: string | null }>();
+  const cached = jsonParse(row?.raw_json);
+  const lines = Array.isArray(cached.line_items)
+    ? cached.line_items
+    : Array.isArray(cached.lineItems)
+      ? cached.lineItems
+      : [];
+  return lines.length ? cached : null;
+}
+
+function refundRetryOutcome(result: {
+  processed?: boolean;
+  reason?: string;
+  retryable?: boolean;
+  stockMovements?: number;
+  skippedDuplicates?: number;
+}) {
+  const reason = text(result.reason);
+  const duplicate = reason === 'duplicate' || Number(result.skippedDuplicates || 0) > 0;
+  const ignored = reason === 'skipped_refund_reason' || reason === 'skipped_other_reason';
+  const movements = Number(result.stockMovements || 0);
+  const needsAttention = result.retryable === true || (!result.processed && !duplicate && !ignored) || (
+    movements === 0 && !duplicate && !ignored && result.processed !== true
+  );
+  return { reason, duplicate, ignored, needsAttention, movements };
+}
+
+/**
+ * Replays pending refund webhooks from their exact order_id/payment_id references.
+ *
+ * Yoco's payment.refunded event intentionally contains only identifiers. The order's
+ * returned_line_items can become readable shortly after the webhook. This retry path
+ * therefore re-fetches that exact payment and order instead of depending on a broad
+ * List Refunds scan or a manual full resync.
+ */
+export async function retryPendingYocoRefundWebhooks(
+  env: Env,
+  workspaceId: string,
+  options: { limit?: number } = {},
+) {
+  const limit = Math.min(Math.max(Number(options.limit || 25) || 25, 1), 100);
+  const rows = await env.DB.prepare(
+    `SELECT event.id,
+            event.yoco_order_id,
+            event.event_type,
+            event.raw_json,
+            event.status,
+            event.created_at
+       FROM yoco_webhook_events event
+      WHERE event.workspace_id = ?1
+        AND lower(replace(event.event_type, '_', '.')) IN (
+          'payment.refunded',
+          'order.updated',
+          'refund.succeeded',
+          'refund.successful'
+        )
+        AND (
+          event.status IN ('attention', 'failed')
+          OR (
+            event.status = 'processed'
+            AND lower(replace(event.event_type, '_', '.')) IN ('payment.refunded', 'refund.succeeded', 'refund.successful')
+            AND COALESCE(event.yoco_order_id, '') <> ''
+            AND NOT EXISTS (
+              SELECT 1
+                FROM yoco_orders refund_order
+               WHERE refund_order.workspace_id = event.workspace_id
+                 AND refund_order.order_type = 'refund'
+                 AND refund_order.parent_yoco_order_id = event.yoco_order_id
+            )
+          )
+        )
+      ORDER BY datetime(event.created_at) ASC
+      LIMIT ?2`,
+  ).bind(workspaceId, limit).all<Row>();
+
+  const candidates = rows.results || [];
+  if (!candidates.length) {
+    return {
+      status: 'nothing_to_retry',
+      candidates: 0,
+      processed: 0,
+      attention: 0,
+      failed: 0,
+      ignored: 0,
+      refundsProcessed: 0,
+      stockMovements: 0,
+      errors: [] as string[],
+    };
+  }
+
+  const apiKey = await getYocoApiKey(env, workspaceId);
+  let processed = 0;
+  let attention = 0;
+  let failed = 0;
+  let ignored = 0;
+  let refundsProcessed = 0;
+  let stockMovements = 0;
+  const errors: string[] = [];
+
+  for (const row of candidates) {
+    const eventDbId = text(row.id);
+    const normalizedEventType = text(row.event_type).toLowerCase().replace(/_/g, '.');
+    const payload = jsonParse(row.raw_json);
+    const fields = yocoWebhookEventFields(payload);
+    const paymentId = fields.paymentId;
+    let orderId = text(row.yoco_order_id || fields.orderId);
+    try {
+      let payment: Row | null = null;
+      if (paymentId) {
+        payment = await fetchPayment(env, apiKey, paymentId) as Row;
+        orderId = orderId || text(payment.order_id || payment.orderId);
+      }
+
+      let order = extractYocoOrder(payload);
+      if (!order && orderId) {
+        try {
+          order = await fetchOrder(env, apiKey, orderId) as Row;
+        } catch (caught) {
+          if (isYocoRateLimitError(caught)) throw caught;
+          order = await loadCachedYocoSaleForRetry(env, workspaceId, orderId);
+        }
+      }
+      order = mergePaymentRefundsForRetry(order, payment);
+      const resolvedOrderId = text(order?.id || order?.order_id || order?.orderId || orderId);
+      if (resolvedOrderId) orderId = resolvedOrderId;
+
+      if (!order || !orderId) {
+        const message = 'Refund webhook is waiting for Yoco to expose the referenced payment and order detail.';
+        await env.DB.prepare(
+          `UPDATE yoco_webhook_events
+              SET status = 'attention',
+                  processed_at = ?2,
+                  error_message = ?3
+            WHERE workspace_id = ?1
+              AND id = ?4`,
+        ).bind(workspaceId, nowIso(), message, eventDbId).run();
+        attention += 1;
+        continue;
+      }
+
+      await env.DB.prepare(
+        `UPDATE yoco_webhook_events
+            SET yoco_order_id = ?3
+          WHERE workspace_id = ?1
+            AND id = ?2`,
+      ).bind(workspaceId, eventDbId, orderId).run();
+
+      const refunds = findRefunds(order, paymentId, null);
+      if (!refunds.length) {
+        const noRefundIsTerminal = normalizedEventType === 'order.updated';
+        const status = noRefundIsTerminal ? 'ignored' : 'attention';
+        const message = noRefundIsTerminal
+          ? 'Order Updated contained no completed refund or returned-line detail and required no stock change.'
+          : 'Payment Refunded was received, but Yoco has not exposed the approved refund and returned-line detail yet.';
+        await env.DB.prepare(
+          `UPDATE yoco_webhook_events
+              SET status = ?3,
+                  processed_at = ?4,
+                  error_message = ?5
+            WHERE workspace_id = ?1
+              AND id = ?2`,
+        ).bind(workspaceId, eventDbId, status, nowIso(), message).run();
+        if (noRefundIsTerminal) ignored += 1;
+        else attention += 1;
+        continue;
+      }
+
+      const outcomes: Array<ReturnType<typeof refundRetryOutcome>> = [];
+      let eventMovements = 0;
+      for (const refund of refunds) {
+        const returnBehavior = resolveRefundReturnBehavior(refund);
+        const result = returnBehavior === 'skip'
+          ? {
+              processed: false,
+              reason: 'skipped_refund_reason',
+              retryable: false,
+              missingRecipes: 0,
+              orderLines: 0,
+              stockMovements: 0,
+              financialRecorded: false,
+            }
+          : await processYocoOrder(env, workspaceId, order, {
+              mode: 'refund',
+              refund,
+              eventType: `yoco.retry.${normalizedEventType || 'payment.refunded'}`,
+              returnBehavior,
+            });
+        const outcome = refundRetryOutcome(result);
+        outcomes.push(outcome);
+        eventMovements += outcome.movements;
+        stockMovements += outcome.movements;
+        if ((result.processed === true || outcome.duplicate) && !outcome.needsAttention) refundsProcessed += 1;
+      }
+
+      const needsAttention = outcomes.some((outcome) => outcome.needsAttention);
+      const allIgnored = outcomes.length > 0 && outcomes.every((outcome) => outcome.ignored);
+      const status = allIgnored ? 'ignored' : needsAttention ? 'attention' : 'processed';
+      const reasons = [...new Set(outcomes.map((outcome) => outcome.reason).filter(Boolean))];
+      const message = allIgnored
+        ? 'Refund was intentionally ignored by the configured return reason. No stock was changed.'
+        : needsAttention
+          ? `Refund remains retryable: ${reasons.join(', ') || 'Yoco returned no exact returned-line match yet'}.`
+          : eventMovements > 0
+            ? 'Refund was replayed from its webhook reference and stock/reporting were updated.'
+            : 'Refund was already processed. No duplicate stock movement or reporting row was created.';
+      await env.DB.prepare(
+        `UPDATE yoco_webhook_events
+            SET status = ?3,
+                yoco_order_id = ?4,
+                processed_at = ?5,
+                error_message = ?6
+          WHERE workspace_id = ?1
+            AND id = ?2`,
+      ).bind(workspaceId, eventDbId, status, orderId, nowIso(), message).run();
+      if (status === 'processed') processed += 1;
+      else if (status === 'ignored') ignored += 1;
+      else attention += 1;
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught);
+      errors.push(`${eventDbId || normalizedEventType}: ${message}`);
+      await env.DB.prepare(
+        `UPDATE yoco_webhook_events
+            SET status = 'failed',
+                processed_at = ?3,
+                error_message = ?4
+          WHERE workspace_id = ?1
+            AND id = ?2`,
+      ).bind(workspaceId, eventDbId, nowIso(), message).run().catch(() => undefined);
+      failed += 1;
+      if (isYocoRateLimitError(caught)) break;
+    }
+  }
+
+  await recordIntegrationLog(env, workspaceId, {
+    operation: 'yoco.refund.webhook_retry',
+    status: failed ? 'failed' : attention ? 'warning' : 'success',
+    message: failed
+      ? `Targeted refund webhook retry completed with ${failed} failure(s).`
+      : attention
+        ? `Targeted refund webhook retry left ${attention} event(s) pending for Yoco returned-line detail.`
+        : `Targeted refund webhook retry completed ${processed} event(s).`,
+    details: {
+      candidates: candidates.length,
+      processed,
+      attention,
+      failed,
+      ignored,
+      refundsProcessed,
+      stockMovements,
+      errors,
+    },
+  });
+
+  return {
+    status: failed ? 'retry_completed_with_errors' : attention ? 'retry_completed_with_attention' : 'retried',
+    candidates: candidates.length,
+    processed,
+    attention,
+    failed,
+    ignored,
+    refundsProcessed,
+    stockMovements,
+    errors,
+  };
+}
+
 async function updateWebhookSaleOutcome(
   env: Env,
   workspaceId: string,
@@ -2158,6 +2475,19 @@ export async function retryFailedYocoOrders(
   options: { automatic?: boolean; maxAutomaticLookbackDays?: number } = {},
 ) {
   const automatic = options.automatic === true;
+  const targetedRefundRetry = await retryPendingYocoRefundWebhooks(env, workspaceId, {
+    limit: automatic ? 50 : 100,
+  }).catch((caught) => ({
+    status: 'retry_completed_with_errors',
+    candidates: 0,
+    processed: 0,
+    attention: 0,
+    failed: 1,
+    ignored: 0,
+    refundsProcessed: 0,
+    stockMovements: 0,
+    errors: [caught instanceof Error ? caught.message : String(caught)],
+  }));
   const stats = await env.DB.prepare(
     `WITH pending AS (
        SELECT event.created_at,
@@ -2192,7 +2522,15 @@ export async function retryFailedYocoOrders(
   ).bind(workspaceId).first<Row>();
   const errorCount = Number(stats?.error_count || 0) || 0;
   if (!errorCount) {
-    return { status: 'nothing_to_retry', errorCount: 0, ordersProcessed: 0, refundsProcessed: 0, errors: [] };
+    return {
+      status: targetedRefundRetry.candidates > 0 ? targetedRefundRetry.status : 'nothing_to_retry',
+      errorCount: 0,
+      ordersProcessed: 0,
+      refundsProcessed: Number(targetedRefundRetry.refundsProcessed || 0),
+      stockMovements: Number(targetedRefundRetry.stockMovements || 0),
+      targetedRefundRetry,
+      errors: targetedRefundRetry.errors || [],
+    };
   }
 
   let earliest = text(stats?.earliest_error_at);
@@ -2224,11 +2562,22 @@ export async function retryFailedYocoOrders(
               error_message = ''
         WHERE workspace_id = ?1
           AND status IN ('failed', 'rejected', 'attention')
+          AND lower(replace(event_type, '_', '.')) NOT IN (
+            'payment.refunded',
+            'order.updated',
+            'refund.succeeded',
+            'refund.successful'
+          )
           AND datetime(created_at) >= datetime(?3)`,
     ).bind(workspaceId, nowIso(), sinceIso).run();
   }
+  const combinedErrors = [...(targetedRefundRetry.errors || []), ...errors];
   return {
-    status: errors.length ? 'retry_completed_with_errors' : retryableCount ? 'retry_completed_with_attention' : 'retried',
+    status: combinedErrors.length
+      ? 'retry_completed_with_errors'
+      : retryableCount || Number(targetedRefundRetry.attention || 0) > 0
+        ? 'retry_completed_with_attention'
+        : 'retried',
     errorCount,
     refundErrorCount,
     saleErrorCount,
@@ -2237,11 +2586,13 @@ export async function retryFailedYocoOrders(
     latestErrorAt: text(stats?.latest_error_at),
     sinceIso,
     ordersProcessed: Number(result.ordersProcessed || 0),
-    refundsProcessed: Number(result.refundsProcessed || 0),
+    refundsProcessed: Number(targetedRefundRetry.refundsProcessed || 0) + Number(result.refundsProcessed || 0),
+    stockMovements: Number(targetedRefundRetry.stockMovements || 0) + Number(result.stockMovements || 0),
     missingRecipes: Number(result.missingRecipes || 0),
     retryableOrders: Number(result.retryableOrders || 0),
     retryableRefunds: Number(result.retryableRefunds || 0),
     warnings: Array.isArray(result.warnings) ? result.warnings : [],
-    errors,
+    targetedRefundRetry,
+    errors: combinedErrors,
   };
 }

@@ -16,7 +16,7 @@ test('Phase 68 stages payment then order and schedules automatic DO retry for ev
   assert.ok(loader.indexOf('fetchPaymentOnce') < loader.indexOf('fetchOrderOnce'));
   assert.match(loader, /lineBearingReturnCount\(order\) >= expectedRefunds/);
   assert.match(workspace, /async alarm\(\): Promise<void>/);
-  assert.match(workspace, /retryFailedYocoOrders/);
+  assert.match(workspace, /retryPendingYocoRefundWebhooks/);
   assert.match(workspace, /setAlarm\(Date\.now\(\) \+ delayMs\)/);
 });
 

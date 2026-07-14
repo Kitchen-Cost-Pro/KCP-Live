@@ -3,7 +3,7 @@ import { FacadeDatabase } from './d1-facade';
 import { TENANT_MIGRATIONS } from './tenant-migrations';
 import type { Env } from './types';
 import { dispatchWorkspaceRoute } from './legacy/index';
-import { retryFailedYocoOrders } from './legacy/yoco-service';
+import { retryPendingYocoRefundWebhooks } from './legacy/yoco-service';
 import type { Env as LegacyEnv, AuthContext as LegacyAuth } from './legacy/types';
 
 /**
@@ -97,9 +97,16 @@ export class WorkspaceDO extends DurableObject<Env> {
 
     // The ported handlers see `env.DB` = this workspace's SQLite facade and `env.CENTRAL_DB` = the
     // shared central D1 (for the few central reads: assertWorkspaceAccess, allowed-locations, etc.).
-    const response = await dispatchWorkspaceRoute(request, this.legacyEnv(), auth, workspaceId, resource);
-    if (resource === 'yoco-webhook') await this.scheduleRefundRetry(workspaceId);
-    return response;
+    try {
+      return await dispatchWorkspaceRoute(request, this.legacyEnv(), auth, workspaceId, resource);
+    } finally {
+      // A webhook handler can throw after safely persisting the event as failed. Always
+      // schedule the internal retry from persisted state so a transient Yoco/API error
+      // cannot strand a live refund until the next manual full resync.
+      if (resource === 'yoco-webhook') {
+        await this.scheduleRefundRetry(workspaceId).catch(() => undefined);
+      }
+    }
   }
 
   async alarm(): Promise<void> {
@@ -107,7 +114,7 @@ export class WorkspaceDO extends DurableObject<Env> {
     if (!workspaceId) return;
     const previousAttempt = Number(await this.state.storage.get<number>('_kcp_refund_retry_attempt') || 0);
     try {
-      await retryFailedYocoOrders(this.legacyEnv(), workspaceId, { automatic: true, maxAutomaticLookbackDays: 31 });
+      await retryPendingYocoRefundWebhooks(this.legacyEnv(), workspaceId, { limit: 50 });
     } catch {
       // Pending state is retained and the bounded backoff below schedules another try.
     }
