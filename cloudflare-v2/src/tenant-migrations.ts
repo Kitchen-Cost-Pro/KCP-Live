@@ -458,5 +458,30 @@ ALTER TABLE yoco_connections ADD COLUMN api_key_locked_by_uid TEXT;`,
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_stocktake_drafts_workspace_user
-  ON stocktake_drafts(workspace_id, user_id, updated_at);`
+  ON stocktake_drafts(workspace_id, user_id, updated_at);`,
+  // 16 — provider-neutral operational diagnostics for webhook lifecycle, sync runs,
+  // signature verification, order ingestion and stock-deduction outcomes.
+  `CREATE TABLE IF NOT EXISTS integration_logs (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  provider TEXT NOT NULL DEFAULT 'yoco',
+  operation TEXT NOT NULL,
+  status TEXT NOT NULL,
+  severity TEXT NOT NULL DEFAULT 'info',
+  message TEXT NOT NULL,
+  details_json TEXT NOT NULL DEFAULT '{}',
+  correlation_id TEXT,
+  started_at TEXT,
+  completed_at TEXT,
+  duration_ms INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_integration_logs_workspace_provider_date
+  ON integration_logs(workspace_id, provider, created_at);
+CREATE INDEX IF NOT EXISTS idx_integration_logs_workspace_status_date
+  ON integration_logs(workspace_id, status, created_at);`,
+  // 17 — make Yoco order-line retries idempotent independently from stock-movement
+  // signatures. Migration 13 already removed historical duplicate line keys.
+  `CREATE UNIQUE INDEX IF NOT EXISTS ux_yoco_order_lines_workspace_order_line
+  ON yoco_order_lines(workspace_id, yoco_order_id, yoco_line_id);`
 ];

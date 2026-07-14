@@ -57,6 +57,17 @@ function uniqueSecrets(secrets: string | string[]) {
     .filter((secret, index, list) => Boolean(secret) && list.indexOf(secret) === index);
 }
 
+function webhookTimestampIsFresh(value: string, toleranceSeconds = 3 * 60) {
+  const raw = text(value);
+  if (!raw) return false;
+  const numeric = Number(raw);
+  const timestampMs = Number.isFinite(numeric)
+    ? (numeric > 10_000_000_000 ? numeric : numeric * 1000)
+    : Date.parse(raw);
+  if (!Number.isFinite(timestampMs)) return false;
+  return Math.abs(Date.now() - timestampMs) <= toleranceSeconds * 1000;
+}
+
 export async function verifyYocoWebhook(rawBody: string, headers: Headers, webhookSecrets: string | string[]) {
   const signatureHeader = text(headers.get('webhook-signature') || headers.get('svix-signature'));
   const webhookId = text(headers.get('webhook-id') || headers.get('svix-id'));
@@ -64,6 +75,9 @@ export async function verifyYocoWebhook(rawBody: string, headers: Headers, webho
   const provided = signatureValues(signatureHeader);
   const secrets = uniqueSecrets(webhookSecrets);
   if (!signatureHeader || !provided.length || !secrets.length) return false;
+  if ((webhookId || webhookTimestamp) && (!webhookId || !webhookTimestamp || !webhookTimestampIsFresh(webhookTimestamp))) {
+    return false;
+  }
 
   // Yoco documents the Standard Webhooks v1 format: signed content is
   // webhook-id + '.' + webhook-timestamp + '.' + the raw request body, and the

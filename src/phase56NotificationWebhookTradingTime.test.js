@@ -30,7 +30,7 @@ test('Phase 56 Yoco recovery retries the oldest errored period automatically and
   const worker = read('cloudflare-v2/src/index.ts');
   const admin = read('public/KCP Admin ConsoleByYOCO.html');
   assert.match(yoco, /MIN\(created_at\) AS earliest_error_at/);
-  assert.match(yoco, /status IN \('failed', 'rejected'\)/);
+  assert.match(yoco, /status IN \('failed', 'rejected', 'attention'\)/);
   assert.match(yoco, /syncYocoSales\(env, workspaceId, \{ sinceIso \}\)/);
   assert.match(yoco, /SET status = 'processed'/);
   assert.match(routes, /automatic: true/);

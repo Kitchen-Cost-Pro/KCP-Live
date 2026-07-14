@@ -242,7 +242,15 @@ function bindIntegrationEvents(view) {
     await runYocoAction(view, 'Syncing Yoco sales...', async () => {
       const result = await syncYocoSales(view.dataset.workspaceId || '', { resetWebhook: true });
       setYocoSummary(view, result);
-      setYocoModalStatus(view, 'Yoco sales sync complete.', 'success');
+      const retryable = Number(result?.retryableOrders || 0) + Number(result?.retryableRefunds || 0);
+      const movementCount = Number(result?.stockMovements || 0);
+      setYocoModalStatus(
+        view,
+        retryable
+          ? `Yoco sync checked ${result?.ordersFetched || 0} orders and created ${movementCount} stock movements. ${retryable} sale/refund record(s) still need recipe or product mapping.`
+          : `Yoco sync complete. ${result?.ordersFetched || 0} orders checked and ${movementCount} stock movements created.`,
+        retryable ? 'error' : 'success'
+      );
     });
   });
 

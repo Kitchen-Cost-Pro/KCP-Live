@@ -159,3 +159,20 @@ export function updateWebhookSubscription(env: Env, apiKey: string, subscription
     body
   });
 }
+
+
+export const fetchWebhookSubscription = async (env: Env, apiKey: string, subscriptionId: string) => (
+  objectData(await yocoFetch(env, apiKey, `/v1/webhooks/subscriptions/${encodeURIComponent(subscriptionId)}`))
+);
+
+export function testWebhookSubscription(
+  env: Env,
+  apiKey: string,
+  subscriptionId: string,
+  eventType = 'payment.created',
+) {
+  return yocoFetch(env, apiKey, `/v1/webhooks/subscriptions/${encodeURIComponent(subscriptionId)}/test`, {
+    method: 'POST',
+    body: { event_type: eventType }
+  });
+}

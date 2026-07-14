@@ -36,8 +36,11 @@ import {
   syncYocoCatalogue,
   syncYocoSales,
   retryFailedYocoOrders,
+  resetYocoWebhook,
+  testYocoWebhook,
 } from "./yoco-service";
 import { findRefund, verifyYocoWebhook } from "./yoco-webhooks";
+import { recordIntegrationLog } from "./integration-log";
 import {
   decryptTextWithSecret,
   encryptTextWithSecret,
@@ -2394,6 +2397,7 @@ const TENANT_TABLE_ALLOWLIST = new Set([
   "grv_lines",
   "grvs",
   "integration_errors",
+  "integration_logs",
   "locations",
   "low_stock_email_runs",
   "low_stock_email_settings",
@@ -2742,16 +2746,11 @@ export async function adminYocoActionDO(
       return json(request, env, { ok: true, ...result });
     }
     if (action === "reset-webhook") {
-      const apiKey = await getYocoApiKey(env, workspaceId);
-      if (!apiKey)
-        return error(
-          request,
-          env,
-          409,
-          "No Yoco API key stored for this workspace — connect Yoco first.",
-        );
-      await disconnectYoco(env, workspaceId);
-      const result = await connectYoco(env, workspaceId, apiKey);
+      const result = await resetYocoWebhook(env, workspaceId);
+      return json(request, env, { ok: true, ...result });
+    }
+    if (action === "test-webhook") {
+      const result = await testYocoWebhook(env, workspaceId);
       return json(request, env, { ok: true, ...result });
     }
     return error(request, env, 404, `Unknown Yoco admin action: ${action}`);
@@ -2800,10 +2799,37 @@ export async function adminYocoEventsDO(
     100,
   );
   const rows = await env.DB.prepare(
-    `SELECT id, provider_event_id, event_type, yoco_order_id, status, error_message,
-            processed_at, created_at
-       FROM yoco_webhook_events
-      WHERE workspace_id = ?1
+    `SELECT *
+       FROM (
+         SELECT id,
+                'webhook' AS source,
+                provider_event_id,
+                event_type AS operation,
+                yoco_order_id,
+                status,
+                COALESCE(NULLIF(error_message, ''), event_type) AS message,
+                raw_json AS details_json,
+                processed_at,
+                NULL AS duration_ms,
+                created_at
+           FROM yoco_webhook_events
+          WHERE workspace_id = ?1
+         UNION ALL
+         SELECT id,
+                'operation' AS source,
+                correlation_id AS provider_event_id,
+                operation,
+                NULL AS yoco_order_id,
+                status,
+                message,
+                details_json,
+                completed_at AS processed_at,
+                duration_ms,
+                created_at
+           FROM integration_logs
+          WHERE workspace_id = ?1
+            AND provider = 'yoco'
+       ) combined
       ORDER BY created_at DESC
       LIMIT ?2`,
   )
@@ -2813,11 +2839,16 @@ export async function adminYocoEventsDO(
     ok: true,
     events: (rows.results || []).map((row) => ({
       id: text(row.id),
+      source: text(row.source || "webhook"),
       providerEventId: text(row.provider_event_id),
-      eventType: text(row.event_type || "webhook"),
+      eventType: text(row.operation || "webhook"),
+      operation: text(row.operation || "webhook"),
       orderId: text(row.yoco_order_id),
       status: text(row.status || "received"),
-      error: text(row.error_message),
+      message: text(row.message),
+      error: ['failed', 'rejected'].includes(text(row.status).toLowerCase()) ? text(row.message) : '',
+      details: jsonParse(row.details_json) || {},
+      durationMs: Number(row.duration_ms || 0) || 0,
       processedAt: text(row.processed_at),
       timestamp: text(row.created_at),
     })),
@@ -14894,6 +14925,8 @@ export async function postYocoWebhook(
   env: Env,
   workspaceId: string,
 ) {
+  const startedMs = Date.now();
+  const receivedAt = nowIso();
   const body = await request.text();
   const eventId =
     request.headers.get("webhook-id") ||
@@ -14920,6 +14953,15 @@ export async function postYocoWebhook(
       payloadHash: hash,
       message: "Yoco webhook payload was not valid JSON.",
     });
+    await recordIntegrationLog(env, workspaceId, {
+      operation: "yoco.webhook.receive",
+      status: "failed",
+      message: "Yoco webhook payload was not valid JSON.",
+      details: { eventId, signaturePresent: Boolean(request.headers.get("webhook-signature") || request.headers.get("svix-signature")) },
+      startedAt: receivedAt,
+      completedAt: nowIso(),
+      durationMs: Date.now() - startedMs,
+    });
     return error(request, env, 400, "Yoco webhook payload was not valid JSON.");
   }
   const { eventType, orderId, paymentId } = yocoWebhookEventFields(payload);
@@ -14933,6 +14975,15 @@ export async function postYocoWebhook(
       orderId,
       payloadHash: hash,
       message: "Yoco webhook secret is not configured for this workspace.",
+    });
+    await recordIntegrationLog(env, workspaceId, {
+      operation: "yoco.webhook.signature",
+      status: "failed",
+      message: "Yoco webhook secret is not configured for this workspace.",
+      details: { eventId, eventType, orderId },
+      startedAt: receivedAt,
+      completedAt: nowIso(),
+      durationMs: Date.now() - startedMs,
     });
     return error(
       request,
@@ -14957,6 +15008,20 @@ export async function postYocoWebhook(
       orderId,
       payloadHash: hash,
       message: "Yoco webhook signature could not be verified.",
+    });
+    await recordIntegrationLog(env, workspaceId, {
+      operation: "yoco.webhook.signature",
+      status: "failed",
+      message: "Yoco webhook signature could not be verified.",
+      details: {
+        eventId,
+        eventType,
+        orderId,
+        webhookTimestamp: request.headers.get("webhook-timestamp") || request.headers.get("svix-timestamp") || "",
+      },
+      startedAt: receivedAt,
+      completedAt: nowIso(),
+      durationMs: Date.now() - startedMs,
     });
     // Never process an unauthenticated webhook, even when it contains a valid-looking
     // order id. Missed events are recovered through the authenticated Yoco sales sync.
@@ -15023,8 +15088,24 @@ export async function postYocoWebhook(
     orderId,
     paymentId,
   )) as Record<string, unknown> | null;
-  if (!order)
+  if (!order) {
+    await env.DB.prepare(
+      `UPDATE yoco_webhook_events
+          SET status = 'failed',
+              error_message = 'Yoco order could not be loaded.'
+        WHERE id = ?1`,
+    ).bind(webhookDbId).run();
+    await recordIntegrationLog(env, workspaceId, {
+      operation: "yoco.webhook.order_load",
+      status: "failed",
+      message: "Yoco order could not be loaded.",
+      details: { eventId, eventType, orderId, paymentId },
+      startedAt: receivedAt,
+      completedAt: nowIso(),
+      durationMs: Date.now() - startedMs,
+    });
     return error(request, env, 400, "Yoco order could not be loaded.");
+  }
 
   try {
     const isRefund = String(eventType || "")
@@ -15081,19 +15162,45 @@ export async function postYocoWebhook(
       result = returnsResult.results[0];
     }
 
+    const returnNeedsRetry = returnsResult.results.some((entry) => entry.retryable === true);
+    const needsAttention = result.retryable === true || returnNeedsRetry;
+    const attentionMessage = needsAttention
+      ? `Webhook accepted, but stock deduction remains retryable: ${result.reason || "missing recipe or product mapping"}.`
+      : "";
     await env.DB.prepare(
       `UPDATE yoco_webhook_events
-          SET status = 'processed',
-              processed_at = ?2,
-              error_message = ''
+          SET status = ?2,
+              processed_at = ?3,
+              error_message = ?4
         WHERE id = ?1`,
     )
-      .bind(webhookDbId, nowIso())
+      .bind(webhookDbId, needsAttention ? "attention" : "processed", nowIso(), attentionMessage)
       .run();
+
+    await recordIntegrationLog(env, workspaceId, {
+      operation: "yoco.webhook.process",
+      status: needsAttention ? "warning" : "success",
+      message: needsAttention
+        ? attentionMessage
+        : `Yoco webhook processed with ${Number(result.stockMovements || 0) + Number(returnsResult.totalMovements || 0)} stock movement(s).`,
+      details: {
+        eventId,
+        eventType,
+        orderId,
+        paymentId,
+        signatureVerified: true,
+        result,
+        returnsProcessed: returnsResult.returnsProcessed,
+        returnMovements: returnsResult.totalMovements,
+      },
+      startedAt: receivedAt,
+      completedAt: nowIso(),
+      durationMs: Date.now() - startedMs,
+    });
 
     return json(request, env, {
       ok: true,
-      status: "processed",
+      status: needsAttention ? "attention" : "processed",
       result,
       ...(returnsResult.returnsProcessed > 0
         ? {
@@ -15112,6 +15219,15 @@ export async function postYocoWebhook(
     )
       .bind(webhookDbId, message)
       .run();
+    await recordIntegrationLog(env, workspaceId, {
+      operation: "yoco.webhook.process",
+      status: "failed",
+      message,
+      details: { eventId, eventType, orderId, paymentId, signatureVerified: true },
+      startedAt: receivedAt,
+      completedAt: nowIso(),
+      durationMs: Date.now() - startedMs,
+    });
     throw caught;
   }
 }

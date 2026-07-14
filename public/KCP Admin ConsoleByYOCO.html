@@ -1287,8 +1287,8 @@
             <section class="glass-card p-0 overflow-hidden">
                 <div class="px-5 py-4 border-b border-white/5 flex items-center justify-between gap-3">
                     <div>
-                        <h4 class="text-sm font-black text-white">Webhook Event Log</h4>
-                        <p class="text-xs text-slate-500 font-semibold mt-1">Recent webhook processing records from the selected workspace database.</p>
+                        <h4 class="text-sm font-black text-white">Yoco Integration Log</h4>
+                        <p class="text-xs text-slate-500 font-semibold mt-1">Webhook delivery, subscription lifecycle, sync runs, stock deductions and errors.</p>
                     </div>
                     <span id="integration-queue-count" class="badge bg-white/5 text-slate-300 border border-white/10">0 entries</span>
                 </div>
@@ -1297,9 +1297,11 @@
                         <thead>
                             <tr class="border-b border-white/5 text-[9px] font-black uppercase tracking-widest text-slate-500">
                                 <th class="px-4 py-4">Timestamp</th>
-                                <th class="px-4 py-4">Event</th>
+                                <th class="px-4 py-4">Source</th>
+                                <th class="px-4 py-4">Operation</th>
                                 <th class="px-4 py-4">Order</th>
                                 <th class="px-4 py-4">Status</th>
+                                <th class="px-4 py-4">Message</th>
                             </tr>
                         </thead>
                         <tbody id="integration-queue-tbody"></tbody>
@@ -1719,7 +1721,7 @@ async function refreshAdminIntegrationQueueSnapshot(wsId = '') {
         return;
     }
     try {
-        const payload = await callAdminApi('GET', `/api/admin/workspaces/${encodeURIComponent(targetWsId)}/yoco/events?limit=25`);
+        const payload = await callAdminApi('GET', `/api/admin/workspaces/${encodeURIComponent(targetWsId)}/yoco/events?limit=100`);
         const current = { ...(KCPStore.state.integrationQueue || {}) };
         Object.keys(current).forEach(key => {
             if (String(current[key]?.workspaceId || '') === targetWsId) delete current[key];
@@ -1802,12 +1804,12 @@ function getYocoIntegrationSummaryForWorkspace(wsId) {
     let status = 'inactive';
     let detail = 'Not connected';
 
-    if (connectionActive || webhookEnabled) {
-        status = 'successful';
-        detail = webhookEnabled ? 'Connected — webhook active' : 'Connected';
-    } else if (lastError) {
+    if (lastError || rawStatus === 'error' || (connectionActive && !webhookEnabled)) {
         status = 'failing';
-        detail = lastError;
+        detail = lastError || 'Yoco API is connected, but the live webhook needs attention.';
+    } else if (connectionActive && webhookEnabled) {
+        status = 'successful';
+        detail = 'Connected — webhook active';
     }
 
     return {
@@ -1816,7 +1818,7 @@ function getYocoIntegrationSummaryForWorkspace(wsId) {
         sync,
         credentials,
         queueRows,
-        queuedCount: queueRows.filter(row => ['received', 'pending', 'retry', 'failed'].includes(String(row.status || '').toLowerCase())).length,
+        queuedCount: queueRows.filter(row => ['received', 'pending', 'retry', 'failed', 'attention'].includes(String(row.status || '').toLowerCase())).length,
         lastSyncAt,
         status,
         detail
@@ -1825,7 +1827,7 @@ function getYocoIntegrationSummaryForWorkspace(wsId) {
 
 function getYocoStatusPresentation(status) {
     if (status === 'successful') return { icon: 'fa-circle-check', label: 'Connected', chip: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20' };
-    if (status === 'failing') return { icon: 'fa-circle-xmark', label: 'Webhook Error', chip: 'text-red-400 bg-red-500/10 border-red-500/20' };
+    if (status === 'failing') return { icon: 'fa-circle-xmark', label: 'Integration Attention', chip: 'text-red-400 bg-red-500/10 border-red-500/20' };
     return { icon: 'fa-circle-minus', label: 'Not Connected', chip: 'text-slate-400 bg-white/5 border-white/10' };
 }
 
@@ -1840,21 +1842,23 @@ function renderWorkspaceIntegrationPanel(wsId, options = {}) {
     const locationCount = Number(sync.locations?.count || 0) || 0;
     const webhookEnabled = sync.webhook?.enabled === true;
     const syncState = sync.syncState || 'idle';
-    const queueHtml = queueRows.slice(0, 10).map(row => `
-        <tr class="border-b border-white/5">
+    const queueHtml = queueRows.slice(0, 20).map(row => `
+        <tr class="border-b border-white/5" title="${adminEscapeHtml(JSON.stringify(row.details || {}))}">
             <td class="px-3 py-3 text-[9px] text-slate-400">${formatAdminDateTime(row.timestamp, 'Unknown')}</td>
-            <td class="px-3 py-3 text-[9px] font-bold text-slate-200">${row.eventType || 'webhook'}</td>
-            <td class="px-3 py-3 text-[9px] text-slate-400">${row.orderId || '—'}</td>
-            <td class="px-3 py-3 text-[9px] font-black uppercase text-slate-300">${row.status || 'Queued'}</td>
+            <td class="px-3 py-3 text-[9px] font-bold text-slate-300 uppercase">${adminEscapeHtml(row.source || 'webhook')}</td>
+            <td class="px-3 py-3 text-[9px] font-bold text-slate-200">${adminEscapeHtml(row.operation || row.eventType || 'webhook')}</td>
+            <td class="px-3 py-3 text-[9px] text-slate-400">${adminEscapeHtml(row.orderId || '—')}</td>
+            <td class="px-3 py-3 text-[9px] font-black uppercase text-slate-300">${adminEscapeHtml(row.status || 'Queued')}</td>
+            <td class="px-3 py-3 text-[9px] text-slate-400 max-w-xs">${adminEscapeHtml(row.message || row.error || '—')}</td>
         </tr>
-    `).join('') || '<tr><td colspan="4" class="px-3 py-6 text-center text-slate-500 text-[10px]">No webhook events recorded for this workspace</td></tr>';
+    `).join('') || '<tr><td colspan="6" class="px-3 py-6 text-center text-slate-500 text-[10px]">No Yoco integration events recorded for this workspace</td></tr>';
 
     const queuePanel = options.queueType === 'email'
         ? renderWorkspaceEmailQueuePanel(wsId)
         : `
             <div class="space-y-3">
                 <div class="flex items-center justify-between">
-                    <h5 class="text-[9px] font-black text-slate-500 uppercase tracking-widest">Webhook Event Log</h5>
+                    <h5 class="text-[9px] font-black text-slate-500 uppercase tracking-widest">Yoco Integration Log</h5>
                     <span class="text-[9px] font-black uppercase tracking-widest text-slate-500">${queueRows.length} entr${queueRows.length === 1 ? 'y' : 'ies'}</span>
                 </div>
                 <div class="overflow-x-auto rounded-xl border border-white/5">
@@ -1862,9 +1866,11 @@ function renderWorkspaceIntegrationPanel(wsId, options = {}) {
                         <thead>
                             <tr class="border-b border-white/5 text-[8px] font-black uppercase tracking-widest text-slate-500">
                                 <th class="px-3 py-3">Timestamp</th>
-                                <th class="px-3 py-3">Event</th>
+                                <th class="px-3 py-3">Source</th>
+                                <th class="px-3 py-3">Operation</th>
                                 <th class="px-3 py-3">Order</th>
                                 <th class="px-3 py-3">Status</th>
+                                <th class="px-3 py-3">Message</th>
                             </tr>
                         </thead>
                         <tbody>${queueHtml}</tbody>
@@ -1940,6 +1946,7 @@ function renderWorkspaceIntegrationPanel(wsId, options = {}) {
                     <button onclick="retryAllErroredYocoOrders(${adminInlineString(wsId)})" class="btn-ghost w-full text-red-300"><i class="fa-solid fa-triangle-exclamation mr-2"></i>Resync Errored Orders</button>
                     <button onclick="forceRetryIntegrationWorkspace(${adminInlineString(wsId)})" class="btn-ghost w-full text-blue-400"><i class="fa-solid fa-rotate mr-2"></i>Reconcile Recent Sales</button>
                     <button onclick="resetWebhookSubscriptionForWorkspace(${adminInlineString(wsId)})" class="btn-ghost w-full text-amber-400"><i class="fa-solid fa-tower-broadcast mr-2"></i>Webhook Reset</button>
+                    <button onclick="testWebhookSubscriptionForWorkspace(${adminInlineString(wsId)})" class="btn-ghost w-full text-violet-300"><i class="fa-solid fa-vial-circle-check mr-2"></i>Test Webhook</button>
                 </div>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <button onclick="factoryResetIntegrationCredentials(${adminInlineString(wsId)})" class="btn-danger w-full"><i class="fa-solid fa-power-off mr-2"></i>Factory Reset</button>
@@ -2186,6 +2193,7 @@ function renderWorkspaceVisualIntegrationSections(wsId) {
                     <button onclick="retryAllErroredYocoOrders(${adminInlineString(wsId)})" class="workspace-action-btn !text-red-300 border-red-500/30"><i class="fa-solid fa-triangle-exclamation mr-2"></i>Resync Errored Orders</button>
                     <button onclick="forceRetryIntegrationWorkspace(${adminInlineString(wsId)})" class="workspace-action-btn"><i class="fa-solid fa-rotate mr-2"></i>Reconcile Recent Sales</button>
                     <button onclick="resetWebhookSubscriptionForWorkspace(${adminInlineString(wsId)})" class="workspace-action-btn !text-amber-300 border-amber-500/30"><i class="fa-solid fa-tower-broadcast mr-2"></i>Webhook Reset</button>
+                    <button onclick="testWebhookSubscriptionForWorkspace(${adminInlineString(wsId)})" class="workspace-action-btn !text-violet-300 border-violet-500/30"><i class="fa-solid fa-vial-circle-check mr-2"></i>Test Webhook</button>
                 </div>
             </section>
         </div>
@@ -2298,14 +2306,16 @@ function renderIntegrationControlTower() {
 
     const queueTbody = document.getElementById('integration-queue-tbody');
     if (queueTbody) {
-        queueTbody.innerHTML = queueRows.slice(0, 50).map(row => `
-            <tr class="tbl-row border-b border-white/5">
+        queueTbody.innerHTML = queueRows.slice(0, 100).map(row => `
+            <tr class="tbl-row border-b border-white/5" title="${adminEscapeHtml(JSON.stringify(row.details || {}))}">
                 <td class="px-4 py-4 text-[10px] text-slate-400">${formatAdminDateTime(row.timestamp, 'Unknown')}</td>
-                <td class="px-4 py-4 text-[10px] font-bold">${row.eventType || 'webhook'}</td>
-                <td class="px-4 py-4 text-[10px] text-slate-400">${row.orderId || '—'}</td>
-                <td class="px-4 py-4 text-[10px] font-black uppercase">${row.status || 'Queued'}</td>
+                <td class="px-4 py-4 text-[10px] font-bold uppercase text-slate-300">${adminEscapeHtml(row.source || 'webhook')}</td>
+                <td class="px-4 py-4 text-[10px] font-bold">${adminEscapeHtml(row.operation || row.eventType || 'webhook')}</td>
+                <td class="px-4 py-4 text-[10px] text-slate-400">${adminEscapeHtml(row.orderId || '—')}</td>
+                <td class="px-4 py-4 text-[10px] font-black uppercase">${adminEscapeHtml(row.status || 'Queued')}</td>
+                <td class="px-4 py-4 text-[10px] text-slate-400 max-w-md">${adminEscapeHtml(row.message || row.error || '—')}</td>
             </tr>
-        `).join('') || '<tr><td colspan="4" class="px-4 py-8 text-center text-slate-500 text-xs">No queue events found</td></tr>';
+        `).join('') || '<tr><td colspan="6" class="px-4 py-8 text-center text-slate-500 text-xs">No Yoco integration events found</td></tr>';
     }
 
     const meta = document.getElementById('integration-selected-workspace-meta');
@@ -2426,7 +2436,7 @@ async function syncYocoSalesFromAdmin(wsId = '') {
         const result = await runAdminYocoAction(wsId, 'Syncing Yoco Sales...', async (workspaceId) => {
             return callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(workspaceId)}/yoco/sync-sales`);
         });
-        showToast(`Sales sync complete. ${result?.ordersProcessed || 0} orders and ${result?.refundsProcessed || 0} refunds processed.`, 'success');
+        showToast(`Sales sync complete. ${result?.ordersFetched || 0} orders checked, ${result?.stockMovements || 0} stock movements, ${result?.retryableOrders || 0} retryable.`, result?.errors?.length || result?.retryableOrders ? 'error' : 'success');
     } catch (e) { }
 }
 
@@ -2467,9 +2477,10 @@ async function sendLowStockSummaryFromAdmin(wsId = '') {
 async function syncYocoFullFromAdmin(wsId = '') {
     try {
         const result = await runAdminYocoAction(wsId, 'Restarting Yoco Sync...', async (workspaceId) => {
+            const webhook = await callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(workspaceId)}/yoco/reset-webhook`);
             const catalogue = await callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(workspaceId)}/yoco/sync-catalogue`);
-            const sales = await callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(workspaceId)}/yoco/sync-sales`);
-            return { catalogue, sales };
+            const sales = await callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(workspaceId)}/yoco/sync-sales`, { sinceDays: 2 });
+            return { webhook, catalogue, sales };
         });
         showToast(`Restarted sync. ${result?.sales?.ordersProcessed || 0} orders processed.`, 'success');
     } catch (e) { }
@@ -2548,6 +2559,17 @@ async function resetWebhookSubscriptionForWorkspace(wsId = '') {
             return callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(workspaceId)}/yoco/reset-webhook`);
         });
         showToast('Yoco webhook subscription reset', 'success');
+    } catch (e) { }
+}
+
+async function testWebhookSubscriptionForWorkspace(wsId = '') {
+    const targetWsId = wsId || getIntegrationSelectedWorkspaceId();
+    if (!targetWsId) return showToast('Select a workspace first', 'error');
+    try {
+        const result = await runAdminYocoAction(targetWsId, 'Testing Webhook...', async (workspaceId) => {
+            return callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(workspaceId)}/yoco/test-webhook`);
+        });
+        showToast(`Yoco test webhook dispatched${result?.messageId ? ` (${result.messageId})` : ''}. Check the integration log for delivery.`, 'success');
     } catch (e) { }
 }
 

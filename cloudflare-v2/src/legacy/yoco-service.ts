@@ -17,10 +17,12 @@ import {
   listWebhookSubscriptions,
   listOrders,
   listRefunds,
+  testWebhookSubscription,
   yocoFetch
 } from './yoco-client';
 import { processYocoOrder } from './yoco-sales';
 import { findRefund } from './yoco-webhooks';
+import { recordIntegrationLog, runLoggedIntegrationOperation } from './integration-log';
 
 type Row = Record<string, unknown>;
 
@@ -342,7 +344,10 @@ async function createYocoWebhookWithFallback(env: Env, apiKey: string, webhookUr
   let lastError: unknown = null;
   for (const body of attempts) {
     try {
-      const subscription = await createWebhookSubscription(env, apiKey, body) as Row;
+      const response = await createWebhookSubscription(env, apiKey, body) as Row;
+      const subscription = response.data && typeof response.data === 'object' && !Array.isArray(response.data)
+        ? response.data as Row
+        : response;
       const idValue = subscriptionId(subscription);
       const secretValue = subscriptionSecret(subscription);
       if (!idValue || !secretValue) {
@@ -363,12 +368,74 @@ function subscriptionEnabled(subscription: Row) {
   return !['disabled', 'inactive', 'deleted', 'archived'].includes(status);
 }
 
-async function deleteActiveYocoWebhookSubscriptions(env: Env, apiKey: string) {
+function subscriptionNotificationUrl(subscription: Row) {
+  return text(subscription.notification_url || subscription.notificationUrl || subscription.url);
+}
+
+function subscriptionName(subscription: Row) {
+  return text(subscription.name || subscription.display_name || subscription.displayName);
+}
+
+function subscriptionEventTypes(subscription: Row) {
+  const value = subscription.event_types || subscription.eventTypes || subscription.events;
+  if (!Array.isArray(value)) return [];
+  return value.map((entry) => text(entry).toLowerCase()).filter(Boolean);
+}
+
+function webhookSubscriptionMatches(subscription: Row, webhookId: string, webhookUrl: string) {
+  if (!subscription || subscriptionId(subscription) !== webhookId) return false;
+  if (!subscriptionEnabled(subscription)) return false;
+  if (subscriptionNotificationUrl(subscription) !== webhookUrl) return false;
+  const eventTypes = subscriptionEventTypes(subscription);
+  return YOCO_WEBHOOK_EVENT_TYPES.every((eventType) => eventTypes.includes(eventType));
+}
+
+async function inspectRemoteYocoWebhook(env: Env, apiKey: string, webhookId: string, webhookUrl: string) {
   const subscriptions = await listWebhookSubscriptions(env, apiKey) as Row[];
-  const active = subscriptions.filter((subscription) => subscriptionId(subscription) && subscriptionEnabled(subscription));
+  const subscription = subscriptions.find((row) => subscriptionId(row) === webhookId) || null;
+  return {
+    subscriptions,
+    subscription,
+    healthy: Boolean(subscription && webhookSubscriptionMatches(subscription, webhookId, webhookUrl)),
+    reason: !subscription
+      ? 'stored_subscription_missing_remotely'
+      : !subscriptionEnabled(subscription)
+        ? 'subscription_disabled_remotely'
+        : subscriptionNotificationUrl(subscription) !== webhookUrl
+          ? 'notification_url_mismatch'
+          : !YOCO_WEBHOOK_EVENT_TYPES.every((eventType) => subscriptionEventTypes(subscription).includes(eventType))
+            ? 'event_types_mismatch'
+            : ''
+  };
+}
+
+function isKcpWebhookSubscription(subscription: Row, webhookId: string, webhookUrl: string) {
+  const idValue = subscriptionId(subscription);
+  const urlValue = subscriptionNotificationUrl(subscription);
+  const nameValue = subscriptionName(subscription).toLowerCase();
+  return Boolean(
+    idValue
+    && (
+      (webhookId && idValue === webhookId)
+      || (webhookUrl && urlValue === webhookUrl)
+      || nameValue.includes('kitchen cost pro')
+      || nameValue.includes('kcp')
+    )
+  );
+}
+
+async function deleteYocoWebhookSubscriptions(
+  env: Env,
+  apiKey: string,
+  options: { webhookId?: string; webhookUrl?: string } = {},
+) {
+  const subscriptions = await listWebhookSubscriptions(env, apiKey) as Row[];
+  const webhookId = text(options.webhookId);
+  const webhookUrl = text(options.webhookUrl);
+  const candidates = subscriptions.filter((subscription) => isKcpWebhookSubscription(subscription, webhookId, webhookUrl));
   const deleted: string[] = [];
   const failed: string[] = [];
-  for (const subscription of active) {
+  for (const subscription of candidates) {
     const idValue = subscriptionId(subscription);
     try {
       await deleteWebhookSubscription(env, apiKey, idValue);
@@ -385,7 +452,11 @@ async function deleteActiveYocoWebhookSubscriptions(env: Env, apiKey: string) {
   if (failed.length) {
     throw new Error(`Could not delete ${failed.length} Yoco webhook subscription(s): ${failed.slice(0, 3).join('; ')}`);
   }
-  return { deletedCount: deleted.length, deletedIds: deleted };
+  return {
+    deletedCount: deleted.length,
+    deletedIds: deleted,
+    ignoredSubscriptionCount: Math.max(0, subscriptions.length - candidates.length),
+  };
 }
 
 export async function getYocoConnection(env: Env, workspaceId: string) {
@@ -435,28 +506,52 @@ export async function connectYoco(
   let webhookId = '';
   let webhookSecret = '';
   let webhookError = '';
+  let deletionResult = { deletedCount: 0, deletedIds: [] as string[], ignoredSubscriptionCount: 0 };
 
-  if (webhookUrl) {
-    try {
-      await deleteActiveYocoWebhookSubscriptions(env, cleanKey);
-      const { subscription } = await createYocoWebhookWithFallback(env, cleanKey, webhookUrl);
-      webhookEnabled = true;
-      webhookId = subscriptionId(subscription);
-      webhookSecret = subscriptionSecret(subscription);
-    } catch (caught) {
-      webhookError = caught instanceof Error ? caught.message : String(caught);
-    }
-  } else {
-    webhookError = 'YOCO_WEBHOOK_BASE_URL is not configured.';
+  try {
+    if (!webhookUrl) throw new Error('YOCO_WEBHOOK_BASE_URL is not configured.');
+    const setup = await runLoggedIntegrationOperation(
+      env,
+      workspaceId,
+      'yoco.connect.webhook',
+      'Validate Yoco credentials and initialise the live webhook',
+      async (correlationId) => {
+        deletionResult = await deleteYocoWebhookSubscriptions(env, cleanKey, {
+          webhookId: text(existing?.webhook_id),
+          webhookUrl,
+        });
+        await recordIntegrationLog(env, workspaceId, {
+          operation: 'yoco.webhook.delete_subscriptions',
+          status: 'success',
+          message: `Deleted ${deletionResult.deletedCount} Yoco webhook subscription(s).`,
+          details: deletionResult,
+          correlationId,
+        });
+        const { subscription } = await createYocoWebhookWithFallback(env, cleanKey, webhookUrl);
+        const createdId = subscriptionId(subscription);
+        const createdSecret = subscriptionSecret(subscription);
+        const remote = await inspectRemoteYocoWebhook(env, cleanKey, createdId, webhookUrl);
+        if (!remote.healthy) {
+          throw new Error(`Yoco created a webhook but remote verification failed: ${remote.reason || 'unknown reason'}.`);
+        }
+        return { webhookId: createdId, webhookSecret: createdSecret, webhookUrl };
+      },
+      { webhookUrl, eventTypes: YOCO_WEBHOOK_EVENT_TYPES },
+    );
+    webhookEnabled = true;
+    webhookId = setup.webhookId;
+    webhookSecret = setup.webhookSecret;
+  } catch (caught) {
+    webhookError = caught instanceof Error ? caught.message : String(caught);
   }
 
   await env.DB.prepare(
     `INSERT INTO yoco_connections
       (workspace_id, status, api_key_encrypted, webhook_id, webhook_secret, webhook_url,
        connection_active, last_error, api_key_fingerprint, api_key_locked_at, api_key_locked_by_uid, created_at, updated_at)
-     VALUES (?1, 'connected', ?2, ?3, ?4, ?5, 1, ?6, ?7, datetime('now'), ?8, datetime('now'), datetime('now'))
+     VALUES (?1, ?10, ?2, ?3, ?4, ?5, 1, ?6, ?7, datetime('now'), ?8, datetime('now'), datetime('now'))
      ON CONFLICT(workspace_id) DO UPDATE SET
-       status = 'connected',
+       status = ?10,
        api_key_encrypted = excluded.api_key_encrypted,
        api_key_fingerprint = CASE
          WHEN ?9 = 1 OR COALESCE(yoco_connections.api_key_fingerprint, '') = '' THEN excluded.api_key_fingerprint
@@ -479,15 +574,33 @@ export async function connectYoco(
        connection_active = 1,
        last_error = excluded.last_error,
        disconnected_at = NULL,
-       updated_at = datetime('now')`
-  ).bind(workspaceId, encrypted, webhookId || null, webhookSecret || null, webhookUrl || null, webhookError, fingerprint, text(options.actorUid) || null, options.allowKeyReplacement === true ? 1 : 0).run();
+       updated_at = datetime('now')`,
+  ).bind(
+    workspaceId,
+    encrypted,
+    webhookId || null,
+    webhookSecret || null,
+    webhookUrl || null,
+    webhookError,
+    fingerprint,
+    text(options.actorUid) || null,
+    options.allowKeyReplacement === true ? 1 : 0,
+    webhookEnabled ? 'connected' : 'error',
+  ).run();
+
+  if (!webhookEnabled) {
+    throw new Error(`Yoco credentials were saved, but the live webhook could not be initialised: ${webhookError}`);
+  }
 
   return {
     connected: true,
     webhookEnabled,
     webhookId,
     webhookUrl,
-    webhookError
+    webhookError: '',
+    deletedSubscriptionCount: deletionResult.deletedCount,
+    deletedSubscriptionIds: deletionResult.deletedIds,
+    remoteVerified: true,
   };
 }
 
@@ -498,63 +611,184 @@ export async function resetYocoWebhook(env: Env, workspaceId: string, apiKeyOver
   if (!webhookUrl) throw new Error('YOCO_WEBHOOK_BASE_URL is not configured.');
   const previousWebhookId = text(connection?.webhook_id);
   const previousWebhookSecret = text(connection?.webhook_secret);
+  let subscriptionsDeleted = false;
 
-  // Manual sync is the source of truth for Yoco webhooks. Delete every active
-  // subscription on the Yoco account first, then create a fresh LIVE subscription
-  // with the one-time secret returned by the official creation endpoint.
-  const deletionResult = await deleteActiveYocoWebhookSubscriptions(env, apiKey);
+  try {
+    return await runLoggedIntegrationOperation(
+      env,
+      workspaceId,
+      'yoco.webhook.reset',
+      'Delete existing Yoco subscriptions and create a fresh live subscription',
+      async (correlationId) => {
+        const deletionResult = await deleteYocoWebhookSubscriptions(env, apiKey, {
+          webhookId: previousWebhookId,
+          webhookUrl,
+        });
+        subscriptionsDeleted = true;
+        await recordIntegrationLog(env, workspaceId, {
+          operation: 'yoco.webhook.delete_subscriptions',
+          status: 'success',
+          message: `Deleted ${deletionResult.deletedCount} Yoco webhook subscription(s).`,
+          details: deletionResult,
+          correlationId,
+        });
 
-  const { subscription } = await createYocoWebhookWithFallback(env, apiKey, webhookUrl);
-  const webhookId = subscriptionId(subscription);
-  const webhookSecret = subscriptionSecret(subscription);
-  const previousUntil = previousWebhookSecret
-    ? new Date(Date.now() + WEBHOOK_PREVIOUS_SECRET_GRACE_MS).toISOString()
-    : null;
-  await env.DB.prepare(
-    `UPDATE yoco_connections
-        SET webhook_id = ?2,
-            webhook_secret = ?3,
-            webhook_url = ?4,
-            webhook_previous_id = ?5,
-            webhook_previous_secret = ?6,
-            webhook_previous_until = ?7,
-            connection_active = 1,
-            status = 'connected',
-            last_error = '',
-            updated_at = datetime('now')
-      WHERE workspace_id = ?1`
-  ).bind(
-    workspaceId,
-    webhookId,
-    webhookSecret,
-    webhookUrl,
-    previousWebhookId || null,
-    previousWebhookSecret || null,
-    previousUntil
-  ).run();
-  return {
-    webhookEnabled: true,
-    webhookId,
-    webhookUrl,
-    replacedWebhookId: previousWebhookId,
-    deletedSubscriptionCount: deletionResult.deletedCount,
-    deletedSubscriptionIds: deletionResult.deletedIds
-  };
+        const { subscription } = await createYocoWebhookWithFallback(env, apiKey, webhookUrl);
+        const webhookId = subscriptionId(subscription);
+        const webhookSecret = subscriptionSecret(subscription);
+        const remote = await inspectRemoteYocoWebhook(env, apiKey, webhookId, webhookUrl);
+        if (!remote.healthy) {
+          throw new Error(`Fresh Yoco webhook failed remote verification: ${remote.reason || 'unknown reason'}.`);
+        }
+        const previousUntil = previousWebhookSecret
+          ? new Date(Date.now() + WEBHOOK_PREVIOUS_SECRET_GRACE_MS).toISOString()
+          : null;
+        await env.DB.prepare(
+          `UPDATE yoco_connections
+              SET webhook_id = ?2,
+                  webhook_secret = ?3,
+                  webhook_url = ?4,
+                  webhook_previous_id = ?5,
+                  webhook_previous_secret = ?6,
+                  webhook_previous_until = ?7,
+                  connection_active = 1,
+                  status = 'connected',
+                  last_error = '',
+                  updated_at = datetime('now')
+            WHERE workspace_id = ?1`,
+        ).bind(
+          workspaceId,
+          webhookId,
+          webhookSecret,
+          webhookUrl,
+          previousWebhookId || null,
+          previousWebhookSecret || null,
+          previousUntil,
+        ).run();
+        return {
+          webhookEnabled: true,
+          webhookId,
+          webhookUrl,
+          replacedWebhookId: previousWebhookId,
+          deletedSubscriptionCount: deletionResult.deletedCount,
+          deletedSubscriptionIds: deletionResult.deletedIds,
+          remoteVerified: true,
+          eventTypes: YOCO_WEBHOOK_EVENT_TYPES,
+        };
+      },
+      { webhookUrl, previousWebhookId, eventTypes: YOCO_WEBHOOK_EVENT_TYPES },
+    );
+  } catch (caught) {
+    const message = caught instanceof Error ? caught.message : String(caught);
+    await env.DB.prepare(
+      `UPDATE yoco_connections
+          SET status = 'error',
+              connection_active = 1,
+              webhook_id = CASE WHEN ?3 = 1 THEN NULL ELSE webhook_id END,
+              webhook_secret = CASE WHEN ?3 = 1 THEN NULL ELSE webhook_secret END,
+              last_error = ?2,
+              updated_at = datetime('now')
+        WHERE workspace_id = ?1`,
+    ).bind(workspaceId, message, subscriptionsDeleted ? 1 : 0).run();
+    throw caught;
+  }
 }
 
 export async function ensureYocoWebhook(env: Env, workspaceId: string, apiKeyOverride = '') {
   const connection = await getYocoConnection(env, workspaceId);
+  const apiKey = text(apiKeyOverride) || await getYocoApiKey(env, workspaceId);
   const webhookUrl = expectedWebhookUrl(env, workspaceId);
   if (!webhookUrl) throw new Error('YOCO_WEBHOOK_BASE_URL is not configured.');
-  if (!webhookNeedsReset(connection, webhookUrl)) {
+  const webhookId = text(connection?.webhook_id);
+  if (webhookNeedsReset(connection, webhookUrl)) {
+    await recordIntegrationLog(env, workspaceId, {
+      operation: 'yoco.webhook.health_check',
+      status: 'warning',
+      message: 'Local webhook state requires a reset.',
+      details: { webhookId, webhookUrl, lastError: text(connection?.last_error) },
+    });
+    return resetYocoWebhook(env, workspaceId, apiKey);
+  }
+
+  const remote = await inspectRemoteYocoWebhook(env, apiKey, webhookId, webhookUrl);
+  if (!remote.healthy) {
+    await recordIntegrationLog(env, workspaceId, {
+      operation: 'yoco.webhook.health_check',
+      status: 'warning',
+      message: `Remote Yoco webhook is unhealthy: ${remote.reason}.`,
+      details: { webhookId, webhookUrl, reason: remote.reason, remoteSubscriptionCount: remote.subscriptions.length },
+    });
+    return resetYocoWebhook(env, workspaceId, apiKey);
+  }
+
+  await recordIntegrationLog(env, workspaceId, {
+    operation: 'yoco.webhook.health_check',
+    status: 'success',
+    message: 'Stored Yoco webhook is enabled and matches the live endpoint.',
+    details: { webhookId, webhookUrl, eventTypes: subscriptionEventTypes(remote.subscription || {}) },
+  });
+  return {
+    webhookEnabled: true,
+    webhookId,
+    webhookUrl,
+    replacedWebhookId: '',
+    remoteVerified: true,
+    eventTypes: YOCO_WEBHOOK_EVENT_TYPES,
+  };
+}
+
+export async function testYocoWebhook(env: Env, workspaceId: string) {
+  const apiKey = await getYocoApiKey(env, workspaceId);
+  const health = await ensureYocoWebhook(env, workspaceId, apiKey);
+  return runLoggedIntegrationOperation(
+    env,
+    workspaceId,
+    'yoco.webhook.test',
+    'Dispatch a Yoco payment.created test webhook',
+    async () => {
+      const response = await testWebhookSubscription(env, apiKey, health.webhookId, 'payment.created') as Row;
+      return {
+        webhookId: health.webhookId,
+        messageId: text(response.message_id || response.messageId || response.id),
+        response,
+      };
+    },
+    { webhookId: health.webhookId, eventType: 'payment.created' },
+  );
+}
+
+async function prepareYocoWebhookForSync(
+  env: Env,
+  workspaceId: string,
+  apiKey: string,
+  resetWebhook: boolean,
+) {
+  if (resetWebhook) return resetYocoWebhook(env, workspaceId, apiKey);
+  try {
+    return await ensureYocoWebhook(env, workspaceId, apiKey);
+  } catch (caught) {
+    const message = caught instanceof Error ? caught.message : String(caught);
+    await env.DB.prepare(
+      `UPDATE yoco_connections
+          SET last_error = ?2,
+              status = 'error',
+              updated_at = datetime('now')
+        WHERE workspace_id = ?1`,
+    ).bind(workspaceId, message).run();
+    await recordIntegrationLog(env, workspaceId, {
+      operation: 'yoco.webhook.health_check',
+      status: 'failed',
+      message,
+      details: { syncContinuedForRecovery: true },
+    });
     return {
-      webhookEnabled: true,
-      webhookId: text(connection?.webhook_id),
-      webhookUrl,
-      replacedWebhookId: ''
+      webhookEnabled: false,
+      webhookId: '',
+      webhookUrl: expectedWebhookUrl(env, workspaceId),
+      remoteVerified: false,
+      error: message,
     };
   }
-  return resetYocoWebhook(env, workspaceId, apiKeyOverride);
 }
 
 export async function disconnectYoco(env: Env, workspaceId: string) {
@@ -565,7 +799,10 @@ export async function disconnectYoco(env: Env, workspaceId: string) {
   if (encrypted && webhookId) {
     try {
       const apiKey = await decryptText(env, encrypted);
-      await deleteActiveYocoWebhookSubscriptions(env, apiKey);
+      await deleteYocoWebhookSubscriptions(env, apiKey, {
+        webhookId,
+        webhookUrl: text(connection?.webhook_url) || expectedWebhookUrl(env, workspaceId),
+      });
     } catch (caught) {
       disconnectError = caught instanceof Error ? caught.message : String(caught);
     }
@@ -592,17 +829,7 @@ export async function disconnectYoco(env: Env, workspaceId: string) {
 
 export async function syncYocoCatalogue(env: Env, workspaceId: string, options: YocoSyncOptions = {}) {
   const apiKey = await getYocoApiKey(env, workspaceId);
-  if (options.resetWebhook === true) {
-    await resetYocoWebhook(env, workspaceId, apiKey).catch(async (caught) => {
-      await env.DB.prepare(`UPDATE yoco_connections SET last_error = ?2, updated_at = datetime('now') WHERE workspace_id = ?1`)
-        .bind(workspaceId, caught instanceof Error ? caught.message : String(caught)).run();
-    });
-  } else {
-    await ensureYocoWebhook(env, workspaceId, apiKey).catch(async (caught) => {
-      await env.DB.prepare(`UPDATE yoco_connections SET last_error = ?2, updated_at = datetime('now') WHERE workspace_id = ?1`)
-        .bind(workspaceId, caught instanceof Error ? caught.message : String(caught)).run();
-    });
-  }
+  const webhook = await prepareYocoWebhookForSync(env, workspaceId, apiKey, options.resetWebhook === true);
   const [locations, categories, brands, items] = await Promise.all([
     listLocations(env, apiKey),
     listItemCategories(env, apiKey).catch(() => []),
@@ -927,7 +1154,8 @@ export async function syncYocoCatalogue(env: Env, workspaceId: string, options: 
     locationPricesUpserted: locationPricing.locationPricesUpserted,
     locationPricesRemoved: locationPricing.locationPricesRemoved,
     locationsPriced: locationPricing.locationsPriced,
-    warnings: locationPricing.warnings
+    warnings: locationPricing.warnings,
+    webhook
   };
 }
 
@@ -1166,24 +1394,38 @@ async function recordYocoSyncError(env: Env, workspaceId: string, details: {
 
 export async function syncYocoSales(env: Env, workspaceId: string, options: YocoSyncOptions = {}) {
   const apiKey = await getYocoApiKey(env, workspaceId);
-  if (options.resetWebhook === true) {
-    await resetYocoWebhook(env, workspaceId, apiKey).catch(async (caught) => {
-      await env.DB.prepare(`UPDATE yoco_connections SET last_error = ?2, updated_at = datetime('now') WHERE workspace_id = ?1`)
-        .bind(workspaceId, caught instanceof Error ? caught.message : String(caught)).run();
-    });
-  } else {
-    await ensureYocoWebhook(env, workspaceId, apiKey).catch(async (caught) => {
-      await env.DB.prepare(`UPDATE yoco_connections SET last_error = ?2, updated_at = datetime('now') WHERE workspace_id = ?1`)
-        .bind(workspaceId, caught instanceof Error ? caught.message : String(caught)).run();
-    });
-  }
+  const syncStartedAt = nowIso();
+  const syncStartedMs = Date.now();
+  const webhook = await prepareYocoWebhookForSync(env, workspaceId, apiKey, options.resetWebhook === true);
   const connection = await getYocoConnection(env, workspaceId);
   const now = nowIso();
-  // An explicit `sinceIso` (e.g. "last 14 days" from the admin console) overrides the stored
-  // incremental cursor so admins can re-pull a fixed recent window on demand. `full` wins over both.
   const explicitSince = text(options.sinceIso);
-  const orderLowerBound = options.full ? '' : (explicitSince || text(connection?.last_successful_order_updated_at || connection?.last_sales_sync_at));
-  const refundLowerBound = options.full ? '' : (explicitSince || text(connection?.last_successful_refund_updated_at || connection?.last_sales_sync_at));
+  const overlapCursor = (value: unknown) => {
+    const raw = text(value);
+    if (!raw) return '';
+    const parsed = Date.parse(raw);
+    return Number.isFinite(parsed) ? new Date(parsed - 6 * 60 * 60 * 1000).toISOString() : raw;
+  };
+  const orderCursor = text(connection?.last_successful_order_updated_at || connection?.last_sales_sync_at);
+  const refundCursor = text(connection?.last_successful_refund_updated_at || connection?.last_sales_sync_at);
+  const orderLowerBound = options.full ? '' : (explicitSince || overlapCursor(orderCursor));
+  const refundLowerBound = options.full ? '' : (explicitSince || overlapCursor(refundCursor));
+
+  await recordIntegrationLog(env, workspaceId, {
+    operation: 'yoco.sales.sync',
+    status: 'started',
+    message: 'Yoco sales reconciliation started.',
+    details: {
+      orderLowerBound: orderLowerBound || null,
+      refundLowerBound: refundLowerBound || null,
+      explicitSince: explicitSince || null,
+      full: options.full === true,
+      resetWebhook: options.resetWebhook === true,
+      webhookHealthy: webhook.webhookEnabled === true && webhook.remoteVerified === true,
+    },
+    startedAt: syncStartedAt,
+  });
+
   const orders = await listOrders(env, apiKey, orderLowerBound ? {
     status: ['completed'],
     updated_at__gte: orderLowerBound,
@@ -1197,10 +1439,24 @@ export async function syncYocoSales(env: Env, workspaceId: string, options: Yoco
 
   let ordersProcessed = 0;
   let refundsProcessed = 0;
+  let ordersSkipped = 0;
+  let refundsSkipped = 0;
   let missingRecipes = 0;
+  let stockMovements = 0;
+  let orderLines = 0;
   let orderErrors = 0;
   let refundErrors = 0;
+  let retryableOrders = 0;
+  let retryableRefunds = 0;
+  let duplicateOrders = 0;
+  let duplicateRefunds = 0;
   const errors: string[] = [];
+  const warnings: string[] = [];
+  const reasonCounts: Record<string, number> = {};
+  const countReason = (reason: unknown) => {
+    const key = text(reason, 'processed');
+    reasonCounts[key] = (reasonCounts[key] || 0) + 1;
+  };
 
   for (const order of orders as Row[]) {
     const orderId = text((order as Row).id || (order as Row).order_id || (order as Row).orderId);
@@ -1209,8 +1465,30 @@ export async function syncYocoSales(env: Env, workspaceId: string, options: Yoco
         ? await fetchOrder(env, apiKey, orderId).catch(() => order) as Row
         : order;
       const result = await processYocoOrder(env, workspaceId, fullOrder, { mode: 'sale', eventType: 'yoco.sync.sale' });
-      if (result.processed) ordersProcessed += 1;
-      missingRecipes += result.missingRecipes || 0;
+      countReason(result.reason);
+      stockMovements += Number(result.stockMovements || 0);
+      orderLines += Number(result.orderLines || 0);
+      missingRecipes += Number(result.missingRecipes || 0);
+      if (result.reason === 'duplicate') duplicateOrders += 1;
+      if (result.retryable) {
+        retryableOrders += 1;
+        const message = `Order ${orderId || 'unknown'} remains retryable because ${result.missingRecipes || 0} product/recipe component(s) could not deduct stock.`;
+        warnings.push(message);
+        await recordYocoSyncError(env, workspaceId, {
+          eventType: 'yoco.sync.sale.retryable',
+          orderId,
+          message,
+          raw: { order, result }
+        });
+        await recordIntegrationLog(env, workspaceId, {
+          operation: 'yoco.sale.deduction',
+          status: 'warning',
+          message,
+          details: { orderId, result },
+        });
+      }
+      if (result.processed && !result.retryable) ordersProcessed += 1;
+      else if (!result.processed || result.retryable) ordersSkipped += 1;
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : String(caught);
       orderErrors += 1;
@@ -1221,21 +1499,53 @@ export async function syncYocoSales(env: Env, workspaceId: string, options: Yoco
         message,
         raw: order
       });
+      await recordIntegrationLog(env, workspaceId, {
+        operation: 'yoco.sale.deduction',
+        status: 'failed',
+        message,
+        details: { orderId },
+      });
     }
   }
 
   for (const refund of refunds as Row[]) {
     const orderId = text((refund as Row).original_order_id || (refund as Row).order_id);
     try {
-      if (!orderId) continue;
+      if (!orderId) {
+        refundsSkipped += 1;
+        countReason('refund_missing_order_id');
+        continue;
+      }
       const order = await fetchOrder(env, apiKey, orderId) as Row;
       const result = await processYocoOrder(env, workspaceId, order, {
         mode: 'refund',
         refund,
         eventType: 'yoco.sync.refund'
       });
-      if (result.processed) refundsProcessed += 1;
-      missingRecipes += result.missingRecipes || 0;
+      countReason(result.reason);
+      stockMovements += Number(result.stockMovements || 0);
+      orderLines += Number(result.orderLines || 0);
+      missingRecipes += Number(result.missingRecipes || 0);
+      if (result.reason === 'duplicate') duplicateRefunds += 1;
+      if (result.retryable) {
+        retryableRefunds += 1;
+        const message = `Refund for order ${orderId} remains retryable because ${result.missingRecipes || 0} product/recipe component(s) could not update stock.`;
+        warnings.push(message);
+        await recordYocoSyncError(env, workspaceId, {
+          eventType: 'yoco.sync.refund.retryable',
+          orderId,
+          message,
+          raw: { refund, result }
+        });
+        await recordIntegrationLog(env, workspaceId, {
+          operation: 'yoco.refund.deduction',
+          status: 'warning',
+          message,
+          details: { orderId, result },
+        });
+      }
+      if (result.processed && !result.retryable) refundsProcessed += 1;
+      else if (!result.processed || result.retryable) refundsSkipped += 1;
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : String(caught);
       refundErrors += 1;
@@ -1246,22 +1556,77 @@ export async function syncYocoSales(env: Env, workspaceId: string, options: Yoco
         message,
         raw: refund
       });
+      await recordIntegrationLog(env, workspaceId, {
+        operation: 'yoco.refund.deduction',
+        status: 'failed',
+        message,
+        details: { orderId },
+      });
     }
   }
 
+  const orderCursorBlocked = orderErrors > 0 || retryableOrders > 0;
+  const refundCursorBlocked = refundErrors > 0 || retryableRefunds > 0;
+  const healthError = text((webhook as Row).error);
+  const firstProblem = errors[0] || warnings[0] || healthError || '';
   await env.DB.prepare(
     `UPDATE yoco_connections
         SET last_sales_sync_at = ?2,
             last_successful_order_updated_at = CASE WHEN ?3 = 0 THEN ?2 ELSE last_successful_order_updated_at END,
             last_successful_refund_updated_at = CASE WHEN ?4 = 0 THEN ?2 ELSE last_successful_refund_updated_at END,
             last_error = ?5,
+            status = CASE WHEN ?6 = 1 THEN 'connected' ELSE 'error' END,
             updated_at = ?2
       WHERE workspace_id = ?1`
-  ).bind(workspaceId, now, orderErrors, refundErrors, errors[0] || '').run();
+  ).bind(
+    workspaceId,
+    now,
+    orderCursorBlocked ? 1 : 0,
+    refundCursorBlocked ? 1 : 0,
+    firstProblem,
+    webhook.webhookEnabled === true && webhook.remoteVerified === true ? 1 : 0,
+  ).run();
 
-  return { ordersProcessed, refundsProcessed, missingRecipes, errors };
+  const result = {
+    ordersFetched: (orders as Row[]).length,
+    refundsFetched: (refunds as Row[]).length,
+    ordersProcessed,
+    refundsProcessed,
+    ordersSkipped,
+    refundsSkipped,
+    retryableOrders,
+    retryableRefunds,
+    duplicateOrders,
+    duplicateRefunds,
+    missingRecipes,
+    stockMovements,
+    orderLines,
+    reasonCounts,
+    orderCursorAdvanced: !orderCursorBlocked,
+    refundCursorAdvanced: !refundCursorBlocked,
+    orderLowerBound: orderLowerBound || null,
+    refundLowerBound: refundLowerBound || null,
+    webhook,
+    warnings,
+    errors,
+  };
+
+  await recordIntegrationLog(env, workspaceId, {
+    operation: 'yoco.sales.sync',
+    status: errors.length ? 'failed' : warnings.length || webhook.webhookEnabled !== true ? 'warning' : 'success',
+    message: errors.length
+      ? `Yoco sales reconciliation completed with ${errors.length} error(s).`
+      : warnings.length
+        ? `Yoco sales reconciliation completed with ${warnings.length} retryable warning(s).`
+        : `Yoco sales reconciliation completed with ${stockMovements} stock movement(s).`,
+    details: result,
+    startedAt: syncStartedAt,
+    completedAt: nowIso(),
+    durationMs: Date.now() - syncStartedMs,
+  });
+
+  return result;
 }
-
 
 export async function retryFailedYocoOrders(
   env: Env,
@@ -1275,7 +1640,7 @@ export async function retryFailedYocoOrders(
             MAX(created_at) AS latest_error_at
        FROM yoco_webhook_events
       WHERE workspace_id = ?1
-        AND status IN ('failed', 'rejected')`,
+        AND status IN ('failed', 'rejected', 'attention')`,
   ).bind(workspaceId).first<Row>();
   const errorCount = Number(stats?.error_count || 0) || 0;
   if (!errorCount) {
@@ -1297,19 +1662,20 @@ export async function retryFailedYocoOrders(
   const sinceIso = new Date((Number.isFinite(parsedEarliest) ? parsedEarliest : Date.now()) - 6 * 60 * 60 * 1000).toISOString();
   const result = await syncYocoSales(env, workspaceId, { sinceIso });
   const errors = Array.isArray(result.errors) ? result.errors : [];
-  if (!errors.length) {
+  const retryableCount = Number(result.retryableOrders || 0) + Number(result.retryableRefunds || 0);
+  if (!errors.length && retryableCount === 0) {
     await env.DB.prepare(
       `UPDATE yoco_webhook_events
           SET status = 'processed',
               processed_at = ?2,
               error_message = ''
         WHERE workspace_id = ?1
-          AND status IN ('failed', 'rejected')
+          AND status IN ('failed', 'rejected', 'attention')
           AND datetime(created_at) >= datetime(?3)`,
     ).bind(workspaceId, nowIso(), sinceIso).run();
   }
   return {
-    status: errors.length ? 'retry_completed_with_errors' : 'retried',
+    status: errors.length ? 'retry_completed_with_errors' : retryableCount ? 'retry_completed_with_attention' : 'retried',
     errorCount,
     earliestErrorAt: text(stats?.earliest_error_at),
     latestErrorAt: text(stats?.latest_error_at),
@@ -1317,6 +1683,9 @@ export async function retryFailedYocoOrders(
     ordersProcessed: Number(result.ordersProcessed || 0),
     refundsProcessed: Number(result.refundsProcessed || 0),
     missingRecipes: Number(result.missingRecipes || 0),
+    retryableOrders: Number(result.retryableOrders || 0),
+    retryableRefunds: Number(result.retryableRefunds || 0),
+    warnings: Array.isArray(result.warnings) ? result.warnings : [],
     errors,
   };
 }

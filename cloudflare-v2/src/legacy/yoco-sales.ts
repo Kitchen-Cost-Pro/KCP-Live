@@ -108,9 +108,11 @@ interface SaleComponent {
 export interface YocoProcessResult {
   processed: boolean;
   reason?: string;
+  retryable?: boolean;
   missingRecipes: number;
   orderLines: number;
   stockMovements: number;
+  skippedDuplicates?: number;
 }
 
 // How stock should behave when a Yoco refund reason is present.
@@ -1274,6 +1276,7 @@ export async function processYocoOrder(
 
       const sourceLocationIds = new Set<string>();
       const lineDbId = id('yoco_line');
+      const componentMovementStart = movementCount;
 
       if (!effectiveProduct || !recipe) {
         missingRecipes += 1;
@@ -1289,6 +1292,7 @@ export async function processYocoOrder(
           recipes,
           recipeLines
         );
+        if (!depletionLines.length) missingRecipes += 1;
         for (const depletion of depletionLines) {
           const sourceLocation = resolveSourceLocation(sellingLocation, depletion.stockItem, locations);
           const sourceLocationId = text(sourceLocation.id);
@@ -1397,7 +1401,15 @@ export async function processYocoOrder(
         `INSERT INTO yoco_order_lines
           (id, workspace_id, yoco_order_id, product_id, yoco_line_id, name, quantity, total,
            selling_location_id, source_location_id, raw_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+         ON CONFLICT(workspace_id, yoco_order_id, yoco_line_id) DO UPDATE SET
+           product_id = excluded.product_id,
+           name = excluded.name,
+           quantity = excluded.quantity,
+           total = excluded.total,
+           selling_location_id = excluded.selling_location_id,
+           source_location_id = excluded.source_location_id,
+           raw_json = excluded.raw_json`
       ).bind(
         lineDbId,
         workspaceId,
@@ -1418,13 +1430,18 @@ export async function processYocoOrder(
         })
       ));
 
-      statements.push(env.DB.prepare(
-        `INSERT INTO yoco_processed_signatures
-          (workspace_id, signature_hash, event_type, yoco_order_id, payment_id, raw_signature)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(workspace_id, signature_hash) DO NOTHING`
-      ).bind(workspaceId, signatureHash, options.eventType || `yoco.${mode}`, orderId, paymentId || null, rawSignature));
-      existingSignatureHashes.add(signatureHash);
+      // A component is only terminally deduplicated after it has produced at least one
+      // stock movement. Missing product/recipe mappings stay retryable so a later resync can
+      // deduct stock after the setup is corrected.
+      if (movementCount > componentMovementStart) {
+        statements.push(env.DB.prepare(
+          `INSERT INTO yoco_processed_signatures
+            (workspace_id, signature_hash, event_type, yoco_order_id, payment_id, raw_signature)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+           ON CONFLICT(workspace_id, signature_hash) DO NOTHING`
+        ).bind(workspaceId, signatureHash, options.eventType || `yoco.${mode}`, orderId, paymentId || null, rawSignature));
+        existingSignatureHashes.add(signatureHash);
+      }
 
       orderLineCount += 1;
     }
@@ -1440,11 +1457,16 @@ export async function processYocoOrder(
 
   if (statements.length) await env.DB.batch(statements);
 
+  const retryable = missingRecipes > 0;
   return {
-    processed: true,
-    reason: skippedDuplicates && !orderLineCount ? 'duplicate' : undefined,
+    processed: movementCount > 0 || skippedDuplicates > 0,
+    reason: retryable
+      ? (movementCount > 0 ? 'partially_processed_missing_recipe_or_mapping' : 'missing_recipe_or_mapping')
+      : skippedDuplicates && !orderLineCount ? 'duplicate' : undefined,
+    retryable,
     missingRecipes,
     orderLines: orderLineCount,
-    stockMovements: movementCount
+    stockMovements: movementCount,
+    skippedDuplicates
   };
 }
