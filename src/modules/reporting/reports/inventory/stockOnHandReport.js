@@ -2,6 +2,7 @@ import { roundMoney, safeNumber } from '../../engine/calculations.js';
 import { groupBy, sumBy, text, toArray } from '../../engine/grouping.js';
 import { fetchStockOnHandRows } from '../../api/reportingApi.js';
 import { mapColumns, rememberPayload, topText, uniqueCount } from '../purchasing/purchasingReportHelpers.js';
+import { buildDefaultStockSku } from '../../../../utils/stockSku.js';
 
 const moneyColumn = (key, label, tooltipKey = '') => ({ key, label, type: 'money', align: 'right', sortable: true, ...(tooltipKey ? { tooltipKey } : {}) });
 const qtyColumn = (key, label) => ({ key, label, type: 'number', align: 'right', sortable: true });
@@ -143,7 +144,7 @@ function normalizeStockRow(row = {}, index = 0) {
     itemId: text(row.itemId || row.stockItemId || row.stock_item_id),
     stockItemId: text(row.stockItemId || row.itemId || row.stock_item_id),
     itemName: text(row.itemName || row.item_name),
-    sku: text(row.sku),
+    sku: text(row.sku) || buildDefaultStockSku(row.itemName || row.item_name),
     category: text(row.category || row.categoryName || row.category_name) || 'General',
     locationId: text(row.locationId || row.location_id),
     locationName: text(row.locationName || row.location_name),

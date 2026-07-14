@@ -3,6 +3,7 @@ import { renderLoadingPanel } from './LoadingPanel.js';
 import { matchesBarcodeQuery, parseBarcodeValues } from '../utils/barcodes.js';
 import { getLocationStock } from '../utils/stockBalances.js';
 import { resolveLocationUnitCost } from '../utils/stockCostResolver.js';
+import { resolveStockItemSku } from '../utils/stockSku.js';
 
 const defaultUoms = ['ea', 'kg', 'g', 'l', 'ml', 'pack', 'case', 'bottle', 'bag', 'box', 'tray', 'portion', 'batch'];
 
@@ -873,32 +874,20 @@ function renderStockRow(item, locationId, locations = [], selected = false) {
 
 
 function formatStockItemSkuProduct(item = {}) {
-  const sku = getStockItemSku(item);
-  const name = getStockItemDisplayName(item);
-  return sku ? `${sku} - ${name}` : '—';
+  return getStockItemSku(item);
 }
 
 function getStockItemSku(item = {}) {
-  const explicit = [item.sku, item.SKU, item.skuCode, item.stockCode, item.itemCode, item.customSku, item.code]
-    .map((value) => String(value ?? '').trim())
-    .find(Boolean);
-  if (explicit) return explicit;
-
-  const id = String(item.id || '').trim();
-  if (!id || /^stock[_-]/i.test(id) || /^imp[_-]/i.test(id)) return '';
-
-  const name = getStockItemDisplayName(item);
-  const nameAsId = String(name || '')
-    .trim()
-    .replace(/[.#$/[\]]/g, '_')
-    .replace(/\s+/g, '_')
-    .slice(0, 120)
-    .toLowerCase();
-
-  const normalizedId = id.toLowerCase();
-  const normalizedName = String(name || '').trim().toLowerCase();
-  if (normalizedId === nameAsId || normalizedId === normalizedName) return '';
-  return id;
+  return resolveStockItemSku(
+    getStockItemDisplayName(item),
+    item.sku,
+    item.SKU,
+    item.skuCode,
+    item.stockCode,
+    item.itemCode,
+    item.customSku,
+    item.code,
+  );
 }
 
 function renderActionDropdown(openDropdown, actionStatus, selectedCount, filters = {}, locationOptions = []) {
@@ -1009,7 +998,7 @@ function renderStockModal(stock, categories = [], uoms = [], locations = [], sto
               </label>
               <label>
                 <span>${withInfo('SKU', 'Editable stock keeping unit used for purchasing, imports, and product references.')}</span>
-                <input name="sku" value="${escapeAttribute(getStockItemSku(item))}" data-stock-draft-field="sku" placeholder="E.g. RW-BTL-750" />
+                <input name="sku" value="${escapeAttribute(getStockItemSku(item))}" data-stock-draft-field="sku" placeholder="Leave blank to use SKU - Item Name" />
               </label>
               <label>
                 <span>${withInfo('Category', 'Controlled category list built from existing stock items to keep spelling consistent.')}</span>

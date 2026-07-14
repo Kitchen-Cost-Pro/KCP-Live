@@ -74,6 +74,15 @@ function text(value: unknown, fallback = "") {
   return String(value ?? fallback).trim();
 }
 
+function defaultStockSku(name: unknown) {
+  return `SKU - ${text(name, "Unnamed Stock Item") || "Unnamed Stock Item"}`;
+}
+
+function resolveStockSku(name: unknown, ...candidates: unknown[]) {
+  const explicit = candidates.map((value) => text(value)).find(Boolean);
+  return explicit || defaultStockSku(name);
+}
+
 function routeText(value: unknown, fallback = "") {
   const raw = text(value, fallback);
   if (!raw) return "";
@@ -520,15 +529,22 @@ function normalizeStockItemPayload(raw: Record<string, unknown>) {
         .map((entry) => entry.trim())
         .filter(Boolean);
 
-  const sku = text(
-    merged.sku ||
-      merged.SKU ||
-      merged.skuCode ||
-      merged.stockCode ||
-      merged.itemCode ||
-      merged.customSku ||
-      merged.code,
+  const skuKeys = [
+    "sku",
+    "SKU",
+    "skuCode",
+    "stockCode",
+    "itemCode",
+    "customSku",
+    "code",
+  ];
+  const hasSkuInput = skuKeys.some((key) =>
+    Object.prototype.hasOwnProperty.call(raw, key),
   );
+  const skuSource = hasSkuInput
+    ? skuKeys.map((key) => raw[key]).find((value) => text(value))
+    : skuKeys.map((key) => merged[key]).find((value) => text(value));
+  const sku = resolveStockSku(name, skuSource);
 
   return {
     id: text(merged.id) || id("stock"),
@@ -569,7 +585,7 @@ function normalizeStockItemPayload(raw: Record<string, unknown>) {
     rawJson: JSON.stringify({
       ...merged,
       sku,
-      customSku: text(merged.customSku || sku),
+      customSku: sku,
       itemType,
       isStocked: Boolean(isStocked),
       isSubRecipe: itemType === "sub_recipe",
@@ -2256,6 +2272,7 @@ async function buildLinkedTransferProfile(
           si.unit,
           si.unit_cost,
           si.barcode_csv,
+          si.raw_json,
           COALESCE((SELECT SUM(quantity) FROM stock_balances sb WHERE sb.workspace_id = si.workspace_id AND sb.stock_item_id = si.id), 0) AS stock,
           COALESCE((
             SELECT json_group_object(sb.location_id, sb.quantity)
@@ -2336,14 +2353,25 @@ async function buildLinkedTransferProfile(
     stockItems: arrayValue(stockItems.results)
       .map((item) => {
         const row = objectValue(item);
+        const raw = objectValue(jsonParse(row.raw_json));
+        const sku = resolveStockSku(
+          row.name,
+          raw.sku,
+          raw.SKU,
+          raw.skuCode,
+          raw.stockCode,
+          raw.itemCode,
+          raw.customSku,
+          raw.code,
+        );
         return {
           id: text(row.id),
           name: text(row.name),
           category: text(row.category),
           itemType: text(row.item_type),
           unit: text(row.unit),
-          sku: text(row.id),
-          code: text(row.id),
+          sku,
+          code: sku,
           barcodes: text(row.barcode_csv)
             .split(",")
             .map((entry) => entry.trim())
@@ -4629,6 +4657,21 @@ export async function getStockItems(
       );
     });
   }
+
+  stockItems.forEach((row) => {
+    const raw = objectValue(jsonParse(row.raw_json));
+    const sku = resolveStockSku(
+      row.name,
+      raw.sku,
+      raw.SKU,
+      raw.skuCode,
+      raw.stockCode,
+      raw.itemCode,
+      raw.customSku,
+      raw.code,
+    );
+    row.raw_json = JSON.stringify({ ...raw, sku, customSku: sku });
+  });
 
   return json(request, env, {
     ok: true,

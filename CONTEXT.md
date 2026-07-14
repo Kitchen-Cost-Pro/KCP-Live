@@ -466,3 +466,12 @@ Then confirm:
 - From and To remain locked to the same 24-hour boundary.
 - Go Live is disabled until Products, Recipes, and Locations are present and shows a saving state.
 - Go Live now records an activation timestamp. All webhook and manual Yoco sales processing honors the workspace setting, ignores pre-activation sales, and refuses to restore refunds unless the original sale was depleted.
+
+## Phase 59 report-action and stock-SKU rules (July 2026)
+
+- Report export/download actions must render before saved views inside every report Actions menu.
+- Visible-column configuration remains below saved views but is wrapped in a collapsed `<details>` section by default. Opening the Actions menu must not immediately display the full checkbox grid.
+- Stock-item SKU normalization has one rule: an explicit user/import SKU is preserved exactly after trimming; a blank SKU becomes `SKU - ${Item Name}`.
+- Do not append the item name to an explicit SKU in the Stock Items table or report output.
+- Apply the fallback to new saves, imports, legacy blank records returned by the Worker, dashboard inventory rows, Stock on Hand reporting, exports based on normalized stock items, and linked-workspace transfer stock data.
+- Phase 59 validation baseline: 411 passing tests, successful production frontend build, successful Worker TypeScript check, and successful Wrangler deployment dry run.
