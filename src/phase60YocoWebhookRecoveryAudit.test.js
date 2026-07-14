@@ -50,7 +50,7 @@ test('Phase 60 admin console exposes unified integration diagnostics and webhook
   assert.match(routes, /action === "test-webhook"/);
   assert.match(admin, /Yoco Integration Log/);
   assert.match(admin, /Test Webhook/);
-  assert.match(admin, /reset-webhook[\s\S]*sync-catalogue[\s\S]*sync-sales/);
+  assert.match(admin, /reset-webhook[\s\S]*sync-catalogue[\s\S]*(?:sync-sales|reconcile-sales)/);
   assert.match(worker, /'test-webhook'/);
 });
 

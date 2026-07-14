@@ -23,7 +23,7 @@ import {
   stockValuationUnitCost,
   yocoWebhookEventFields,
 } from "./yoco-sales";
-import { fetchModifierGroup, fetchOrder, listOrders } from "./yoco-client";
+import { fetchModifierGroup, fetchOrder, listOrders, listOrdersPage } from "./yoco-client";
 import {
   connectYoco,
   disconnectYoco,
@@ -14085,20 +14085,15 @@ export async function postYocoConnect(
   await scoped(request, env, auth, workspaceId);
   const payload = await readJson<{
     apiKey?: string;
-    syncSalesOnConnect?: boolean;
   }>(request);
   const denied = await denyUnlessPermissionManager(request, env, auth, workspaceId);
   if (denied) return denied;
   const connection = await connectYoco(env, workspaceId, payload.apiKey || "", { actorUid: auth.uid });
   const catalogue = await syncYocoCatalogue(env, workspaceId);
-  const sales =
-    payload.syncSalesOnConnect === true
-      ? await syncYocoSales(env, workspaceId, { full: true })
-      : {
-          skipped: true,
-          reason:
-            "Full sales history sync is run manually to avoid unnecessary connection-time API calls.",
-        };
+  const sales = {
+    skipped: true,
+    reason: "Initial Yoco connection imports the catalogue only. Historical orders are not imported or deducted.",
+  };
   return json(request, env, {
     ok: true,
     ...connection,
@@ -14869,13 +14864,32 @@ async function loadYocoOrderForWebhook(
   // recent order window and match the payment id before giving up. This keeps
   // stock deduction live even when the webhook payload is payment-shaped.
   const candidateOrders = (await listOrders(env, apiKey, {
-    status: ["completed"],
     payment_id: paymentId,
     limit: 25,
   }).catch(() => [])) as Record<string, unknown>[];
-  const matched = candidateOrders.find((order) =>
+  let matched = candidateOrders.find((order) =>
     orderHasPayment(order, paymentId),
   );
+
+  // A number of Yoco accounts return an empty list when payment_id is used as a
+  // server-side filter. Inspect a bounded set of normal order pages before giving
+  // up so a valid payment.created webhook can still resolve its order immediately.
+  if (!matched) {
+    let cursor: string | null = null;
+    for (let pageIndex = 0; pageIndex < 5; pageIndex += 1) {
+      const page: { rows: unknown[]; nextCursor: unknown } | null = await listOrdersPage(env, apiKey, {
+        cursor,
+        limit: 100,
+      }).catch(() => null);
+      if (!page) break;
+      const rows = (page.rows || []) as Record<string, unknown>[];
+      matched = rows.find((order) => orderHasPayment(order, paymentId));
+      if (matched) break;
+      cursor = text(page.nextCursor) || null;
+      if (!cursor || !rows.length) break;
+    }
+  }
+
   if (matched) {
     const matchedOrderId = text(
       matched.id || matched.order_id || matched.orderId,
@@ -15107,6 +15121,15 @@ export async function postYocoWebhook(
     return error(request, env, 400, "Yoco order could not be loaded.");
   }
 
+  const resolvedOrderId = text(order.id || order.order_id || order.orderId || orderId);
+  if (resolvedOrderId && resolvedOrderId !== orderId) {
+    await env.DB.prepare(
+      `UPDATE yoco_webhook_events
+          SET yoco_order_id = ?2
+        WHERE id = ?1`,
+    ).bind(webhookDbId, resolvedOrderId).run();
+  }
+
   try {
     const isRefund = String(eventType || "")
       .toLowerCase()
@@ -15163,35 +15186,55 @@ export async function postYocoWebhook(
     }
 
     const returnNeedsRetry = returnsResult.results.some((entry) => entry.retryable === true);
-    const needsAttention = result.retryable === true || returnNeedsRetry;
-    const attentionMessage = needsAttention
-      ? `Webhook accepted, but stock deduction remains retryable: ${result.reason || "missing recipe or product mapping"}.`
-      : "";
+    const totalMovements = Number(result.stockMovements || 0) + Number(returnsResult.totalMovements || 0);
+    const resultReason = text(result.reason);
+    const duplicateSuccess = resultReason === 'duplicate' || Number(result.skippedDuplicates || 0) > 0;
+    const intentionallyIgnored = [
+      'before_stock_depletion_start',
+      'skipped_refund_reason',
+      'skipped_other_reason'
+    ].includes(resultReason);
+    const needsAttention = result.retryable === true || returnNeedsRetry || (
+      totalMovements === 0 && !duplicateSuccess && !intentionallyIgnored
+    );
+    const webhookStatus = intentionallyIgnored ? 'ignored' : needsAttention ? 'attention' : 'processed';
+    const outcomeMessage = intentionallyIgnored
+      ? `Webhook intentionally ignored: ${resultReason}. No stock was changed.`
+      : needsAttention
+        ? resultReason === 'stock_depletion_disabled'
+          ? 'Webhook received, but stock depletion is not live. Use Business Settings > Go Live before new sales can deduct stock.'
+          : resultReason === 'order_not_paid_or_completed'
+            ? 'Webhook received, but the Yoco order is not yet available in a paid/completed state. It will remain retryable.'
+            : `Webhook received, but stock deduction needs attention: ${resultReason || 'missing recipe or product mapping'}.`
+        : duplicateSuccess && totalMovements === 0
+          ? 'Webhook matched stock movements that were already processed. No duplicate deduction was created.'
+          : `Stock deduction completed with ${totalMovements} stock movement(s).`;
     await env.DB.prepare(
       `UPDATE yoco_webhook_events
           SET status = ?2,
+              yoco_order_id = COALESCE(NULLIF(?5, ''), yoco_order_id),
               processed_at = ?3,
               error_message = ?4
         WHERE id = ?1`,
     )
-      .bind(webhookDbId, needsAttention ? "attention" : "processed", nowIso(), attentionMessage)
+      .bind(webhookDbId, webhookStatus, nowIso(), outcomeMessage, resolvedOrderId)
       .run();
 
     await recordIntegrationLog(env, workspaceId, {
       operation: "yoco.webhook.process",
       status: needsAttention ? "warning" : "success",
-      message: needsAttention
-        ? attentionMessage
-        : `Yoco webhook processed with ${Number(result.stockMovements || 0) + Number(returnsResult.totalMovements || 0)} stock movement(s).`,
+      message: outcomeMessage,
       details: {
         eventId,
         eventType,
-        orderId,
+        orderId: resolvedOrderId || orderId,
         paymentId,
         signatureVerified: true,
         result,
         returnsProcessed: returnsResult.returnsProcessed,
         returnMovements: returnsResult.totalMovements,
+        totalMovements,
+        webhookStatus,
       },
       startedAt: receivedAt,
       completedAt: nowIso(),
@@ -15200,7 +15243,7 @@ export async function postYocoWebhook(
 
     return json(request, env, {
       ok: true,
-      status: needsAttention ? "attention" : "processed",
+      status: webhookStatus,
       result,
       ...(returnsResult.returnsProcessed > 0
         ? {

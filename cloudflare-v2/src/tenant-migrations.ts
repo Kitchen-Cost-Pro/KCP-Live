@@ -483,5 +483,12 @@ CREATE INDEX IF NOT EXISTS idx_integration_logs_workspace_status_date
   // 17 — make Yoco order-line retries idempotent independently from stock-movement
   // signatures. Migration 13 already removed historical duplicate line keys.
   `CREATE UNIQUE INDEX IF NOT EXISTS ux_yoco_order_lines_workspace_order_line
-  ON yoco_order_lines(workspace_id, yoco_order_id, yoco_line_id);`
+  ON yoco_order_lines(workspace_id, yoco_order_id, yoco_line_id);`,
+  // 18 — preserve the initial connection boundary separately from rolling sync cursors.
+  // Normal background reconciliation never looks before this boundary; an explicit admin
+  // lookback may still inspect older orders and the Go Live timestamp remains the final guard.
+  `ALTER TABLE yoco_connections ADD COLUMN sales_baseline_at TEXT;
+UPDATE yoco_connections
+   SET sales_baseline_at = COALESCE(last_successful_order_updated_at, last_sales_sync_at, created_at)
+ WHERE COALESCE(sales_baseline_at, '') = '';`
 ];

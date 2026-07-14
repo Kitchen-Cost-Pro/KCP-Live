@@ -475,3 +475,24 @@ Then confirm:
 - Do not append the item name to an explicit SKU in the Stock Items table or report output.
 - Apply the fallback to new saves, imports, legacy blank records returned by the Worker, dashboard inventory rows, Stock on Hand reporting, exports based on normalized stock items, and linked-workspace transfer stock data.
 - Phase 59 validation baseline: 411 passing tests, successful production frontend build, successful Worker TypeScript check, and successful Wrangler deployment dry run.
+
+## Phase 60 - Yoco webhook recovery and diagnostics (July 2026)
+
+- Webhook reinitialisation must delete KCP-owned Yoco subscriptions through the remote DELETE API before creating and remotely verifying a replacement. Never delete unrelated subscriptions on the same Yoco account.
+- A local webhook ID is not proof of health. Remote existence, enabled state, callback URL, and required event types must be verified.
+- Missing recipe or ingredient mappings remain retryable until a stock movement exists. Do not permanently deduplicate a zero-movement component.
+- Sales/refund cursors do not advance past retryable or failed deductions.
+- Integration diagnostics use `integration_logs`; all secrets, tokens, API keys, authorization values, and signatures are redacted.
+- Webhook signatures use the raw request body and reject stale signed timestamps.
+
+## Phase 61 - Yoco sales reconciliation and initial-sync boundary (July 2026)
+
+- Initial Yoco connection imports locations, products, modifiers, and catalogue data only. It never imports or deducts historical orders.
+- `sales_baseline_at` is the permanent initial connection boundary. Normal automatic overlap cannot cross it; explicit KCP-admin lookback may inspect older orders, while Go Live remains the final deduction guard.
+- Customer Integrations does not expose a manual sales-sync button. Retrospective sales recovery belongs in the Admin Console.
+- Admin reconciliation always uses an explicit lookback and combines Yoco order-list results with recent webhook payload/order/payment references.
+- An empty filtered Yoco order list is not conclusive. Use bounded unfiltered pages with local window filtering and webhook-backed recovery before reporting zero orders.
+- Payment-shaped webhooks must resolve payment ID to order ID through direct lookup and bounded-page fallback.
+- A webhook is `processed` only after stock movement creation or a proven idempotent duplicate. Zero-movement outcomes are `attention` with a specific message; pre-baseline/Go-Live events are `ignored`.
+- Reconciliation diagnostics must report orders from list, webhook candidates, webhook-recovered orders, load failures, retryable counts, stock movements, and cursor decisions.
+- Phase 61 validation baseline: 423 passing tests, successful production frontend build, successful Worker TypeScript check, and successful Wrangler deployment dry run.

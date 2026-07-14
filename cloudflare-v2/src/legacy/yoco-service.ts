@@ -16,11 +16,12 @@ import {
   listModifierGroups,
   listWebhookSubscriptions,
   listOrders,
+  listOrdersPage,
   listRefunds,
   testWebhookSubscription,
   yocoFetch
 } from './yoco-client';
-import { processYocoOrder } from './yoco-sales';
+import { extractYocoOrder, processYocoOrder, yocoWebhookEventFields } from './yoco-sales';
 import { findRefund } from './yoco-webhooks';
 import { recordIntegrationLog, runLoggedIntegrationOperation } from './integration-log';
 
@@ -42,6 +43,16 @@ function id(prefix: string) {
 
 function jsonString(value: unknown) {
   return JSON.stringify(value || {});
+}
+
+function jsonParse(value: unknown): Row {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value as Row;
+  try {
+    const parsed = JSON.parse(text(value) || '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Row : {};
+  } catch {
+    return {};
+  }
 }
 
 async function sha256Hex(value: string) {
@@ -493,6 +504,10 @@ export async function connectYoco(
   if (!cleanKey) throw new Error('Yoco API key is required.');
   const fingerprint = await yocoApiKeyFingerprint(cleanKey);
   const existing = await getYocoConnection(env, workspaceId);
+  const existingSalesCursor = text(existing?.last_successful_order_updated_at || existing?.last_sales_sync_at);
+  const existingSalesBaseline = text(existing?.sales_baseline_at);
+  const salesBaselineAt = existingSalesBaseline || existingSalesCursor || nowIso();
+  const salesBaselineCreated = !existingSalesBaseline;
   const lockedFingerprint = text(existing?.api_key_fingerprint);
   if (lockedFingerprint && lockedFingerprint !== fingerprint && options.allowKeyReplacement !== true) {
     throw new Error('This workspace is locked to a different Yoco API key. A KCP administrator must replace the locked key.');
@@ -548,8 +563,10 @@ export async function connectYoco(
   await env.DB.prepare(
     `INSERT INTO yoco_connections
       (workspace_id, status, api_key_encrypted, webhook_id, webhook_secret, webhook_url,
-       connection_active, last_error, api_key_fingerprint, api_key_locked_at, api_key_locked_by_uid, created_at, updated_at)
-     VALUES (?1, ?10, ?2, ?3, ?4, ?5, 1, ?6, ?7, datetime('now'), ?8, datetime('now'), datetime('now'))
+       connection_active, last_error, api_key_fingerprint, api_key_locked_at, api_key_locked_by_uid,
+       last_sales_sync_at, last_successful_order_updated_at, last_successful_refund_updated_at, sales_baseline_at,
+       created_at, updated_at)
+     VALUES (?1, ?10, ?2, ?3, ?4, ?5, 1, ?6, ?7, datetime('now'), ?8, ?11, ?11, ?11, ?11, datetime('now'), datetime('now'))
      ON CONFLICT(workspace_id) DO UPDATE SET
        status = ?10,
        api_key_encrypted = excluded.api_key_encrypted,
@@ -572,6 +589,22 @@ export async function connectYoco(
        webhook_previous_secret = NULL,
        webhook_previous_until = NULL,
        connection_active = 1,
+       last_sales_sync_at = CASE
+         WHEN COALESCE(yoco_connections.last_sales_sync_at, '') = '' THEN excluded.last_sales_sync_at
+         ELSE yoco_connections.last_sales_sync_at
+       END,
+       last_successful_order_updated_at = CASE
+         WHEN COALESCE(yoco_connections.last_successful_order_updated_at, '') = '' THEN excluded.last_successful_order_updated_at
+         ELSE yoco_connections.last_successful_order_updated_at
+       END,
+       last_successful_refund_updated_at = CASE
+         WHEN COALESCE(yoco_connections.last_successful_refund_updated_at, '') = '' THEN excluded.last_successful_refund_updated_at
+         ELSE yoco_connections.last_successful_refund_updated_at
+       END,
+       sales_baseline_at = CASE
+         WHEN COALESCE(yoco_connections.sales_baseline_at, '') = '' THEN excluded.sales_baseline_at
+         ELSE yoco_connections.sales_baseline_at
+       END,
        last_error = excluded.last_error,
        disconnected_at = NULL,
        updated_at = datetime('now')`,
@@ -586,7 +619,17 @@ export async function connectYoco(
     text(options.actorUid) || null,
     options.allowKeyReplacement === true ? 1 : 0,
     webhookEnabled ? 'connected' : 'error',
+    salesBaselineAt,
   ).run();
+
+  if (salesBaselineCreated) {
+    await recordIntegrationLog(env, workspaceId, {
+      operation: 'yoco.sales.baseline',
+      status: 'success',
+      message: 'Initial Yoco connection baseline created. Historical orders were not imported or deducted.',
+      details: { salesBaselineAt, historicalSalesImported: false },
+    });
+  }
 
   if (!webhookEnabled) {
     throw new Error(`Yoco credentials were saved, but the live webhook could not be initialised: ${webhookError}`);
@@ -601,6 +644,8 @@ export async function connectYoco(
     deletedSubscriptionCount: deletionResult.deletedCount,
     deletedSubscriptionIds: deletionResult.deletedIds,
     remoteVerified: true,
+    salesBaselineAt,
+    historicalSalesImported: false,
   };
 }
 
@@ -1359,6 +1404,232 @@ export async function getYocoModifierGroup(env: Env, workspaceId: string, modifi
   return row ? parseModifierGroupRow(row) : null;
 }
 
+function yocoOrderIdValue(order: Row) {
+  return text(order.id || order.order_id || order.orderId);
+}
+
+function yocoOrderTimestampValue(order: Row) {
+  return text(
+    order.updated_at ||
+    order.updatedAt ||
+    order.closed_at ||
+    order.closedAt ||
+    order.completed_at ||
+    order.completedAt ||
+    order.paid_at ||
+    order.paidAt ||
+    order.created_at ||
+    order.createdAt
+  );
+}
+
+function yocoOrderWithinWindow(order: Row, lowerBound: string, upperBound: string) {
+  const occurredAt = yocoOrderTimestampValue(order);
+  const parsed = Date.parse(occurredAt);
+  if (!Number.isFinite(parsed)) return true;
+  const lower = Date.parse(lowerBound);
+  const upper = Date.parse(upperBound);
+  if (Number.isFinite(lower) && parsed < lower) return false;
+  if (Number.isFinite(upper) && parsed > upper) return false;
+  return true;
+}
+
+async function listYocoOrdersForSalesSync(
+  env: Env,
+  apiKey: string,
+  lowerBound: string,
+  upperBound: string,
+) {
+  const attempts = lowerBound
+    ? [
+        {
+          strategy: 'updated_at_window',
+          params: { updated_at__gte: lowerBound, updated_at__lte: upperBound },
+        },
+        {
+          strategy: 'created_at_window',
+          params: { created_at__gte: lowerBound, created_at__lte: upperBound },
+        },
+      ]
+    : [{ strategy: 'unfiltered', params: { updated_at__lte: upperBound } }];
+  const attemptErrors: string[] = [];
+
+  for (const attempt of attempts) {
+    try {
+      const rows = await listOrders(env, apiKey, attempt.params) as Row[];
+      if (rows.length) {
+        return {
+          orders: rows.filter((order) => yocoOrderWithinWindow(order, lowerBound, upperBound)),
+          strategy: attempt.strategy,
+          attemptErrors,
+        };
+      }
+    } catch (caught) {
+      attemptErrors.push(`${attempt.strategy}: ${caught instanceof Error ? caught.message : String(caught)}`);
+    }
+  }
+
+  // Some Yoco tenants return an empty collection for unsupported server-side filters rather
+  // than a validation error. Pull a bounded number of normal order pages and apply the window
+  // locally so admin reconciliation cannot incorrectly report zero while webhooks are arriving.
+  const fallbackOrders: Row[] = [];
+  let cursor: string | null = null;
+  for (let pageIndex = 0; pageIndex < 5; pageIndex += 1) {
+    try {
+      const page: { rows: unknown[]; nextCursor: unknown } = await listOrdersPage(env, apiKey, { cursor, limit: 100 });
+      const rows = (page.rows || []) as Row[];
+      fallbackOrders.push(...rows.filter((order) => yocoOrderWithinWindow(order, lowerBound, upperBound)));
+      cursor = text(page.nextCursor) || null;
+      if (!cursor || !rows.length) break;
+    } catch (caught) {
+      attemptErrors.push(`bounded_unfiltered_page_${pageIndex + 1}: ${caught instanceof Error ? caught.message : String(caught)}`);
+      break;
+    }
+  }
+  return { orders: fallbackOrders, strategy: 'bounded_unfiltered_fallback', attemptErrors };
+}
+
+function yocoOrderHasPaymentId(order: Row, paymentId: string) {
+  const wanted = text(paymentId);
+  if (!wanted) return false;
+  if ([order.payment_id, order.paymentId].some((value) => text(value) === wanted)) return true;
+  const payments = Array.isArray(order.payments) ? order.payments as Row[] : [];
+  return payments.some((payment) => [payment.id, payment.payment_id, payment.paymentId]
+    .some((value) => text(value) === wanted));
+}
+
+async function findYocoOrderByPaymentId(env: Env, apiKey: string, paymentId: string) {
+  if (!paymentId) return null;
+  const direct = await listOrders(env, apiKey, { payment_id: paymentId, limit: 25 }).catch(() => []) as Row[];
+  const directMatch = direct.find((order) => yocoOrderHasPaymentId(order, paymentId));
+  if (directMatch) return directMatch;
+
+  let cursor: string | null = null;
+  for (let pageIndex = 0; pageIndex < 5; pageIndex += 1) {
+    const page: { rows: unknown[]; nextCursor: unknown } | null = await listOrdersPage(env, apiKey, { cursor, limit: 100 }).catch(() => null);
+    if (!page) break;
+    const rows = (page.rows || []) as Row[];
+    const match = rows.find((order) => yocoOrderHasPaymentId(order, paymentId));
+    if (match) return match;
+    cursor = text(page.nextCursor) || null;
+    if (!cursor || !rows.length) break;
+  }
+  return null;
+}
+
+async function loadWebhookBackedOrders(
+  env: Env,
+  workspaceId: string,
+  apiKey: string,
+  lowerBound: string,
+) {
+  const floor = lowerBound || new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
+  const rows = await env.DB.prepare(
+    `SELECT id, yoco_order_id, event_type, raw_json, created_at
+       FROM yoco_webhook_events event
+      WHERE event.workspace_id = ?1
+        AND lower(event.event_type) NOT LIKE '%refund%'
+        AND (
+          lower(event.event_type) LIKE '%payment%'
+          OR lower(event.event_type) LIKE '%order%'
+          OR lower(event.event_type) LIKE '%sale%'
+        )
+        AND datetime(event.created_at) >= datetime(?2)
+        AND (
+          COALESCE(event.yoco_order_id, '') = ''
+          OR NOT EXISTS (
+            SELECT 1
+              FROM stock_movements movement
+             WHERE movement.workspace_id = event.workspace_id
+               AND movement.document_type = 'yoco_order'
+               AND movement.document_id = event.yoco_order_id
+               AND movement.movement_type = 'sale_depletion'
+          )
+        )
+      ORDER BY datetime(event.created_at) DESC
+      LIMIT 200`,
+  ).bind(workspaceId, floor).all<Row>();
+
+  const orderMap = new Map<string, Row>();
+  const failures: string[] = [];
+  for (const row of rows.results || []) {
+    const payload = jsonParse(row.raw_json);
+    const payloadOrder = extractYocoOrder(payload);
+    const fields = yocoWebhookEventFields(payload);
+    const storedOrderId = text(row.yoco_order_id);
+    const orderIds = [...new Set([storedOrderId, fields.orderId].filter(Boolean))];
+    let loadedOrder: Row | null = payloadOrder;
+    let lastError = '';
+
+    for (const orderId of orderIds) {
+      if (loadedOrder) break;
+      try {
+        loadedOrder = await fetchOrder(env, apiKey, orderId) as Row;
+      } catch (caught) {
+        lastError = caught instanceof Error ? caught.message : String(caught);
+      }
+    }
+
+    if (!loadedOrder && fields.paymentId) {
+      loadedOrder = await findYocoOrderByPaymentId(env, apiKey, fields.paymentId);
+    }
+
+    const resolvedOrderId = loadedOrder ? yocoOrderIdValue(loadedOrder) : '';
+    if (loadedOrder && resolvedOrderId) {
+      orderMap.set(resolvedOrderId, loadedOrder);
+      if (resolvedOrderId !== storedOrderId) {
+        await env.DB.prepare(
+          `UPDATE yoco_webhook_events
+              SET yoco_order_id = ?2
+            WHERE workspace_id = ?1
+              AND id = ?3`,
+        ).bind(workspaceId, resolvedOrderId, text(row.id)).run().catch(() => undefined);
+      }
+      continue;
+    }
+
+    failures.push(`${storedOrderId || fields.paymentId || 'unknown webhook reference'}: ${lastError || 'Yoco order could not be resolved from the webhook payload.'}`);
+  }
+  return { orders: [...orderMap.values()], failures, candidateCount: (rows.results || []).length, floor };
+}
+
+async function updateWebhookSaleOutcome(
+  env: Env,
+  workspaceId: string,
+  orderId: string,
+  result: { reason?: string; retryable?: boolean; stockMovements?: number; skippedDuplicates?: number },
+) {
+  if (!orderId) return;
+  const reason = text(result.reason);
+  const movements = Number(result.stockMovements || 0);
+  const duplicate = reason === 'duplicate' || Number(result.skippedDuplicates || 0) > 0;
+  const ignored = reason === 'before_stock_depletion_start';
+  const needsAttention = result.retryable === true || (
+    movements === 0 && !duplicate && !ignored
+  );
+  const status = ignored ? 'ignored' : needsAttention ? 'attention' : 'processed';
+  const message = ignored
+    ? 'Order is before the KCP sales baseline or Go Live timestamp. No historical stock deduction was applied.'
+    : reason === 'stock_depletion_disabled'
+      ? 'Order found, but stock depletion is not live. Enable Go Live before new sales can deduct stock.'
+      : reason === 'order_not_paid_or_completed'
+        ? 'Order found, but Yoco has not yet returned it in a paid/completed state.'
+        : needsAttention
+          ? `Order found, but stock deduction needs attention: ${reason || 'missing recipe or product mapping'}.`
+          : duplicate && movements === 0
+            ? 'Order was already deducted. No duplicate stock movement was created.'
+            : `Sales reconciliation created ${movements} stock movement(s).`;
+  await env.DB.prepare(
+    `UPDATE yoco_webhook_events
+        SET status = ?3,
+            error_message = ?4,
+            processed_at = ?5
+      WHERE workspace_id = ?1
+        AND yoco_order_id = ?2
+        AND lower(event_type) NOT LIKE '%refund%'`,
+  ).bind(workspaceId, orderId, status, message, nowIso()).run();
+}
+
 async function recordYocoSyncError(env: Env, workspaceId: string, details: {
   eventType: string;
   orderId?: string;
@@ -1408,8 +1679,16 @@ export async function syncYocoSales(env: Env, workspaceId: string, options: Yoco
   };
   const orderCursor = text(connection?.last_successful_order_updated_at || connection?.last_sales_sync_at);
   const refundCursor = text(connection?.last_successful_refund_updated_at || connection?.last_sales_sync_at);
-  const orderLowerBound = options.full ? '' : (explicitSince || overlapCursor(orderCursor));
-  const refundLowerBound = options.full ? '' : (explicitSince || overlapCursor(refundCursor));
+  const salesBaselineAt = text(connection?.sales_baseline_at);
+  const clampToInitialBaseline = (candidate: string) => {
+    if (!candidate || !salesBaselineAt || explicitSince || options.full) return candidate;
+    const candidateMs = Date.parse(candidate);
+    const baselineMs = Date.parse(salesBaselineAt);
+    if (!Number.isFinite(candidateMs) || !Number.isFinite(baselineMs)) return candidate;
+    return new Date(Math.max(candidateMs, baselineMs)).toISOString();
+  };
+  const orderLowerBound = options.full ? '' : (explicitSince || clampToInitialBaseline(overlapCursor(orderCursor)) || salesBaselineAt);
+  const refundLowerBound = options.full ? '' : (explicitSince || clampToInitialBaseline(overlapCursor(refundCursor)) || salesBaselineAt);
 
   await recordIntegrationLog(env, workspaceId, {
     operation: 'yoco.sales.sync',
@@ -1419,6 +1698,7 @@ export async function syncYocoSales(env: Env, workspaceId: string, options: Yoco
       orderLowerBound: orderLowerBound || null,
       refundLowerBound: refundLowerBound || null,
       explicitSince: explicitSince || null,
+      salesBaselineAt: salesBaselineAt || null,
       full: options.full === true,
       resetWebhook: options.resetWebhook === true,
       webhookHealthy: webhook.webhookEnabled === true && webhook.remoteVerified === true,
@@ -1426,16 +1706,37 @@ export async function syncYocoSales(env: Env, workspaceId: string, options: Yoco
     startedAt: syncStartedAt,
   });
 
-  const orders = await listOrders(env, apiKey, orderLowerBound ? {
-    status: ['completed'],
-    updated_at__gte: orderLowerBound,
-    updated_at__lte: now
-  } : { status: ['completed'], updated_at__lte: now });
+  const orderDiscovery = await listYocoOrdersForSalesSync(env, apiKey, orderLowerBound, now);
+  const webhookBacked = await loadWebhookBackedOrders(env, workspaceId, apiKey, orderLowerBound);
+  const orderMap = new Map<string, Row>();
+  [...orderDiscovery.orders, ...webhookBacked.orders].forEach((order) => {
+    const orderId = yocoOrderIdValue(order);
+    if (orderId) orderMap.set(orderId, order);
+  });
+  const orders = [...orderMap.values()];
   const refunds = await listRefunds(env, apiKey, refundLowerBound ? {
-    status: ['approved'],
     updated_at__gte: refundLowerBound,
     updated_at__lte: now
-  } : { status: ['approved'], updated_at__lte: now });
+  } : { updated_at__lte: now });
+
+  await recordIntegrationLog(env, workspaceId, {
+    operation: 'yoco.sales.discovery',
+    status: webhookBacked.failures.length ? 'warning' : 'success',
+    message: orders.length
+      ? `Discovered ${orders.length} unique Yoco order(s) for reconciliation.`
+      : 'No Yoco orders were returned for the reconciliation window.',
+    details: {
+      listStrategy: orderDiscovery.strategy,
+      ordersFromList: orderDiscovery.orders.length,
+      webhookCandidates: webhookBacked.candidateCount,
+      ordersLoadedFromWebhookReferences: webhookBacked.orders.length,
+      uniqueOrders: orders.length,
+      filterAttemptErrors: orderDiscovery.attemptErrors,
+      webhookOrderLoadFailures: webhookBacked.failures,
+      orderLowerBound: orderLowerBound || null,
+      webhookCandidateFloor: webhookBacked.floor,
+    },
+  });
 
   let ordersProcessed = 0;
   let refundsProcessed = 0;
@@ -1451,7 +1752,7 @@ export async function syncYocoSales(env: Env, workspaceId: string, options: Yoco
   let duplicateOrders = 0;
   let duplicateRefunds = 0;
   const errors: string[] = [];
-  const warnings: string[] = [];
+  const warnings: string[] = webhookBacked.failures.map((failure) => `Webhook-backed order could not be loaded: ${failure}`);
   const reasonCounts: Record<string, number> = {};
   const countReason = (reason: unknown) => {
     const key = text(reason, 'processed');
@@ -1470,9 +1771,12 @@ export async function syncYocoSales(env: Env, workspaceId: string, options: Yoco
       orderLines += Number(result.orderLines || 0);
       missingRecipes += Number(result.missingRecipes || 0);
       if (result.reason === 'duplicate') duplicateOrders += 1;
+      await updateWebhookSaleOutcome(env, workspaceId, orderId, result);
       if (result.retryable) {
         retryableOrders += 1;
-        const message = `Order ${orderId || 'unknown'} remains retryable because ${result.missingRecipes || 0} product/recipe component(s) could not deduct stock.`;
+        const message = result.reason === 'order_not_paid_or_completed'
+          ? `Order ${orderId || 'unknown'} was found, but Yoco has not yet returned it in a paid/completed state.`
+          : `Order ${orderId || 'unknown'} remains retryable because ${result.missingRecipes || 0} product/recipe component(s) could not deduct stock.`;
         warnings.push(message);
         await recordYocoSyncError(env, workspaceId, {
           eventType: 'yoco.sync.sale.retryable',
@@ -1565,7 +1869,7 @@ export async function syncYocoSales(env: Env, workspaceId: string, options: Yoco
     }
   }
 
-  const orderCursorBlocked = orderErrors > 0 || retryableOrders > 0;
+  const orderCursorBlocked = orderErrors > 0 || retryableOrders > 0 || webhookBacked.failures.length > 0;
   const refundCursorBlocked = refundErrors > 0 || retryableRefunds > 0;
   const healthError = text((webhook as Row).error);
   const firstProblem = errors[0] || warnings[0] || healthError || '';
@@ -1588,7 +1892,13 @@ export async function syncYocoSales(env: Env, workspaceId: string, options: Yoco
   ).run();
 
   const result = {
-    ordersFetched: (orders as Row[]).length,
+    ordersFetched: orders.length,
+    ordersFromList: orderDiscovery.orders.length,
+    webhookOrderCandidates: webhookBacked.candidateCount,
+    ordersLoadedFromWebhookReferences: webhookBacked.orders.length,
+    orderDiscoveryStrategy: orderDiscovery.strategy,
+    orderDiscoveryErrors: orderDiscovery.attemptErrors,
+    webhookOrderLoadFailures: webhookBacked.failures,
     refundsFetched: (refunds as Row[]).length,
     ordersProcessed,
     refundsProcessed,

@@ -1927,12 +1927,14 @@ export async function buildAdminYocoStatus(env: Env, workspaceId: string) {
 export async function postAdminYocoConnect(request: Request, env: Env, workspaceId: string) {
   const adminSession = await requireAdmin(request, env);
   const payload = await readJson<Record<string, unknown>>(request);
-  const result = await connectYoco(env, workspaceId, text(payload.apiKey || payload.secretKey));
+  const connection = await connectYoco(env, workspaceId, text(payload.apiKey || payload.secretKey));
+  const catalogue = await syncYocoCatalogue(env, workspaceId);
   await writeAdminAuditEvent(env, adminAuditActor(adminSession), 'yoco.connect', workspaceId, {
-    webhookEnabled: Boolean(result.webhookEnabled),
-    connected: Boolean(result.connected)
+    webhookEnabled: Boolean(connection.webhookEnabled),
+    connected: Boolean(connection.connected),
+    historicalSalesImported: false
   });
-  return json(request, env, { ok: true, ...result });
+  return json(request, env, { ok: true, ...connection, catalogueSync: catalogue, historicalSalesImported: false });
 }
 
 export async function postAdminYocoDisconnect(request: Request, env: Env, workspaceId: string) {
@@ -1954,12 +1956,19 @@ export async function postAdminYocoSyncCatalogue(request: Request, env: Env, wor
 
 export async function postAdminYocoSyncSales(request: Request, env: Env, workspaceId: string) {
   const adminSession = await requireAdmin(request, env);
-  const result = await syncYocoSales(env, workspaceId);
+  const payload: Record<string, unknown> = await readJson<Record<string, unknown>>(request).catch(() => ({} as Record<string, unknown>));
+  const sinceDays = Number(payload.sinceDays || 2);
+  const clampedDays = Number.isFinite(sinceDays) && sinceDays > 0
+    ? Math.min(Math.max(sinceDays, 1), 31)
+    : 2;
+  const sinceIso = new Date(Date.now() - clampedDays * 24 * 60 * 60 * 1000).toISOString();
+  const result = await syncYocoSales(env, workspaceId, { sinceIso });
   await writeAdminAuditEvent(env, adminAuditActor(adminSession), 'yoco.sync_sales', workspaceId, {
-    imported: (result as any)?.imported,
-    updated: (result as any)?.updated
+    sinceDays: clampedDays,
+    ordersFetched: (result as any)?.ordersFetched,
+    stockMovements: (result as any)?.stockMovements
   });
-  return json(request, env, { ok: true, ...result });
+  return json(request, env, { ok: true, sinceDays: clampedDays, sinceIso, ...result });
 }
 
 export async function postAdminYocoResetWebhook(request: Request, env: Env, workspaceId: string) {

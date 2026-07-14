@@ -140,6 +140,17 @@ export const fetchModifierGroup = async (env: Env, apiKey: string, modifierGroup
 };
 export const listOrders = (env: Env, apiKey: string, params: Record<string, unknown> = {}) => listAllPages(env, apiKey, '/v1/orders/', params);
 export const listRefunds = (env: Env, apiKey: string, params: Record<string, unknown> = {}) => listAllPages(env, apiKey, '/v1/refunds/', params);
+
+export async function listOrdersPage(env: Env, apiKey: string, params: Record<string, unknown> = {}) {
+  const page = await withYocoRetry(() => yocoFetch(env, apiKey, '/v1/orders/', {
+    params: { ...params, limit: params.limit || 100 }
+  }));
+  return {
+    rows: listData(page),
+    nextCursor: page?.next_cursor || page?.nextCursor || page?.pagination?.next_cursor || null
+  };
+}
+
 export const fetchOrder = async (env: Env, apiKey: string, orderId: string) => objectData(await yocoFetch(env, apiKey, `/v1/orders/${encodeURIComponent(orderId)}`));
 
 

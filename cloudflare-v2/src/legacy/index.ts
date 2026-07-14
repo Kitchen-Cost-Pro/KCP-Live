@@ -471,7 +471,7 @@ export async function dispatchCentralRoute(request: Request, env: Env): Promise<
     if (action === 'disconnect') return postAdminYocoDisconnect(request, env, workspaceId);
     if (action === 'reset-webhook') return postAdminYocoResetWebhook(request, env, workspaceId);
     if (action === 'sync-catalogue') return postAdminYocoSyncCatalogue(request, env, workspaceId);
-    if (action === 'sync-sales') return postAdminYocoSyncSales(request, env, workspaceId);
+    if (action === 'sync-sales' || action === 'reconcile-sales') return postAdminYocoSyncSales(request, env, workspaceId);
   }
 
   const adminWorkspaceActionMatch = routePattern(url.pathname, /^\/api\/admin\/workspaces\/([^/]+)\/actions\/([^/]+)$/);

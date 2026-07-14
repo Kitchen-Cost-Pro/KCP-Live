@@ -266,6 +266,64 @@ function getOrderLineItems(order: Row) {
   return [];
 }
 
+const FINAL_YOCO_SALE_STATUSES = new Set([
+  'approved',
+  'captured',
+  'closed',
+  'complete',
+  'completed',
+  'fulfilled',
+  'paid',
+  'partially refunded',
+  'refunded',
+  'settled',
+  'success',
+  'successful'
+]);
+
+function yocoOrderStatusValues(order: Row) {
+  const payment = objectValue(order.payment);
+  const payments = Array.isArray(order.payments) ? order.payments as Row[] : [];
+  return [
+    order.status,
+    order.order_status,
+    order.orderStatus,
+    order.payment_status,
+    order.paymentStatus,
+    payment.status,
+    payment.payment_status,
+    payment.paymentStatus,
+    ...payments.flatMap((entry) => [
+      entry.status,
+      entry.state,
+      entry.payment_status,
+      entry.paymentStatus
+    ])
+  ].map(normalizeText).filter(Boolean);
+}
+
+export function yocoOrderReadyForStock(order: Row) {
+  const statuses = yocoOrderStatusValues(order);
+  if (!statuses.length) return true;
+  if (statuses.some((status) => FINAL_YOCO_SALE_STATUSES.has(status))) return true;
+  if (statuses.some((status) => (
+    status.includes('approved') ||
+    status.includes('captured') ||
+    status.includes('completed') ||
+    status.includes('paid') ||
+    status.includes('settled') ||
+    status.includes('success')
+  ))) return true;
+  return Boolean(text(
+    order.paid_at ||
+    order.paidAt ||
+    order.closed_at ||
+    order.closedAt ||
+    order.completed_at ||
+    order.completedAt
+  ));
+}
+
 function refundProportion(order: Row, refund: Row): number {
   const refundAmt = moneyToMajor(refund.total_amount || objectValue(refund.amounts).net_amount || refund.amount || refund.net_amount);
   const orderAmt = moneyToMajor(order.total_price || objectValue(order.amounts).net_amount || order.total_amount || order.net_amount);
@@ -1080,10 +1138,34 @@ export function extractYocoOrder(payload: Row) {
 
 export function yocoWebhookEventFields(payload: Row) {
   const data = objectValue(payload.data);
+  const payloadOrder = objectValue(payload.order);
+  const dataOrder = objectValue(data.order);
+  const payloadPayment = objectValue(payload.payment);
+  const dataPayment = objectValue(data.payment);
+  const eventType = text(payload.event_type || payload.event || payload.type || data.event_type || data.event || data.type);
+  const paymentEvent = normalizeText(eventType).includes('payment');
   return {
-    eventType: text(payload.event_type || payload.event || payload.type),
-    orderId: text(payload.order_id || payload.orderId || data.order_id || data.orderId || objectValue(data.order).id),
-    paymentId: text(payload.payment_id || payload.paymentId || data.payment_id || data.paymentId)
+    eventType,
+    orderId: text(
+      payload.order_id ||
+      payload.orderId ||
+      payloadOrder.id ||
+      data.order_id ||
+      data.orderId ||
+      dataOrder.id ||
+      dataPayment.order_id ||
+      dataPayment.orderId ||
+      objectValue(dataPayment.order).id
+    ),
+    paymentId: text(
+      payload.payment_id ||
+      payload.paymentId ||
+      payloadPayment.id ||
+      data.payment_id ||
+      data.paymentId ||
+      dataPayment.id ||
+      (paymentEvent ? data.id : '')
+    )
   };
 }
 
@@ -1098,8 +1180,15 @@ export async function processYocoOrder(
   const refund = options.refund || null;
   const orderId = text(order.id || order.order_id || order.orderId || refund?.order_id || refund?.original_order_id);
   if (!orderId) throw new Error('Yoco order id is missing.');
-  if (mode === 'sale' && text(order.status, 'completed').toLowerCase() !== 'completed') {
-    return { processed: false, reason: 'order_not_completed', missingRecipes: 0, orderLines: 0, stockMovements: 0 };
+  if (mode === 'sale' && !yocoOrderReadyForStock(order)) {
+    return {
+      processed: false,
+      reason: 'order_not_paid_or_completed',
+      retryable: true,
+      missingRecipes: 0,
+      orderLines: 0,
+      stockMovements: 0
+    };
   }
 
   const occurredAt = mode === 'refund'

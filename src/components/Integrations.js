@@ -8,8 +8,7 @@ import {
   startGmailConnection,
   subscribeGmailIntegration,
   subscribeYocoIntegration,
-  syncYocoCatalogue,
-  syncYocoSales
+  syncYocoCatalogue
 } from '../services/integrationService.js';
 
 const INTEGRATIONS = [
@@ -234,23 +233,7 @@ function bindIntegrationEvents(view) {
       const result = await connectYocoIntegration(workspaceId, apiKey);
       if (input) input.value = '';
       setYocoSummary(view, result);
-      setYocoModalStatus(view, 'Yoco connected. Run Sync Sales when you need historical orders.', 'success');
-    });
-  });
-
-  view.querySelector('[data-yoco-sync-sales]')?.addEventListener('click', async () => {
-    await runYocoAction(view, 'Syncing Yoco sales...', async () => {
-      const result = await syncYocoSales(view.dataset.workspaceId || '', { resetWebhook: true });
-      setYocoSummary(view, result);
-      const retryable = Number(result?.retryableOrders || 0) + Number(result?.retryableRefunds || 0);
-      const movementCount = Number(result?.stockMovements || 0);
-      setYocoModalStatus(
-        view,
-        retryable
-          ? `Yoco sync checked ${result?.ordersFetched || 0} orders and created ${movementCount} stock movements. ${retryable} sale/refund record(s) still need recipe or product mapping.`
-          : `Yoco sync complete. ${result?.ordersFetched || 0} orders checked and ${movementCount} stock movements created.`,
-        retryable ? 'error' : 'success'
-      );
+      setYocoModalStatus(view, 'Yoco connected. Products and locations were synced; historical sales were not imported. New paid sales will deduct after Go Live.', 'success');
     });
   });
 
@@ -480,10 +463,6 @@ function renderYocoModal({ canDisconnectYoco = false } = {}) {
               <strong>Run a focused Yoco sync when required.</strong>
             </div>
             <div class="yocoActionRow">
-              <button type="button" class="yocoActionButton" data-yoco-sync-sales>
-                <span class="yocoActionIcon">${icon('receiptText')}</span>
-                <span><strong>Sync Sales</strong><small>Orders and refunds</small></span>
-              </button>
               <button type="button" class="yocoActionButton" data-yoco-sync-catalogue>
                 <span class="yocoActionIcon">${icon('boxes')}</span>
                 <span><strong>Sync Catalogue</strong><small>Menu items and locations</small></span>
@@ -838,7 +817,7 @@ async function runGmailAction(view, message, task, options = {}) {
 
 function setYocoBusy(view, busy) {
   yocoDrawerState.busy = busy;
-  view.querySelectorAll('[data-yoco-submit], [data-yoco-sync-sales], [data-yoco-sync-catalogue], [data-yoco-disconnect]').forEach((button) => {
+  view.querySelectorAll('[data-yoco-submit], [data-yoco-sync-catalogue], [data-yoco-disconnect]').forEach((button) => {
     button.disabled = busy;
   });
 }

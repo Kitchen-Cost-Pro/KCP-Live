@@ -102,6 +102,14 @@ npm run dev
 
 The Vite development server normally runs at `http://localhost:5173`.
 
+## Current Yoco recovery behavior
+
+- Initial connection imports the Yoco catalogue only and records a sales baseline; historical orders are not deducted.
+- Live payment webhooks resolve both order-shaped and payment-shaped payloads. A delivery is not shown as processed unless it created stock movements or was a proven duplicate.
+- Customer Integrations has no manual sales-sync action. Admin Console provides explicit 2-day and 14-day reconciliation using both the Yoco order list and stored webhook references.
+- Use **Restart Sync** after deploying webhook changes, then **Reconcile Sales - 2 Days** to recover recent missed deductions.
+- Detailed findings are in `YOCO_INTEGRATION_AUDIT.md`.
+
 ## Validation
 
 Run the full release check:
