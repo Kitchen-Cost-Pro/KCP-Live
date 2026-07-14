@@ -15,3 +15,12 @@
 
 /assets/*
   Cache-Control: public, max-age=31536000, immutable
+
+/privacy.html
+  Cache-Control: no-store, no-cache, must-revalidate, max-age=0
+
+/terms.html
+  Cache-Control: no-store, no-cache, must-revalidate, max-age=0
+
+/legal.css
+  Cache-Control: public, max-age=3600

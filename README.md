@@ -321,3 +321,19 @@ The front Worker handles central authentication, admin routes, security configur
 - Blank stock-item SKUs normalize to `SKU - Item Name` across manual creation, imports, existing records, stock tables, dashboards, Stock on Hand reporting, exports, and linked-site transfer data.
 - A user-entered SKU is preserved and displayed exactly as entered; the item name is no longer appended to explicit SKU values.
 - Validation: 411 automated tests passed, the production frontend build passed, Worker TypeScript validation passed, and Wrangler deployment dry run passed.
+
+## Phase 63: Privacy Policy and Terms of Service
+
+Phase 63 adds:
+
+- A full Privacy Policy at `/privacy.html`.
+- Full Terms of Service at `/terms.html`.
+- Privacy Policy and Terms of Service links on the sign-in screen.
+- Required legal acceptance on workspace registration.
+- Frontend and Worker validation so registration cannot bypass acceptance.
+- A versioned acceptance record stored in the registration request `raw_json` field.
+- Responsive legal-page styling and no em dashes in the new legal copy.
+
+The current legal document version is `2026-07-14`. When the legal documents change, update both `src/legal.js` and `CURRENT_LEGAL_VERSION` in `cloudflare-v2/src/legacy/auth-routes.ts`.
+
+The project does not contain a verified registered company name, physical address, or public legal email address. The legal pages therefore refer users to the service provider and contact details in their order form, subscription agreement, invoice, account, or onboarding communication. Add the final registered entity and public contact information before a formal legal review or public commercial launch.

@@ -1,4 +1,5 @@
 import { completeFirstLoginPasswordChange, confirmPasswordReset, getAuthSecurityConfig, registerWorkspaceAccount, requestPasswordReset, signIn } from './services/authService.js';
+import { LEGAL_DOCUMENT_VERSION, PRIVACY_POLICY_URL, TERMS_OF_SERVICE_URL } from './legal.js';
 import styles from './styles/auth.module.css';
 
 let authTurnstileSiteKey = '';
@@ -87,13 +88,19 @@ export function renderLogin({
     const formData = new FormData(registerForm);
 
     try {
+      if (formData.get('legalAccepted') !== 'on') {
+        throw new Error('You must agree to the Terms of Service and acknowledge the Privacy Policy before registering.');
+      }
       const turnstileToken = await requireAuthTurnstileToken(view);
       onBusy?.('Creating your workspace...', 'register');
       const result = await registerWorkspaceAccount({
         fullName: formData.get('fullName') || user?.displayName,
         siteName: formData.get('siteName'),
         email: user?.email || formData.get('email'),
-        turnstileToken
+        turnstileToken,
+        termsAccepted: true,
+        privacyAcknowledged: true,
+        legalVersion: LEGAL_DOCUMENT_VERSION
       });
       onRegistrationPending?.({
         ...result,
@@ -446,6 +453,8 @@ function renderCredentialsCard(authState) {
         ${authState.status === 'loading' ? 'Authenticating...' : 'Sign In To Workspace'}
       </button>
 
+      ${renderLoginLegalNotice()}
+
       <p class="${styles.authSwitch}">
         Need an account?
         <button type="button" data-auth-mode="register">Create one</button>
@@ -481,6 +490,8 @@ function renderRegistrationCard(authState, user = null) {
 
       ${renderAuthTurnstilePanel()}
 
+      ${renderRegistrationLegalAcceptance()}
+
       ${authState.error ? `<div class="${styles.errorBox}" role="alert">${escapeHtml(authState.error)}</div>` : ''}
 
       <button class="${styles.primaryButton}" type="submit" ${authState.status === 'loading' ? 'disabled' : ''}>
@@ -492,6 +503,31 @@ function renderRegistrationCard(authState, user = null) {
         <button type="button" data-auth-mode="login">Sign in</button>
       </p>
     </form>
+  `;
+}
+
+function renderLoginLegalNotice() {
+  return `
+    <p class="${styles.legalNotice}">
+      By signing in, you acknowledge the
+      <a href="${PRIVACY_POLICY_URL}" target="_blank" rel="noopener noreferrer">Privacy Policy</a>
+      and
+      <a href="${TERMS_OF_SERVICE_URL}" target="_blank" rel="noopener noreferrer">Terms of Service</a>.
+    </p>
+  `;
+}
+
+function renderRegistrationLegalAcceptance() {
+  return `
+    <label class="${styles.legalAcceptance}">
+      <input type="checkbox" name="legalAccepted" required />
+      <span>
+        I have read and agree to the
+        <a href="${TERMS_OF_SERVICE_URL}" target="_blank" rel="noopener noreferrer">Terms of Service</a>
+        and acknowledge the
+        <a href="${PRIVACY_POLICY_URL}" target="_blank" rel="noopener noreferrer">Privacy Policy</a>.
+      </span>
+    </label>
   `;
 }
 

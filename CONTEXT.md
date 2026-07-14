@@ -508,3 +508,14 @@ Then confirm:
 - A full order fetch failure must never fall back silently to an order-list summary. No-line-item sales use the explicit retryable reason `order_has_no_line_items`.
 - Admin diagnostics report successful order API calls, webhook recovery, Go Live state, product mapping readiness, locations, recipe lines, result reasons, warnings, errors, movements, and cursor decisions.
 - Phase 62 validation baseline: 428 passing tests, successful production frontend build, successful Worker TypeScript check, and successful Wrangler deployment dry run.
+
+## Phase 63 legal pages and registration acceptance
+
+- Privacy Policy: `/privacy.html`
+- Terms of Service: `/terms.html`
+- Sign-in displays links to both documents.
+- Workspace registration requires agreement to the Terms of Service and acknowledgement of the Privacy Policy.
+- Acceptance is enforced in the browser, auth service, and Cloudflare Worker.
+- Registration request `raw_json` stores `termsAccepted`, `privacyAcknowledged`, `legalVersion`, and server-side `acceptedAt`.
+- Current legal version: `2026-07-14`.
+- New legal copy contains no em dashes.
