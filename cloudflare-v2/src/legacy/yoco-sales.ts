@@ -1,7 +1,7 @@
 import type { Env, DbLike, DbStatementLike } from './types';
 import { fallbackStockItemUnitCost } from './inventory-costing';
 // @ts-ignore Shared Yoco Money converter: Money objects are minor units; normalized scalars remain major units.
-import { yocoMoneyToMajor } from '../../../src/modules/reporting/engine/yocoFinancials.js';
+import { deriveYocoFinancialAmounts, yocoMoneyToMajor } from '../../../src/modules/reporting/engine/yocoFinancials.js';
 
 type Row = Record<string, unknown>;
 
@@ -247,6 +247,22 @@ interface StockDepletionPolicy {
 
 function parseBoolean(value: unknown) {
   return value === true || text(value).toLowerCase() === 'true' || numberValue(value, 0) === 1;
+}
+
+async function getWorkspaceVatRate(env: Env, workspaceId: string) {
+  try {
+    const row = await env.DB.prepare(
+      `SELECT vat_rate, raw_json
+         FROM workspace_settings
+        WHERE workspace_id = ?1
+        LIMIT 1`
+    ).bind(workspaceId).first<{ vat_rate?: number | null; raw_json?: string | null }>();
+    const raw = objectValue(jsonParse(row?.raw_json));
+    const candidate = numberValue(row?.vat_rate ?? raw.vatRate ?? raw.vat_rate, 15);
+    return candidate > 0 ? candidate : 15;
+  } catch {
+    return 15;
+  }
 }
 
 async function getStockDepletionPolicy(env: Env, workspaceId: string): Promise<StockDepletionPolicy> {
@@ -699,24 +715,22 @@ export function resolveRefundLineItems(order: Row, refund: Row | null): RefundLi
       : { lines: [], source: 'unresolved', reason: 'refund_line_quantity_missing' };
   }
 
-  const refundAmount = refundAmountMajor(refund);
-  const orderAmount = orderAmountMajor(order);
-  if (refundLooksFull(refund) || (refundAmount > 0 && orderAmount > 0 && refundAmount >= orderAmount - 0.01)) {
-    return { lines: originals, source: 'full_order' };
-  }
-  if (refundAmount > 0) {
-    const inferred = inferRefundLinesByAmount(originals, refundAmount);
-    if (inferred?.length) return { lines: inferred, source: 'amount_inferred' };
+  // Stock must be driven by Yoco's returned_line_items, not by a monetary guess.
+  // A one-item gross refund can equal an order's ex-VAT value, so comparing the
+  // refund amount with an ambiguous order total can incorrectly reverse the whole
+  // bill. Only an explicit provider full-refund marker may select every line.
+  if (refundLooksFull(refund)) return { lines: originals, source: 'full_order' };
+  if (refundAmountMajor(refund) > 0) {
     return {
       lines: [],
       source: 'unresolved',
-      reason: 'partial_refund_requires_an_exact_line_item_match'
+      reason: 'refund_return_lines_not_available_yet'
     };
   }
   return {
     lines: [],
     source: 'unresolved',
-    reason: 'refund_has_no_line_items_or_amount'
+    reason: 'refund_has_no_returned_line_items'
   };
 }
 
@@ -1684,6 +1698,7 @@ async function recordYocoRefundFinancial(
     resolvedRefundAmount: number;
     refundLineResolution: RefundLineResolution | null;
     refund: Row | null;
+    financials: Record<string, any>;
   }
 ) {
   const existing = await env.DB.prepare(
@@ -1714,20 +1729,26 @@ async function recordYocoRefundFinancial(
       lineResolution: context.refundLineResolution?.source || null,
       lineResolutionReason: context.refundLineResolution?.reason || null,
       amount: context.resolvedRefundAmount,
+      grossAmount: context.financials.refundGrossAmount ?? context.resolvedRefundAmount,
+      vatAmount: context.financials.refundVatAmount ?? Math.abs(Number(context.financials.vatAmount || 0)),
+      netAmount: context.financials.refundNetAmount ?? Math.abs(Number(context.financials.netAmount || 0)),
       source: context.refund || null
     }
   };
   await env.DB.prepare(
     `INSERT INTO yoco_orders
-      (id, workspace_id, yoco_order_id, yoco_payment_id, location_id, order_type, status, payment_method, total, occurred_at, raw_json,
+      (id, workspace_id, yoco_order_id, yoco_payment_id, location_id, order_type, status, payment_method, total, gross_total, vat_total, net_total, occurred_at, raw_json,
        parent_yoco_order_id, provider_refund_id, refund_reason, refund_behavior)
-     VALUES (?1, ?2, ?3, ?4, ?5, 'refund', 'refunded', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+     VALUES (?1, ?2, ?3, ?4, ?5, 'refund', 'refunded', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
      ON CONFLICT(workspace_id, yoco_order_id, order_type) DO UPDATE SET
       yoco_payment_id = excluded.yoco_payment_id,
       location_id = COALESCE(excluded.location_id, yoco_orders.location_id),
       status = excluded.status,
       payment_method = excluded.payment_method,
       total = excluded.total,
+      gross_total = excluded.gross_total,
+      vat_total = excluded.vat_total,
+      net_total = excluded.net_total,
       occurred_at = excluded.occurred_at,
       raw_json = excluded.raw_json,
       parent_yoco_order_id = excluded.parent_yoco_order_id,
@@ -1742,6 +1763,9 @@ async function recordYocoRefundFinancial(
     locationId,
     getPaymentMethod(order, context.refund),
     -Math.abs(context.resolvedRefundAmount),
+    -Math.abs(Number(context.financials.refundGrossAmount ?? context.resolvedRefundAmount)),
+    -Math.abs(Number(context.financials.refundVatAmount ?? context.financials.vatAmount ?? 0)),
+    -Math.abs(Number(context.financials.refundNetAmount ?? context.financials.netAmount ?? 0)),
     context.occurredAt,
     jsonString(refundRaw),
     context.orderId,
@@ -1828,6 +1852,15 @@ export async function processYocoOrder(
   const resolvedRefundAmount = explicitRefundAmount > 0
     ? explicitRefundAmount
     : sourceLines.reduce((sum, line) => sum + lineTotalMajor(line), 0);
+  const configuredVatRate = await getWorkspaceVatRate(env, workspaceId);
+  const resolvedSaleGross = moneyToMajor(order.total_price || objectValue(order.amounts).net_amount || 0);
+  const transactionFinancials = deriveYocoFinancialAmounts({
+    raw: mode === 'refund' ? (refund || {}) : order,
+    persistedTotal: mode === 'refund' ? -Math.abs(resolvedRefundAmount) : resolvedSaleGross,
+    configuredVatRate,
+    orderType: mode,
+    status: mode === 'refund' ? 'refunded' : text(order.status, 'completed'),
+  }) as Record<string, any>;
   const financialRecorded = mode === 'refund'
     ? await recordYocoRefundFinancial(env, workspaceId, order, {
         orderId,
@@ -1841,6 +1874,7 @@ export async function processYocoOrder(
         resolvedRefundAmount,
         refundLineResolution,
         refund,
+        financials: transactionFinancials,
       })
     : false;
 
@@ -1942,6 +1976,9 @@ export async function processYocoOrder(
           lineResolution: refundLineResolution?.source || null,
           lineResolutionReason: refundLineResolution?.reason || null,
           amount: resolvedRefundAmount,
+          grossAmount: transactionFinancials.refundGrossAmount ?? resolvedRefundAmount,
+          vatAmount: transactionFinancials.refundVatAmount ?? Math.abs(Number(transactionFinancials.vatAmount || 0)),
+          netAmount: transactionFinancials.refundNetAmount ?? Math.abs(Number(transactionFinancials.netAmount || 0)),
           source: refund || null
         }
       }
@@ -1949,14 +1986,17 @@ export async function processYocoOrder(
 
   statements.push(env.DB.prepare(
     `INSERT INTO yoco_orders
-      (id, workspace_id, yoco_order_id, yoco_payment_id, location_id, order_type, status, payment_method, total, occurred_at, raw_json,
+      (id, workspace_id, yoco_order_id, yoco_payment_id, location_id, order_type, status, payment_method, total, gross_total, vat_total, net_total, occurred_at, raw_json,
        parent_yoco_order_id, provider_refund_id, refund_reason, refund_behavior)
-     VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+     VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
      ON CONFLICT(workspace_id, yoco_order_id, order_type) DO UPDATE SET
       yoco_payment_id = excluded.yoco_payment_id,
       status = excluded.status,
       payment_method = excluded.payment_method,
       total = excluded.total,
+      gross_total = excluded.gross_total,
+      vat_total = excluded.vat_total,
+      net_total = excluded.net_total,
       occurred_at = excluded.occurred_at,
       raw_json = excluded.raw_json,
       parent_yoco_order_id = excluded.parent_yoco_order_id,
@@ -1971,7 +2011,10 @@ export async function processYocoOrder(
     mode,
     mode === 'refund' ? 'refunded' : text(order.status, 'completed'),
     getPaymentMethod(order, refund),
-    mode === 'refund' ? -Math.abs(resolvedRefundAmount) : moneyToMajor(order.total_price || objectValue(order.amounts).net_amount || 0),
+    mode === 'refund' ? -Math.abs(resolvedRefundAmount) : resolvedSaleGross,
+    mode === 'refund' ? -Math.abs(Number(transactionFinancials.refundGrossAmount ?? resolvedRefundAmount)) : Math.abs(Number(transactionFinancials.grossAmount || resolvedSaleGross)),
+    Number(transactionFinancials.vatAmount || 0),
+    Number(transactionFinancials.netAmount || 0),
     occurredAt,
     jsonString(refundRaw),
     mode === 'refund' ? orderId : null,

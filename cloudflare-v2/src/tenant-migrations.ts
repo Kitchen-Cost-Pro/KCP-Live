@@ -514,5 +514,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_yoco_orders_workspace_provider_refund
   ON yoco_orders(workspace_id, provider_refund_id)
   WHERE COALESCE(TRIM(provider_refund_id), '') <> '';
 CREATE INDEX IF NOT EXISTS idx_yoco_orders_workspace_parent_order
-  ON yoco_orders(workspace_id, parent_yoco_order_id, occurred_at);`
+  ON yoco_orders(workspace_id, parent_yoco_order_id, occurred_at);`,
+  // 21 — persist the signed gross, VAT and ex-VAT values used by sales reporting.
+  // `total` remains the backwards-compatible signed customer amount. Refund rows
+  // store all three accounting components as negative values.
+  `ALTER TABLE yoco_orders ADD COLUMN gross_total REAL;
+ALTER TABLE yoco_orders ADD COLUMN vat_total REAL;
+ALTER TABLE yoco_orders ADD COLUMN net_total REAL;
+UPDATE yoco_orders
+   SET gross_total = total
+ WHERE gross_total IS NULL;
+CREATE INDEX IF NOT EXISTS idx_yoco_orders_workspace_refund_financials
+  ON yoco_orders(workspace_id, order_type, occurred_at, gross_total);`
 ];

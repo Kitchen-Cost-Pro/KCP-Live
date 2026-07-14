@@ -9,7 +9,8 @@ test('Phase 67 pairs Yoco refund summaries with the separate returned-line colle
   const sales = read('cloudflare-v2/src/legacy/yoco-sales.ts');
   assert.match(webhooks, /function pairRefundsWithReturns/);
   assert.match(webhooks, /returned_line_items/);
-  assert.match(webhooks, /refunds\.length === sortedReturns\.length/);
+  assert.doesNotMatch(webhooks, /refunds\.length === sortedReturns\.length/);
+  assert.match(webhooks, /Never pair multiple partial refunds and returns by array position/);
   assert.match(webhooks, /export function findRefunds/);
   assert.match(sales, /prefer line-bearing order\.returns entries/);
   assert.match(sales, /source = 'linked_return'/);
@@ -36,15 +37,16 @@ test('Phase 67 keeps a rate-limited refund webhook retryable and does not mark i
   assert.match(routes, /Refund webhook verified, but Yoco has not yet exposed the refund and returned-line detail/);
 });
 
-test('Phase 67 performs one direct order fetch for standard refund webhooks without list-scan fanout', () => {
+test('Phase 67/68 uses bounded staged payment and order fetches for standard refund webhooks', () => {
   const routes = read('cloudflare-v2/src/legacy/routes.ts');
   const start = routes.indexOf('async function loadYocoOrderForWebhook');
   const end = routes.indexOf('function getObjectLineItems', start);
   const loader = routes.slice(start, end);
-  assert.match(loader, /if \(orderId\)[\s\S]*fetchOrder\(env, apiKey, orderId\)/);
+  assert.match(loader, /fetchPaymentOnce\(env, apiKey, paymentId\)/);
+  assert.match(loader, /fetchOrderOnce\(env, apiKey, resolvedOrderId\)/);
+  assert.match(loader, /for \(const waitMs of \[500, 1250\]\)/);
   assert.match(loader, /if \(isYocoRateLimitError\(caught\)\) throw caught/);
   assert.doesNotMatch(loader, /for \(let pageIndex/);
-  assert.match(loader, /Legacy fallback for non-standard payloads that omit order_id/);
 });
 
 test('Phase 67 caches refund orders and stops issuing requests when Yoco rate limits enrichment', () => {

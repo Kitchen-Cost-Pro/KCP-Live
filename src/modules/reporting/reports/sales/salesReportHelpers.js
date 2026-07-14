@@ -66,16 +66,20 @@ export function normalizeSalesFinancialRow(row = {}) {
     : explicitNetReconciles
       ? explicitNetAmount
       : roundMoney(sourceGrossAmount - accountingVatAmount);
+  const suppliedRefundVat = row.refundVatAmount ?? row.refund_vat_amount;
   const suppliedRefundNet = row.refundNetAmount ?? row.refund_net_amount;
   const refundVatAmount = refundGrossAmount > 0
-    ? roundMoney(isVatExempt ? 0 : calculateVatFromGross(refundGrossAmount, vatRate))
+    ? hasValue(suppliedRefundVat)
+      ? Math.abs(roundMoney(safeNumber(suppliedRefundVat)))
+      : roundMoney(isVatExempt ? 0 : calculateVatFromGross(refundGrossAmount, vatRate))
     : 0;
-  const refundAmount = hasValue(suppliedRefundNet)
+  const refundNetAmount = hasValue(suppliedRefundNet)
     ? Math.abs(roundMoney(safeNumber(suppliedRefundNet)))
     : roundMoney(Math.max(0, refundGrossAmount - refundVatAmount));
+  const refundAmount = refundGrossAmount;
 
   // The displayed sales columns remain pre-refund so the report can be read left-to-right:
-  // Gross Sales - VAT = Net Sales; Net Sales + Tips - Refunds - Fees = Payout.
+  // Gross Sales - VAT = Net Sales; Net Sales + Tips - Gross Refunds - Fees = Payout.
   const grossAmount = isRefund ? 0 : sourceGrossAmount;
   const vatAmount = isRefund ? 0 : accountingVatAmount;
   const netAmount = isRefund ? 0 : accountingNetAmount;
@@ -105,6 +109,7 @@ export function normalizeSalesFinancialRow(row = {}) {
     refundAmount,
     refundGrossAmount,
     refundVatAmount,
+    refundNetAmount,
     tipAmount,
     feeAmount,
     payoutAmount,
@@ -263,6 +268,8 @@ export function paymentTotals(rows = [], includeAverage = false) {
     grossSales: sumBy(rows, (row) => row.grossSales ?? row.grossAmount),
     discounts: sumBy(rows, (row) => row.discounts ?? row.discountAmount),
     refunds: sumBy(rows, (row) => row.refunds ?? row.refundAmount),
+    refundVat: sumBy(rows, (row) => row.refundVat ?? row.refundVatAmount),
+    refundNet: sumBy(rows, (row) => row.refundNet ?? row.refundNetAmount),
     vat: sumBy(rows, (row) => row.vat ?? row.vatAmount),
     netSales: sumBy(rows, (row) => row.netSales ?? row.netAmount),
     tips: sumBy(rows, (row) => row.tips ?? row.tipAmount),
@@ -314,6 +321,8 @@ function summarizePayments(rows, keySelector, baseSelector) {
     const netSales = sumBy(groupRows, 'netAmount');
     const tips = sumBy(groupRows, 'tipAmount');
     const refunds = sumBy(groupRows, 'refundAmount');
+    const refundVat = sumBy(groupRows, 'refundVatAmount');
+    const refundNet = sumBy(groupRows, 'refundNetAmount');
     const discounts = sumBy(groupRows, 'discountAmount');
     const fees = sumBy(groupRows, 'feeAmount');
     const payoutAmount = roundMoney(netSales + tips - refunds - fees);
@@ -323,6 +332,8 @@ function summarizePayments(rows, keySelector, baseSelector) {
       grossSales,
       discounts,
       refunds,
+      refundVat,
+      refundNet,
       vat,
       netSales,
       tips,

@@ -4,7 +4,7 @@ import { buildReportIntegritySummary } from './reportingIntegrity.js';
 
 test('reporting integrity accepts reconciled sales, movement and stocktake rows', () => {
   const summary = buildReportIntegritySummary([
-    { id: 'sale', grossAmount: 560, vatAmount: 73.04, netAmount: 486.96, refundAmount: 0, feeAmount: 10, tipAmount: 0, payoutAmount: 550 },
+    { id: 'sale', grossAmount: 560, vatAmount: 73.04, netAmount: 486.96, refundAmount: 0, feeAmount: 10, tipAmount: 0, payoutAmount: 476.96 },
     { id: 'movement', qtyIn: 5, qtyOut: 2, netQty: 3, unitCostExVat: 10, movementValue: 30 },
     { id: 'stocktake', expectedQty: 10, countedQty: 8, varianceQty: -2, expectedValue: 100, countedValue: 80, varianceValue: -20 }
   ]);

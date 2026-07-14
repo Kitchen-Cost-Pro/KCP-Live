@@ -3,6 +3,7 @@ import { FacadeDatabase } from './d1-facade';
 import { TENANT_MIGRATIONS } from './tenant-migrations';
 import type { Env } from './types';
 import { dispatchWorkspaceRoute } from './legacy/index';
+import { retryFailedYocoOrders } from './legacy/yoco-service';
 import type { Env as LegacyEnv, AuthContext as LegacyAuth } from './legacy/types';
 
 /**
@@ -16,9 +17,11 @@ import type { Env as LegacyEnv, AuthContext as LegacyAuth } from './legacy/types
  */
 export class WorkspaceDO extends DurableObject<Env> {
   private readonly db: FacadeDatabase;
+  private readonly state: DurableObjectState;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    this.state = ctx;
     this.db = new FacadeDatabase(ctx.storage.sql, ctx.storage);
     // Apply pending migrations before serving any request.
     ctx.blockConcurrencyWhile(async () => {
@@ -48,6 +51,34 @@ export class WorkspaceDO extends DurableObject<Env> {
     }
   }
 
+  private legacyEnv(): LegacyEnv {
+    return {
+      ...this.env,
+      DB: this.db,
+      CENTRAL_DB: this.env.CENTRAL_DB
+    } as unknown as LegacyEnv;
+  }
+
+  private async pendingRefundWebhookCount(workspaceId: string) {
+    if (!workspaceId) return 0;
+    const row = await this.db.prepare(
+      `SELECT COUNT(*) AS pending
+         FROM yoco_webhook_events
+        WHERE workspace_id = ?1
+          AND status IN ('attention', 'failed')
+          AND lower(replace(event_type, '_', '.')) IN ('payment.refunded', 'refund.succeeded', 'refund.successful')`
+    ).bind(workspaceId).first<{ pending?: number }>();
+    return Number(row?.pending || 0) || 0;
+  }
+
+  private async scheduleRefundRetry(workspaceId: string, delayMs = 15_000) {
+    if (!workspaceId || !(await this.pendingRefundWebhookCount(workspaceId))) return;
+    await this.state.storage.put('_kcp_workspace_id', workspaceId);
+    const target = Date.now() + Math.max(5_000, delayMs);
+    const existing = await this.state.storage.getAlarm();
+    if (existing === null || existing > target) await this.state.storage.setAlarm(target);
+  }
+
   async fetch(request: Request): Promise<Response> {
     const workspaceId = request.headers.get('x-kcp-workspace') || '';
     const resource = request.headers.get('x-kcp-resource') || new URL(request.url).pathname;
@@ -66,12 +97,28 @@ export class WorkspaceDO extends DurableObject<Env> {
 
     // The ported handlers see `env.DB` = this workspace's SQLite facade and `env.CENTRAL_DB` = the
     // shared central D1 (for the few central reads: assertWorkspaceAccess, allowed-locations, etc.).
-    const legacyEnv = {
-      ...this.env,
-      DB: this.db,
-      CENTRAL_DB: this.env.CENTRAL_DB
-    } as unknown as LegacyEnv;
+    const response = await dispatchWorkspaceRoute(request, this.legacyEnv(), auth, workspaceId, resource);
+    if (resource === 'yoco-webhook') await this.scheduleRefundRetry(workspaceId);
+    return response;
+  }
 
-    return dispatchWorkspaceRoute(request, legacyEnv, auth, workspaceId, resource);
+  async alarm(): Promise<void> {
+    const workspaceId = String(await this.state.storage.get<string>('_kcp_workspace_id') || '');
+    if (!workspaceId) return;
+    const previousAttempt = Number(await this.state.storage.get<number>('_kcp_refund_retry_attempt') || 0);
+    try {
+      await retryFailedYocoOrders(this.legacyEnv(), workspaceId, { automatic: true, maxAutomaticLookbackDays: 31 });
+    } catch {
+      // Pending state is retained and the bounded backoff below schedules another try.
+    }
+    const pending = await this.pendingRefundWebhookCount(workspaceId);
+    if (!pending) {
+      await this.state.storage.delete('_kcp_refund_retry_attempt');
+      return;
+    }
+    const nextAttempt = Math.min(previousAttempt + 1, 6);
+    await this.state.storage.put('_kcp_refund_retry_attempt', nextAttempt);
+    const delayMs = Math.min(15_000 * (2 ** nextAttempt), 5 * 60_000);
+    await this.state.storage.setAlarm(Date.now() + delayMs);
   }
 }

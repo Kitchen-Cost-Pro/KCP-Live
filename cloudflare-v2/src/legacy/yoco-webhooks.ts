@@ -241,9 +241,10 @@ function pairRefundsWithReturns(order: Record<string, unknown>, refunds: Record<
       }
     }
 
-    if (selected < 0 && refunds.length === sortedReturns.length && refundIndex < sortedReturns.length && !used.has(refundIndex)) {
-      selected = refundIndex;
-    }
+    // Never pair multiple partial refunds and returns by array position. Yoco can
+    // expose those collections in different orders, and positional matching can
+    // restore the wrong product. A single unambiguous refund/return pair is safe;
+    // otherwise wait for an id, payment reference, unique amount, or timestamp match.
     if (selected < 0 && sortedReturns.length === 1 && refunds.length === 1) selected = 0;
     if (selected >= 0) used.add(selected);
     return mergeRefundAndReturn(refund, selected >= 0 ? sortedReturns[selected] : null);

@@ -25,7 +25,16 @@ import {
   yocoWebhookEventFields,
   yocoWebhookPaymentSucceeded,
 } from "./yoco-sales";
-import { fetchModifierGroup, fetchOrder, fetchPayment, isYocoRateLimitError, listOrders, listOrdersPage } from "./yoco-client";
+import {
+  fetchModifierGroup,
+  fetchOrder,
+  fetchOrderOnce,
+  fetchPayment,
+  fetchPaymentOnce,
+  isYocoRateLimitError,
+  listOrders,
+  listOrdersPage,
+} from "./yoco-client";
 import {
   connectYoco,
   disconnectYoco,
@@ -14890,19 +14899,93 @@ function mergePaymentRefundsIntoOrder(
   };
 }
 
+function refundStatusIsFinalForWebhook(value: Record<string, unknown>) {
+  const status = text(value.status).toLowerCase();
+  return !status || ['approved', 'complete', 'completed', 'refunded', 'succeeded', 'successful', 'success'].includes(status);
+}
+
+function objectRows(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((entry) => entry && typeof entry === 'object' && !Array.isArray(entry)) as Record<string, unknown>[]
+    : [];
+}
+
+function returnLineRows(value: Record<string, unknown>) {
+  for (const key of ['returned_line_items', 'returnedLineItems', 'line_items', 'lineItems', 'items']) {
+    const rows = objectRows(value[key]);
+    if (rows.length) return rows;
+  }
+  return [];
+}
+
+function approvedPaymentRefundCount(payment: Record<string, unknown> | null) {
+  if (!payment) return 0;
+  return objectRows(payment.refunds).filter(refundStatusIsFinalForWebhook).length;
+}
+
+function lineBearingReturnCount(order: Record<string, unknown> | null) {
+  if (!order) return 0;
+  return objectRows(order.returns).filter((entry) => returnLineRows(entry).length > 0).length;
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function loadYocoOrderForWebhook(
   env: Env,
   workspaceId: string,
   payloadOrder: Record<string, unknown> | null,
   orderId: string,
   paymentId: string,
+  eventDisposition: string,
 ) {
-  if (payloadOrder && getObjectLineItems(payloadOrder).length) return payloadOrder;
+  const isRefund = eventDisposition === 'refund';
+  if (payloadOrder && getObjectLineItems(payloadOrder).length && !isRefund) return payloadOrder;
   const apiKey = await getYocoApiKey(env, workspaceId);
 
-  // Yoco's payment.refunded webhook contract includes order_id and payment_id.
-  // Fetch the order directly once because that response contains line_items,
-  // refunds, returns, and modifiers. Do not fan out into list scans after a 429.
+  if (isRefund) {
+    // Yoco's payment.refunded webhook supplies only order_id and payment_id. Fetch
+    // the payment first to identify approved refund summaries, then fetch the order
+    // because returned_line_items and modifiers live on order.returns. These are
+    // single-attempt requests; KCP controls the bounded eventual-consistency retry.
+    let payment: Record<string, unknown> | null = null;
+    let resolvedOrderId = orderId;
+    if (paymentId) {
+      try {
+        payment = await fetchPaymentOnce(env, apiKey, paymentId) as Record<string, unknown>;
+        resolvedOrderId = resolvedOrderId || text(payment.order_id || payment.orderId);
+      } catch (caught) {
+        if (isYocoRateLimitError(caught)) throw caught;
+      }
+    }
+
+    let order = payloadOrder && getObjectLineItems(payloadOrder).length
+      ? payloadOrder
+      : resolvedOrderId
+        ? await fetchOrderOnce(env, apiKey, resolvedOrderId) as Record<string, unknown>
+        : null;
+    if (!order && resolvedOrderId) order = await loadCachedYocoOrder(env, workspaceId, resolvedOrderId);
+    order = mergePaymentRefundsIntoOrder(order, payment);
+
+    const expectedRefunds = approvedPaymentRefundCount(payment);
+    // The payment can become refunded a fraction before the order's physical return
+    // collection is queryable. Re-read only the order, at most twice, and only while
+    // a returned-line record is missing. The DO alarm handles longer delays.
+    for (const waitMs of [500, 1250]) {
+      if (!resolvedOrderId || !expectedRefunds || lineBearingReturnCount(order) >= expectedRefunds) break;
+      await delay(waitMs);
+      try {
+        const refreshed = await fetchOrderOnce(env, apiKey, resolvedOrderId) as Record<string, unknown>;
+        order = mergePaymentRefundsIntoOrder(refreshed, payment);
+      } catch (caught) {
+        if (isYocoRateLimitError(caught)) throw caught;
+        break;
+      }
+    }
+    return order;
+  }
+
   if (orderId) {
     try {
       return await fetchOrder(env, apiKey, orderId) as Record<string, unknown>;
@@ -14921,7 +15004,7 @@ async function loadYocoOrderForWebhook(
   }
 
   if (!paymentId) return payloadOrder;
-  // Yoco payments expose order_id, so a valid payment.created webhook can still resolve its order immediately.
+  // Yoco payments expose order_id directly; a valid payment.created webhook can still resolve its order immediately.
   try {
     const payment = await fetchPayment(env, apiKey, paymentId) as Record<string, unknown>;
     const paymentOrderId = text(payment.order_id || payment.orderId);
@@ -14939,8 +15022,6 @@ async function loadYocoOrderForWebhook(
     if (isYocoRateLimitError(caught)) throw caught;
   }
 
-  // Legacy fallback for non-standard payloads that omit order_id. Keep this
-  // bounded and stop immediately if Yoco applies rate limiting.
   try {
     const candidateOrders = await listOrders(env, apiKey, { payment_id: paymentId, limit: 25 }) as Record<string, unknown>[];
     const matched = candidateOrders.find((order) => orderHasPayment(order, paymentId));
@@ -15250,6 +15331,7 @@ export async function postYocoWebhook(
       order,
       orderId,
       paymentId,
+      eventDisposition,
     )) as Record<string, unknown> | null;
   } catch (caught) {
     if (isYocoRateLimitError(caught)) {

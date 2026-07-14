@@ -88,7 +88,7 @@ test('Phase 45 payment reporting excludes tips from taxable gross and keeps refu
   assert.equal(refund.refundAmount, 115);
   assert.equal(refund.vatAmount, -15);
   assert.equal(refund.netAmount, -100);
-  assert.equal(refund.payoutAmount, -100);
+  assert.equal(refund.payoutAmount, -115);
 
   const model = buildPaymentModel([
     { id: 'sale', saleDate: '2026-07-13', locationName: 'Main', status: 'completed', ...sale },
@@ -96,11 +96,11 @@ test('Phase 45 payment reporting excludes tips from taxable gross and keeps refu
   ]);
   const summary = model.views.by_location[0];
   assert.equal(summary.grossSales, 115);
-  assert.equal(summary.refunds, 100);
+  assert.equal(summary.refunds, 115);
   assert.equal(summary.vat, 15);
   assert.equal(summary.netSales, 100);
   assert.equal(summary.tips, 2);
-  assert.equal(summary.payoutAmount, 2);
+  assert.equal(summary.payoutAmount, -13);
   assert.equal(summary.refundCount, 1);
 });
 

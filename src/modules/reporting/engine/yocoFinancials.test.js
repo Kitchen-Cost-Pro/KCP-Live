@@ -128,7 +128,7 @@ test('Yoco processing fees can be summed from nested payment fee Money objects',
   const result = deriveYocoFinancialAmounts({ persistedTotal: 560, raw: order, configuredVatRate: 15 });
   assert.equal(result.feeAmount, 10);
   assert.equal(result.payoutAmount, 476.96);
-  assert.equal(result.payoutAmount, result.netAmount + result.tipAmount - result.refundNetAmount - result.feeAmount);
+  assert.equal(result.payoutAmount, result.netAmount + result.tipAmount - result.refundAmount - result.feeAmount);
 });
 
 test('refund rows preserve the refund amount and reverse the VAT-exclusive bill values', () => {
@@ -137,7 +137,7 @@ test('refund rows preserve the refund amount and reverse the VAT-exclusive bill 
   assert.equal(result.vatAmount, -18.26);
   assert.equal(result.netAmount, -121.74);
   assert.equal(result.refundAmount, 140);
-  assert.equal(result.payoutAmount, -121.74);
+  assert.equal(result.payoutAmount, -140);
   assert.equal(result.refundAmount, Math.abs(result.netAmount) + Math.abs(result.vatAmount));
 });
 
@@ -162,7 +162,7 @@ test('refund rows do not double count the parent order discount, tip, or process
   assert.equal(result.refundAmount, 140);
   assert.equal(result.vatAmount, -18.26);
   assert.equal(result.netAmount, -121.74);
-  assert.equal(result.payoutAmount, -121.74);
+  assert.equal(result.payoutAmount, -140);
 });
 
 test('known Checkout scalar fields are converted from cents without magnitude guessing', () => {

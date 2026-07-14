@@ -57,11 +57,11 @@ export function sumYocoProcessingFees(order = {}) {
 
 
 export function sumYocoTaxAmounts(order = {}) {
-  const orderTaxes = arrayValue(order?.total_taxes, order?.totalTaxes);
+  const orderTaxes = arrayValue(order?.returned_total_taxes, order?.returnedTotalTaxes, order?.total_taxes, order?.totalTaxes);
   const orderTax = sumMoneyEntries(orderTaxes, ['tax_amount', 'taxAmount', 'amount']);
   if (Number.isFinite(orderTax)) return orderTax;
 
-  const lines = arrayValue(order?.line_items, order?.lineItems, order?.items);
+  const lines = arrayValue(order?.returned_line_items, order?.returnedLineItems, order?.line_items, order?.lineItems, order?.items);
   let found = false;
   let total = 0;
   for (const line of lines) {
@@ -82,6 +82,9 @@ export function sumYocoPaymentTips(order = {}) {
 export function deriveYocoFinancialAmounts({
   raw = {},
   persistedTotal = 0,
+  persistedGrossTotal = NaN,
+  persistedVatTotal = NaN,
+  persistedNetTotal = NaN,
   configuredVatRate = 15,
   orderType = '',
   status = ''
@@ -93,6 +96,13 @@ export function deriveYocoFinancialAmounts({
   const vatRate = vatRateResolution.value;
   const normalizedVatRate = normalizeVatRate(vatRate);
   const storedTotal = Math.abs(safeNumber(persistedTotal, 0));
+  const hasPersistedValue = (value) => value !== undefined && value !== null && value !== '' && Number.isFinite(Number(value));
+  const hasStoredGross = hasPersistedValue(persistedGrossTotal);
+  const hasStoredVat = hasPersistedValue(persistedVatTotal);
+  const hasStoredNet = hasPersistedValue(persistedNetTotal);
+  const storedGross = hasStoredGross ? Math.abs(Number(persistedGrossTotal)) : NaN;
+  const storedVat = hasStoredVat ? Math.abs(Number(persistedVatTotal)) : NaN;
+  const storedNet = hasStoredNet ? Math.abs(Number(persistedNetTotal)) : NaN;
 
   const directTip = resolveYocoMoney(raw, [
     'amounts.tip_amount',
@@ -137,7 +147,7 @@ export function deriveYocoFinancialAmounts({
   const selectedCustomerTotal = persistedTotalMismatch ? resolvedGross : storedTotal || finiteOr(resolvedGross, 0);
   // Customer-paid totals can include gratuity. Gross sales must represent only the bill
   // value because tips are not taxable and are reported in their own column.
-  const grossAmount = isRefund ? 0 : roundMoney(Math.max(0, selectedCustomerTotal - tipAmount));
+  const grossAmount = isRefund ? 0 : roundMoney(hasStoredGross ? storedGross : Math.max(0, selectedCustomerTotal - tipAmount));
 
   const rawRefund = resolveYocoMoney(raw, [
     'refund_amount',
@@ -148,7 +158,7 @@ export function deriveYocoFinancialAmounts({
     'amounts.refundAmount'
   ], NaN).value;
   const refundAmount = isRefund
-    ? roundMoney(storedTotal || finiteOr(rawRefund, finiteOr(grossResolution.value, 0)))
+    ? roundMoney(hasStoredGross ? storedGross : storedTotal || finiteOr(rawRefund, finiteOr(grossResolution.value, 0)))
     : roundMoney(finiteOr(rawRefund, 0));
 
   const directTaxResolution = resolveYocoMoney(raw, [
@@ -169,19 +179,25 @@ export function deriveYocoFinancialAmounts({
       ? { value: aggregatedTax, path: 'total_taxes', rawValue: aggregatedTax }
       : checkoutTax;
   const explicitZeroRated = isExplicitlyZeroRated(raw);
-  const explicitTaxPlausible = !isRefund
-    && Number.isFinite(taxResolution.value)
+  const taxBaseAmount = isRefund ? refundAmount : grossAmount;
+  const explicitTaxPlausible = Number.isFinite(taxResolution.value)
     && taxResolution.value >= 0
-    && taxResolution.value <= grossAmount + CENT_TOLERANCE
-    && (taxResolution.value > 0 || !grossAmount || !normalizedVatRate || explicitZeroRated);
+    && taxResolution.value <= taxBaseAmount + CENT_TOLERANCE
+    && (taxResolution.value > 0 || !taxBaseAmount || !normalizedVatRate || explicitZeroRated);
   const calculatedVat = calculateVatFromGross(grossAmount, vatRate);
-  const refundVatAmount = explicitZeroRated ? 0 : calculateVatFromGross(refundAmount, vatRate);
+  const refundVatAmount = roundMoney(explicitZeroRated
+    ? 0
+    : hasStoredVat
+      ? storedVat
+      : explicitTaxPlausible
+        ? taxResolution.value
+        : calculateVatFromGross(refundAmount, vatRate));
   const vatAmount = isRefund
     ? roundMoney(-refundVatAmount)
-    : roundMoney(explicitTaxPlausible ? taxResolution.value : calculatedVat);
+    : roundMoney(hasStoredVat ? storedVat : explicitTaxPlausible ? taxResolution.value : calculatedVat);
   const netAmount = isRefund
-    ? roundMoney(-(refundAmount - refundVatAmount))
-    : roundMoney(grossAmount - vatAmount);
+    ? roundMoney(-(hasStoredNet ? storedNet : refundAmount - refundVatAmount))
+    : roundMoney(hasStoredNet ? storedNet : grossAmount - vatAmount);
 
   const directDiscount = resolveYocoMoney(raw, [
     'amounts.discount_amount',
@@ -207,11 +223,12 @@ export function deriveYocoFinancialAmounts({
   ], NaN).value;
   const feeAmount = isRefund ? 0 : roundMoney(finiteOr(directFee, finiteOr(sumYocoProcessingFees(raw), 0)));
 
-  const refundNetAmount = roundMoney(Math.max(0, refundAmount - refundVatAmount));
-  // Payout is deliberately VAT-exclusive and keeps deductions visible as separate columns.
-  // Refund rows contribute through Refunds rather than being counted again in Net Sales.
+  const refundNetAmount = roundMoney(isRefund && hasStoredNet ? storedNet : Math.max(0, refundAmount - refundVatAmount));
+  // Refunds are cash returned to the customer, so payout and payment reconciliation
+  // must deduct the full VAT-inclusive gross refund. VAT and ex-VAT components are
+  // still exposed separately for accounting tables.
   const payoutNetSales = isRefund ? 0 : netAmount;
-  const expectedPayout = roundMoney(payoutNetSales + tipAmount - refundNetAmount - feeAmount);
+  const expectedPayout = roundMoney(payoutNetSales + tipAmount - refundAmount - feeAmount);
   const payoutAmount = expectedPayout;
 
   const issues = [];
@@ -245,6 +262,8 @@ export function deriveYocoFinancialAmounts({
     netAmount,
     discountAmount,
     refundAmount,
+    refundGrossAmount: refundAmount,
+    refundVatAmount,
     refundNetAmount,
     tipAmount,
     feeAmount,
@@ -252,7 +271,7 @@ export function deriveYocoFinancialAmounts({
     expectedPayout,
     vatRate,
     isVatExempt: explicitZeroRated,
-    vatSource: isRefund ? 'refund-calculated' : explicitZeroRated ? 'zero-rated' : explicitTaxPlausible ? 'yoco' : 'calculated',
+    vatSource: isRefund ? (hasStoredVat ? 'persisted-refund' : explicitTaxPlausible ? 'yoco-return' : 'refund-calculated') : explicitZeroRated ? 'zero-rated' : hasStoredVat ? 'persisted' : explicitTaxPlausible ? 'yoco' : 'calculated',
     grossSource: persistedTotalMismatch
       ? `raw-corrected:${resolvedGrossPath}`
       : storedTotal

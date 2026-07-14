@@ -21,8 +21,8 @@ test('Phase 65 resolves partial refunds at line level and never spreads a propor
   const sales = read('cloudflare-v2/src/legacy/yoco-sales.ts');
   assert.match(sales, /export function resolveRefundLineItems/);
   assert.match(sales, /refund_line_could_not_match_original_order/);
-  assert.match(sales, /partial_refund_requires_an_exact_line_item_match/);
-  assert.match(sales, /inferRefundLinesByAmount/);
+  assert.match(sales, /refund_return_lines_not_available_yet/);
+  assert.match(sales, /Stock must be driven by Yoco's returned_line_items, not by a monetary guess/);
   assert.doesNotMatch(sales, /function refundProportion/);
   assert.doesNotMatch(sales, /function scaleLineQty/);
 });

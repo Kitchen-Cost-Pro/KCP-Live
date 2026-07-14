@@ -22,7 +22,7 @@ export function buildReportIntegritySummary(rows = []) {
       }
     }
     if (row?.payoutAmount !== undefined) {
-      const expected = roundMoney(safeNumber(row.grossAmount) - safeNumber(row.refundAmount) - safeNumber(row.feeAmount) + safeNumber(row.tipAmount));
+      const expected = roundMoney(safeNumber(row.netAmount) + safeNumber(row.tipAmount) - safeNumber(row.refundAmount) - safeNumber(row.feeAmount));
       if (!moneyReconciles(row.payoutAmount, expected, 0.05)) {
         issues.push({ code: 'sales-payout-reconciliation', level: 'warning', rowId, difference: roundMoney(safeNumber(row.payoutAmount) - expected) });
       }
