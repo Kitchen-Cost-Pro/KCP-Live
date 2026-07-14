@@ -5,13 +5,37 @@ const DEFAULT_YOCO_BASE_URL = 'https://api.yoco.com';
 export class YocoApiError extends Error {
   status: number;
   details: unknown;
+  retryAfterMs: number;
 
-  constructor(message: string, status = 0, details: unknown = null) {
+  constructor(message: string, status = 0, details: unknown = null, retryAfterMs = 0) {
     super(message);
     this.name = 'YocoApiError';
     this.status = status;
     this.details = details;
+    this.retryAfterMs = Math.max(0, Number(retryAfterMs || 0));
   }
+}
+
+export function isYocoRateLimitError(value: unknown): value is YocoApiError {
+  return value instanceof YocoApiError && value.status === 429;
+}
+
+function retryAfterMs(headers: Headers) {
+  const retryAfter = String(headers.get('retry-after') || '').trim();
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+    const dateMs = Date.parse(retryAfter);
+    if (Number.isFinite(dateMs)) return Math.max(0, dateMs - Date.now());
+  }
+  for (const name of ['ratelimit-reset', 'x-ratelimit-reset']) {
+    const raw = String(headers.get(name) || '').trim();
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value <= 0) continue;
+    const resetMs = value > 10_000_000_000 ? value : value * 1000;
+    return Math.max(0, resetMs - Date.now());
+  }
+  return 0;
 }
 
 function parseJson(value: string) {
@@ -85,8 +109,10 @@ async function withYocoRetry<T>(task: () => Promise<T>, attempt = 0): Promise<T>
   try {
     return await task();
   } catch (caught) {
-    if (caught instanceof YocoApiError && caught.status === 429 && attempt < 3) {
-      await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1) * (attempt + 1)));
+    if (isYocoRateLimitError(caught) && attempt < 2) {
+      const fallbackDelay = 750 * (attempt + 1) * (attempt + 1);
+      const delay = Math.min(Math.max(caught.retryAfterMs || fallbackDelay, fallbackDelay), 5_000);
+      await new Promise((resolve) => setTimeout(resolve, delay));
       return withYocoRetry(task, attempt + 1);
     }
     throw caught;
@@ -117,7 +143,12 @@ export async function yocoFetch(env: Env, apiKey: string, path: string, options:
   const data = raw ? parseJson(raw) : null;
   if (!response.ok) {
     const message = data?.detail || data?.title || data?.message || response.statusText;
-    throw new YocoApiError(`Yoco API request failed: ${message}`, response.status, data);
+    throw new YocoApiError(
+      `Yoco API request failed: ${message}`,
+      response.status,
+      data,
+      retryAfterMs(response.headers),
+    );
   }
   return data;
 }
@@ -196,8 +227,15 @@ export async function listOrdersPage(env: Env, apiKey: string, params: Record<st
   };
 }
 
-export const fetchOrder = async (env: Env, apiKey: string, orderId: string) => objectData(await yocoFetch(env, apiKey, `/v1/orders/${encodeURIComponent(orderId)}`));
-export const fetchPayment = async (env: Env, apiKey: string, paymentId: string) => objectData(await yocoFetch(env, apiKey, `/v1/payments/${encodeURIComponent(paymentId)}`));
+export const fetchOrder = async (env: Env, apiKey: string, orderId: string) => objectData(await withYocoRetry(
+  () => yocoFetch(env, apiKey, `/v1/orders/${encodeURIComponent(orderId)}`),
+));
+export const fetchPayment = async (env: Env, apiKey: string, paymentId: string) => objectData(await withYocoRetry(
+  () => yocoFetch(env, apiKey, `/v1/payments/${encodeURIComponent(paymentId)}`),
+));
+export const fetchRefund = async (env: Env, apiKey: string, refundId: string) => objectData(await withYocoRetry(
+  () => yocoFetch(env, apiKey, `/v1/refunds/${encodeURIComponent(refundId)}`),
+));
 
 
 export const listWebhookSubscriptions = (env: Env, apiKey: string) => listAllPages(env, apiKey, '/v1/webhooks/subscriptions/');

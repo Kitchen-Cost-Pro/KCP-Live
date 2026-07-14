@@ -38,6 +38,7 @@ import {
 } from './services/settingsService.js';
 import { ACTION_PERMISSION_MAP, canManagePermissionSets, getAccessRenderRevision, hasPermission, hasSectionAccess, normalizeRoleName, resolveRoleDefinition, toRoleLabel } from './services/roleService.js';
 import { buildSupplierPurchaseOrderPdfFile as buildSupplierPurchaseOrderPdfDocument, buildManufacturingBuilderXlsx, downloadFileBlob, downloadStyledRecipeTemplateXlsx, downloadStyledStockTemplateXlsx, parseDataFile } from './services/dataService.js';
+import { KCP_PDF_THEME } from './utils/pdfTheme.js';
 import {
   buildMenuCatalogueRows,
   buildGoodsReceiptDocumentRows,
@@ -15304,25 +15305,26 @@ async function exportStockTakeTemplatePdf(templateId, selectedLocationId = '') {
         theme: 'grid',
         tableWidth: 'auto',
         horizontalPageBreak: false,
-        ruleColor: [148, 163, 184],
+        ruleColor: KCP_PDF_THEME.accent,
         styles: {
           fontSize: 9,
           cellPadding: { top: 8, right: 6, bottom: 8, left: 6 },
           lineWidth: 0.45,
-          lineColor: [190, 200, 214],
+          lineColor: KCP_PDF_THEME.border,
           valign: 'middle',
           minCellHeight: 26,
-          textColor: [0, 0, 0],
+          textColor: KCP_PDF_THEME.ink,
           overflow: 'linebreak'
         },
         headStyles: {
-          fillColor: [232, 238, 246],
-          textColor: [0, 0, 0],
+          fillColor: KCP_PDF_THEME.accentDark,
+          textColor: KCP_PDF_THEME.white,
           fontStyle: 'bold',
-          lineColor: [165, 176, 193],
+          lineColor: KCP_PDF_THEME.accentDark,
           minCellHeight: 28
         },
-        alternateRowStyles: { fillColor: [255, 255, 255] },
+        bodyStyles: { fillColor: KCP_PDF_THEME.white },
+        alternateRowStyles: { fillColor: KCP_PDF_THEME.surfaceAlt },
         margin: { left: 28, right: 28 },
         columnStyles: {
           0: { cellWidth: 230, fontStyle: 'bold', halign: 'left' },
@@ -15340,21 +15342,21 @@ async function exportStockTakeTemplatePdf(templateId, selectedLocationId = '') {
           const isCategoryRow = data.section === 'body' && firstCell.startsWith('CATEGORY:');
           if (isCategoryRow) {
             data.cell.styles.fontStyle = 'bold';
-            data.cell.styles.fillColor = [238, 242, 247];
-            data.cell.styles.textColor = [0, 0, 0];
+            data.cell.styles.fillColor = KCP_PDF_THEME.surfaceStrong;
+            data.cell.styles.textColor = KCP_PDF_THEME.navy;
             data.cell.styles.minCellHeight = 24;
             if (data.column.index > 0) data.cell.text = [''];
           }
           if (data.section === 'body' && !isCategoryRow && [2, 4, 6, 8].includes(data.column.index)) {
-            data.cell.styles.fillColor = [255, 255, 255];
-            data.cell.styles.textColor = [0, 0, 0];
-            data.cell.styles.lineColor = [165, 176, 193];
+            data.cell.styles.fillColor = KCP_PDF_THEME.white;
+            data.cell.styles.textColor = KCP_PDF_THEME.ink;
+            data.cell.styles.lineColor = KCP_PDF_THEME.borderStrong;
             data.cell.styles.minCellHeight = 30;
           }
           if (data.section === 'body' && !isCategoryRow && [1, 3, 5, 7].includes(data.column.index)) {
             data.cell.styles.fontStyle = 'bold';
-            data.cell.styles.textColor = [0, 0, 0];
-            data.cell.styles.fillColor = [250, 252, 255];
+            data.cell.styles.textColor = KCP_PDF_THEME.navySoft;
+            data.cell.styles.fillColor = KCP_PDF_THEME.surface;
           }
         },
         didDrawCell: () => {

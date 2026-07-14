@@ -91,6 +91,165 @@ function refundId(refund: Record<string, unknown>) {
   );
 }
 
+function objectArray(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((entry) => entry && typeof entry === 'object' && !Array.isArray(entry)) as Record<string, unknown>[]
+    : [];
+}
+
+function refundStatusIsFinal(refund: Record<string, unknown>) {
+  const status = text(refund.status).toLowerCase();
+  if (!status) return true;
+  return ['approved', 'complete', 'completed', 'refunded', 'succeeded', 'successful', 'success'].includes(status);
+}
+
+function timestampMs(value: Record<string, unknown>) {
+  const raw = text(
+    value.processed_at ||
+    value.processedAt ||
+    value.updated_at ||
+    value.updatedAt ||
+    value.created_at ||
+    value.createdAt
+  );
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function moneyMinor(value: unknown): number {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const amount = Number((value as Record<string, unknown>).amount);
+    return Number.isFinite(amount) ? Math.round(Math.abs(amount)) : 0;
+  }
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? Math.round(Math.abs(numeric) * 100) : 0;
+}
+
+function refundAmountMinor(value: Record<string, unknown>) {
+  const amounts = objectValue(value.amounts);
+  const direct = [
+    value.total_amount,
+    value.totalAmount,
+    value.refund_amount,
+    value.refundAmount,
+    value.amount,
+    value.net_amount,
+    value.netAmount,
+    amounts.net_amount,
+    amounts.netAmount,
+    amounts.total_amount,
+    amounts.totalAmount
+  ];
+  for (const candidate of direct) {
+    const amount = moneyMinor(candidate);
+    if (amount > 0) return amount;
+  }
+  return 0;
+}
+
+const RETURN_LINE_KEYS = [
+  'returned_line_items',
+  'returnedLineItems',
+  'line_items',
+  'lineItems',
+  'items',
+  'return_lines',
+  'returnLines'
+];
+
+function returnLines(value: Record<string, unknown>) {
+  for (const key of RETURN_LINE_KEYS) {
+    const lines = objectArray(value[key]);
+    if (lines.length) return lines;
+  }
+  return [];
+}
+
+function refundCandidates(order: Record<string, unknown>, webhookRefund: Record<string, unknown> | null) {
+  const candidates: Record<string, unknown>[] = [];
+  if (webhookRefund) candidates.push(webhookRefund);
+  candidates.push(...objectArray(order.refunds));
+  for (const payment of objectArray(order.payments)) {
+    const paymentId = text(payment.id || payment.payment_id || payment.paymentId);
+    for (const refund of objectArray(payment.refunds)) {
+      candidates.push(paymentId && !text(refund.payment_id || refund.paymentId)
+        ? { ...refund, payment_id: paymentId }
+        : refund);
+    }
+  }
+  const byKey = new Map<string, Record<string, unknown>>();
+  candidates.forEach((candidate, index) => {
+    const key = refundId(candidate) || `${text(candidate.payment_id || candidate.paymentId)}:${timestampMs(candidate)}:${refundAmountMinor(candidate)}:${index}`;
+    const existing = byKey.get(key);
+    byKey.set(key, existing ? { ...existing, ...candidate } : candidate);
+  });
+  return [...byKey.values()];
+}
+
+function returnReferenceValues(value: Record<string, unknown>) {
+  const metadata = objectValue(value.metadata);
+  return [
+    value.refund_id,
+    value.refundId,
+    value.payment_id,
+    value.paymentId,
+    value.source_refund_id,
+    value.sourceRefundId,
+    metadata.refund_id,
+    metadata.refundId,
+    metadata.payment_id,
+    metadata.paymentId
+  ].map((entry) => text(entry)).filter(Boolean);
+}
+
+function mergeRefundAndReturn(refund: Record<string, unknown>, returned: Record<string, unknown> | null) {
+  if (!returned) return refund;
+  const lines = returnLines(returned);
+  return {
+    ...returned,
+    ...refund,
+    returned_line_items: lines.length ? lines : refund.returned_line_items,
+    return_id: text(returned.id || returned.return_id || returned.returnId) || undefined,
+    return_reason: refund.return_reason || refund.returnReason || returned.return_reason || returned.returnReason || returned.reason,
+    return_note: refund.return_note || refund.returnNote || returned.return_note || returned.returnNote || returned.note,
+    kcpMatchedReturn: returned
+  };
+}
+
+function pairRefundsWithReturns(order: Record<string, unknown>, refunds: Record<string, unknown>[]) {
+  const returns = objectArray(order.returns).filter((entry) => returnLines(entry).length > 0);
+  if (!returns.length || !refunds.length) return refunds;
+  const sortedReturns = [...returns].sort((left, right) => timestampMs(left) - timestampMs(right));
+  const used = new Set<number>();
+  return refunds.map((refund, refundIndex) => {
+    const refundRefs = new Set([refundId(refund), text(refund.payment_id || refund.paymentId)].filter(Boolean));
+    let selected = sortedReturns.findIndex((entry, index) => !used.has(index)
+      && returnReferenceValues(entry).some((value) => refundRefs.has(value)));
+
+    if (selected < 0) {
+      const amount = refundAmountMinor(refund);
+      const amountMatches = sortedReturns
+        .map((entry, index) => ({ entry, index }))
+        .filter(({ entry, index }) => !used.has(index) && amount > 0 && refundAmountMinor(entry) === amount);
+      if (amountMatches.length === 1) selected = amountMatches[0].index;
+      else if (amountMatches.length > 1) {
+        const refundTime = timestampMs(refund);
+        amountMatches.sort((a, b) => Math.abs(timestampMs(a.entry) - refundTime) - Math.abs(timestampMs(b.entry) - refundTime));
+        const firstDistance = Math.abs(timestampMs(amountMatches[0].entry) - refundTime);
+        const secondDistance = Math.abs(timestampMs(amountMatches[1].entry) - refundTime);
+        if (firstDistance < secondDistance) selected = amountMatches[0].index;
+      }
+    }
+
+    if (selected < 0 && refunds.length === sortedReturns.length && refundIndex < sortedReturns.length && !used.has(refundIndex)) {
+      selected = refundIndex;
+    }
+    if (selected < 0 && sortedReturns.length === 1 && refunds.length === 1) selected = 0;
+    if (selected >= 0) used.add(selected);
+    return mergeRefundAndReturn(refund, selected >= 0 ? sortedReturns[selected] : null);
+  });
+}
+
 export function extractYocoRefund(payload: Record<string, unknown>) {
   const envelope = objectValue(payload.payload);
   const data = objectValue(payload.data);
@@ -112,26 +271,31 @@ export function extractYocoRefund(payload: Record<string, unknown>) {
   )) || null;
 }
 
+export function findRefunds(
+  order: Record<string, unknown>,
+  paymentId: string,
+  webhookRefund: Record<string, unknown> | null = null
+) {
+  const wantedPaymentId = text(paymentId);
+  const wantedRefundId = webhookRefund ? refundId(webhookRefund) : '';
+  const matches = refundCandidates(order, webhookRefund)
+    .filter(refundStatusIsFinal)
+    .filter((refund) => {
+      const currentId = refundId(refund);
+      const currentPaymentId = text(refund.payment_id || refund.paymentId);
+      if (wantedRefundId && currentId === wantedRefundId) return true;
+      if (wantedPaymentId && currentPaymentId === wantedPaymentId) return true;
+      return !wantedRefundId && !wantedPaymentId;
+    })
+    .sort((left, right) => timestampMs(left) - timestampMs(right));
+  return pairRefundsWithReturns(order, matches);
+}
+
 export function findRefund(
   order: Record<string, unknown>,
   paymentId: string,
   webhookRefund: Record<string, unknown> | null = null
 ) {
-  const refunds = [
-    ...(Array.isArray(order.refunds) ? order.refunds as Record<string, unknown>[] : []),
-    ...(Array.isArray(order.returns) ? order.returns as Record<string, unknown>[] : [])
-  ];
-  const candidateId = webhookRefund ? refundId(webhookRefund) : '';
-  const exact = refunds.find((refund) => {
-    const currentId = refundId(refund);
-    const currentPaymentId = text(refund.payment_id || refund.paymentId);
-    return Boolean(
-      (candidateId && currentId === candidateId) ||
-      (paymentId && (currentId === paymentId || currentPaymentId === paymentId))
-    );
-  });
-  if (exact && webhookRefund) return { ...exact, ...webhookRefund };
-  if (exact) return exact;
-  if (webhookRefund) return webhookRefund;
-  return refunds.length === 1 ? refunds[0] : null;
+  const refunds = findRefunds(order, paymentId, webhookRefund);
+  return refunds.length ? refunds[refunds.length - 1] : null;
 }

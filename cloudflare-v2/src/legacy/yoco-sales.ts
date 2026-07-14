@@ -116,6 +116,7 @@ export interface YocoProcessResult {
   skippedDuplicates?: number;
   refundId?: string;
   refundLineResolution?: string;
+  financialRecorded?: boolean;
 }
 
 // How stock should behave when a Yoco refund reason is present.
@@ -588,20 +589,32 @@ function explicitRefundLines(value: Row) {
 function linkedRefundEntry(order: Row, refund: Row) {
   const refundId = refundProviderId(refund);
   const paymentReference = text(refund.payment_id || refund.paymentId);
-  const candidates = [
-    ...(Array.isArray(order.refunds) ? order.refunds as Row[] : []),
-    ...(Array.isArray(order.returns) ? order.returns as Row[] : [])
-  ];
-  if (!candidates.length) return null;
-  const exact = candidates.find((entry) => {
+  // Yoco exposes the money refund and the physical item return as separate
+  // collections. The refund summary does not contain returned_line_items, so
+  // prefer line-bearing order.returns entries instead of matching the refund
+  // object back to itself.
+  const returns = (Array.isArray(order.returns) ? order.returns as Row[] : [])
+    .filter((entry) => explicitRefundLines(entry).length > 0);
+  if (!returns.length) return null;
+
+  const exact = returns.find((entry) => {
     const entryId = refundProviderId(entry);
     const entryPayment = text(entry.payment_id || entry.paymentId);
+    const metadata = objectValue(entry.metadata);
+    const linkedRefundId = text(entry.refund_id || entry.refundId || metadata.refund_id || metadata.refundId);
     return Boolean(
-      (refundId && entryId === refundId) ||
-      (paymentReference && (entryPayment === paymentReference || entryId === paymentReference))
+      (refundId && (entryId === refundId || linkedRefundId === refundId)) ||
+      (paymentReference && entryPayment === paymentReference)
     );
   });
-  return exact || (candidates.length === 1 ? candidates[0] : null);
+  if (exact) return exact;
+
+  const wantedAmount = Math.round(refundAmountMajor(refund) * 100);
+  if (wantedAmount > 0) {
+    const amountMatches = returns.filter((entry) => Math.round(refundAmountMajor(entry) * 100) === wantedAmount);
+    if (amountMatches.length === 1) return amountMatches[0];
+  }
+  return returns.length === 1 ? returns[0] : null;
 }
 
 function inferRefundLinesByAmount(orderLines: Row[], targetAmount: number): Row[] | null {
@@ -1655,6 +1668,90 @@ export function yocoWebhookEventFields(payload: Row) {
   };
 }
 
+async function recordYocoRefundFinancial(
+  env: Env,
+  workspaceId: string,
+  order: Row,
+  context: {
+    orderId: string;
+    reportOrderKey: string;
+    paymentId: string;
+    refundId: string;
+    refundReason: string;
+    refundNote: string;
+    returnBehavior: RefundReturnBehavior;
+    occurredAt: string;
+    resolvedRefundAmount: number;
+    refundLineResolution: RefundLineResolution | null;
+    refund: Row | null;
+  }
+) {
+  const existing = await env.DB.prepare(
+    `SELECT id, location_id
+       FROM yoco_orders
+      WHERE workspace_id = ?1
+        AND yoco_order_id = ?2
+        AND order_type = 'refund'
+      LIMIT 1`
+  ).bind(workspaceId, context.reportOrderKey).first<{ id?: string; location_id?: string | null }>();
+  const originalSale = await env.DB.prepare(
+    `SELECT location_id
+       FROM yoco_orders
+      WHERE workspace_id = ?1
+        AND yoco_order_id = ?2
+        AND order_type = 'sale'
+      LIMIT 1`
+  ).bind(workspaceId, context.orderId).first<{ location_id?: string | null }>();
+  const locationId = text(existing?.location_id || originalSale?.location_id) || null;
+  const refundRaw = {
+    ...order,
+    kcpRefund: {
+      originalOrderId: context.orderId,
+      refundId: context.refundId,
+      reason: context.refundReason || null,
+      note: context.refundNote || null,
+      behavior: context.returnBehavior,
+      lineResolution: context.refundLineResolution?.source || null,
+      lineResolutionReason: context.refundLineResolution?.reason || null,
+      amount: context.resolvedRefundAmount,
+      source: context.refund || null
+    }
+  };
+  await env.DB.prepare(
+    `INSERT INTO yoco_orders
+      (id, workspace_id, yoco_order_id, yoco_payment_id, location_id, order_type, status, payment_method, total, occurred_at, raw_json,
+       parent_yoco_order_id, provider_refund_id, refund_reason, refund_behavior)
+     VALUES (?1, ?2, ?3, ?4, ?5, 'refund', 'refunded', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+     ON CONFLICT(workspace_id, yoco_order_id, order_type) DO UPDATE SET
+      yoco_payment_id = excluded.yoco_payment_id,
+      location_id = COALESCE(excluded.location_id, yoco_orders.location_id),
+      status = excluded.status,
+      payment_method = excluded.payment_method,
+      total = excluded.total,
+      occurred_at = excluded.occurred_at,
+      raw_json = excluded.raw_json,
+      parent_yoco_order_id = excluded.parent_yoco_order_id,
+      provider_refund_id = excluded.provider_refund_id,
+      refund_reason = excluded.refund_reason,
+      refund_behavior = excluded.refund_behavior`
+  ).bind(
+    text(existing?.id) || id('yoco_order'),
+    workspaceId,
+    context.reportOrderKey,
+    context.paymentId || null,
+    locationId,
+    getPaymentMethod(order, context.refund),
+    -Math.abs(context.resolvedRefundAmount),
+    context.occurredAt,
+    jsonString(refundRaw),
+    context.orderId,
+    context.refundId,
+    context.refundReason || null,
+    context.returnBehavior,
+  ).run();
+  return true;
+}
+
 export async function processYocoOrder(
   env: Env,
   workspaceId: string,
@@ -1700,15 +1797,76 @@ export async function processYocoOrder(
         order.updatedAt ||
         new Date().toISOString()
       );
+  const refundLineResolution = mode === 'refund' ? resolveRefundLineItems(order, refund) : null;
+  const sourceLines = mode === 'refund' ? refundLineResolution?.lines || [] : getOrderLineItems(order);
+  if (mode === 'sale' && sourceLines.length === 0) {
+    return {
+      processed: false,
+      reason: 'order_has_no_line_items',
+      retryable: true,
+      missingRecipes: 0,
+      orderLines: 0,
+      stockMovements: 0,
+    };
+  }
+  const paymentId = getPaymentId(order, refund);
+  const directRefundId = mode === 'refund' ? refundProviderId(refund) : '';
+  const refundId = mode === 'refund'
+    ? directRefundId || await hash(jsonString({
+        orderId,
+        paymentId,
+        occurredAt,
+        amount: refundAmountMajor(refund),
+        reason: refund ? text(refund.reason || refund.refund_reason || refund.refundReason) : '',
+        lines: sourceLines.map((line, index) => ({ id: lineId(line, index), quantity: lineQuantity(line) }))
+      }))
+    : '';
+  const reportOrderKey = mode === 'refund' ? `${orderId}:refund:${refundId}` : orderId;
+  const refundReason = mode === 'refund' ? refundReasonText(refund) : '';
+  const refundNote = mode === 'refund' ? refundNoteText(refund) : '';
+  const explicitRefundAmount = mode === 'refund' ? refundAmountMajor(refund) : 0;
+  const resolvedRefundAmount = explicitRefundAmount > 0
+    ? explicitRefundAmount
+    : sourceLines.reduce((sum, line) => sum + lineTotalMajor(line), 0);
+  const financialRecorded = mode === 'refund'
+    ? await recordYocoRefundFinancial(env, workspaceId, order, {
+        orderId,
+        reportOrderKey,
+        paymentId,
+        refundId,
+        refundReason,
+        refundNote,
+        returnBehavior,
+        occurredAt,
+        resolvedRefundAmount,
+        refundLineResolution,
+        refund,
+      })
+    : false;
+
   const depletionPolicy = await getStockDepletionPolicy(env, workspaceId);
   if (!depletionPolicy.enabled) {
-    return { processed: false, reason: 'stock_depletion_disabled', missingRecipes: 0, orderLines: 0, stockMovements: 0 };
+    return {
+      processed: false,
+      reason: 'stock_depletion_disabled',
+      missingRecipes: 0,
+      orderLines: 0,
+      stockMovements: 0,
+      financialRecorded,
+    };
   }
   if (mode === 'sale' && occurredBeforeActivation(occurredAt, depletionPolicy.enabledAt)) {
     return { processed: false, reason: 'before_stock_depletion_start', missingRecipes: 0, orderLines: 0, stockMovements: 0 };
   }
   if (mode === 'refund' && !(await originalSaleWasDepleted(env, workspaceId, orderId))) {
-    return { processed: false, reason: 'original_sale_not_depleted', missingRecipes: 0, orderLines: 0, stockMovements: 0 };
+    return {
+      processed: false,
+      reason: 'original_sale_not_depleted',
+      missingRecipes: 0,
+      orderLines: sourceLines.length,
+      stockMovements: 0,
+      financialRecorded,
+    };
   }
 
   const [
@@ -1744,37 +1902,6 @@ export async function processYocoOrder(
   ]));
   const productsById = new Map(products.map((product) => [text(product.id), product]));
   const modifierCatalogue = buildModifierCatalogue(modifierGroups);
-  const refundLineResolution = mode === 'refund' ? resolveRefundLineItems(order, refund) : null;
-  const sourceLines = mode === 'refund' ? refundLineResolution?.lines || [] : getOrderLineItems(order);
-  if (mode === 'sale' && sourceLines.length === 0) {
-    return {
-      processed: false,
-      reason: 'order_has_no_line_items',
-      retryable: true,
-      missingRecipes: 0,
-      orderLines: 0,
-      stockMovements: 0
-    };
-  }
-  const paymentId = getPaymentId(order, refund);
-  const directRefundId = mode === 'refund' ? refundProviderId(refund) : '';
-  const refundId = mode === 'refund'
-    ? directRefundId || await hash(jsonString({
-        orderId,
-        paymentId,
-        occurredAt,
-        amount: refundAmountMajor(refund),
-        reason: refund ? text(refund.reason || refund.refund_reason || refund.refundReason) : '',
-        lines: sourceLines.map((line, index) => ({ id: lineId(line, index), quantity: lineQuantity(line) }))
-      }))
-    : '';
-  const reportOrderKey = mode === 'refund' ? `${orderId}:refund:${refundId}` : orderId;
-  const refundReason = mode === 'refund' ? refundReasonText(refund) : '';
-  const refundNote = mode === 'refund' ? refundNoteText(refund) : '';
-  const explicitRefundAmount = mode === 'refund' ? refundAmountMajor(refund) : 0;
-  const resolvedRefundAmount = explicitRefundAmount > 0
-    ? explicitRefundAmount
-    : sourceLines.reduce((sum, line) => sum + lineTotalMajor(line), 0);
   const statements: DbStatementLike[] = [];
   const existingOrder = await env.DB.prepare(
     `SELECT id, location_id
@@ -1803,7 +1930,6 @@ export async function processYocoOrder(
   const existingSellingLocation = existingOrder?.location_id
     ? locations.find((location) => text(location.id) === text(existingOrder.location_id)) || null
     : null;
-
   const refundRaw = mode === 'refund'
     ? {
         ...order,
@@ -2195,6 +2321,7 @@ export async function processYocoOrder(
     stockMovements: actualMovementCount,
     skippedDuplicates,
     refundId: refundId || undefined,
-    refundLineResolution: refundLineResolution?.source
+    refundLineResolution: refundLineResolution?.source,
+    financialRecorded,
   };
 }

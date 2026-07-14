@@ -2240,6 +2240,9 @@ body.dark .reportingDashboard--miniBentoHome .reportingMiniSection--audit {
   color: var(--report-text);
   box-shadow: none;
   text-align: left;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
 }
 
 .reportActionMenu__panel button span {
@@ -2253,6 +2256,7 @@ body.dark .reportingDashboard--miniBentoHome .reportingMiniSection--audit {
   color: var(--report-muted);
   font-size: .62rem;
   font-weight: 950;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
 }
 
 .reportActionMenu__panel button strong {
@@ -2262,10 +2266,19 @@ body.dark .reportingDashboard--miniBentoHome .reportingMiniSection--audit {
 
 .reportActionMenu__panel button:hover,
 .reportActionMenu__panel button:focus-visible {
-  transform: none;
-  background: rgba(148, 163, 184, 0.12);
-  box-shadow: none;
+  transform: translateX(2px);
+  border-color: color-mix(in srgb, var(--accent-blue, #38bdf8) 48%, var(--report-border));
+  background: color-mix(in srgb, var(--accent-blue, #38bdf8) 16%, var(--report-panel-strong));
+  color: var(--report-text);
+  box-shadow: inset 3px 0 0 var(--accent-blue, #38bdf8), 0 8px 20px rgba(0, 0, 0, 0.16);
   outline: none;
+}
+
+.reportActionMenu__panel button:hover span,
+.reportActionMenu__panel button:focus-visible span {
+  border-color: color-mix(in srgb, var(--accent-blue, #38bdf8) 64%, var(--report-border));
+  background: var(--accent-blue, #38bdf8);
+  color: #ffffff;
 }
 
 @media (max-width: 900px) {
@@ -5468,4 +5481,28 @@ body > #report-enhanced-select-portal.reportEnhancedSelect__menu--portal {
 body > #report-enhanced-select-portal .reportEnhancedSelect__option {
   min-height: 2.35rem;
   padding: .55rem .7rem;
+}
+
+/* Phase 66: visible feedback for every item inside the report Actions panel. */
+.reportActionMenu__panel .reportSavedViews__item,
+.reportActionMenu__panel .reportColumnVisibility--embedded label {
+  border: 1px solid transparent;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+}
+
+.reportActionMenu__panel .reportSavedViews__item:hover,
+.reportActionMenu__panel .reportSavedViews__item:focus-within,
+.reportActionMenu__panel .reportColumnVisibility--embedded label:hover,
+.reportActionMenu__panel .reportColumnVisibility--embedded label:focus-within {
+  transform: translateX(2px);
+  border-color: color-mix(in srgb, var(--accent-blue, #38bdf8) 42%, var(--report-border));
+  background: color-mix(in srgb, var(--accent-blue, #38bdf8) 14%, var(--report-panel-strong));
+  box-shadow: inset 3px 0 0 var(--accent-blue, #38bdf8);
+  color: var(--report-text);
+}
+
+.reportActionMenu__panel .reportSavedViews__item.is-active {
+  border-color: color-mix(in srgb, var(--accent-blue, #38bdf8) 58%, var(--report-border));
+  background: color-mix(in srgb, var(--accent-blue, #38bdf8) 20%, var(--report-panel-strong));
+  box-shadow: inset 3px 0 0 var(--accent-blue, #38bdf8);
 }
