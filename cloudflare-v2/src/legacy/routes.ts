@@ -41,7 +41,7 @@ import {
   resetYocoWebhook,
   testYocoWebhook,
 } from "./yoco-service";
-import { findRefund, verifyYocoWebhook } from "./yoco-webhooks";
+import { extractYocoRefund, findRefund, verifyYocoWebhook } from "./yoco-webhooks";
 import { recordIntegrationLog } from "./integration-log";
 import {
   decryptTextWithSecret,
@@ -15242,13 +15242,14 @@ export async function postYocoWebhook(
   try {
     const isRefund = eventDisposition === "refund";
     const isReturn = eventDisposition === "return";
-    const refundObj = isRefund ? findRefund(order, paymentId) : null;
+    const webhookRefund = isRefund ? extractYocoRefund(payload) : null;
+    const refundObj = isRefund ? findRefund(order, paymentId, webhookRefund) : null;
     const refundBehavior = refundObj
       ? resolveRefundReturnBehavior(refundObj)
       : "return";
 
-    // Process the main event (sale or financial refund)
-    // Skip entirely if reason maps to 'skip' (e.g. other+scrap note)
+    // Process the main event. Scrap/wastage refunds still create the financial
+    // refund and accounting-only wastage movements; they do not restore or deduct stock.
     let result =
       refundBehavior === "skip"
         ? {

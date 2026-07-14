@@ -324,7 +324,7 @@ function subscriptionSecret(subscription: Row) {
   return text(subscription.secret || subscription.webhook_secret || subscription.webhookSecret || subscription.signing_secret || subscription.signingSecret);
 }
 
-const YOCO_WEBHOOK_EVENT_TYPES = ['order.completed', 'payment.refunded'];
+const YOCO_WEBHOOK_EVENT_TYPES = ['order.completed', 'payment.refunded', 'refund.succeeded'];
 const WEBHOOK_PREVIOUS_SECRET_GRACE_MS = 24 * 60 * 60 * 1000;
 
 type YocoSyncOptions = { full?: boolean; sinceIso?: string; resetWebhook?: boolean };

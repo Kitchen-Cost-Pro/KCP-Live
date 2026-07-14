@@ -114,6 +114,8 @@ export interface YocoProcessResult {
   orderLines: number;
   stockMovements: number;
   skippedDuplicates?: number;
+  refundId?: string;
+  refundLineResolution?: string;
 }
 
 // How stock should behave when a Yoco refund reason is present.
@@ -122,32 +124,63 @@ export interface YocoProcessResult {
 // 'skip'    → no stock change and no movement record
 export type RefundReturnBehavior = 'return' | 'wastage' | 'skip';
 
-export function resolveRefundReturnBehavior(returnEntry: Row): RefundReturnBehavior {
-  const reason = text(
+function refundReasonText(returnEntry: Row | null) {
+  if (!returnEntry) return '';
+  const payload = objectValue(returnEntry.payload);
+  const data = objectValue(returnEntry.data);
+  const metadata = objectValue(returnEntry.metadata);
+  return text(
     returnEntry.reason ||
     returnEntry.refund_reason ||
     returnEntry.refundReason ||
     returnEntry.return_reason ||
-    returnEntry.returnReason
-  ).toLowerCase();
+    returnEntry.returnReason ||
+    payload.reason ||
+    payload.refund_reason ||
+    payload.refundReason ||
+    data.reason ||
+    data.refund_reason ||
+    data.refundReason ||
+    metadata.reason ||
+    metadata.refund_reason ||
+    metadata.refundReason
+  );
+}
 
-  // Yoco sends reason as structured key OR as human-readable display text in the note field
-  const note = text(
+function refundNoteText(returnEntry: Row | null) {
+  if (!returnEntry) return '';
+  const payload = objectValue(returnEntry.payload);
+  const data = objectValue(returnEntry.data);
+  const metadata = objectValue(returnEntry.metadata);
+  return text(
     returnEntry.other_reason ||
     returnEntry.otherReason ||
     returnEntry.note ||
     returnEntry.reason_note ||
     returnEntry.reasonNote ||
-    returnEntry.description
-  ).toLowerCase();
+    returnEntry.description ||
+    payload.other_reason ||
+    payload.otherReason ||
+    payload.note ||
+    payload.description ||
+    data.other_reason ||
+    data.otherReason ||
+    data.note ||
+    data.description ||
+    metadata.other_reason ||
+    metadata.otherReason ||
+    metadata.note ||
+    metadata.description
+  );
+}
 
+export function resolveRefundReturnBehavior(returnEntry: Row): RefundReturnBehavior {
+  const reason = refundReasonText(returnEntry).toLowerCase();
+  const note = refundNoteText(returnEntry).toLowerCase();
+
+  const wasteLanguage = /(?:wast(?:e|age|ed|ing)|scrap(?:ped|ping)?|discard(?:ed|ing)?|damag(?:e|ed)|defect(?:ive|ed)|spoilt|spoiled|contaminat(?:ed|ion)|unusable|destroy(?:ed)?|throw(?:n)? away)/i;
   if (reason === 'damaged_or_defective' || reason === 'damaged or defective') return 'wastage';
-  // Yoco puts "Damaged or defective" as a display string in the note field
-  if (/damaged.*defective|defective.*damaged/i.test(note)) return 'wastage';
-
-  if (reason === 'other' || reason === '') {
-    if (/wastage|waste|scrap|discard/.test(note)) return 'wastage';
-  }
+  if (wasteLanguage.test(reason) || wasteLanguage.test(note)) return 'wastage';
 
   // accidental_charge, customer_changed_mind, incorrect_amount, service_not_delivered
   // and "other" with non-waste notes all restore stock
@@ -330,27 +363,348 @@ export function yocoOrderReadyForStock(order: Row) {
   return hasCompletionTimestamp;
 }
 
-function refundProportion(order: Row, refund: Row): number {
-  const refundAmt = moneyToMajor(refund.total_amount || objectValue(refund.amounts).net_amount || refund.amount || refund.net_amount);
-  const orderAmt = moneyToMajor(order.total_price || objectValue(order.amounts).net_amount || order.total_amount || order.net_amount);
-  if (refundAmt > 0 && orderAmt > 0 && refundAmt < orderAmt * 0.9999) return refundAmt / orderAmt;
-  return 1;
+interface RefundLineResolution {
+  lines: Row[];
+  source: 'explicit' | 'linked_return' | 'amount_inferred' | 'full_order' | 'unresolved';
+  reason?: string;
 }
 
-function scaleLineQty(line: Row, proportion: number): Row {
-  if (proportion >= 0.9999) return line;
-  const original = Math.abs(numberValue(line.quantity || line.qty || line.count, 1));
-  return { ...line as Record<string, unknown>, quantity: Math.max(Math.round(original * proportion), 1) } as Row;
+const REFUND_LINE_KEYS = [
+  'returned_line_items',
+  'returnedLineItems',
+  'line_items',
+  'lineItems',
+  'items',
+  'refund_lines',
+  'refundLines',
+  'return_lines',
+  'returnLines'
+];
+
+const MODIFIER_PAYLOAD_KEYS = [
+  'modifiers',
+  'selected_modifiers',
+  'selectedModifiers',
+  'line_modifiers',
+  'lineModifiers',
+  'modifier_lines',
+  'modifierLines',
+  'applied_modifiers',
+  'appliedModifiers',
+  'modifier_selections',
+  'modifierSelections',
+  'modifier_groups',
+  'modifierGroups',
+  'selected_modifier_groups',
+  'selectedModifierGroups',
+  'applied_modifier_groups',
+  'appliedModifierGroups'
+];
+
+function refundAmountMajor(refund: Row | null) {
+  if (!refund) return 0;
+  const amounts = objectValue(refund.amounts);
+  const payload = objectValue(refund.payload);
+  const payloadAmounts = objectValue(payload.amounts);
+  const data = objectValue(refund.data);
+  const dataAmounts = objectValue(data.amounts);
+  return Math.abs(moneyToMajor(
+    refund.total_amount ||
+    refund.totalAmount ||
+    refund.refund_amount ||
+    refund.refundAmount ||
+    refund.amount ||
+    refund.net_amount ||
+    refund.netAmount ||
+    amounts.net_amount ||
+    amounts.netAmount ||
+    amounts.total_amount ||
+    amounts.totalAmount ||
+    payload.total_amount ||
+    payload.totalAmount ||
+    payload.amount ||
+    payloadAmounts.net_amount ||
+    payloadAmounts.netAmount ||
+    data.total_amount ||
+    data.totalAmount ||
+    data.amount ||
+    dataAmounts.net_amount ||
+    dataAmounts.netAmount ||
+    0
+  ));
 }
 
-function getRefundLineItems(order: Row, refund: Row | null) {
-  if (!refund) return [];
-  const proportion = refundProportion(order, refund);
-  for (const key of ['returned_line_items', 'returnedLineItems', 'line_items', 'lineItems', 'items', 'refund_lines', 'refundLines']) {
-    const value = refund[key];
-    if (Array.isArray(value) && value.length) return (value as Row[]).map((l) => scaleLineQty(l, proportion));
+function orderAmountMajor(order: Row) {
+  const amounts = objectValue(order.amounts);
+  return Math.abs(moneyToMajor(
+    order.total_price ||
+    order.totalPrice ||
+    order.total_amount ||
+    order.totalAmount ||
+    order.net_amount ||
+    order.netAmount ||
+    amounts.net_amount ||
+    amounts.netAmount ||
+    amounts.total_amount ||
+    amounts.totalAmount ||
+    0
+  ));
+}
+
+function lineTotalMajor(line: Row) {
+  const amounts = objectValue(line.amounts);
+  const explicit = Math.abs(moneyToMajor(
+    line.total_price ||
+    line.totalPrice ||
+    line.total_amount ||
+    line.totalAmount ||
+    line.net_amount ||
+    line.netAmount ||
+    line.amount ||
+    amounts.net_amount ||
+    amounts.netAmount ||
+    amounts.total_amount ||
+    amounts.totalAmount ||
+    0
+  ));
+  if (explicit > 0) return explicit;
+  const unit = Math.abs(moneyToMajor(line.unit_price || line.unitPrice || line.price || 0));
+  return unit * lineQuantity(line);
+}
+
+function refundProviderId(refund: Row | null) {
+  if (!refund) return '';
+  const payload = objectValue(refund.payload);
+  const data = objectValue(refund.data);
+  return text(
+    refund.id ||
+    refund.refund_id ||
+    refund.refundId ||
+    refund.transaction_id ||
+    refund.transactionId ||
+    payload.id ||
+    payload.refund_id ||
+    payload.refundId ||
+    data.id ||
+    data.refund_id ||
+    data.refundId
+  );
+}
+
+function refundLineReferenceValues(line: Row) {
+  return [
+    line.original_line_item_id,
+    line.originalLineItemId,
+    line.original_order_line_id,
+    line.originalOrderLineId,
+    line.order_line_id,
+    line.orderLineId,
+    line.line_item_id,
+    line.lineItemId,
+    line.id,
+    line.uuid
+  ].map((value) => text(value)).filter(Boolean);
+}
+
+function hasModifierPayload(line: Row) {
+  return MODIFIER_PAYLOAD_KEYS.some((key) => Array.isArray(line[key]));
+}
+
+function withoutModifierPayload(line: Row) {
+  const copy: Row = { ...line };
+  for (const key of MODIFIER_PAYLOAD_KEYS) delete copy[key];
+  return copy;
+}
+
+function findOriginalRefundLine(originalLines: Row[], refundLine: Row) {
+  const references = new Set(refundLineReferenceValues(refundLine));
+  if (references.size) {
+    const exact = originalLines.find((line) => refundLineReferenceValues(line).some((value) => references.has(value)));
+    if (exact) return exact;
   }
-  return getOrderLineItems(order).map((l) => scaleLineQty(l, proportion));
+
+  const refundItemId = lineItemId(refundLine);
+  const refundVariantId = lineVariantId(refundLine);
+  if (refundItemId || refundVariantId) {
+    const candidates = originalLines.filter((line) => (
+      (!refundItemId || lineItemId(line) === refundItemId) &&
+      (!refundVariantId || lineVariantId(line) === refundVariantId)
+    ));
+    if (candidates.length === 1) return candidates[0];
+  }
+
+  const wantedName = normalizeText(lineName(refundLine));
+  if (wantedName) {
+    const candidates = originalLines.filter((line) => normalizeText(lineName(line)) === wantedName);
+    if (candidates.length === 1) return candidates[0];
+  }
+  return null;
+}
+
+function mergeRefundLine(original: Row, refundLine: Row) {
+  const originalQty = Math.max(lineQuantity(original), 0);
+  const rawRequestedQty = refundLine.quantity ?? refundLine.qty ?? refundLine.count;
+  const quantityWasProvided = rawRequestedQty !== undefined && rawRequestedQty !== null && text(rawRequestedQty) !== '';
+  const requestedQty = quantityWasProvided
+    ? Math.max(Math.abs(numberValue(rawRequestedQty, 0)), 0)
+    : originalQty;
+  const quantity = originalQty > 0 ? Math.min(requestedQty, originalQty) : requestedQty;
+  if (hasModifierPayload(refundLine)) {
+    return {
+      ...withoutModifierPayload(original),
+      ...refundLine,
+      quantity,
+      id: refundLine.id || original.id,
+      line_item_id: refundLine.line_item_id || refundLine.lineItemId || original.line_item_id || original.lineItemId,
+      item_id: refundLine.item_id || refundLine.itemId || original.item_id || original.itemId,
+      product_id: refundLine.product_id || refundLine.productId || original.product_id || original.productId,
+      variant_id: refundLine.variant_id || refundLine.variantId || original.variant_id || original.variantId,
+      name: refundLine.name || original.name
+    } as Row;
+  }
+  // Yoco refund line payloads often omit modifiers. Preserve the original line's
+  // modifier selection so a refunded burger also reverses or scraps its extra onion.
+  return { ...original, ...refundLine, quantity } as Row;
+}
+
+function explicitRefundLines(value: Row) {
+  const candidates = [
+    value,
+    objectValue(value.payload),
+    objectValue(value.data),
+    objectValue(value.refund),
+    objectValue(value.return),
+    objectValue(value.order)
+  ];
+  for (const candidate of candidates) {
+    for (const key of REFUND_LINE_KEYS) {
+      const lines = candidate[key];
+      if (Array.isArray(lines) && lines.length) return lines as Row[];
+    }
+  }
+  return [];
+}
+
+function linkedRefundEntry(order: Row, refund: Row) {
+  const refundId = refundProviderId(refund);
+  const paymentReference = text(refund.payment_id || refund.paymentId);
+  const candidates = [
+    ...(Array.isArray(order.refunds) ? order.refunds as Row[] : []),
+    ...(Array.isArray(order.returns) ? order.returns as Row[] : [])
+  ];
+  if (!candidates.length) return null;
+  const exact = candidates.find((entry) => {
+    const entryId = refundProviderId(entry);
+    const entryPayment = text(entry.payment_id || entry.paymentId);
+    return Boolean(
+      (refundId && entryId === refundId) ||
+      (paymentReference && (entryPayment === paymentReference || entryId === paymentReference))
+    );
+  });
+  return exact || (candidates.length === 1 ? candidates[0] : null);
+}
+
+function inferRefundLinesByAmount(orderLines: Row[], targetAmount: number): Row[] | null {
+  const targetCents = Math.round(Math.abs(targetAmount) * 100);
+  if (targetCents <= 0) return null;
+  const units: Array<{ lineIndex: number; cents: number }> = [];
+  orderLines.forEach((line, lineIndex) => {
+    const qty = Math.max(Math.round(lineQuantity(line)), 0);
+    if (!qty || qty > 100) return;
+    const totalCents = Math.round(lineTotalMajor(line) * 100);
+    const unitCents = qty > 0 ? Math.round(totalCents / qty) : 0;
+    if (unitCents <= 0) return;
+    for (let count = 0; count < qty; count += 1) units.push({ lineIndex, cents: unitCents });
+  });
+  if (!units.length || units.length > 100) return null;
+
+  type State = { counts: number[]; ambiguous: boolean };
+  const states = new Map<number, State>();
+  states.set(0, { counts: new Array(orderLines.length).fill(0), ambiguous: false });
+  for (const unit of units) {
+    const snapshot = [...states.entries()];
+    for (const [subtotal, state] of snapshot) {
+      const nextTotal = subtotal + unit.cents;
+      if (nextTotal > targetCents) continue;
+      const nextCounts = [...state.counts];
+      nextCounts[unit.lineIndex] += 1;
+      const existing = states.get(nextTotal);
+      if (!existing) {
+        states.set(nextTotal, { counts: nextCounts, ambiguous: state.ambiguous });
+        continue;
+      }
+      const sameCounts = existing.counts.every((count, index) => count === nextCounts[index]);
+      if (!sameCounts || state.ambiguous) existing.ambiguous = true;
+    }
+  }
+  const match = states.get(targetCents);
+  if (!match || match.ambiguous) return null;
+  return match.counts.flatMap((quantity, index) => quantity > 0
+    ? [{ ...orderLines[index], quantity } as Row]
+    : []);
+}
+
+function refundLooksFull(refund: Row) {
+  const value = normalizeText(
+    refund.refund_type ||
+    refund.refundType ||
+    refund.type ||
+    refund.status ||
+    refund.scope
+  );
+  return parseBoolean(refund.full_refund || refund.fullRefund || refund.is_full || refund.isFull)
+    || value === 'full'
+    || value.includes('full refund');
+}
+
+export function resolveRefundLineItems(order: Row, refund: Row | null): RefundLineResolution {
+  if (!refund) return { lines: [], source: 'unresolved', reason: 'refund_payload_missing' };
+  const originals = getOrderLineItems(order);
+  if (!originals.length) return { lines: [], source: 'unresolved', reason: 'order_has_no_line_items' };
+
+  let rawLines = explicitRefundLines(refund);
+  let source: RefundLineResolution['source'] = 'explicit';
+  if (!rawLines.length) {
+    const linked = linkedRefundEntry(order, refund);
+    if (linked) {
+      rawLines = explicitRefundLines(linked);
+      if (rawLines.length) source = 'linked_return';
+    }
+  }
+  if (rawLines.length) {
+    const resolved: Row[] = [];
+    for (const refundLine of rawLines) {
+      const original = findOriginalRefundLine(originals, refundLine);
+      if (!original) {
+        return { lines: [], source: 'unresolved', reason: 'refund_line_could_not_match_original_order' };
+      }
+      const merged = mergeRefundLine(original, refundLine);
+      if (lineQuantity(merged) > 0) resolved.push(merged);
+    }
+    return resolved.length
+      ? { lines: resolved, source }
+      : { lines: [], source: 'unresolved', reason: 'refund_line_quantity_missing' };
+  }
+
+  const refundAmount = refundAmountMajor(refund);
+  const orderAmount = orderAmountMajor(order);
+  if (refundLooksFull(refund) || (refundAmount > 0 && orderAmount > 0 && refundAmount >= orderAmount - 0.01)) {
+    return { lines: originals, source: 'full_order' };
+  }
+  if (refundAmount > 0) {
+    const inferred = inferRefundLinesByAmount(originals, refundAmount);
+    if (inferred?.length) return { lines: inferred, source: 'amount_inferred' };
+    return {
+      lines: [],
+      source: 'unresolved',
+      reason: 'partial_refund_requires_an_exact_line_item_match'
+    };
+  }
+  return {
+    lines: [],
+    source: 'unresolved',
+    reason: 'refund_has_no_line_items_or_amount'
+  };
 }
 
 function lineId(line: Row, index: number) {
@@ -362,7 +716,8 @@ function lineName(line: Row) {
 }
 
 function lineQuantity(line: Row) {
-  return Math.abs(numberValue(line.quantity || line.qty || line.count, 1));
+  const rawQuantity = line.quantity ?? line.qty ?? line.count;
+  return Math.abs(numberValue(rawQuantity, rawQuantity === undefined || rawQuantity === null ? 1 : 0));
 }
 
 function lineItemId(line: Row) {
@@ -878,7 +1233,8 @@ async function componentMovementExists(
   orderId: string,
   mode: 'sale' | 'refund',
   component: SaleComponent,
-  effectiveProduct: ProductRow | null
+  effectiveProduct: ProductRow | null,
+  refundOrPaymentId = ''
 ) {
   const componentType = component.componentType;
   const productId = text(effectiveProduct?.id);
@@ -894,16 +1250,28 @@ async function componentMovementExists(
     productId ? metadataFieldFragment('productId', productId) : '',
     !productId && productName ? metadataFieldFragment('productName', productName) : ''
   ].filter(Boolean);
-  const filters = checks.map((_, index) => `instr(metadata_json, ?${index + 3}) > 0`).join(' AND ');
+  const identityChecks = mode === 'refund' && refundOrPaymentId
+    ? [
+        metadataFieldFragment('refundId', refundOrPaymentId),
+        metadataFieldFragment('paymentId', refundOrPaymentId)
+      ]
+    : [];
+  const bindings = [...checks, ...identityChecks];
+  const baseFilters = checks.map((_, index) => `instr(metadata_json, ?${index + 3}) > 0`);
+  if (identityChecks.length) {
+    const identityStart = checks.length + 3;
+    baseFilters.push(`(instr(metadata_json, ?${identityStart}) > 0 OR instr(metadata_json, ?${identityStart + 1}) > 0)`);
+  }
+  const filters = baseFilters.join(' AND ');
   const row = await env.DB.prepare(
     `SELECT COUNT(*) AS count
        FROM stock_movements
       WHERE workspace_id = ?1
         AND document_type = 'yoco_order'
         AND document_id = ?2
-        AND movement_type IN ('sale_depletion', 'sale_refund')
+        AND movement_type IN ('sale_depletion', 'sale_refund', 'wastage')
         ${filters ? `AND ${filters}` : ''}`
-  ).bind(workspaceId, orderId, ...checks).first<{ count: number }>();
+  ).bind(workspaceId, orderId, ...bindings).first<{ count: number }>();
   return numberValue(row?.count, 0) > 0;
 }
 
@@ -1168,11 +1536,23 @@ export function yocoWebhookPaymentSucceeded(payload: Row) {
 }
 
 export function yocoWebhookEventDisposition(eventTypeValue: unknown) {
-  const eventType = normalizeText(eventTypeValue).replace(/_/g, '.');
+  const eventType = text(eventTypeValue).toLowerCase().trim().replace(/[\s_]+/g, '.').replace(/\.+/g, '.');
   if (['order.completed', 'payment.succeeded', 'payment.successful'].includes(eventType)) return 'sale';
-  if (eventType.includes('refund')) return 'refund';
-  if (eventType.includes('return')) return 'return';
-  if (['payment.created', 'order.created', 'order.updated'].includes(eventType)) return 'waiting';
+  if ([
+    'refund.succeeded',
+    'refund.successful',
+    'payment.refunded',
+    'payment.partially.refunded',
+    'order.refunded',
+    'order.partially.refunded'
+  ].includes(eventType)) return 'refund';
+  if (['return.completed', 'order.returned', 'order.partially.returned'].includes(eventType)) return 'return';
+  if (
+    ['payment.created', 'order.created', 'order.updated', 'refund.created', 'refund.pending', 'refund.processing'].includes(eventType) ||
+    eventType.endsWith('.created') ||
+    eventType.endsWith('.pending') ||
+    eventType.endsWith('.processing')
+  ) return 'waiting';
   return 'ignored';
 }
 
@@ -1298,8 +1678,28 @@ export async function processYocoOrder(
   }
 
   const occurredAt = mode === 'refund'
-    ? text(refund?.processed_at || refund?.created_at || refund?.updated_at || order.closed_at || order.created_at || new Date().toISOString())
-    : text(order.closed_at || order.created_at || order.updated_at || new Date().toISOString());
+    ? text(
+        refund?.processed_at ||
+        refund?.processedAt ||
+        refund?.created_at ||
+        refund?.createdAt ||
+        refund?.updated_at ||
+        refund?.updatedAt ||
+        order.closed_at ||
+        order.closedAt ||
+        order.created_at ||
+        order.createdAt ||
+        new Date().toISOString()
+      )
+    : text(
+        order.closed_at ||
+        order.closedAt ||
+        order.created_at ||
+        order.createdAt ||
+        order.updated_at ||
+        order.updatedAt ||
+        new Date().toISOString()
+      );
   const depletionPolicy = await getStockDepletionPolicy(env, workspaceId);
   if (!depletionPolicy.enabled) {
     return { processed: false, reason: 'stock_depletion_disabled', missingRecipes: 0, orderLines: 0, stockMovements: 0 };
@@ -1344,7 +1744,8 @@ export async function processYocoOrder(
   ]));
   const productsById = new Map(products.map((product) => [text(product.id), product]));
   const modifierCatalogue = buildModifierCatalogue(modifierGroups);
-  const sourceLines = mode === 'refund' ? getRefundLineItems(order, refund) : getOrderLineItems(order);
+  const refundLineResolution = mode === 'refund' ? resolveRefundLineItems(order, refund) : null;
+  const sourceLines = mode === 'refund' ? refundLineResolution?.lines || [] : getOrderLineItems(order);
   if (mode === 'sale' && sourceLines.length === 0) {
     return {
       processed: false,
@@ -1356,34 +1757,31 @@ export async function processYocoOrder(
     };
   }
   const paymentId = getPaymentId(order, refund);
-  let refundIndex = 0;
-  if (refund) {
-    const refunds = Array.isArray(order.refunds) ? order.refunds : [];
-    const returns = Array.isArray(order.returns) ? order.returns : [];
-    const rIdx = refunds.findIndex((r: any) =>
-      text(r.id) === text(refund.id) ||
-      text(r.payment_id) === text(refund.payment_id) ||
-      text(r.paymentId) === text(refund.paymentId)
-    );
-    if (rIdx >= 0) {
-      refundIndex = rIdx;
-    } else {
-      const retIdx = returns.findIndex((r: any) =>
-        text(r.id) === text(refund.id) ||
-        text(r.payment_id) === text(refund.payment_id)
-      );
-      if (retIdx >= 0) {
-        refundIndex = retIdx;
-      }
-    }
-  }
+  const directRefundId = mode === 'refund' ? refundProviderId(refund) : '';
+  const refundId = mode === 'refund'
+    ? directRefundId || await hash(jsonString({
+        orderId,
+        paymentId,
+        occurredAt,
+        amount: refundAmountMajor(refund),
+        reason: refund ? text(refund.reason || refund.refund_reason || refund.refundReason) : '',
+        lines: sourceLines.map((line, index) => ({ id: lineId(line, index), quantity: lineQuantity(line) }))
+      }))
+    : '';
+  const reportOrderKey = mode === 'refund' ? `${orderId}:refund:${refundId}` : orderId;
+  const refundReason = mode === 'refund' ? refundReasonText(refund) : '';
+  const refundNote = mode === 'refund' ? refundNoteText(refund) : '';
+  const explicitRefundAmount = mode === 'refund' ? refundAmountMajor(refund) : 0;
+  const resolvedRefundAmount = explicitRefundAmount > 0
+    ? explicitRefundAmount
+    : sourceLines.reduce((sum, line) => sum + lineTotalMajor(line), 0);
   const statements: DbStatementLike[] = [];
   const existingOrder = await env.DB.prepare(
     `SELECT id, location_id
        FROM yoco_orders
       WHERE workspace_id = ?1 AND yoco_order_id = ?2 AND order_type = ?3
       LIMIT 1`
-  ).bind(workspaceId, orderId, mode).first<{ id: string; location_id?: string | null }>();
+  ).bind(workspaceId, reportOrderKey, mode).first<{ id: string; location_id?: string | null }>();
   const existingSignatureRows = await allRows<{ signature_hash: string }>(
     env.DB.prepare(
       `SELECT signature_hash
@@ -1406,31 +1804,54 @@ export async function processYocoOrder(
     ? locations.find((location) => text(location.id) === text(existingOrder.location_id)) || null
     : null;
 
+  const refundRaw = mode === 'refund'
+    ? {
+        ...order,
+        kcpRefund: {
+          originalOrderId: orderId,
+          refundId,
+          reason: refundReason || null,
+          note: refundNote || null,
+          behavior: returnBehavior,
+          lineResolution: refundLineResolution?.source || null,
+          lineResolutionReason: refundLineResolution?.reason || null,
+          amount: resolvedRefundAmount,
+          source: refund || null
+        }
+      }
+    : order;
+
   statements.push(env.DB.prepare(
     `INSERT INTO yoco_orders
-      (id, workspace_id, yoco_order_id, yoco_payment_id, location_id, order_type, status, payment_method, total, occurred_at, raw_json)
-     VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8, ?9, ?10)
+      (id, workspace_id, yoco_order_id, yoco_payment_id, location_id, order_type, status, payment_method, total, occurred_at, raw_json,
+       parent_yoco_order_id, provider_refund_id, refund_reason, refund_behavior)
+     VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
      ON CONFLICT(workspace_id, yoco_order_id, order_type) DO UPDATE SET
       yoco_payment_id = excluded.yoco_payment_id,
       status = excluded.status,
       payment_method = excluded.payment_method,
       total = excluded.total,
       occurred_at = excluded.occurred_at,
-      raw_json = excluded.raw_json`
+      raw_json = excluded.raw_json,
+      parent_yoco_order_id = excluded.parent_yoco_order_id,
+      provider_refund_id = excluded.provider_refund_id,
+      refund_reason = excluded.refund_reason,
+      refund_behavior = excluded.refund_behavior`
   ).bind(
     yocoOrderDbId,
     workspaceId,
-    orderId,
+    reportOrderKey,
     paymentId || null,
     mode,
     mode === 'refund' ? 'refunded' : text(order.status, 'completed'),
     getPaymentMethod(order, refund),
-    (mode === 'refund'
-      ? moneyToMajor(refund?.total_amount || order.total_price || objectValue(order.amounts).net_amount || 0)
-      : moneyToMajor(order.total_price || objectValue(order.amounts).net_amount || 0)
-    ) * (mode === 'refund' ? -1 : 1),
+    mode === 'refund' ? -Math.abs(resolvedRefundAmount) : moneyToMajor(order.total_price || objectValue(order.amounts).net_amount || 0),
     occurredAt,
-    jsonString(order)
+    jsonString(refundRaw),
+    mode === 'refund' ? orderId : null,
+    mode === 'refund' ? refundId : null,
+    mode === 'refund' ? refundReason || null : null,
+    mode === 'refund' ? returnBehavior : null
   ));
 
   for (let index = 0; index < sourceLines.length; index += 1) {
@@ -1472,10 +1893,10 @@ export async function processYocoOrder(
       const linkedProductRecipeLines = linkedProductRecipes.flatMap((linkedRecipe) => linesForRecipe(text(linkedRecipe.id), recipeLines));
 	      const recipe = productRecipe || recipeSourceStockItemRecipe || linkedProductRecipes[0] || manualModifierRecipe;
       const effectiveProduct = product || linkedProducts[0] || null;
-      const signaturePaymentPart = mode === 'refund' ? `refund_${refundIndex}` : paymentId;
+      const signaturePaymentPart = mode === 'refund' ? refundId : paymentId;
       const rawSignature = `yoco:${mode}:${orderId}:${signaturePaymentPart}:${component.lineId}:${quantitySold}`;
       const signatureHash = await hash(rawSignature);
-      const hasExistingMovement = await componentMovementExists(env, workspaceId, orderId, mode, component, effectiveProduct);
+      const hasExistingMovement = await componentMovementExists(env, workspaceId, orderId, mode, component, effectiveProduct, refundId || paymentId);
       if (existingSignatureHashes.has(signatureHash) || hasExistingMovement) {
         skippedDuplicates += 1;
         continue;
@@ -1550,17 +1971,17 @@ export async function processYocoOrder(
           const resolvedMovementType = isWastageBehavior
             ? 'wastage'
             : mode === 'refund' ? 'sale_refund' : 'sale_depletion';
-          const refundReason = mode === 'refund' && refund
-            ? text(refund.reason || refund.refund_reason || refund.refundReason || refund.return_reason || refund.returnReason)
-            : undefined;
-          const refundNote = mode === 'refund' && refund
-            ? text(refund.other_reason || refund.otherReason || refund.note || refund.reason_note || refund.reasonNote || refund.description)
-            : undefined;
           const metadata = {
             mode,
             returnBehavior: mode === 'refund' ? returnBehavior : undefined,
             refundReason: refundReason || undefined,
             refundNote: refundNote || undefined,
+            refundId: refundId || undefined,
+            reportOrderKey,
+            refundLineResolution: refundLineResolution?.source || undefined,
+            accountingOnly: isWastageBehavior || undefined,
+            originalSaleAlreadyDepleted: isWastageBehavior || undefined,
+            wastageQty: isWastageBehavior ? Math.abs(quantitySold * depletion.quantity) : undefined,
             orderId,
             paymentId,
             componentType: component.componentType,
@@ -1646,9 +2067,9 @@ export async function processYocoOrder(
               resolvedMovementType,
               orderId,
               sourceLocationId,
-              deltaQty,
+              0,
               unitCost,
-              deltaQty * unitCost,
+              -Math.abs(quantitySold * depletion.quantity * unitCost),
               occurredAt,
               jsonString(metadata)
             ));
@@ -1734,7 +2155,7 @@ export async function processYocoOrder(
       `UPDATE yoco_orders
           SET location_id = ?1
         WHERE workspace_id = ?2 AND yoco_order_id = ?3 AND order_type = ?4`
-    ).bind([...orderSellingLocations][0], workspaceId, orderId, mode));
+    ).bind([...orderSellingLocations][0], workspaceId, reportOrderKey, mode));
   }
 
   if (statements.length) await env.DB.batch(statements);
@@ -1752,9 +2173,12 @@ export async function processYocoOrder(
     actualMovementCount += numberValue(row?.count, 0);
   }
 
-  const retryable = missingRecipes > 0 || insufficientStockItems > 0;
+  const unresolvedRefund = mode === 'refund' && refundLineResolution?.source === 'unresolved';
+  const retryable = unresolvedRefund || missingRecipes > 0 || insufficientStockItems > 0;
   const partial = actualMovementCount > 0;
-  const reason = insufficientStockItems > 0
+  const reason = unresolvedRefund
+    ? refundLineResolution?.reason || 'refund_line_selection_unresolved'
+    : insufficientStockItems > 0
     ? (missingRecipes > 0
       ? (partial ? 'partially_processed_missing_recipe_or_mapping_and_insufficient_stock' : 'missing_recipe_or_mapping_and_insufficient_stock')
       : (partial ? 'partially_processed_insufficient_stock' : 'insufficient_stock'))
@@ -1769,6 +2193,8 @@ export async function processYocoOrder(
     insufficientStockItems,
     orderLines: orderLineCount,
     stockMovements: actualMovementCount,
-    skippedDuplicates
+    skippedDuplicates,
+    refundId: refundId || undefined,
+    refundLineResolution: refundLineResolution?.source
   };
 }

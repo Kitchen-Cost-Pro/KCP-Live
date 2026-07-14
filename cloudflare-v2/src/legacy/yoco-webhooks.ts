@@ -75,9 +75,63 @@ export async function verifyYocoWebhook(rawBody: string, headers: Headers, webho
   return false;
 }
 
-export function findRefund(order: Record<string, unknown>, paymentId: string) {
-  const refunds = Array.isArray(order.refunds) ? order.refunds as Record<string, unknown>[] : [];
-  return refunds.find((refund) => (
-    text(refund.payment_id || refund.paymentId || refund.id) === paymentId
-  )) || refunds[0] || null;
+function objectValue(value: unknown) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function refundId(refund: Record<string, unknown>) {
+  return text(
+    refund.id ||
+    refund.refund_id ||
+    refund.refundId ||
+    refund.transaction_id ||
+    refund.transactionId
+  );
+}
+
+export function extractYocoRefund(payload: Record<string, unknown>) {
+  const envelope = objectValue(payload.payload);
+  const data = objectValue(payload.data);
+  const envelopeData = objectValue(envelope.data);
+  const candidates = [
+    objectValue(payload.refund),
+    objectValue(envelope.refund),
+    objectValue(data.refund),
+    objectValue(envelopeData.refund),
+    envelope,
+    data
+  ];
+  return candidates.find((candidate) => Boolean(
+    refundId(candidate) ||
+    candidate.refund_amount ||
+    candidate.refundAmount ||
+    candidate.total_amount ||
+    candidate.totalAmount
+  )) || null;
+}
+
+export function findRefund(
+  order: Record<string, unknown>,
+  paymentId: string,
+  webhookRefund: Record<string, unknown> | null = null
+) {
+  const refunds = [
+    ...(Array.isArray(order.refunds) ? order.refunds as Record<string, unknown>[] : []),
+    ...(Array.isArray(order.returns) ? order.returns as Record<string, unknown>[] : [])
+  ];
+  const candidateId = webhookRefund ? refundId(webhookRefund) : '';
+  const exact = refunds.find((refund) => {
+    const currentId = refundId(refund);
+    const currentPaymentId = text(refund.payment_id || refund.paymentId);
+    return Boolean(
+      (candidateId && currentId === candidateId) ||
+      (paymentId && (currentId === paymentId || currentPaymentId === paymentId))
+    );
+  });
+  if (exact && webhookRefund) return { ...exact, ...webhookRefund };
+  if (exact) return exact;
+  if (webhookRefund) return webhookRefund;
+  return refunds.length === 1 ? refunds[0] : null;
 }

@@ -91,6 +91,10 @@ export function normalizeSalesFinancialRow(row = {}) {
     saleTime: saleDateTime.time,
     reportingTimeZone: saleDateTime.timeZone,
     receiptNumber: text(row.receiptNumber || row.receipt_number),
+    refundId: text(row.refundId || row.refund_id || row.providerRefundId || row.provider_refund_id),
+    refundReason: text(row.refundReason || row.refund_reason),
+    refundHandling: text(row.refundHandling || row.refund_handling),
+    refundBehavior: text(row.refundBehavior || row.refund_behavior),
     paymentMethod: text(row.paymentMethod || row.payment_method) || 'Unknown',
     status,
     isRefund,
@@ -118,12 +122,12 @@ export function normalizeSalesFinancialRow(row = {}) {
 export function normalizeSaleUsageRow(row = {}) {
   const saleDateTime = resolveSalesDateTime(row);
   const sourceType = text(row.sourceType || row.source_type || 'Sale Usage') || 'Sale Usage';
-  const qtyUsed = Math.abs(safeNumber(row.qtyUsed ?? row.qty_used));
+  const qtyUsed = safeNumber(row.qtyUsed ?? row.qty_used);
   const unitCostExVat = safeNumber(row.unitCostExVat ?? row.unit_cost_ex_vat ?? row.unitCost ?? row.unit_cost);
   const stockValueUsed = hasValue(row.stockValueUsed ?? row.stock_value_used)
-    ? Math.abs(safeNumber(row.stockValueUsed ?? row.stock_value_used))
+    ? safeNumber(row.stockValueUsed ?? row.stock_value_used)
     : roundMoney(qtyUsed * unitCostExVat);
-  const qtySold = Math.abs(safeNumber(row.qtySold ?? row.qty_sold ?? row.lineQuantity ?? row.line_quantity, 1)) || 1;
+  const qtySold = safeNumber(row.qtySold ?? row.qty_sold ?? row.lineQuantity ?? row.line_quantity, 1) || 1;
   const grossSaleAmount = safeNumber(row.grossSaleAmount ?? row.gross_sale_amount);
   const suppliedVatRate = row.vatRate !== undefined || row.vat_rate !== undefined
     ? normalizeRate(row.vatRate ?? row.vat_rate)
@@ -156,6 +160,14 @@ export function normalizeSaleUsageRow(row = {}) {
     saleTime: saleDateTime.time,
     reportingTimeZone: saleDateTime.timeZone,
     receiptNumber: text(row.receiptNumber || row.receipt_number),
+    refundId: text(row.refundId || row.refund_id || row.providerRefundId || row.provider_refund_id),
+    refundReason: text(row.refundReason || row.refund_reason),
+    refundHandling: text(row.refundHandling || row.refund_handling),
+    refundBehavior: text(row.refundBehavior || row.refund_behavior),
+    stockMovementType: text(row.stockMovementType || row.stock_movement_type),
+    stockQuantityChange: safeNumber(row.stockQuantityChange ?? row.stock_quantity_change),
+    wastageQty: Math.abs(safeNumber(row.wastageQty ?? row.wastage_qty)),
+    accountingOnly: booleanValue(row.accountingOnly ?? row.accounting_only),
     saleId: text(row.saleId || row.sale_id),
     saleLineId: text(row.saleLineId || row.sale_line_id),
     menuItemId: text(row.menuItemId || row.menu_item_id),
@@ -446,6 +458,12 @@ function toRecipeLineDetailRow(row = {}) {
     recipeLevel: row.recipeLevel,
     parentRecipe: row.parentRecipe,
     sourceType: row.sourceType,
+    stockMovementType: row.stockMovementType,
+    refundReason: row.refundReason,
+    refundHandling: row.refundHandling,
+    refundId: row.refundId,
+    stockQuantityChange: row.stockQuantityChange,
+    wastageQty: row.wastageQty,
     sourceId: row.sourceId
   };
 }
@@ -461,6 +479,12 @@ function toUsageTransactionDetailRow(row = {}) {
     inventoryIngredient: row.inventoryItemName,
     inventoryCategoryName: row.inventoryCategoryName,
     sourceType: row.sourceType,
+    stockMovementType: row.stockMovementType,
+    refundReason: row.refundReason,
+    refundHandling: row.refundHandling,
+    refundId: row.refundId,
+    stockQuantityChange: row.stockQuantityChange,
+    wastageQty: row.wastageQty,
     qtyUsed: row.qtyUsed,
     baseUom: row.baseUom,
     unitCostExVat: row.unitCostExVat,

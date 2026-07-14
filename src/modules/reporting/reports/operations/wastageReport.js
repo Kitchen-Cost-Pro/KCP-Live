@@ -483,8 +483,8 @@ function isAccountingOnlyManufacturingWastage(row = {}) {
 }
 
 function resolveReason(row = {}) {
-  const raw = row.raw?.metadata || row.raw?.movement?.metadata || row.rawSourceRow?.metadata || {};
-  return text(row.reason || row.wasteReason || row.notes || row.note || raw.wasteReason || raw.reason || raw.note);
+  const metadata = resolveMovementMetadata(row);
+  return text(row.reason || row.refundReason || row.wasteReason || row.notes || row.note || metadata.refundReason || metadata.refundNote || metadata.wasteReason || metadata.reason || metadata.note);
 }
 
 function shouldHaveReason(row = {}) {

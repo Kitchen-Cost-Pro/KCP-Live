@@ -503,5 +503,16 @@ UPDATE yoco_connections
    );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_yoco_webhook_events_workspace_provider_event
   ON yoco_webhook_events(workspace_id, provider_event_id)
-  WHERE COALESCE(TRIM(provider_event_id), '') <> '';`
+  WHERE COALESCE(TRIM(provider_event_id), '') <> '';`,
+  // 20 — store every provider refund as its own financial transaction while retaining
+  // the original receipt reference and the stock-handling decision used by reporting.
+  `ALTER TABLE yoco_orders ADD COLUMN parent_yoco_order_id TEXT;
+ALTER TABLE yoco_orders ADD COLUMN provider_refund_id TEXT;
+ALTER TABLE yoco_orders ADD COLUMN refund_reason TEXT;
+ALTER TABLE yoco_orders ADD COLUMN refund_behavior TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_yoco_orders_workspace_provider_refund
+  ON yoco_orders(workspace_id, provider_refund_id)
+  WHERE COALESCE(TRIM(provider_refund_id), '') <> '';
+CREATE INDEX IF NOT EXISTS idx_yoco_orders_workspace_parent_order
+  ON yoco_orders(workspace_id, parent_yoco_order_id, occurred_at);`
 ];

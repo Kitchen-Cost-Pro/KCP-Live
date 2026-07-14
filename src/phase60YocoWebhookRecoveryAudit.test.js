@@ -28,7 +28,7 @@ test('Phase 60 missing recipe mappings stay retryable and are not permanently de
   const sales = read('cloudflare-v2/src/legacy/yoco-sales.ts');
   assert.match(sales, /only terminally deduplicated after it has produced at least one/);
   assert.match(sales, /if \(movementCount > componentMovementStart\)/);
-  assert.match(sales, /retryable = missingRecipes > 0/);
+  assert.match(sales, /retryable = unresolvedRefund \|\| missingRecipes > 0/);
   assert.match(sales, /missing_recipe_or_mapping/);
   assert.match(sales, /ON CONFLICT\(workspace_id, yoco_order_id, yoco_line_id\) DO UPDATE/);
 });

@@ -498,6 +498,10 @@ export async function getSalesFinancialReport(
         yo.workspace_id,
         yo.yoco_order_id,
         yo.yoco_payment_id,
+        yo.parent_yoco_order_id,
+        yo.provider_refund_id,
+        yo.refund_reason,
+        yo.refund_behavior,
         yo.location_id,
         yo.order_type,
         yo.status,
@@ -650,6 +654,10 @@ export async function getSaleStockUsageReport(
         yo.id AS yoco_order_db_id,
         yo.yoco_order_id,
         yo.yoco_payment_id,
+        yo.parent_yoco_order_id,
+        yo.provider_refund_id,
+        yo.refund_reason,
+        yo.refund_behavior,
         yo.payment_method,
         yo.status AS sale_status,
         yo.total AS order_total,
@@ -685,7 +693,7 @@ export async function getSaleStockUsageReport(
              FROM yoco_orders yo_source
             WHERE yo_source.workspace_id = ?1
          ) WHERE canonical_rank = 1
-       ) yo ON yo.workspace_id = sm.workspace_id AND yo.yoco_order_id = sm.document_id
+       ) yo ON yo.workspace_id = sm.workspace_id AND yo.yoco_order_id = COALESCE(NULLIF(json_extract(sm.metadata_json, '$.reportOrderKey'), ''), sm.document_id)
        LEFT JOIN (
          SELECT * FROM (
            SELECT yol_source.*,
@@ -819,6 +827,10 @@ export async function getModifierSalesReport(
         yo.id AS yoco_order_db_id_joined,
         yo.yoco_order_id,
         yo.yoco_payment_id,
+        yo.parent_yoco_order_id,
+        yo.provider_refund_id,
+        yo.refund_reason,
+        yo.refund_behavior,
         yo.location_id,
         yo.order_type,
         yo.status,
@@ -3744,7 +3756,7 @@ function buildSalesWhere(
     binds.push(`%${filters.receiptNumber.toLowerCase()}%`);
     const idx = binds.length;
     clauses.push(
-      `(lower(COALESCE(yo.yoco_order_id, '')) LIKE ?${idx} OR lower(COALESCE(yo.yoco_payment_id, '')) LIKE ?${idx} OR lower(COALESCE(yo.id, '')) LIKE ?${idx})`,
+      `(lower(COALESCE(yo.parent_yoco_order_id, yo.yoco_order_id, '')) LIKE ?${idx} OR lower(COALESCE(yo.provider_refund_id, '')) LIKE ?${idx} OR lower(COALESCE(yo.yoco_payment_id, '')) LIKE ?${idx} OR lower(COALESCE(yo.id, '')) LIKE ?${idx})`,
     );
   }
   if (filters.menuItemId && tableStatus.yoco_order_lines)
@@ -3772,7 +3784,7 @@ function buildSalesWhere(
     );
   if (filters.inventoryItemId && tableStatus.stock_movements)
     add(
-      "EXISTS (SELECT 1 FROM stock_movements sm_filter WHERE sm_filter.workspace_id = yo.workspace_id AND sm_filter.document_type = 'yoco_order' AND sm_filter.document_id = yo.yoco_order_id AND sm_filter.stock_item_id = ?)",
+      "EXISTS (SELECT 1 FROM stock_movements sm_filter WHERE sm_filter.workspace_id = yo.workspace_id AND sm_filter.document_type = 'yoco_order' AND COALESCE(NULLIF(json_extract(sm_filter.metadata_json, '$.reportOrderKey'), ''), sm_filter.document_id) = yo.yoco_order_id AND sm_filter.stock_item_id = ?)",
       filters.inventoryItemId,
     );
   if (
@@ -3781,17 +3793,17 @@ function buildSalesWhere(
     tableStatus.stock_items
   )
     add(
-      "EXISTS (SELECT 1 FROM stock_movements sm_filter JOIN stock_items si_filter ON si_filter.id = sm_filter.stock_item_id AND si_filter.workspace_id = sm_filter.workspace_id WHERE sm_filter.workspace_id = yo.workspace_id AND sm_filter.document_type = 'yoco_order' AND sm_filter.document_id = yo.yoco_order_id AND lower(COALESCE(si_filter.category, '')) = lower(?))",
+      "EXISTS (SELECT 1 FROM stock_movements sm_filter JOIN stock_items si_filter ON si_filter.id = sm_filter.stock_item_id AND si_filter.workspace_id = sm_filter.workspace_id WHERE sm_filter.workspace_id = yo.workspace_id AND sm_filter.document_type = 'yoco_order' AND COALESCE(NULLIF(json_extract(sm_filter.metadata_json, '$.reportOrderKey'), ''), sm_filter.document_id) = yo.yoco_order_id AND lower(COALESCE(si_filter.category, '')) = lower(?))",
       filters.inventoryCategory,
     );
   if (filters.modifierGroupId && tableStatus.stock_movements)
     add(
-      "EXISTS (SELECT 1 FROM stock_movements sm_filter WHERE sm_filter.workspace_id = yo.workspace_id AND sm_filter.document_type = 'yoco_order' AND sm_filter.document_id = yo.yoco_order_id AND json_extract(sm_filter.metadata_json, '$.modifierGroupId') = ?)",
+      "EXISTS (SELECT 1 FROM stock_movements sm_filter WHERE sm_filter.workspace_id = yo.workspace_id AND sm_filter.document_type = 'yoco_order' AND COALESCE(NULLIF(json_extract(sm_filter.metadata_json, '$.reportOrderKey'), ''), sm_filter.document_id) = yo.yoco_order_id AND json_extract(sm_filter.metadata_json, '$.modifierGroupId') = ?)",
       filters.modifierGroupId,
     );
   if (filters.modifierId && tableStatus.stock_movements)
     add(
-      "EXISTS (SELECT 1 FROM stock_movements sm_filter WHERE sm_filter.workspace_id = yo.workspace_id AND sm_filter.document_type = 'yoco_order' AND sm_filter.document_id = yo.yoco_order_id AND json_extract(sm_filter.metadata_json, '$.modifierId') = ?)",
+      "EXISTS (SELECT 1 FROM stock_movements sm_filter WHERE sm_filter.workspace_id = yo.workspace_id AND sm_filter.document_type = 'yoco_order' AND COALESCE(NULLIF(json_extract(sm_filter.metadata_json, '$.reportOrderKey'), ''), sm_filter.document_id) = yo.yoco_order_id AND json_extract(sm_filter.metadata_json, '$.modifierId') = ?)",
       filters.modifierId,
     );
   if (filters.search) {
@@ -3820,7 +3832,7 @@ function buildSaleUsageWhere(
   const clauses = [
     "sm.workspace_id = ?1",
     "sm.document_type = 'yoco_order'",
-    "sm.movement_type IN ('sale_depletion', 'sale_refund')",
+    "(sm.movement_type IN ('sale_depletion', 'sale_refund') OR (sm.movement_type = 'wastage' AND json_extract(sm.metadata_json, '$.mode') = 'refund'))",
   ];
   const binds: unknown[] = [workspaceId];
   const add = (sql: string, value: unknown) => {
@@ -3912,6 +3924,7 @@ function standardizeSalesFinancialRow(
   tradingDayStartMinutes = 0,
 ) {
   const raw = parseJson(row.raw_json);
+  const kcpRefund = reportRowObject(raw.kcpRefund);
   const financials = deriveYocoFinancialAmounts({
     raw,
     persistedTotal: row.total,
@@ -3948,7 +3961,13 @@ function standardizeSalesFinancialRow(
     saleTime: local.time,
     occurredAt: saleAt,
     reportingTimeZone: local.timeZone || timeZone,
-    receiptNumber: clean(row.yoco_order_id || row.yoco_payment_id || row.id),
+    receiptNumber: clean(row.parent_yoco_order_id || kcpRefund.originalOrderId || row.yoco_order_id || row.yoco_payment_id || row.id),
+    refundId: clean(row.provider_refund_id || kcpRefund.refundId),
+    refundReason: clean(row.refund_reason || kcpRefund.reason),
+    refundHandling: clean(row.refund_behavior || kcpRefund.behavior).toLowerCase() === 'wastage'
+      ? 'Scrap / Wastage'
+      : clean(row.order_type).toLowerCase() === 'refund' ? 'Returned to Stock' : '',
+    refundBehavior: clean(row.refund_behavior || kcpRefund.behavior),
     paymentMethod: clean(row.payment_method || "Unknown"),
     status: clean(row.status || row.order_type || "completed"),
     grossAmount: financials.grossAmount,
@@ -3965,7 +3984,7 @@ function standardizeSalesFinancialRow(
     isVatExempt: financials.isVatExempt,
     financialDiagnostics: financials.diagnostics,
     createdBy: "yoco",
-    sourceId: clean(row.yoco_order_id || row.id),
+    sourceId: clean(row.provider_refund_id || row.yoco_order_id || row.id),
     raw: { order: row, parsed: raw, financials },
   };
 }
@@ -3985,13 +4004,24 @@ function standardizeSaleStockUsageRow(
       : "product";
   const sourceType =
     componentType === "modifier" ? "Modifier Usage" : "Sale Usage";
-  const qtyUsed = Math.abs(numberValue(row.quantity_delta, 0));
-  const unitCostExVat = numberValue(row.unit_cost, 0);
-  const stockValueUsed = Math.abs(
-    hasMeaningfulValue(row.value_delta)
-      ? numberValue(row.value_delta, 0)
-      : qtyUsed * unitCostExVat,
+  const physicalQuantityDelta = numberValue(row.quantity_delta, 0);
+  const movementType = clean(row.movement_type).toLowerCase();
+  const isRefundMovement = clean(metadata.mode).toLowerCase() === 'refund' || movementType === 'sale_refund';
+  const isRefundWastage = isRefundMovement && (
+    movementType === 'wastage' || clean(metadata.returnBehavior).toLowerCase() === 'wastage'
   );
+  // Usage is the inverse of the physical balance delta: a sale deduction is positive
+  // usage, a returned item is negative usage, and accounting-only scrap has zero
+  // physical impact because the original sale deduction already remains in force.
+  const qtyUsed = isRefundWastage ? 0 : -physicalQuantityDelta;
+  const unitCostExVat = numberValue(row.unit_cost, 0);
+  const movementValue = hasMeaningfulValue(row.value_delta)
+    ? numberValue(row.value_delta, 0)
+    : physicalQuantityDelta * unitCostExVat;
+  const stockValueUsed = isRefundWastage ? 0 : -movementValue;
+  const wastageQty = isRefundWastage
+    ? Math.abs(numberValue(metadata.wastageQty || metadata.wasteQty || metadata.wastage_quantity, 0))
+    : 0;
   const lineFinancialSource =
     componentType === "modifier"
       ? objectFromUnknown(lineRaw.kcpModifier || lineRaw.modifier || lineRaw)
@@ -4024,7 +4054,7 @@ function standardizeSaleStockUsageRow(
       level: "critical",
       message: "A sale usage movement is missing its stock item id.",
     });
-  if (!unitCostExVat && qtyUsed)
+  if (!unitCostExVat && (qtyUsed || wastageQty))
     warnings.push({
       code: "missing-unit-cost",
       level: "critical",
@@ -4041,9 +4071,19 @@ function standardizeSaleStockUsageRow(
     occurredAt: saleAt,
     reportingTimeZone: local.timeZone || timeZone,
     receiptNumber: clean(
-      row.yoco_order_id || row.yoco_payment_id || row.document_id,
+      row.parent_yoco_order_id || metadata.orderId || row.yoco_order_id || row.yoco_payment_id || row.document_id,
     ),
-    saleId: clean(row.yoco_order_id || row.document_id),
+    saleId: clean(row.provider_refund_id || row.yoco_order_id || row.document_id),
+    refundId: clean(row.provider_refund_id || metadata.refundId),
+    refundReason: clean(row.refund_reason || metadata.refundReason),
+    refundHandling: clean(row.refund_behavior || metadata.returnBehavior).toLowerCase() === 'wastage'
+      ? 'Scrap / Wastage'
+      : isRefundMovement ? 'Returned to Stock' : '',
+    refundBehavior: clean(row.refund_behavior || metadata.returnBehavior),
+    stockMovementType: isRefundWastage ? 'Refund Scrap' : isRefundMovement ? 'Refund Return' : 'Sale Depletion',
+    stockQuantityChange: physicalQuantityDelta,
+    wastageQty,
+    accountingOnly: isRefundWastage || metadata.accountingOnly === true || numberValue(metadata.accountingOnly, 0) === 1,
     saleLineId: clean(
       row.yoco_line_id || metadata.componentLineId || metadata.parentLineId,
     ),
@@ -4056,7 +4096,9 @@ function standardizeSaleStockUsageRow(
         ? clean(metadata.parentProductName || row.line_name || row.product_name)
         : clean(metadata.productName || row.line_name || row.product_name),
     menuCategory: clean(row.product_category),
-    qtySold: Math.abs(numberValue(row.line_quantity, 1)) || 1,
+    qtySold: isRefundMovement
+      ? -Math.abs(numberValue(row.line_quantity, 1) || 1)
+      : Math.abs(numberValue(row.line_quantity, 1)) || 1,
     recipeLineType:
       sourceType === "Modifier Usage"
         ? "Modifier Ingredient"
@@ -4263,7 +4305,7 @@ function buildModifierSalesWhere(
     binds.push(`%${filters.receiptNumber.toLowerCase()}%`);
     const idx = binds.length;
     clauses.push(
-      `(lower(COALESCE(yo.yoco_order_id, '')) LIKE ?${idx} OR lower(COALESCE(yo.yoco_payment_id, '')) LIKE ?${idx} OR lower(COALESCE(yol.yoco_line_id, '')) LIKE ?${idx})`,
+      `(lower(COALESCE(yo.parent_yoco_order_id, yo.yoco_order_id, '')) LIKE ?${idx} OR lower(COALESCE(yo.provider_refund_id, '')) LIKE ?${idx} OR lower(COALESCE(yo.yoco_payment_id, '')) LIKE ?${idx} OR lower(COALESCE(yol.yoco_line_id, '')) LIKE ?${idx})`,
     );
   }
   if (filters.search) {
@@ -4291,7 +4333,7 @@ function buildModifierUsageOnlyWhere(
   const clauses = [
     "sm.workspace_id = ?1",
     "sm.document_type = 'yoco_order'",
-    "sm.movement_type IN ('sale_depletion', 'sale_refund')",
+    "(sm.movement_type IN ('sale_depletion', 'sale_refund') OR (sm.movement_type = 'wastage' AND json_extract(sm.metadata_json, '$.mode') = 'refund'))",
     "json_extract(sm.metadata_json, '$.componentType') = 'modifier'",
   ];
   const binds: unknown[] = [workspaceId];
@@ -4331,7 +4373,7 @@ function buildMenuItemUsageWhere(
   const clauses = [
     "sm.workspace_id = ?1",
     "sm.document_type = 'yoco_order'",
-    "sm.movement_type IN ('sale_depletion', 'sale_refund')",
+    "(sm.movement_type IN ('sale_depletion', 'sale_refund') OR (sm.movement_type = 'wastage' AND json_extract(sm.metadata_json, '$.mode') = 'refund'))",
   ];
   const binds: unknown[] = [workspaceId];
   const add = (sql: string, value: unknown) => {
@@ -4581,11 +4623,25 @@ function standardizeRawModifierSelection(
   };
 }
 
+function movementReportOrderKey(row: Row, metadata: Row) {
+  return clean(metadata.reportOrderKey || row.document_id);
+}
+
+function isAccountingOnlyRefundWastage(row: Row) {
+  const metadata = parseJson(row.metadata_json);
+  return clean(metadata.mode).toLowerCase() === 'refund' && (
+    clean(row.movement_type).toLowerCase() === 'wastage' ||
+    clean(metadata.returnBehavior).toLowerCase() === 'wastage' ||
+    metadata.accountingOnly === true ||
+    numberValue(metadata.accountingOnly, 0) === 1
+  );
+}
+
 function buildMenuItemUsageIndex(rows: Row[]) {
   const index = new Map<string, Row[]>();
   for (const row of rows) {
     const metadata = parseJson(row.metadata_json);
-    const orderId = clean(row.document_id);
+    const orderId = movementReportOrderKey(row, metadata);
     const lineId = clean(metadata.componentLineId || metadata.parentLineId || metadata.saleLineId || metadata.lineId);
     if (!orderId || !lineId) continue;
     const key = `${orderId}|${lineId}`;
@@ -4602,12 +4658,13 @@ function matchingMenuItemUsageRows(row: Row, selection: Row, index: Map<string, 
 }
 
 function signedMovementStockCost(row: Row) {
+  if (isAccountingOnlyRefundWastage(row)) return 0;
   const amount = Math.abs(
     hasMeaningfulValue(row.value_delta)
       ? numberValue(row.value_delta, 0)
       : numberValue(row.quantity_delta, 0) * numberValue(row.unit_cost, 0),
   );
-  return clean(row.movement_type) === "sale_refund" ? -amount : amount;
+  return clean(row.movement_type).toLowerCase() === "sale_refund" ? -amount : amount;
 }
 
 function buildModifierUsageIndex(rows: Row[]) {
@@ -4624,7 +4681,7 @@ function buildModifierUsageIndex(rows: Row[]) {
 }
 
 function modifierUsageKeys(row: Row, metadata: Row) {
-  const orderId = clean(row.document_id);
+  const orderId = movementReportOrderKey(row, metadata);
   const lineId = clean(metadata.componentLineId || metadata.parentLineId);
   const modifierId = clean(metadata.modifierId || metadata.modifierVariantId);
   const modifierName = clean(metadata.modifierName).toLowerCase();
@@ -4698,23 +4755,26 @@ function standardizeModifierSalesRow(
 ) {
   const usageRows = matchingModifierUsageRows(row, selection, usageIndex);
   const menuUsageRows = matchingMenuItemUsageRows(row, selection, menuUsageIndex);
-  const grossAmount = roundMoneyNumber(
+  const isRefundRow = clean(row.order_type).toLowerCase() === 'refund' || clean(row.status).toLowerCase().includes('refund');
+  const selectedAmount = roundMoneyNumber(
     Math.abs(numberValue(selection.grossAmount, 0)),
   );
   const modifierFinancials = deriveYocoFinancialAmounts({
     raw: objectFromUnknown(selection.raw || {}),
-    persistedTotal: grossAmount,
+    persistedTotal: selectedAmount,
     configuredVatRate: row.vat_rate,
     orderType: row.order_type,
     status: row.status,
   });
+  const grossAmount = modifierFinancials.grossAmount;
+  const refundAmount = modifierFinancials.refundAmount;
   const vatRate = modifierFinancials.vatRate;
   const vatAmount = modifierFinancials.vatAmount;
   const netAmount = modifierFinancials.netAmount;
-  const menuItemGrossAmount = roundMoneyNumber(Math.abs(numberValue(row.line_total, 0)));
+  const menuItemAmount = roundMoneyNumber(Math.abs(numberValue(row.line_total, 0)));
   const menuItemFinancials = deriveYocoFinancialAmounts({
     raw: parseJson(row.line_raw_json),
-    persistedTotal: menuItemGrossAmount,
+    persistedTotal: menuItemAmount,
     configuredVatRate: row.vat_rate,
     orderType: row.order_type,
     status: row.status,
@@ -4732,25 +4792,27 @@ function standardizeModifierSalesRow(
   const menuItemTotalStockCost = roundMoneyNumber(menuItemBaseStockCost + menuItemModifierStockCost);
   const menuItemGrossProfit = roundMoneyNumber(menuItemFinancials.netAmount - menuItemTotalStockCost);
   const menuItemGpPercent = menuItemFinancials.netAmount ? menuItemGrossProfit / menuItemFinancials.netAmount : 0;
-  const stockQtyDeducted = usageRows.reduce(
-    (sum, usage) => sum + Math.abs(numberValue(usage.quantity_delta, 0)),
+  const physicalStockQuantityChange = usageRows.reduce(
+    (sum, usage) => sum + numberValue(usage.quantity_delta, 0),
     0,
   );
+  const stockQtyDeducted = -physicalStockQuantityChange;
+  const accountingWastageRows = usageRows.filter(isAccountingOnlyRefundWastage);
+  const wastageQty = accountingWastageRows.reduce((sum, usage) => {
+    const metadata = parseJson(usage.metadata_json);
+    return sum + Math.abs(numberValue(metadata.wastageQty || metadata.wasteQty || metadata.wastage_quantity, 0));
+  }, 0);
+  const wastageCost = roundMoneyNumber(accountingWastageRows.reduce((sum, usage) => sum + Math.abs(
+    hasMeaningfulValue(usage.value_delta)
+      ? numberValue(usage.value_delta, 0)
+      : numberValue(usage.unit_cost, 0) * numberValue(parseJson(usage.metadata_json).wastageQty, 0)
+  ), 0));
   const stockCost = roundMoneyNumber(
-    usageRows.reduce(
-      (sum, usage) =>
-        sum +
-        Math.abs(
-          hasMeaningfulValue(usage.value_delta)
-            ? numberValue(usage.value_delta, 0)
-            : numberValue(usage.quantity_delta, 0) *
-                numberValue(usage.unit_cost, 0),
-        ),
-      0,
-    ),
+    usageRows.reduce((sum, usage) => sum + signedMovementStockCost(usage), 0),
   );
-  const unitCostExVat = stockQtyDeducted
-    ? roundMoneyNumber(stockCost / stockQtyDeducted)
+  const costQuantity = Math.abs(stockQtyDeducted) || wastageQty;
+  const unitCostExVat = costQuantity
+    ? roundMoneyNumber(Math.abs((stockCost || wastageCost) / costQuantity))
     : 0;
   const sourceIds = usageRows.map((usage) => clean(usage.id)).filter(Boolean);
   const linkedItems = uniqueText(
@@ -4759,13 +4821,24 @@ function standardizeModifierSalesRow(
   const baseUom =
     sameText(usageRows.map((usage) => clean(usage.base_uom))) || "";
   const modifierType = normalizeModifierType(selection.modifierType);
-  const shouldDeduct = modifierType === "Product" || stockQtyDeducted > 0;
-  const status =
-    stockQtyDeducted > 0
+  const shouldDeduct = modifierType === "Product" || usageRows.length > 0;
+  const status = isRefundRow
+    ? accountingWastageRows.length
+      ? "Scrapped / Wastage"
+      : usageRows.length
+        ? "Returned to Stock"
+        : shouldDeduct
+          ? "Missing Modifier Refund Movement"
+          : "Refunded / No Stock Mapping Required"
+    : usageRows.length
       ? "Deducted"
       : shouldDeduct
         ? "Missing Modifier Usage"
         : "No Stock Mapping Required";
+  const selectionQty = Math.abs(numberValue(selection.qty, 1)) || 1;
+  const saleQty = isRefundRow ? 0 : selectionQty;
+  const refundQty = isRefundRow ? selectionQty : 0;
+  const signedQty = saleQty - refundQty;
   const saleAt = clean(row.occurred_at);
   const local = zonedTradingDateTimeStrings(saleAt, timeZone, tradingDayStartMinutes);
 
@@ -4778,9 +4851,11 @@ function standardizeModifierSalesRow(
   }
   if (shouldDeduct && !usageRows.length)
     warnings.push({
-      code: "modifier-usage-row-missing",
+      code: isRefundRow ? "modifier-refund-usage-row-missing" : "modifier-usage-row-missing",
       level: "critical",
-      message: "A stock-deducting modifier has no Modifier Usage movement row.",
+      message: isRefundRow
+        ? "A stock-affecting refunded modifier has no matching return or wastage movement row."
+        : "A stock-deducting modifier has no Modifier Usage movement row.",
     });
 
   return {
@@ -4793,8 +4868,15 @@ function standardizeModifierSalesRow(
     occurredAt: saleAt,
     reportingTimeZone: local.timeZone || timeZone,
     receiptNumber: clean(
-      row.yoco_order_id || row.yoco_payment_id || row.yoco_order_db_id_joined,
+      row.parent_yoco_order_id || row.yoco_order_id || row.yoco_payment_id || row.yoco_order_db_id_joined,
     ),
+    transactionType: isRefundRow ? "Refund" : "Sale",
+    isRefund: isRefundRow,
+    refundId: clean(row.provider_refund_id),
+    refundReason: clean(row.refund_reason),
+    refundHandling: clean(row.refund_behavior).toLowerCase() === 'wastage'
+      ? 'Scrap / Wastage'
+      : isRefundRow ? 'Returned to Stock' : '',
     paymentMethod: clean(row.payment_method),
     status: clean(row.status || row.order_type || "completed"),
     menuItemId: clean(row.line_product_id),
@@ -4803,6 +4885,7 @@ function standardizeModifierSalesRow(
     parentLineId: clean(selection.parentLineId || row.yoco_line_id || row.yoco_order_line_db_id),
     menuItemSaleKey: `${clean(row.yoco_order_id || row.yoco_payment_id || row.yoco_order_db_id_joined)}|${clean(selection.parentLineId || row.yoco_line_id || row.yoco_order_line_db_id)}`,
     menuItemGrossAmount: menuItemFinancials.grossAmount,
+    menuItemRefundAmount: menuItemFinancials.refundAmount,
     menuItemVatAmount: menuItemFinancials.vatAmount,
     menuItemNetAmount: menuItemFinancials.netAmount,
     menuItemBaseStockCost,
@@ -4816,9 +4899,14 @@ function standardizeModifierSalesRow(
     yocoModifierId: clean(selection.modifierId),
     modifierName: clean(selection.modifierName || "Yoco Modifier"),
     modifierType,
-    qty: numberValue(selection.qty, 1),
-    timesSelected: numberValue(selection.qty, 1),
+    qty: signedQty,
+    saleQty,
+    refundQty,
+    timesSelected: saleQty,
+    refundedSelections: refundQty,
+    netSelections: signedQty,
     grossAmount,
+    refundAmount,
     vatAmount,
     netAmount,
     vatRate,
@@ -4826,6 +4914,7 @@ function standardizeModifierSalesRow(
     isVatExempt: modifierFinancials.isVatExempt,
     financialDiagnostics: modifierFinancials.diagnostics,
     grossSales: grossAmount,
+    refunds: refundAmount,
     vat: vatAmount,
     netSales: netAmount,
     linkedProduct:
@@ -4834,9 +4923,13 @@ function standardizeModifierSalesRow(
       usageRows.map((usage) => clean(usage.stock_item_id)),
     ).join(", "),
     linkedStockItemName: linkedItems,
+    stockQuantityChange: physicalStockQuantityChange,
     stockQtyDeducted,
     stockDeducted: stockQtyDeducted,
     qtyDeducted: stockQtyDeducted,
+    wastageQty,
+    wastageCost,
+    accountingOnlyWastage: accountingWastageRows.length > 0,
     baseUom,
     unitCostExVat,
     stockCost,
@@ -4844,7 +4937,7 @@ function standardizeModifierSalesRow(
     gpPercent: netAmount ? (netAmount - stockCost) / netAmount : 0,
     stockDeductionStatus: status,
     createdBy: "yoco",
-    sourceId: sourceIds[0] || clean(selection.sourceId),
+    sourceId: clean(row.provider_refund_id) || sourceIds[0] || clean(selection.sourceId),
     sourceType: "Modifier Usage",
     hasModifierUsage: usageRows.length > 0,
     modifierMarkedStockDeducting: shouldDeduct,
@@ -4875,22 +4968,26 @@ function buildOrphanModifierUsageRows(
     .filter((row) => !linkedUsageIds.has(clean(row.id)))
     .map((row) => {
       const metadata = parseJson(row.metadata_json);
-      const qty = Math.abs(numberValue(row.quantity_delta, 0));
+      const isRefund = clean(metadata.mode).toLowerCase() === 'refund' || clean(row.movement_type).toLowerCase() === 'sale_refund';
+      const isWastage = isAccountingOnlyRefundWastage(row);
+      const physicalStockQuantityChange = numberValue(row.quantity_delta, 0);
+      const stockQtyDeducted = isWastage ? 0 : -physicalStockQuantityChange;
+      const wastageQty = isWastage
+        ? Math.abs(numberValue(metadata.wastageQty || metadata.wasteQty || metadata.wastage_quantity, 0))
+        : 0;
       const unitCostExVat = numberValue(row.unit_cost, 0);
-      const stockCost = roundMoneyNumber(
-        Math.abs(
-          hasMeaningfulValue(row.value_delta)
-            ? numberValue(row.value_delta, 0)
-            : qty * unitCostExVat,
-        ),
-      );
+      const movementValue = hasMeaningfulValue(row.value_delta)
+        ? numberValue(row.value_delta, 0)
+        : physicalStockQuantityChange * unitCostExVat;
+      const stockCost = roundMoneyNumber(signedMovementStockCost(row));
+      const wastageCost = isWastage ? roundMoneyNumber(Math.abs(movementValue)) : 0;
       const saleAt = clean(row.occurred_at || row.created_at);
       const local = zonedTradingDateTimeStrings(saleAt, timeZone, tradingDayStartMinutes);
       warnings.push({
         code: "modifier-usage-not-linked-to-yoco-line",
         level: "warning",
         message:
-          "A Modifier Usage movement could not be linked back to a parsed Yoco modifier sale line.",
+          "A Modifier Usage movement could not be linked back to a parsed Yoco modifier sale or refund line.",
       });
       return {
         id: `orphan-modifier-usage:${clean(row.id)}`,
@@ -4901,7 +4998,12 @@ function buildOrphanModifierUsageRows(
         saleTime: local.time,
         occurredAt: saleAt,
         reportingTimeZone: local.timeZone || timeZone,
-        receiptNumber: clean(row.document_id),
+        receiptNumber: clean(metadata.orderId || row.document_id),
+        transactionType: isRefund ? 'Refund' : 'Sale',
+        isRefund,
+        refundId: clean(metadata.refundId),
+        refundReason: clean(metadata.refundReason),
+        refundHandling: isWastage ? 'Scrap / Wastage' : isRefund ? 'Returned to Stock' : '',
         menuItemId: clean(metadata.parentProductId || metadata.productId),
         menuItemName: clean(
           metadata.parentProductName ||
@@ -4919,28 +5021,42 @@ function buildOrphanModifierUsageRows(
         ),
         modifierName: clean(metadata.modifierName || "Yoco Modifier"),
         modifierType: normalizeModifierType(metadata.modifierType || "product"),
-        qty: 0,
-        timesSelected: 1,
+        qty: isRefund ? -1 : 1,
+        saleQty: isRefund ? 0 : 1,
+        refundQty: isRefund ? 1 : 0,
+        timesSelected: isRefund ? 0 : 1,
+        refundedSelections: isRefund ? 1 : 0,
+        netSelections: isRefund ? -1 : 1,
         grossAmount: 0,
+        refundAmount: 0,
         vatAmount: 0,
         netAmount: 0,
         grossSales: 0,
+        refunds: 0,
         vat: 0,
         netSales: 0,
         linkedProduct: clean(metadata.modifierName),
         linkedStockItemId: clean(row.stock_item_id),
         linkedStockItemName: clean(row.item_name || row.stock_item_id),
-        stockQtyDeducted: qty,
-        stockDeducted: qty,
-        qtyDeducted: qty,
+        stockQuantityChange: physicalStockQuantityChange,
+        stockQtyDeducted,
+        stockDeducted: stockQtyDeducted,
+        qtyDeducted: stockQtyDeducted,
+        wastageQty,
+        wastageCost,
+        accountingOnlyWastage: isWastage,
         baseUom: clean(row.base_uom || metadata.unit || "ea"),
         unitCostExVat,
         stockCost,
         grossProfit: -stockCost,
         gpPercent: 0,
-        stockDeductionStatus: "Deducted - Sale Line Missing",
+        stockDeductionStatus: isWastage
+          ? "Scrapped / Wastage - Sale Line Missing"
+          : isRefund
+            ? "Returned to Stock - Sale Line Missing"
+            : "Deducted - Sale Line Missing",
         createdBy: clean(row.created_by || "yoco"),
-        sourceId: clean(row.id || row.document_id),
+        sourceId: clean(metadata.refundId || row.id || row.document_id),
         sourceType: "Modifier Usage",
         hasModifierUsage: true,
         modifierMarkedStockDeducting: true,
@@ -6467,21 +6583,17 @@ function standardizeMovementRow(
   const baseUom =
     clean(row.base_uom || metadata.unit || metadata.baseUom) || "ea";
   const notes = resolveNotes(row, metadata, sourceType);
-  const wastageQty =
-    sourceType === "Manufacturing Wastage"
-      ? Math.abs(
-          numberValue(
-            metadata.wastageQty ||
-              metadata.wasteQty ||
-              metadata.wastage_quantity,
-            0,
-          ),
-        )
-      : 0;
+  const wastageQty = Math.abs(
+    numberValue(
+      metadata.wastageQty ||
+        metadata.wasteQty ||
+        metadata.wastage_quantity,
+      0,
+    ),
+  );
   const accountingOnly =
-    sourceType === "Manufacturing Wastage" &&
-    (metadata.accountingOnly === true ||
-      numberValue(metadata.accountingOnly, 0) === 1);
+    metadata.accountingOnly === true ||
+    numberValue(metadata.accountingOnly, 0) === 1;
   const isTransfer =
     sourceType === "Transfer In" || sourceType === "Transfer Out";
   const transferType = isTransfer
@@ -6968,6 +7080,14 @@ function classifySourceType(row: Row, metadata: Row) {
   if (movement === "transfer_out") return "Transfer Out";
   if (movement === "transfer_reversal") return "Transfer In";
   if (
+    document === "wastage_adjustment" ||
+    movement === "wastage" ||
+    clean(metadata.returnBehavior).toLowerCase() === "wastage" ||
+    clean(metadata.mode).toLowerCase() === "wastage" ||
+    clean(metadata.wasteReason)
+  )
+    return "Wastage Adjustment";
+  if (
     document === "yoco_order" &&
     (clean(metadata.componentType).toLowerCase() === "modifier" ||
       clean(metadata.modifierId) ||
@@ -6979,13 +7099,6 @@ function classifySourceType(row: Row, metadata: Row) {
     (movement === "sale_depletion" || movement === "sale_refund")
   )
     return "Sale Usage";
-  if (
-    document === "wastage_adjustment" ||
-    movement === "wastage" ||
-    clean(metadata.mode).toLowerCase() === "wastage" ||
-    clean(metadata.wasteReason)
-  )
-    return "Wastage Adjustment";
   if (document === "adjustment" || movement === "adjustment")
     return "Manual Adjustment";
   if (movement.includes("sale")) return "Sale Usage";
@@ -7074,6 +7187,8 @@ function resolveNotes(row: Row, metadata: Row, sourceType: string) {
       row.adjustment_reason ||
         metadata.note ||
         metadata.wasteReason ||
+        metadata.refundReason ||
+        metadata.refundNote ||
         metadata.reason,
     );
   if (sourceType === "Transfer In" || sourceType === "Transfer Out")
