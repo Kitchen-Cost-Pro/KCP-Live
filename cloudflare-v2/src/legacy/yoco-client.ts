@@ -152,6 +152,7 @@ export async function listOrdersPage(env: Env, apiKey: string, params: Record<st
 }
 
 export const fetchOrder = async (env: Env, apiKey: string, orderId: string) => objectData(await yocoFetch(env, apiKey, `/v1/orders/${encodeURIComponent(orderId)}`));
+export const fetchPayment = async (env: Env, apiKey: string, paymentId: string) => objectData(await yocoFetch(env, apiKey, `/v1/payments/${encodeURIComponent(paymentId)}`));
 
 
 export const listWebhookSubscriptions = (env: Env, apiKey: string) => listAllPages(env, apiKey, '/v1/webhooks/subscriptions/');
@@ -180,7 +181,7 @@ export function testWebhookSubscription(
   env: Env,
   apiKey: string,
   subscriptionId: string,
-  eventType = 'payment.created',
+  eventType = 'order.completed',
 ) {
   return yocoFetch(env, apiKey, `/v1/webhooks/subscriptions/${encodeURIComponent(subscriptionId)}/test`, {
     method: 'POST',

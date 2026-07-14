@@ -2431,6 +2431,28 @@ async function syncYocoCatalogueFromAdmin(wsId = '') {
     } catch (e) { }
 }
 
+function showYocoReconciliationDiagnostic(result, days) {
+    const readiness = result?.readiness || {};
+    const reasons = Object.entries(result?.reasonCounts || {}).map(([key, value]) => `${key}: ${value}`).join(', ') || 'none';
+    const apiErrors = [...(result?.orderDiscoveryErrors || []), ...(result?.webhookOrderLoadFailures || []), ...(result?.errors || [])].filter(Boolean);
+    const warnings = [...(result?.warnings || [])].filter(Boolean);
+    const lines = [
+        `Window: last ${days} day(s)`,
+        `Completed orders found: ${Number(result?.ordersFetched || 0)}`,
+        `Successful Orders API requests: ${Number(result?.successfulOrderApiRequests || 0)}`,
+        `Webhook order candidates: ${Number(result?.webhookOrderCandidates || 0)}`,
+        `Orders recovered from webhook ids: ${Number(result?.ordersLoadedFromWebhookReferences || 0)}`,
+        `Stock movements created: ${Number(result?.stockMovements || 0)}`,
+        `Go Live enabled: ${readiness.stockDepletionEnabled === true ? 'Yes' : 'No'}`,
+        `Mapped Yoco products: ${Number(readiness.mappedYocoProducts || 0)} of ${Number(readiness.activeYocoProducts || 0)}`,
+        `Active locations: ${Number(readiness.activeLocations || 0)}`,
+        `Result reasons: ${reasons}`,
+        warnings.length ? `Warnings: ${warnings.slice(0, 5).join(' | ')}` : 'Warnings: none',
+        apiErrors.length ? `Errors: ${apiErrors.slice(0, 5).join(' | ')}` : 'Errors: none'
+    ];
+    showInfo('Yoco Sales Diagnostic', lines.map(adminEscapeHtml).join('<br><br>'));
+}
+
 async function syncYocoSalesFromAdmin(wsId = '') {
     try {
         const result = await runAdminYocoAction(wsId, 'Reconciling the last 2 days of Yoco sales...', async (workspaceId) => {
@@ -2439,6 +2461,7 @@ async function syncYocoSalesFromAdmin(wsId = '') {
         const failed = Number(result?.errors?.length || 0) + Number(result?.webhookOrderLoadFailures?.length || 0);
         const retryable = Number(result?.retryableOrders || 0) + Number(result?.retryableRefunds || 0);
         showToast(`2-day reconciliation: ${result?.ordersFetched || 0} unique orders (${result?.ordersFromList || 0} from Yoco list, ${result?.ordersLoadedFromWebhookReferences || 0} from webhook references), ${result?.stockMovements || 0} stock movements, ${retryable} retryable.`, failed || retryable ? 'error' : 'success');
+        if (!Number(result?.ordersFetched || 0) || !Number(result?.stockMovements || 0) || failed || retryable) showYocoReconciliationDiagnostic(result, 2);
     } catch (e) { }
 }
 
@@ -2450,6 +2473,7 @@ async function syncYocoSalesLast14DaysFromAdmin(wsId = '') {
         const failed = Number(result?.errors?.length || 0) + Number(result?.webhookOrderLoadFailures?.length || 0);
         const retryable = Number(result?.retryableOrders || 0) + Number(result?.retryableRefunds || 0);
         showToast(`14-day reconciliation: ${result?.ordersFetched || 0} unique orders, ${result?.ordersLoadedFromWebhookReferences || 0} recovered from webhook references, ${result?.stockMovements || 0} stock movements, ${retryable} retryable.`, failed || retryable ? 'error' : 'success');
+        if (!Number(result?.ordersFetched || 0) || !Number(result?.stockMovements || 0) || failed || retryable) showYocoReconciliationDiagnostic(result, 14);
     } catch (e) { }
 }
 

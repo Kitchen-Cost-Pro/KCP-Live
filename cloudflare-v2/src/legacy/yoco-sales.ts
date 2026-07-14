@@ -1239,6 +1239,16 @@ export async function processYocoOrder(
   const productsById = new Map(products.map((product) => [text(product.id), product]));
   const modifierCatalogue = buildModifierCatalogue(modifierGroups);
   const sourceLines = mode === 'refund' ? getRefundLineItems(order, refund) : getOrderLineItems(order);
+  if (mode === 'sale' && sourceLines.length === 0) {
+    return {
+      processed: false,
+      reason: 'order_has_no_line_items',
+      retryable: true,
+      missingRecipes: 0,
+      orderLines: 0,
+      stockMovements: 0
+    };
+  }
   const paymentId = getPaymentId(order, refund);
   let refundIndex = 0;
   if (refund) {

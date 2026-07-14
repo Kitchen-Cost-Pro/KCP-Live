@@ -23,7 +23,7 @@ import {
   stockValuationUnitCost,
   yocoWebhookEventFields,
 } from "./yoco-sales";
-import { fetchModifierGroup, fetchOrder, listOrders, listOrdersPage } from "./yoco-client";
+import { fetchModifierGroup, fetchOrder, fetchPayment, listOrders, listOrdersPage } from "./yoco-client";
 import {
   connectYoco,
   disconnectYoco,
@@ -14860,9 +14860,16 @@ async function loadYocoOrderForWebhook(
   }
   if (!paymentId) return payloadOrder;
 
-  // Some Yoco payment webhooks identify the payment, not the order. Pull a small
-  // recent order window and match the payment id before giving up. This keeps
-  // stock deduction live even when the webhook payload is payment-shaped.
+  // Resolve the payment directly first. Yoco payments expose order_id, which avoids
+  // relying on an undocumented payment_id filter on the Orders API.
+  const payment = (await fetchPayment(env, apiKey, paymentId).catch(() => null)) as Record<string, unknown> | null;
+  const paymentOrderId = text(payment?.order_id || payment?.orderId);
+  if (paymentOrderId) {
+    const paymentOrder = (await fetchOrder(env, apiKey, paymentOrderId).catch(() => null)) as Record<string, unknown> | null;
+    if (paymentOrder) return paymentOrder;
+  }
+
+  // Keep the legacy list fallback for older Yoco accounts.
   const candidateOrders = (await listOrders(env, apiKey, {
     payment_id: paymentId,
     limit: 25,
@@ -15128,6 +15135,31 @@ export async function postYocoWebhook(
           SET yoco_order_id = ?2
         WHERE id = ?1`,
     ).bind(webhookDbId, resolvedOrderId).run();
+  }
+
+  // payment.created is emitted before the order is guaranteed to be closed. It is
+  // retained for compatibility with older subscriptions, but it is not treated as
+  // the final stock trigger. The replacement subscription uses order.completed.
+  if (String(eventType || '').toLowerCase() === 'payment.created') {
+    const message = 'Payment received. Waiting for the final order.completed event before deducting stock.';
+    await env.DB.prepare(
+      `UPDATE yoco_webhook_events
+          SET status = 'attention',
+              yoco_order_id = COALESCE(NULLIF(?3, ''), yoco_order_id),
+              processed_at = ?2,
+              error_message = ?4
+        WHERE id = ?1`,
+    ).bind(webhookDbId, nowIso(), resolvedOrderId, message).run();
+    await recordIntegrationLog(env, workspaceId, {
+      operation: 'yoco.webhook.waiting_for_order_completion',
+      status: 'warning',
+      message,
+      details: { eventId, eventType, orderId: resolvedOrderId || orderId, paymentId },
+      startedAt: receivedAt,
+      completedAt: nowIso(),
+      durationMs: Date.now() - startedMs,
+    });
+    return json(request, env, { ok: true, status: 'attention', message });
   }
 
   try {

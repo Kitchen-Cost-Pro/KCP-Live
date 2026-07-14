@@ -1,116 +1,129 @@
-# Yoco Webhook and Sales Reconciliation Audit
+# Yoco Completed Order and Stock Deduction Audit
 
 Date: 14 July 2026  
-Release: Phase 61 - Yoco Sales Reconciliation and Initial-Sync Boundary
+Release: Phase 62 - Yoco Completed Order Deduction and Order API Diagnostics
 
-## Scope audited
+## Problem confirmed
 
-- Customer Yoco connection and initial catalogue import
-- Webhook delivery, order resolution, event status, and stock deduction
-- Yoco order-list retrieval and date/status filtering
-- Admin 2-day and 14-day sales reconciliation
-- Recovery of orders already represented in webhook logs
-- Go Live, initial sales baseline, cursor overlap, retries, and duplicate protection
-- Customer and admin integration controls
+The webhook log proved that Yoco could reach KCP, but it did not prove that KCP had received a final completed order with line items or created stock movements.
+
+The previous subscription used `payment.created` as the main sale event. That event means that a payment record was created. It does not mean that the order is closed and fully paid. KCP could therefore receive and log the event before the order was ready for stock deduction.
+
+The admin reconciliation also relied on order queries that did not prioritise the order completion timestamp. When a filtered request failed or returned no rows, errors could be hidden behind a zero-order result. A discovered order summary could also be used after the full order-detail request failed, leaving KCP with no line items and no useful explanation.
 
 ## Confirmed root causes
 
-1. **A webhook could show `PROCESSED` with zero stock movements.** Receipt and signature verification were treated as successful processing even when stock depletion was disabled, the order was not considered complete, or recipe/product mapping produced no deduction.
-2. **Admin reconciliation depended too heavily on the filtered Yoco order list.** When an account returned an empty result for the supplied order filters, KCP reported zero orders even though payment webhooks had already supplied recoverable order or payment references.
-3. **Payment-shaped webhooks were not always resolvable.** Some events identify the payment first. The direct `payment_id` order lookup could return no rows, and there was no bounded unfiltered fallback in the live webhook path.
-4. **Webhook recovery excluded payment-only events.** Admin recovery required a stored order ID, so a valid payment event with no resolved order ID could be ignored.
-5. **Initial connection had no permanent sales boundary.** Connection skipped historical sales, but later cursor overlap could look behind the moment of connection.
-6. **The customer Integrations page exposed an unnecessary manual sales-sync control.** Recovery and retrospective reconciliation should be an admin operation, not a customer setup action.
-7. **The errored-order audit query contained duplicated SQL text.** This could break the recovery action at runtime despite passing TypeScript validation.
+1. The live webhook subscribed to `payment.created` instead of the final `order.completed` event.
+2. The two-day reconciliation did not query `closed_at` first, even though completed orders are finalised at that point.
+3. Order API errors could be converted into an empty order result.
+4. Payment-to-order recovery relied partly on an undocumented Orders API payment filter instead of first reading the payment and using its `order_id`.
+5. A failed full-order fetch could fall back to a list summary with no line items.
+6. An order with no line items could return zero movements without a specific retry reason.
+7. The webhook test still requested `payment.created`, which no longer matched the corrected subscription.
+8. The admin result did not clearly show whether Go Live, product mappings, locations, line items, or API permissions blocked the deduction.
 
 ## Corrections implemented
 
-### Initial connection and catalogue setup
+### Final webhook event
 
-- Initial Yoco connection now always imports the catalogue only.
-- The hidden `syncSalesOnConnect` path was removed.
-- A dedicated `sales_baseline_at` is created on initial connection and added through append-only tenant migration 18.
-- Normal automatic reconciliation and its six-hour overlap cannot cross the initial baseline.
-- Explicit admin reconciliation may inspect an older selected period, while the Go Live timestamp remains the final stock-deduction guard.
-- Customer messaging clearly states that historical sales were not imported.
+KCP now creates the Yoco subscription with:
 
-### Live webhook deduction
+- `order.completed`
+- `payment.refunded`
 
-- A webhook is now marked `processed` only when:
-  - stock movements were created;
-  - the order was safely identified as an already-processed duplicate; or
-  - the event was intentionally ignored, in which case it uses `ignored` rather than `processed`.
-- Zero-movement outcomes now use `attention` with an explicit reason, including:
-  - stock depletion is not live;
-  - order not yet paid/completed;
-  - missing recipe or product mapping;
-  - unresolved Yoco order.
-- Order readiness recognises final order and payment states from top-level and nested payment data instead of requiring only the exact word `completed`.
-- Payment-created webhooks first attempt the direct payment lookup, then inspect up to five normal order pages and match the payment locally.
-- Once a payment reference resolves to an order, the webhook row is corrected to the actual order ID.
+`order.completed` is the sale trigger used for stock deduction. Existing `payment.created` events from an older subscription are accepted for compatibility, but they are marked as waiting for order completion and do not deduct stock.
 
-### Admin sales reconciliation
+The webhook test now sends an `order.completed` test event.
 
-- Admin controls are now **Reconcile Sales - 2 Days** and **Reconcile Sales - 14 Days**.
-- They call the explicit `reconcile-sales` action with a fixed lookback rather than depending on the rolling customer cursor.
-- Order discovery now attempts:
-  1. updated-at window;
-  2. created-at window;
-  3. bounded unfiltered pages with local date filtering.
-- Reconciliation also scans recent payment/order/sale webhook rows, including rows with no stored order ID.
-- It resolves the raw webhook payload, direct order references, and payment references, then merges and deduplicates these orders with the normal order-list results.
-- Existing webhook rows are updated after reconciliation to show the real deduction result and movement count.
-- The result reports list-sourced orders, webhook candidates, webhook-recovered orders, discovery strategy, load failures, retryable orders, and stock movements.
-- Cursor advancement is blocked when retryable orders, processing errors, or unresolved webhook-backed orders remain.
-- The malformed duplicated `FROM yoco_webhook_events` recovery query was repaired.
+### Completed order discovery
 
-### Integration controls
+Admin reconciliation now tries these completed-order queries and merges their results:
 
-- The customer-facing manual **Sync Sales** button and event handler were removed.
-- Catalogue sync remains available on the customer integration.
-- Admin connection saves credentials, establishes the webhook, and imports the catalogue without importing sales.
-- **Restart Sync** still performs webhook replacement, catalogue refresh, and a controlled two-day reconciliation.
+1. `closed_at` within the selected period with status `completed`
+2. `updated_at` within the selected period with status `completed`
+3. `created_at` within the selected period with status `completed`
+4. A bounded completed-order page scan with local date filtering
 
-## Expected diagnostic behavior after deployment
+The API client preserves repeated query parameters for list filters and deduplicates orders by Yoco order ID.
 
-A `payment.created` row must no longer show a blank-message `PROCESSED` state when no deduction occurred. It will show one of these outcomes:
+### Direct webhook recovery
 
-- `PROCESSED` — stock movements were created;
-- `PROCESSED` — already deducted, duplicate safely skipped;
-- `ATTENTION` — order found but not ready, Go Live disabled, or mapping/recipe issue;
-- `FAILED` — order/API processing failed;
-- `IGNORED` — order predates the baseline or Go Live activation.
+Recent webhook rows are used as a second recovery source.
 
-The admin reconciliation toast and log will separately report:
+KCP now:
 
-- unique orders found;
-- orders returned by the Yoco list;
-- webhook candidates;
-- orders recovered from webhook references;
-- stock movements created;
-- retryable or unresolved orders.
+1. Reads the order ID directly from an order webhook.
+2. Reads a payment through `/v1/payments/{payment_id}` when only a payment reference is available.
+3. Uses the returned `order_id` to fetch the full order.
+4. Merges the resolved order with orders returned by the normal order list.
+5. Updates the webhook row with the resolved order ID and the real deduction outcome.
+
+### Full line-item enforcement
+
+A list-order summary is no longer silently processed when the full order request fails.
+
+If the full order cannot be fetched, reconciliation records a clear error and blocks cursor advancement. If Yoco returns an order with no line items, the order is marked retryable with the reason `order_has_no_line_items`.
+
+No zero-line order is recorded as a successful deduction.
+
+### API permission check
+
+Connection and Restart Sync now perform a completed-order read check. A key that cannot read orders fails visibly instead of appearing connected after catalogue access alone.
+
+The relevant Yoco key must include `business/orders:read`.
+
+### Admin diagnostic result
+
+The 2-day and 14-day reconciliation results now show:
+
+- completed orders found
+- successful Orders API requests
+- orders returned by list queries
+- webhook candidates
+- orders recovered from webhook IDs or payment IDs
+- stock movements created
+- retryable orders
+- result reason counts
+- Go Live state and activation timestamp
+- active Yoco products
+- mapped Yoco products
+- active locations
+- recipe line count
+- warnings and API errors
+- whether the order cursor advanced
+
+This distinguishes an order-fetch problem from a recipe, mapping, location, Go Live, or line-item problem.
+
+## Initial connection behavior
+
+Initial connection still imports catalogue data only.
+
+It does not fetch, import, or deduct historical sales. It records `sales_baseline_at`, and normal background overlap cannot cross that boundary. Admin reconciliation can inspect an explicit earlier period, while the Go Live timestamp remains the final stock-deduction boundary.
+
+The customer-facing manual Sales Sync button remains removed.
+
+## Required deployment and recovery sequence
+
+1. Deploy the Worker.
+2. Deploy the Pages frontend and admin console.
+3. Run **Restart Sync** for the affected workspace.
+4. Confirm that the remote subscription lists `order.completed` and `payment.refunded`.
+5. Run **Reconcile Sales - 2 Days**.
+6. Review the diagnostic window and the Yoco Integration Log.
+
+Restart Sync is required because an existing remote subscription continues to send its old event types until it is deleted and recreated.
+
+A successful sale must report at least one stock movement or a proven duplicate. A zero-movement result must now contain a specific warning or error.
 
 ## Validation completed
 
-- Automated suite: **423 passed, 0 failed**
-- Frontend production build: **passed**
-- Cloudflare Worker TypeScript check: **passed**
-- Wrangler Worker deployment dry run: **passed**
+- Automated suite: 428 passed, 0 failed
+- Frontend production build: passed
+- Cloudflare Worker TypeScript check: passed
+- Wrangler deployment dry run: passed
 
-The frontend build emits existing chunking warnings for modules that are both statically and dynamically imported. These warnings are unrelated to the Yoco changes and do not fail the build.
-
-## Deployment and recovery sequence
-
-1. Deploy the Worker first so tenant migration 18 and the new webhook/reconciliation logic are active.
-2. Deploy the Pages frontend/admin console.
-3. In Admin Console, run **Restart Sync** once for the affected workspace.
-4. Run **Reconcile Sales - 2 Days**. Use 14 days only when the missed order is older.
-5. Review the Yoco Integration Log:
-   - `ordersFromList` may be zero;
-   - `ordersLoadedFromWebhookReferences` should recover known webhook orders;
-   - `stockMovements` must be greater than zero for a successfully mapped sale.
-6. Any remaining `ATTENTION` row will now state the exact blocking reason. Correct the mapping/recipe or enable Go Live, then run **Resync Errored Orders**.
+The frontend build emits existing chunking warnings for modules that are both statically and dynamically imported. Those warnings are unrelated to this Yoco correction and do not fail the build.
 
 ## Environment limitation
 
-The release was audited, compiled, and tested locally. No production Cloudflare account or live Yoco credentials were available in the audit environment, so the live subscription and affected orders could not be replayed here.
+The release was audited, compiled, and tested locally. The production Cloudflare account and live Yoco credentials were not available in this environment, so the affected production order could not be replayed here.

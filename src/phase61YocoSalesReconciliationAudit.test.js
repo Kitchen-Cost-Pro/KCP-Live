@@ -40,7 +40,7 @@ test('Phase 61 order discovery falls back from Yoco filters and recovers webhook
   const service = read('cloudflare-v2/src/legacy/yoco-service.ts');
   const webhookRoutes = read('cloudflare-v2/src/legacy/routes.ts');
   assert.match(service, /listYocoOrdersForSalesSync/);
-  assert.match(service, /bounded_unfiltered_fallback/);
+  assert.match(service, /bounded_completed_fallback/);
   assert.match(service, /loadWebhookBackedOrders/);
   assert.match(service, /lower\(event\.event_type\) LIKE '%payment%'/);
   assert.match(service, /COALESCE\(event\.yoco_order_id, ''\) = ''/);

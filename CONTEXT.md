@@ -496,3 +496,15 @@ Then confirm:
 - A webhook is `processed` only after stock movement creation or a proven idempotent duplicate. Zero-movement outcomes are `attention` with a specific message; pre-baseline/Go-Live events are `ignored`.
 - Reconciliation diagnostics must report orders from list, webhook candidates, webhook-recovered orders, load failures, retryable counts, stock movements, and cursor decisions.
 - Phase 61 validation baseline: 423 passing tests, successful production frontend build, successful Worker TypeScript check, and successful Wrangler deployment dry run.
+
+
+## Phase 62 - Yoco completed-order deduction and order API diagnostics (July 2026)
+
+- Sale deduction subscriptions use `order.completed`, not `payment.created`. A payment-created event is accepted only for backward compatibility and remains in attention until the completed order can be handled.
+- Restart Sync must delete the KCP-owned remote subscription and recreate it with `order.completed` and `payment.refunded`. The webhook test uses `order.completed`.
+- Completed-order reconciliation queries `closed_at` first, then `updated_at` and `created_at`, all with completed status, and merges the results before bounded fallback scanning.
+- Payment references resolve through the Payments API and its `order_id` before any legacy list scan.
+- Catalogue access is not enough to declare Yoco connected. Connection validates that the key can read completed orders and must surface a missing `business/orders:read` permission.
+- A full order fetch failure must never fall back silently to an order-list summary. No-line-item sales use the explicit retryable reason `order_has_no_line_items`.
+- Admin diagnostics report successful order API calls, webhook recovery, Go Live state, product mapping readiness, locations, recipe lines, result reasons, warnings, errors, movements, and cursor decisions.
+- Phase 62 validation baseline: 428 passing tests, successful production frontend build, successful Worker TypeScript check, and successful Wrangler deployment dry run.

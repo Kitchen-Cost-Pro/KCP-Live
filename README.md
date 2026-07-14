@@ -104,10 +104,12 @@ The Vite development server normally runs at `http://localhost:5173`.
 
 ## Current Yoco recovery behavior
 
-- Initial connection imports the Yoco catalogue only and records a sales baseline; historical orders are not deducted.
-- Live payment webhooks resolve both order-shaped and payment-shaped payloads. A delivery is not shown as processed unless it created stock movements or was a proven duplicate.
-- Customer Integrations has no manual sales-sync action. Admin Console provides explicit 2-day and 14-day reconciliation using both the Yoco order list and stored webhook references.
-- Use **Restart Sync** after deploying webhook changes, then **Reconcile Sales - 2 Days** to recover recent missed deductions.
+- Initial connection imports the Yoco catalogue only and records a sales baseline. Historical orders are not deducted.
+- The live subscription uses `order.completed` for sale deduction and `payment.refunded` for refund processing. `payment.created` is not treated as a final stock trigger.
+- Completed-order reconciliation queries `closed_at`, `updated_at`, and `created_at`, then combines those results with stored webhook order and payment references.
+- Full order detail and line items are required before deduction. Order API failures and empty-line orders remain visible and retryable.
+- Customer Integrations has no manual sales-sync action. Admin Console provides explicit 2-day and 14-day reconciliation with readiness and API diagnostics.
+- After deploying webhook changes, run **Restart Sync** and then **Reconcile Sales - 2 Days**.
 - Detailed findings are in `YOCO_INTEGRATION_AUDIT.md`.
 
 ## Validation

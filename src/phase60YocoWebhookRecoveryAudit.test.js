@@ -37,7 +37,7 @@ test('Phase 60 sales reconciliation reports movements and does not advance curso
   const service = read('cloudflare-v2/src/legacy/yoco-service.ts');
   assert.match(service, /retryableOrders/);
   assert.match(service, /stockMovements/);
-  assert.match(service, /orderCursorBlocked = orderErrors > 0 \|\| retryableOrders > 0/);
+  assert.match(service, /orderCursorBlocked = orderErrors > 0[\s\S]*retryableOrders > 0/);
   assert.match(service, /orderCursorAdvanced: !orderCursorBlocked/);
   assert.match(service, /overlapCursor/);
 });
