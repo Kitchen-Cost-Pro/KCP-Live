@@ -668,21 +668,22 @@ function renderColumnVisibilityControl(
   const visible = new Set(visibleColumns || []);
   const section = document.createElement("section");
   section.className = `reportColumnVisibility${embedded ? " reportColumnVisibility--embedded reportActionMenu__section" : ""}`;
+  const options = columns
+    .map(
+      (column) => `
+        <label><input type="checkbox" name="reportColumn" value="${escapeHtml(column.key)}" ${visible.has(column.key) ? "checked" : ""} ${isTransactionIdColumn(column) ? 'disabled data-required-report-column="true"' : ""} /><span>${escapeHtml(column.label || column.key)}${isTransactionIdColumn(column) ? " · Required" : ""}</span></label>
+      `,
+    )
+    .join("");
   const form = `
     <form data-report-columns-form>
-      <header><div><span>Columns</span><strong>Visible columns · ${visible.size}/${columns.length}</strong></div><button type="button" data-report-columns-all>Select all</button></header>
-      <div>${columns
-        .map(
-          (column) => `
-        <label><input type="checkbox" name="reportColumn" value="${escapeHtml(column.key)}" ${visible.has(column.key) ? "checked" : ""} ${isTransactionIdColumn(column) ? "disabled data-required-report-column=\"true\"" : ""} /><span>${escapeHtml(column.label || column.key)}${isTransactionIdColumn(column) ? " · Required" : ""}</span></label>
-      `,
-        )
-        .join("")}</div>
+      ${embedded ? '<div class="reportColumnVisibility__toolbar"><button type="button" data-report-columns-all>Select all</button></div>' : `<header><div><span>Columns</span><strong>Visible columns · ${visible.size}/${columns.length}</strong></div><button type="button" data-report-columns-all>Select all</button></header>`}
+      <div class="reportColumnVisibility__options">${options}</div>
       <button type="submit">Apply columns</button>
     </form>
   `;
   section.innerHTML = embedded
-    ? form
+    ? `<details class="reportColumnVisibility__details"><summary><span><small>Columns</small><strong>Visible columns · ${visible.size}/${columns.length}</strong></span><span class="reportColumnVisibility__chevron" aria-hidden="true">⌄</span></summary>${form}</details>`
     : `<details><summary>Columns <span>${visible.size}/${columns.length}</span></summary>${form}</details>`;
   return section;
 }

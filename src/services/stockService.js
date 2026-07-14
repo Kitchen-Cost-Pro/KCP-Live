@@ -2,6 +2,7 @@ import { callCloudflareWorkspaceRoute } from './cloudflareApi.js';
 import { DEFAULT_STOCK_LOCATION_ID, normalizeSites, normalizeStockLocations } from './locationModel.js';
 import { parseBarcodeValues } from '../utils/barcodes.js';
 import { resolveBalanceKey } from '../utils/stockBalances.js';
+import { resolveStockItemSku } from '../utils/stockSku.js';
 
 const DEFAULT_UOMS = ['ea', 'kg', 'g', 'l', 'ml', 'pack', 'case', 'bottle', 'bag', 'box', 'tray', 'portion', 'batch'];
 const MANUFACTURED_CATEGORY = 'Manufactured';
@@ -568,11 +569,23 @@ export function normalizeIngredient(key, item = {}) {
       : Number(item.stock || 0);
   const barcodes = parseBarcodeValues(item);
   const name = item.name || item.ingredientName || 'Unnamed Stock Item';
+  const sku = resolveStockItemSku(
+    name,
+    item.sku,
+    item.SKU,
+    item.skuCode,
+    item.stockCode,
+    item.itemCode,
+    item.customSku,
+    item.code,
+  );
 
   return {
     ...itemWithoutLocationPrices,
     id: String(item.id || key || createId()),
     name,
+    sku,
+    customSku: sku,
     category: isSubRecipe ? normalizeSubRecipeCategory(item.category) : isManufactured ? normalizeManufacturedCategory(name, item.category) : (item.category || 'General - Raw Materials'),
     unit: item.unit || item.uom || 'ea',
     cost: Number(item.cost ?? item.costEx ?? 0) || 0,
@@ -613,7 +626,7 @@ function normalizeStockPayload(item = {}) {
 	    category += ' - Raw Materials';
 	  }
 
-  const sku = String(item.sku || item.SKU || item.skuCode || item.stockCode || item.itemCode || item.customSku || item.code || '').trim();
+  const sku = resolveStockItemSku(name, item.sku, item.SKU, item.skuCode, item.stockCode, item.itemCode, item.customSku, item.code);
 
   const payload = {
     id,

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
+import { buildDefaultStockSku, resolveStockItemSku } from './utils/stockSku.js';
 
 const dashboard = fs.readFileSync(new URL('./dashboard.js', import.meta.url), 'utf8');
 const dashboardCss = fs.readFileSync(new URL('./styles/dashboard.module.css', import.meta.url), 'utf8');
@@ -24,11 +25,16 @@ test('dashboard defaults to Today, includes week presets, removes search, and us
   assert.match(dashboardCss, /\.refreshButton\s*\{/);
 });
 
-test('stock item editor exposes SKU and list displays SKU plus product name', () => {
+test('stock item SKU defaults from the item name and preserves entered values exactly', () => {
   assert.match(stock, /name="sku"/);
   assert.match(stock, /sku: formData\.get\('sku'\)/);
-  assert.match(stock, /function formatStockItemSkuProduct/);
-  assert.match(stock, /`\$\{sku\} - \$\{name\}`/);
+  assert.match(stock, /resolveStockItemSku/);
+  assert.doesNotMatch(stock, /`\$\{sku\} - \$\{name\}`/);
+  assert.equal(buildDefaultStockSku('Burger Bun'), 'SKU - Burger Bun');
+  assert.equal(resolveStockItemSku('Burger Bun', ''), 'SKU - Burger Bun');
+  assert.equal(resolveStockItemSku('Burger Bun', 'BB-001'), 'BB-001');
+  assert.match(worker, /function resolveStockSku/);
+  assert.match(worker, /const hasSkuInput/);
 });
 
 test('purchase order PDF contains product, UOM and quantity only', () => {

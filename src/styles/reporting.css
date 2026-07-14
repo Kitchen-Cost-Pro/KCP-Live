@@ -3006,22 +3006,73 @@ body.light .reportBulkActions__supplier select {
 .reportSavedViews__list { max-height: 13rem; overflow: auto; }
 .reportSavedViews__item.is-active { background: rgba(148,163,184,.12); }
 
+.reportActionMenu__exports + .reportActionMenu__custom { border-top: 1px solid var(--report-border); }
 .reportColumnVisibility.reportColumnVisibility--embedded {
   display: block;
   margin: 0;
+  padding: 0;
   position: static;
   z-index: auto;
 }
+.reportColumnVisibility--embedded > details,
+.reportColumnVisibility--embedded > details[open] { position: static; }
+.reportColumnVisibility--embedded > details > summary {
+  display: flex;
+  width: 100%;
+  min-height: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: .7rem;
+  padding: .62rem;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--report-text);
+}
+.reportColumnVisibility--embedded > details > summary:hover { background: rgba(148,163,184,.08); }
+.reportColumnVisibility--embedded > details > summary > span:first-child { display: grid; gap: .08rem; }
+.reportColumnVisibility--embedded > details > summary small {
+  color: var(--report-muted);
+  font-size: .58rem;
+  font-weight: 850;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.reportColumnVisibility--embedded > details > summary strong { color: var(--report-text); font-size: .74rem; }
+.reportColumnVisibility__chevron {
+  color: var(--report-muted);
+  font-size: .9rem;
+  transition: transform .16s ease;
+}
+.reportColumnVisibility--embedded > details[open] > summary .reportColumnVisibility__chevron { transform: rotate(180deg); }
 .reportColumnVisibility--embedded form {
   position: static;
   min-width: 0;
-  padding: 0;
+  padding: .12rem .62rem .62rem;
   border: 0;
   border-radius: 0;
   background: transparent;
   box-shadow: none;
 }
-.reportColumnVisibility--embedded form > div {
+.reportColumnVisibility--embedded .reportColumnVisibility__toolbar {
+  display: flex;
+  justify-content: flex-end;
+  max-height: none;
+  margin-bottom: .3rem;
+  overflow: visible;
+}
+.reportColumnVisibility--embedded .reportColumnVisibility__toolbar button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--report-text);
+  font: inherit;
+  font-size: .68rem;
+  font-weight: 750;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.reportColumnVisibility--embedded .reportColumnVisibility__options {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: .18rem;
@@ -3043,7 +3094,6 @@ body.light .reportBulkActions__supplier select {
   color: var(--report-panel-strong);
   font-size: .68rem;
 }
-.reportColumnVisibility--embedded form header button { color: var(--report-text); }
 
 /* Fully opaque report dialogs. */
 .reportModalBackdrop {

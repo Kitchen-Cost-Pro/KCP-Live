@@ -303,3 +303,11 @@ The front Worker handles central authentication, admin routes, security configur
 - From and To remain locked to the same 24-hour boundary.
 - Go Live is disabled until Products, Recipes, and Locations are present and shows a saving state.
 - Go Live now records an activation timestamp. All webhook and manual Yoco sales processing honors the workspace setting, ignores pre-activation sales, and refuses to restore refunds unless the original sale was depleted.
+
+## Phase 59 — Report Actions and SKU Logic
+
+- Every report Actions menu now lists CSV, XLSX, PDF, and All Views Excel downloads above saved-view controls.
+- The visible-column selector is an expandable section beneath saved views and is collapsed by default so report actions open in a compact state.
+- Blank stock-item SKUs normalize to `SKU - Item Name` across manual creation, imports, existing records, stock tables, dashboards, Stock on Hand reporting, exports, and linked-site transfer data.
+- A user-entered SKU is preserved and displayed exactly as entered; the item name is no longer appended to explicit SKU values.
+- Validation: 411 automated tests passed, the production frontend build passed, Worker TypeScript validation passed, and Wrangler deployment dry run passed.

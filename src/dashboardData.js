@@ -5,6 +5,7 @@ import {
   normalizeLocationReference,
   resolveLocationDisplayName
 } from './utils/locationDisplayName.js';
+import { buildDefaultStockSku } from './utils/stockSku.js';
 
 const MAX_REPORT_PAGES = 10;
 const LEDGER_PAGE_SIZE = 2000;
@@ -627,7 +628,7 @@ function resolveSku(row = {}) {
     row.sku || row.SKU || row.stockCode || row.stock_code ||
     stockItem.sku || stockItem.SKU || stockItem.stock_code ||
     stockRaw.sku || stockRaw.SKU || stockRaw.itemSku || stockRaw.item_sku || stockRaw.Stock_Code || stockRaw['Stock Code']
-  ) || '—';
+  ) || buildDefaultStockSku(row.itemName || row.name || stockItem.name);
 }
 
 function normalizeStockStatus(value, currentStock, lowThreshold, parLevel) {

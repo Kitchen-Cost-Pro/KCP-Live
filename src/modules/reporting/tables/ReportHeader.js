@@ -40,7 +40,6 @@ export function renderReportHeader(result = {}, options = {}) {
           <span class="reportActionMenu__chevron" aria-hidden="true">⌄</span>
         </summary>
         <div class="reportActionMenu__panel" popover="manual" role="menu" aria-label="Report actions">
-          <div class="reportActionMenu__custom" data-report-actions-custom></div>
           ${canExport ? `
             <section class="reportActionMenu__section reportActionMenu__exports">
               <header><span>Export</span><strong>Current report</strong></header>
@@ -50,6 +49,7 @@ export function renderReportHeader(result = {}, options = {}) {
               ${report.allowAllViewsExport === false ? '' : '<button type="button" role="menuitem" data-report-export="all-xlsx"><span aria-hidden="true">ALL</span><strong>All Views Excel</strong></button>'}
             </section>
           ` : ''}
+          <div class="reportActionMenu__custom" data-report-actions-custom></div>
         </div>
       </details>
     </div>

@@ -13,10 +13,17 @@ const customSelectSource = read('src/modules/reporting/ui/customSelect.js');
 const reportingCss = read('src/styles/reporting.css');
 const workerSource = read('cloudflare-v2/src/legacy/report-scheduling-routes.ts');
 
-test('report actions own saved views and visible-column configuration', () => {
+test('report actions show downloads first and keep columns collapsed below saved views', () => {
   assert.match(reportHeaderSource, /data-report-actions-custom/);
+  assert.ok(
+    reportHeaderSource.indexOf('reportActionMenu__exports') < reportHeaderSource.indexOf('data-report-actions-custom'),
+    'report downloads must render above saved views',
+  );
   assert.match(reportViewerSource, /actionMount\?\.append\(renderSavedViewsControl/);
   assert.match(reportViewerSource, /actionMount\?\.append\(renderColumnVisibilityControl/);
+  assert.match(reportViewerSource, /<details class="reportColumnVisibility__details">/);
+  assert.doesNotMatch(reportViewerSource, /<details class="reportColumnVisibility__details" open/);
+  assert.match(reportingCss, /reportColumnVisibility--embedded > details > summary/);
   assert.match(savedViewsSource, /visibleColumns: config\.visibleColumns \|\| \[\]/);
 });
 

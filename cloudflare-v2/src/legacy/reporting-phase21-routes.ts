@@ -167,9 +167,10 @@ export async function getStockOnHandReport(
         itemId: clean(row.stock_item_id),
         stockItemId: clean(row.stock_item_id),
         itemName: clean(row.item_name),
-        sku: clean(
-          raw.sku || raw.SKU || raw.code || raw.itemCode || raw.item_code,
-        ),
+        sku:
+          clean(
+            raw.sku || raw.SKU || raw.code || raw.itemCode || raw.item_code,
+          ) || `SKU - ${clean(row.item_name, "Unnamed Stock Item")}`,
         category: clean(row.category, "General"),
         locationId: clean(row.location_id),
         locationName: clean(row.location_name),
