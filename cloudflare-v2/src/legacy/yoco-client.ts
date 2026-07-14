@@ -109,9 +109,9 @@ async function withYocoRetry<T>(task: () => Promise<T>, attempt = 0): Promise<T>
   try {
     return await task();
   } catch (caught) {
-    if (isYocoRateLimitError(caught) && attempt < 2) {
-      const fallbackDelay = 750 * (attempt + 1) * (attempt + 1);
-      const delay = Math.min(Math.max(caught.retryAfterMs || fallbackDelay, fallbackDelay), 5_000);
+    if (isYocoRateLimitError(caught) && attempt < 4) {
+      const fallbackDelay = Math.min(1_000 * Math.pow(2, attempt), 12_000);
+      const delay = Math.min(Math.max(caught.retryAfterMs || fallbackDelay, fallbackDelay), 30_000);
       await new Promise((resolve) => setTimeout(resolve, delay));
       return withYocoRetry(task, attempt + 1);
     }
@@ -254,18 +254,23 @@ export const fetchRefund = async (env: Env, apiKey: string, refundId: string) =>
 export const listWebhookSubscriptions = (env: Env, apiKey: string) => listAllPages(env, apiKey, '/v1/webhooks/subscriptions/');
 
 export function deleteWebhookSubscription(env: Env, apiKey: string, subscriptionId: string) {
-  return yocoFetch(env, apiKey, `/v1/webhooks/subscriptions/${encodeURIComponent(subscriptionId)}`, { method: 'DELETE' });
+  return withYocoRetry(() => yocoFetch(
+    env,
+    apiKey,
+    `/v1/webhooks/subscriptions/${encodeURIComponent(subscriptionId)}`,
+    { method: 'DELETE' },
+  ));
 }
 
 export function createWebhookSubscription(env: Env, apiKey: string, body: Record<string, unknown>) {
-  return yocoFetch(env, apiKey, '/v1/webhooks/subscriptions/', { method: 'POST', body });
+  return withYocoRetry(() => yocoFetch(env, apiKey, '/v1/webhooks/subscriptions/', { method: 'POST', body }));
 }
 
 export function updateWebhookSubscription(env: Env, apiKey: string, subscriptionId: string, body: Record<string, unknown>) {
-  return yocoFetch(env, apiKey, `/v1/webhooks/subscriptions/${encodeURIComponent(subscriptionId)}`, {
+  return withYocoRetry(() => yocoFetch(env, apiKey, `/v1/webhooks/subscriptions/${encodeURIComponent(subscriptionId)}`, {
     method: 'PATCH',
     body
-  });
+  }));
 }
 
 

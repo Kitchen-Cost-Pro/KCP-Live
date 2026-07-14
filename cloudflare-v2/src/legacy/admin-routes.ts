@@ -1,7 +1,7 @@
 import type { AuthContext, Env, DbLike, DbStatementLike } from './types';
 import { error, json, readJson } from './http';
 import { requireAuth } from './auth';
-import { connectYoco, disconnectYoco, getYocoApiKey, getYocoConnection, syncYocoCatalogue, syncYocoSales } from './yoco-service';
+import { connectYoco, disconnectYoco, getYocoApiKey, getYocoConnection, resetYocoWebhook, syncYocoCatalogue, syncYocoSales } from './yoco-service';
 import { sendEmail, type EmailDeliveryConfig } from './email';
 import { encryptTextWithSecret, decryptTextWithSecret } from './crypto';
 import { KCP_WORKER_RELEASE, KCP_WORKER_RELEASE_DATE, KCP_REFUND_PIPELINE_VERSION } from '../release';
@@ -2009,10 +2009,11 @@ export async function postAdminYocoResetWebhook(request: Request, env: Env, work
   const adminSession = await requireAdmin(request, env);
   const apiKey = await getYocoApiKey(env, workspaceId);
   if (!apiKey) return error(request, env, 409, 'No Yoco API key stored for this workspace — connect Yoco first.');
-  await disconnectYoco(env, workspaceId);
-  const result = await connectYoco(env, workspaceId, apiKey);
+  const result = await resetYocoWebhook(env, workspaceId, apiKey);
   await writeAdminAuditEvent(env, adminAuditActor(adminSession), 'yoco.reset_webhook', workspaceId, {
-    webhookEnabled: Boolean(result.webhookEnabled)
+    webhookEnabled: Boolean(result.webhookEnabled),
+    createBeforeCleanup: true,
+    cleanupPending: Boolean(result.webhookCleanupPending),
   });
   return json(request, env, { ok: true, ...result });
 }

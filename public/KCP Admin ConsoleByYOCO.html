@@ -1789,7 +1789,7 @@ function getIntegrationSelectedWorkspaceId() {
     return select.value;
 }
 
-const KCP_EXPECTED_WORKER_RELEASE = 'phase71-yoco-refund-live-recovery';
+const KCP_EXPECTED_WORKER_RELEASE = 'phase72-yoco-webhook-rate-limit-safe';
 
 function getYocoIntegrationSummaryForWorkspace(wsId) {
     const ws = KCPStore.state.workspaces?.[wsId];
@@ -2433,11 +2433,13 @@ async function connectYocoIntegrationFromAdmin(wsId = '') {
     if (!apiKey) return showToast('Enter the YOCO_SECRET_KEY before connecting or rotating credentials.', 'error');
     try {
         const result = await runAdminYocoAction(targetWsId, 'Connecting Yoco and syncing the catalogue...', async (workspaceId) => {
-            const connection = await callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(workspaceId)}/yoco/connect`, { apiKey });
-            const catalogue = await callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(workspaceId)}/yoco/sync-catalogue`);
-            return { connection, catalogue };
+            return callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(workspaceId)}/yoco/connect`, { apiKey });
         });
-        showToast(`Yoco connected and catalogue synced. Historical sales were not imported. ${result?.catalogue?.productsImported || 0} products imported.`, 'success');
+        const catalogue = result?.catalogueSync || {};
+        const cleanupNote = result?.webhookCleanupPending
+            ? ` The live webhook is active; ${Number(result?.deferredSubscriptionCleanupCount || 0)} stale subscription cleanup attempt(s) were deferred by Yoco rate limiting.`
+            : '';
+        showToast(`Yoco connected and catalogue synced. Historical sales were not imported. ${catalogue?.productsImported || 0} products imported.${cleanupNote}`, result?.webhookCleanupPending ? 'warning' : 'success');
     } catch (e) { }
 }
 
@@ -2605,10 +2607,14 @@ async function resetWebhookSubscriptionForWorkspace(wsId = '') {
     const targetWsId = wsId || getIntegrationSelectedWorkspaceId();
     if (!targetWsId) return showToast('Select a workspace first', 'error');
     try {
-        await runAdminYocoAction(targetWsId, 'Resetting Webhook...', async (workspaceId) => {
+        const result = await runAdminYocoAction(targetWsId, 'Resetting Webhook...', async (workspaceId) => {
             return callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(workspaceId)}/yoco/reset-webhook`);
         });
-        showToast('Yoco webhook subscription reset', 'success');
+        if (result?.webhookCleanupPending) {
+            showToast(`Replacement webhook is live. ${Number(result?.deferredSubscriptionCleanupCount || 0)} stale subscription cleanup attempt(s) were deferred by Yoco rate limiting.`, 'warning');
+        } else {
+            showToast('Yoco webhook subscription reset', 'success');
+        }
     } catch (e) { }
 }
 

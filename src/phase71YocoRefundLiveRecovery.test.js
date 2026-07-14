@@ -9,10 +9,10 @@ test('Phase 71 exposes the deployed Worker release so Pages and API drift is vis
   const worker = read('cloudflare-v2/src/index.ts');
   const admin = read('public/KCP Admin ConsoleByYOCO.html');
 
-  assert.match(release, /phase71-yoco-refund-live-recovery/);
+  assert.match(release, /phase7[12]-yoco-(?:refund-live-recovery|webhook-rate-limit-safe)/);
   assert.match(worker, /\/api\/runtime-version/);
   assert.match(worker, /workerRelease: KCP_WORKER_RELEASE/);
-  assert.match(admin, /KCP_EXPECTED_WORKER_RELEASE = 'phase71-yoco-refund-live-recovery'/);
+  assert.match(admin, /KCP_EXPECTED_WORKER_RELEASE = 'phase7[12]-yoco-(?:refund-live-recovery|webhook-rate-limit-safe)'/);
   assert.match(admin, /updating Pages alone does not update webhook logic/);
 });
 

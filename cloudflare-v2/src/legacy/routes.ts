@@ -36,6 +36,7 @@ import {
   listOrdersPage,
 } from "./yoco-client";
 import {
+  cleanupStaleYocoWebhookSubscriptions,
   connectYoco,
   disconnectYoco,
   fetchAssignedYocoModifierGroups,
@@ -2918,6 +2919,10 @@ export async function adminActionDO(
       return json(request, env, { ok: true, ...result });
     }
     if (action === "yoco-webhook-health") {
+      const webhookCleanup = await cleanupStaleYocoWebhookSubscriptions(env, workspaceId).catch((caught) => ({
+        status: 'cleanup_failed',
+        error: caught instanceof Error ? caught.message : String(caught),
+      }));
       const health = await checkYocoWebhookSignatureHealth(env, workspaceId);
       const retry = await retryFailedYocoOrders(env, workspaceId, {
         automatic: true,
@@ -2926,7 +2931,7 @@ export async function adminActionDO(
         status: 'retry_failed',
         error: caught instanceof Error ? caught.message : String(caught),
       }));
-      return json(request, env, { ...health, retry });
+      return json(request, env, { ...health, webhookCleanup, retry });
     }
     if (action === "repair-baseline") {
       let changes = 0;
