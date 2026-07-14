@@ -30,6 +30,7 @@ import {
   yocoWebhookEventFields,
 } from './yoco-sales';
 import { findRefund, findRefunds } from './yoco-webhooks';
+import { resolveYocoRefundWebhookContext } from './yoco-refund-context';
 import { recordIntegrationLog, runLoggedIntegrationOperation } from './integration-log';
 
 type Row = Record<string, unknown>;
@@ -1961,12 +1962,11 @@ function refundRetryOutcome(result: {
 }
 
 /**
- * Replays pending refund webhooks from their exact order_id/payment_id references.
+ * Replays pending refund webhooks from their Yoco refund-order and payment references.
  *
- * Yoco's payment.refunded event intentionally contains only identifiers. The order's
- * returned_line_items can become readable shortly after the webhook. This retry path
- * therefore re-fetches that exact payment and order instead of depending on a broad
- * List Refunds scan or a manual full resync.
+ * payment.refunded.order_id identifies the refund order, not the original sale. This
+ * path resolves payment.order_id or refund.original_order_id, then loads the original
+ * sale because that is the resource containing sold line_items and return detail.
  */
 export async function retryPendingYocoRefundWebhooks(
   env: Env,
@@ -2042,29 +2042,19 @@ export async function retryPendingYocoRefundWebhooks(
     const payload = jsonParse(row.raw_json);
     const fields = yocoWebhookEventFields(payload);
     const paymentId = fields.paymentId;
-    let orderId = text(row.yoco_order_id || fields.orderId);
+    const refundOrderId = fields.orderId;
+    const storedOrderId = text(row.yoco_order_id);
     try {
-      let payment: Row | null = null;
-      if (paymentId) {
-        payment = await fetchPayment(env, apiKey, paymentId) as Row;
-        orderId = orderId || text(payment.order_id || payment.orderId);
-      }
-
-      let order = extractYocoOrder(payload);
-      if (!order && orderId) {
-        try {
-          order = await fetchOrder(env, apiKey, orderId) as Row;
-        } catch (caught) {
-          if (isYocoRateLimitError(caught)) throw caught;
-          order = await loadCachedYocoSaleForRetry(env, workspaceId, orderId);
-        }
-      }
-      order = mergePaymentRefundsForRetry(order, payment);
-      const resolvedOrderId = text(order?.id || order?.order_id || order?.orderId || orderId);
-      if (resolvedOrderId) orderId = resolvedOrderId;
+      const context = await resolveYocoRefundWebhookContext(env, workspaceId, apiKey, {
+        webhookOrderId: refundOrderId,
+        paymentId,
+        storedOrderId,
+      });
+      const order = context.order;
+      let orderId = context.originalOrderId;
 
       if (!order || !orderId) {
-        const message = 'Refund webhook is waiting for Yoco to expose the referenced payment and order detail.';
+        const message = 'Refund webhook is waiting for Yoco to expose the original sale order. The webhook order id is a refund-order reference and is not used for stock.';
         await env.DB.prepare(
           `UPDATE yoco_webhook_events
               SET status = 'attention',

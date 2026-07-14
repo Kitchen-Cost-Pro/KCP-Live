@@ -37,16 +37,18 @@ test('Phase 67 keeps a rate-limited refund webhook retryable and does not mark i
   assert.match(routes, /Refund webhook verified, but Yoco has not yet exposed the refund and returned-line detail/);
 });
 
-test('Phase 67/68 uses bounded staged payment and order fetches for standard refund webhooks', () => {
+test('Phase 67/68 uses bounded staged payment and original-order fetches for standard refund webhooks', () => {
   const routes = read('cloudflare-v2/src/legacy/routes.ts');
+  const context = read('cloudflare-v2/src/legacy/yoco-refund-context.ts');
   const start = routes.indexOf('async function loadYocoOrderForWebhook');
   const end = routes.indexOf('function getObjectLineItems', start);
   const loader = routes.slice(start, end);
-  assert.match(loader, /fetchPaymentOnce\(env, apiKey, paymentId\)/);
-  assert.match(loader, /fetchOrderOnce\(env, apiKey, resolvedOrderId\)/);
-  assert.match(loader, /for \(const waitMs of \[500, 1250\]\)/);
-  assert.match(loader, /if \(isYocoRateLimitError\(caught\)\) throw caught/);
-  assert.doesNotMatch(loader, /for \(let pageIndex/);
+  assert.match(loader, /resolveYocoRefundWebhookContext/);
+  assert.match(loader, /singleAttempt: true/);
+  assert.ok(context.indexOf('fetchPaymentOnce(env') < context.indexOf('fetchOrderOnce(env'));
+  assert.match(context, /fetchOrderOnce\(env, apiKey, originalOrderId\)/);
+  assert.match(context, /if \(isYocoRateLimitError\(caught\)\) throw caught/);
+  assert.doesNotMatch(context, /for \(let pageIndex/);
 });
 
 test('Phase 67 caches refund orders and stops issuing requests when Yoco rate limits enrichment', () => {

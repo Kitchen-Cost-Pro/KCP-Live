@@ -20,8 +20,9 @@ test('Phase 70 retries a refund from its exact payment and order webhook identif
 
   assert.match(retryBlock, /event\.status IN \('attention', 'failed'\)/);
   assert.match(retryBlock, /const fields = yocoWebhookEventFields\(payload\)/);
-  assert.match(retryBlock, /payment = await fetchPayment\(env, apiKey, paymentId\)/);
-  assert.match(retryBlock, /order = await fetchOrder\(env, apiKey, orderId\)/);
+  assert.match(retryBlock, /resolveYocoRefundWebhookContext/);
+  assert.match(retryBlock, /webhookOrderId: refundOrderId/);
+  assert.match(retryBlock, /let orderId = context\.originalOrderId/);
   assert.match(retryBlock, /const refunds = findRefunds\(order, paymentId, null\)/);
   assert.match(retryBlock, /await processYocoOrder\(env, workspaceId, order/);
   assert.match(retryBlock, /status = allIgnored \? 'ignored' : needsAttention \? 'attention' : 'processed'/);

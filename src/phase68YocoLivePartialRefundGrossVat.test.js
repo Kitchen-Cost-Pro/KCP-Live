@@ -6,15 +6,19 @@ import { buildPaymentModel } from './modules/reporting/reports/sales/salesReport
 
 const read = (file) => fs.readFileSync(file, 'utf8');
 
-test('Phase 68 stages payment then order and schedules automatic DO retry for eventual consistency', () => {
+test('Phase 68 stages payment then original order and schedules automatic DO retry for eventual consistency', () => {
   const routes = read('cloudflare-v2/src/legacy/routes.ts');
   const client = read('cloudflare-v2/src/legacy/yoco-client.ts');
+  const context = read('cloudflare-v2/src/legacy/yoco-refund-context.ts');
   const workspace = read('cloudflare-v2/src/workspace-do.ts');
   assert.match(client, /export const fetchPaymentOnce/);
   assert.match(client, /export const fetchOrderOnce/);
+  assert.ok(context.indexOf('fetchPaymentOnce(env') < context.indexOf('fetchOrderOnce(env'));
+  assert.match(context, /payment\?\.order_id/);
+  assert.match(context, /refund\.original_order_id/);
   const loader = routes.slice(routes.indexOf('async function loadYocoOrderForWebhook'), routes.indexOf('function getObjectLineItems'));
-  assert.ok(loader.indexOf('fetchPaymentOnce') < loader.indexOf('fetchOrderOnce'));
-  assert.match(loader, /lineBearingReturnCount\(order\) >= expectedRefunds/);
+  assert.match(loader, /resolveYocoRefundWebhookContext/);
+  assert.match(loader, /singleAttempt: true/);
   assert.match(workspace, /async alarm\(\): Promise<void>/);
   assert.match(workspace, /retryPendingYocoRefundWebhooks/);
   assert.match(workspace, /setAlarm\(Date\.now\(\) \+ delayMs\)/);

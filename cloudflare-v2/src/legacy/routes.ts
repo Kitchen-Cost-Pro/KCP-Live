@@ -28,9 +28,7 @@ import {
 import {
   fetchModifierGroup,
   fetchOrder,
-  fetchOrderOnce,
   fetchPayment,
-  fetchPaymentOnce,
   isYocoRateLimitError,
   listOrders,
   listOrdersPage,
@@ -53,6 +51,7 @@ import {
   testYocoWebhook,
 } from "./yoco-service";
 import { extractYocoRefund, findRefunds, verifyYocoWebhook } from "./yoco-webhooks";
+import { resolveYocoRefundWebhookContext } from "./yoco-refund-context";
 import { recordIntegrationLog } from "./integration-log";
 import {
   decryptTextWithSecret,
@@ -14980,45 +14979,15 @@ async function loadYocoOrderForWebhook(
   const apiKey = await getYocoApiKey(env, workspaceId);
 
   if (isRefundLookup) {
-    // Yoco's payment.refunded webhook supplies only order_id and payment_id. Fetch
-    // the payment first to identify approved refund summaries, then fetch the order
-    // because returned_line_items and modifiers live on order.returns. These are
-    // single-attempt requests; KCP controls the bounded eventual-consistency retry.
-    let payment: Record<string, unknown> | null = null;
-    let resolvedOrderId = orderId;
-    if (paymentId) {
-      try {
-        payment = await fetchPaymentOnce(env, apiKey, paymentId) as Record<string, unknown>;
-        resolvedOrderId = resolvedOrderId || text(payment.order_id || payment.orderId);
-      } catch (caught) {
-        if (isYocoRateLimitError(caught)) throw caught;
-      }
-    }
-
-    let order = payloadOrder && getObjectLineItems(payloadOrder).length
-      ? payloadOrder
-      : resolvedOrderId
-        ? await fetchOrderOnce(env, apiKey, resolvedOrderId) as Record<string, unknown>
-        : null;
-    if (!order && resolvedOrderId) order = await loadCachedYocoOrder(env, workspaceId, resolvedOrderId);
-    order = mergePaymentRefundsIntoOrder(order, payment);
-
-    const expectedRefunds = approvedPaymentRefundCount(payment);
-    // The payment can become refunded a fraction before the order's physical return
-    // collection is queryable. Re-read only the order, at most twice, and only while
-    // a returned-line record is missing. The DO alarm handles longer delays.
-    for (const waitMs of [500, 1250]) {
-      if (!resolvedOrderId || !expectedRefunds || lineBearingReturnCount(order) >= expectedRefunds) break;
-      await delay(waitMs);
-      try {
-        const refreshed = await fetchOrderOnce(env, apiKey, resolvedOrderId) as Record<string, unknown>;
-        order = mergePaymentRefundsIntoOrder(refreshed, payment);
-      } catch (caught) {
-        if (isYocoRateLimitError(caught)) throw caught;
-        break;
-      }
-    }
-    return order;
+    // Yoco payment.refunded.order_id identifies the refund order. It is not the
+    // original sale order that contains the sold line_items. Resolve the original
+    // order through payment.order_id or refund.original_order_id before touching
+    // reporting or stock.
+    const context = await resolveYocoRefundWebhookContext(env, workspaceId, apiKey, {
+      webhookOrderId: orderId,
+      paymentId,
+    }, { singleAttempt: true });
+    return context.order;
   }
 
   if (orderId) {
@@ -15148,7 +15117,7 @@ export async function postYocoWebhook(
     return error(request, env, 400, "Yoco webhook payload was not valid JSON.");
   }
   const { eventType, orderId, paymentId } = yocoWebhookEventFields(payload);
-  const eventDisposition = yocoWebhookEventDisposition(eventType);
+  let eventDisposition = yocoWebhookEventDisposition(eventType);
   const connection = await getYocoConnection(env, workspaceId);
   if (!connection?.webhook_secret) {
     await recordYocoWebhookRejection(env, {
@@ -15400,6 +15369,52 @@ export async function postYocoWebhook(
     }
     throw caught;
   }
+  // Yoco also emits order.completed for the refund order. That order can be a
+  // valid resource but has no sale line_items. Resolve it back to the original
+  // sale and process it as a refund refresh rather than reporting a broken sale.
+  if (eventDisposition === "sale" && (!order || !getObjectLineItems(order).length) && orderId) {
+    try {
+      const apiKey = await getYocoApiKey(env, workspaceId);
+      const refundContext = await resolveYocoRefundWebhookContext(env, workspaceId, apiKey, {
+        webhookOrderId: orderId,
+        paymentId,
+      }, { singleAttempt: true });
+      if (refundContext.order && refundContext.refunds.length) {
+        order = refundContext.order;
+        eventDisposition = "refund_refresh";
+      }
+    } catch (caught) {
+      if (isYocoRateLimitError(caught)) {
+        const retryAfterSeconds = Math.max(1, Math.ceil(Number(caught.retryAfterMs || 60_000) / 1000));
+        const message = `Yoco rate-limited the refund-order lookup. KCP kept this event retryable and did not treat the refund order as a new sale. Retry after approximately ${retryAfterSeconds} second(s).`;
+        await env.DB.prepare(
+          `UPDATE yoco_webhook_events
+              SET status = 'attention',
+                  processed_at = ?2,
+                  error_message = ?3
+            WHERE id = ?1`,
+        ).bind(webhookDbId, nowIso(), message).run();
+        await recordIntegrationLog(env, workspaceId, {
+          operation: "yoco.webhook.refund_order_resolution",
+          status: "warning",
+          message,
+          details: { eventId, eventType, refundOrderId: orderId, paymentId, retryAfterSeconds },
+          startedAt: receivedAt,
+          completedAt: nowIso(),
+          durationMs: Date.now() - startedMs,
+        });
+        return json(request, env, {
+          ok: true,
+          status: "attention",
+          retryable: true,
+          reason: "yoco_rate_limited",
+          retryAfterSeconds,
+        });
+      }
+    }
+  }
+
+
   if (!order) {
     const message = "Yoco order detail is not available yet. The webhook remains retryable; no stock or reporting completion was recorded.";
     await env.DB.prepare(
@@ -15420,6 +15435,7 @@ export async function postYocoWebhook(
     });
     return json(request, env, { ok: true, status: "attention", retryable: true, reason: "order_detail_unavailable" });
   }
+
 
   const resolvedOrderId = text(order.id || order.order_id || order.orderId || orderId);
   if (resolvedOrderId && resolvedOrderId !== orderId) {

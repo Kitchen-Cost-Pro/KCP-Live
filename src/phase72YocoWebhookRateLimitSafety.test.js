@@ -9,9 +9,9 @@ test('Phase 72 identifies the rate-limit-safe Worker release', () => {
   const admin = read('public/KCP Admin ConsoleByYOCO.html');
   const verify = read('scripts/verify-worker-release.mjs');
 
-  assert.match(release, /phase72-yoco-webhook-rate-limit-safe/);
-  assert.match(admin, /KCP_EXPECTED_WORKER_RELEASE = 'phase72-yoco-webhook-rate-limit-safe'/);
-  assert.match(verify, /phase72-yoco-webhook-rate-limit-safe/);
+  assert.match(release, /phase7[23]-yoco-(?:webhook-rate-limit-safe|refund-original-order-resolution)/);
+  assert.match(admin, /KCP_EXPECTED_WORKER_RELEASE = 'phase7[23]-yoco-(?:webhook-rate-limit-safe|refund-original-order-resolution)'/);
+  assert.match(verify, /phase7[23]-yoco-(?:webhook-rate-limit-safe|refund-original-order-resolution)/);
 });
 
 test('Phase 72 creates and stores the replacement webhook before scheduling stale cleanup', () => {

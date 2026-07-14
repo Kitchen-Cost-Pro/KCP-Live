@@ -227,6 +227,26 @@ export async function listOrdersPage(env: Env, apiKey: string, params: Record<st
   };
 }
 
+export async function listRefundsPageOnce(env: Env, apiKey: string, params: Record<string, unknown> = {}) {
+  const page = await yocoFetch(env, apiKey, '/v1/refunds/', {
+    params: { ...params, limit: params.limit || 100 }
+  });
+  return {
+    rows: listData(page),
+    nextCursor: nextCursor(page)
+  };
+}
+
+export async function listRefundsPage(env: Env, apiKey: string, params: Record<string, unknown> = {}) {
+  const page = await withYocoRetry(() => yocoFetch(env, apiKey, '/v1/refunds/', {
+    params: { ...params, limit: params.limit || 100 }
+  }));
+  return {
+    rows: listData(page),
+    nextCursor: nextCursor(page)
+  };
+}
+
 // Single-attempt detail fetches are used by live webhooks. A webhook handler must
 // control its own staged requests so an internal retry loop cannot multiply API
 // calls and exhaust Yoco's rate limit before the order return is visible.
