@@ -1773,6 +1773,10 @@ export async function retryPendingYocoRefundWebhooks(
         AND (
           event.status IN ('attention', 'failed')
           OR (
+            event.status = 'processing'
+            AND datetime(COALESCE(event.processed_at, event.created_at)) <= datetime('now', '-5 minutes')
+          )
+          OR (
             event.status = 'processed'
             AND lower(replace(event.event_type, '_', '.')) IN ('payment.refunded', 'refund.succeeded', 'refund.successful')
             AND COALESCE(event.yoco_order_id, '') <> ''
@@ -2499,6 +2503,10 @@ export async function retryFailedYocoOrders(
         WHERE event.workspace_id = ?1
           AND (
             event.status IN ('failed', 'rejected', 'attention')
+            OR (
+              event.status = 'processing'
+              AND datetime(COALESCE(event.processed_at, event.created_at)) <= datetime('now', '-5 minutes')
+            )
             OR (
               event.status = 'processed'
               AND lower(replace(event.event_type, '_', '.')) IN ('payment.refunded', 'refund.succeeded', 'refund.successful')

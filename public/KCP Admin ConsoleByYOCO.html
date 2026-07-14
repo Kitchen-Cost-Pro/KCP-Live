@@ -1789,6 +1789,8 @@ function getIntegrationSelectedWorkspaceId() {
     return select.value;
 }
 
+const KCP_EXPECTED_WORKER_RELEASE = 'phase71-yoco-refund-live-recovery';
+
 function getYocoIntegrationSummaryForWorkspace(wsId) {
     const ws = KCPStore.state.workspaces?.[wsId];
     const live = ws?.data?.integrations?.yoco || {};
@@ -1800,6 +1802,8 @@ function getYocoIntegrationSummaryForWorkspace(wsId) {
     const connectionActive = sync.connectionActive === true || rawStatus === 'connected';
     const webhookEnabled = sync.webhook?.enabled === true;
     const lastError = sync.lastError || '';
+    const workerRelease = String(sync.workerRelease || '').trim();
+    const workerCurrent = workerRelease === KCP_EXPECTED_WORKER_RELEASE;
 
     let status = 'inactive';
     let detail = 'Not connected';
@@ -1807,9 +1811,14 @@ function getYocoIntegrationSummaryForWorkspace(wsId) {
     if (lastError || rawStatus === 'error' || (connectionActive && !webhookEnabled)) {
         status = 'failing';
         detail = lastError || 'Yoco API is connected, but the live webhook needs attention.';
+    } else if (connectionActive && webhookEnabled && !workerCurrent) {
+        status = 'failing';
+        detail = workerRelease
+            ? `Backend Worker is ${workerRelease}; ${KCP_EXPECTED_WORKER_RELEASE} must be deployed for live refunds.`
+            : `Backend Worker is not reporting a release. Deploy ${KCP_EXPECTED_WORKER_RELEASE}; updating Pages alone does not update webhook logic.`;
     } else if (connectionActive && webhookEnabled) {
         status = 'successful';
-        detail = 'Connected — webhook active';
+        detail = 'Connected — webhook active and live refund worker verified';
     }
 
     return {
@@ -1818,8 +1827,13 @@ function getYocoIntegrationSummaryForWorkspace(wsId) {
         sync,
         credentials,
         queueRows,
-        queuedCount: queueRows.filter(row => ['received', 'pending', 'retry', 'failed', 'attention'].includes(String(row.status || '').toLowerCase())).length,
+        queuedCount: Math.max(
+            queueRows.filter(row => ['received', 'pending', 'retry', 'failed', 'attention'].includes(String(row.status || '').toLowerCase())).length,
+            Number(sync.refundRecovery?.pendingEvents || 0) || 0
+        ),
         lastSyncAt,
+        workerRelease,
+        workerCurrent,
         status,
         detail
     };
@@ -1911,6 +1925,10 @@ function renderWorkspaceIntegrationPanel(wsId, options = {}) {
                     <p class="text-[10px] font-bold ${webhookEnabled ? 'text-emerald-300' : 'text-amber-300'} normal-case mt-1">${webhookEnabled ? 'Active' : 'Needs check'}</p>
                 </div>
                 <div class="p-3 rounded-xl bg-black/10">
+                    <p class="text-[8px] text-slate-500 uppercase">Backend Release</p>
+                    <p class="text-[10px] font-bold ${summary.workerCurrent ? 'text-emerald-300' : 'text-red-300'} normal-case mt-1">${adminEscapeHtml(summary.workerRelease || 'Old Worker / not reported')}</p>
+                </div>
+                <div class="p-3 rounded-xl bg-black/10">
                     <p class="text-[8px] text-slate-500 uppercase">Events Needing Attention</p>
                     <p class="text-[10px] font-bold text-slate-200 normal-case mt-1">${summary.queuedCount || 0} pending events</p>
                 </div>
@@ -1943,6 +1961,7 @@ function renderWorkspaceIntegrationPanel(wsId, options = {}) {
                     <button onclick="syncYocoFullFromAdmin(${adminInlineString(wsId)})" class="btn-ghost w-full text-sky-300"><i class="fa-solid fa-arrows-spin mr-2"></i>Restart Sync</button>
                 </div>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <button onclick="retryPendingYocoRefunds(${adminInlineString(wsId)})" class="btn-ghost w-full text-orange-300"><i class="fa-solid fa-rotate-left mr-2"></i>Retry Live Refunds</button>
                     <button onclick="retryAllErroredYocoOrders(${adminInlineString(wsId)})" class="btn-ghost w-full text-red-300"><i class="fa-solid fa-triangle-exclamation mr-2"></i>Resync Errored Orders</button>
                     <button onclick="resetWebhookSubscriptionForWorkspace(${adminInlineString(wsId)})" class="btn-ghost w-full text-amber-400"><i class="fa-solid fa-tower-broadcast mr-2"></i>Webhook Reset</button>
                     <button onclick="testWebhookSubscriptionForWorkspace(${adminInlineString(wsId)})" class="btn-ghost w-full text-violet-300"><i class="fa-solid fa-vial-circle-check mr-2"></i>Test Webhook</button>
@@ -2550,6 +2569,21 @@ async function factoryResetIntegrationCredentials(wsId = '') {
         console.error('[Admin] Failed to factory reset workspace integration', e);
         showToast(`Could not reset integration: ${e.message}`, 'error');
     }
+}
+
+async function retryPendingYocoRefunds(wsId = '') {
+    const targetWsId = wsId || getIntegrationSelectedWorkspaceId();
+    if (!targetWsId) return showToast('Select a workspace first', 'error');
+    try {
+        const result = await runAdminYocoAction(targetWsId, 'Retrying Live Refunds...', async (workspaceId) => {
+            return callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(workspaceId)}/yoco/retry-refunds`);
+        });
+        if (result?.status === 'nothing_to_retry') {
+            showToast('No stranded live refund webhook requires recovery.', 'success');
+        } else {
+            showToast(`Live refund recovery complete. ${result?.refundsProcessed || 0} refund(s) and ${result?.stockMovements || 0} stock movement(s) recovered.`, result?.errors?.length ? 'error' : 'success');
+        }
+    } catch (e) { }
 }
 
 async function retryAllErroredYocoOrders(wsId = '') {

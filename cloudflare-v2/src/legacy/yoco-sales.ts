@@ -954,7 +954,7 @@ function orderLocationId(order: Row, line: Row) {
 }
 
 function getPaymentId(order: Row, refund: Row | null) {
-  if (refund) return text(refund.id || refund.payment_id || refund.paymentId);
+  if (refund) return text(refund.payment_id || refund.paymentId || refund.id);
   const payments = order.payments;
   if (Array.isArray(payments) && payments[0]) {
     const approved = payments.find((payment) => normalizeText((payment as Row).status) === 'approved') || payments[0];

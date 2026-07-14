@@ -47,6 +47,7 @@ import {
   syncYocoCatalogue,
   syncYocoSales,
   retryFailedYocoOrders,
+  retryPendingYocoRefundWebhooks,
   resetYocoWebhook,
   testYocoWebhook,
 } from "./yoco-service";
@@ -83,6 +84,7 @@ import {
 import { resolveLocationDisplayName } from "./location-display";
 // @ts-ignore Shared unit-aware Yoco Money conversion. Money objects are minor units; normalized scalars are major units.
 import { yocoMoneyToMajor } from "../../../src/modules/reporting/engine/yocoFinancials.js";
+import { KCP_WORKER_RELEASE, KCP_REFUND_PIPELINE_VERSION } from "../release";
 
 function text(value: unknown, fallback = "") {
   return String(value ?? fallback).trim();
@@ -2754,7 +2756,11 @@ export async function adminYocoActionDO(
     }
     if (action === "retry-failed-orders") {
       const result = await retryFailedYocoOrders(env, workspaceId, { automatic: false });
-      return json(request, env, { ok: true, ...result });
+      return json(request, env, { ok: true, workerRelease: KCP_WORKER_RELEASE, ...result });
+    }
+    if (action === "retry-refunds") {
+      const result = await retryPendingYocoRefundWebhooks(env, workspaceId, { limit: 100 });
+      return json(request, env, { ok: true, workerRelease: KCP_WORKER_RELEASE, refundPipelineVersion: KCP_REFUND_PIPELINE_VERSION, ...result });
     }
     if (action === "reset-webhook") {
       const result = await resetYocoWebhook(env, workspaceId);
@@ -2818,7 +2824,14 @@ export async function adminYocoEventsDO(
                 event_type AS operation,
                 yoco_order_id,
                 status,
-                COALESCE(NULLIF(error_message, ''), event_type) AS message,
+                COALESCE(
+                  NULLIF(error_message, ''),
+                  CASE
+                    WHEN lower(replace(event_type, '_', '.')) = 'payment.refunded' AND status = 'processed'
+                      THEN 'Refund webhook marked processed. Confirm the linked refund reporting row and stock movement were created.'
+                    ELSE event_type
+                  END
+                ) AS message,
                 raw_json AS details_json,
                 processed_at,
                 NULL AS duration_ms,
@@ -2848,6 +2861,8 @@ export async function adminYocoEventsDO(
     .all<any>();
   return json(request, env, {
     ok: true,
+    workerRelease: KCP_WORKER_RELEASE,
+    refundPipelineVersion: KCP_REFUND_PIPELINE_VERSION,
     events: (rows.results || []).map((row) => ({
       id: text(row.id),
       source: text(row.source || "webhook"),
@@ -15563,6 +15578,8 @@ export async function postYocoWebhook(
       details: {
         eventId,
         eventType,
+        workerRelease: KCP_WORKER_RELEASE,
+        refundPipelineVersion: KCP_REFUND_PIPELINE_VERSION,
         orderId: resolvedOrderId || orderId,
         paymentId,
         signatureVerified: true,
@@ -15580,6 +15597,8 @@ export async function postYocoWebhook(
     return json(request, env, {
       ok: true,
       status: webhookStatus,
+      workerRelease: KCP_WORKER_RELEASE,
+      refundPipelineVersion: KCP_REFUND_PIPELINE_VERSION,
       result,
       ...(returnsResult.returnsProcessed > 0
         ? {

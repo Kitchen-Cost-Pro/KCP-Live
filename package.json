@@ -11,7 +11,8 @@
     "preview": "vite preview --host 127.0.0.1",
     "typecheck:worker": "npm --prefix cloudflare-v2 run typecheck",
     "deploy:worker": "npm --prefix cloudflare-v2 run deploy",
-    "check:hardening": "npm test && npm run build && npm --prefix cloudflare-v2 run check:deploy"
+    "check:hardening": "npm test && npm run build && npm --prefix cloudflare-v2 run check:deploy",
+    "verify:worker-release": "node scripts/verify-worker-release.mjs"
   },
   "dependencies": {
     "chart.js": "^4.5.1",

@@ -15,6 +15,7 @@ import {
 } from './legacy/admin-routes';
 import type { AdminTenantSummary } from './legacy/admin-routes';
 import { dispatchCentralRoute } from './legacy/index';
+import { KCP_WORKER_RELEASE, KCP_WORKER_RELEASE_DATE, KCP_REFUND_PIPELINE_VERSION } from './release';
 
 export { WorkspaceDO } from './workspace-do';
 
@@ -41,7 +42,7 @@ async function dispatchCentral(request: Request, env: Env, url: URL): Promise<Re
     const workspaceId = decodeURIComponent(adminWorkspaceYocoM[1]);
     const action = decodeURIComponent(adminWorkspaceYocoM[2]);
     const allowedGetActions = new Set(['status', 'events']);
-    const allowedPostActions = new Set(['connect', 'disconnect', 'sync-catalogue', 'sync-sales', 'reconcile-sales', 'retry-failed-orders', 'reset-webhook', 'test-webhook']);
+    const allowedPostActions = new Set(['connect', 'disconnect', 'sync-catalogue', 'sync-sales', 'reconcile-sales', 'retry-failed-orders', 'retry-refunds', 'reset-webhook', 'test-webhook']);
     if ((request.method === 'GET' && allowedGetActions.has(action)) || (request.method === 'POST' && allowedPostActions.has(action))) {
       const adminSession = await requireAdmin(request, lenv);
       const auth = adminAuthContext(adminSession);
@@ -993,7 +994,24 @@ async function handle(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
 
   if (request.method === 'GET' && url.pathname === '/health') {
-    return json(request, env, { ok: true, service: 'kcp-api-v2', environment: env.ENVIRONMENT || 'development' });
+    return json(request, env, {
+      ok: true,
+      service: 'kcp-api-v2',
+      environment: env.ENVIRONMENT || 'development',
+      workerRelease: KCP_WORKER_RELEASE,
+      workerReleaseDate: KCP_WORKER_RELEASE_DATE,
+      refundPipelineVersion: KCP_REFUND_PIPELINE_VERSION
+    });
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/runtime-version') {
+    return json(request, env, {
+      ok: true,
+      service: 'kcp-api-v2',
+      workerRelease: KCP_WORKER_RELEASE,
+      workerReleaseDate: KCP_WORKER_RELEASE_DATE,
+      refundPipelineVersion: KCP_REFUND_PIPELINE_VERSION
+    });
   }
 
   // Data-migration tool (superuser only): import central rows + per-workspace tenant rows.

@@ -63,10 +63,28 @@ export class WorkspaceDO extends DurableObject<Env> {
     if (!workspaceId) return 0;
     const row = await this.db.prepare(
       `SELECT COUNT(*) AS pending
-         FROM yoco_webhook_events
-        WHERE workspace_id = ?1
-          AND status IN ('attention', 'failed')
-          AND lower(replace(event_type, '_', '.')) IN ('payment.refunded', 'order.updated', 'refund.succeeded', 'refund.successful')`
+         FROM yoco_webhook_events event
+        WHERE event.workspace_id = ?1
+          AND lower(replace(event.event_type, '_', '.')) IN ('payment.refunded', 'order.updated', 'refund.succeeded', 'refund.successful')
+          AND (
+            event.status IN ('attention', 'failed')
+            OR (
+              event.status = 'processing'
+              AND datetime(COALESCE(event.processed_at, event.created_at)) <= datetime('now', '-5 minutes')
+            )
+            OR (
+              event.status = 'processed'
+              AND lower(replace(event.event_type, '_', '.')) IN ('payment.refunded', 'refund.succeeded', 'refund.successful')
+              AND COALESCE(event.yoco_order_id, '') <> ''
+              AND NOT EXISTS (
+                SELECT 1
+                  FROM yoco_orders refund_order
+                 WHERE refund_order.workspace_id = event.workspace_id
+                   AND refund_order.order_type = 'refund'
+                   AND refund_order.parent_yoco_order_id = event.yoco_order_id
+              )
+            )
+          )`
     ).bind(workspaceId).first<{ pending?: number }>();
     return Number(row?.pending || 0) || 0;
   }
