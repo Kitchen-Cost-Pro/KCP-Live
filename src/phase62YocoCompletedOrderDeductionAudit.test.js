@@ -4,10 +4,10 @@ import assert from 'node:assert/strict';
 
 const read = (file) => fs.readFileSync(file, 'utf8');
 
-test('Phase 62 subscribes to final order events instead of using payment.created as the stock trigger', () => {
+test('Phase 62 subscribes to final order events and Phase 69 refund refresh events instead of using payment.created as the stock trigger', () => {
   const service = read('cloudflare-v2/src/legacy/yoco-service.ts');
   const routes = read('cloudflare-v2/src/legacy/routes.ts');
-  assert.match(service, /const YOCO_WEBHOOK_EVENT_TYPES = \['order\.completed', 'payment\.refunded', 'refund\.succeeded'\]/);
+  assert.match(service, /const YOCO_WEBHOOK_EVENT_TYPES = \['order\.completed', 'order\.updated', 'payment\.refunded'\]/);
   assert.doesNotMatch(service, /const YOCO_WEBHOOK_EVENT_TYPES = \['payment\.created'/);
   assert.match(routes, /Waiting for the final order\.completed event before deducting stock/);
   assert.match(routes, /yoco\.webhook\.waiting_for_order_completion/);

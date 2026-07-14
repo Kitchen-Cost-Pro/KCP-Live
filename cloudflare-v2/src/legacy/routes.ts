@@ -9167,7 +9167,19 @@ export async function deleteStockTakeTemplateRoute(
 }
 
 function normalizeStockTakeUomCounts(value: unknown) {
-  const rows = Array.isArray(value) ? value : Object.values(objectValue(value));
+  const rows = Array.isArray(value)
+    ? value
+    : Object.entries(objectValue(value)).map(([key, rawValue]) => {
+        const row = objectValue(rawValue);
+        return Object.keys(row).length
+          ? { key, ...row }
+          : {
+              key,
+              uomName: key,
+              ratio: key === "base" ? 1 : undefined,
+              count: rawValue,
+            };
+      });
   return rows
     .map(objectValue)
     .map((row) => {
@@ -9177,9 +9189,12 @@ function normalizeStockTakeUomCounts(value: unknown) {
       );
       const count = numberValue(row.count ?? row.scannedCount ?? row.qty, 0);
       const safeRatio = ratio > 0 ? ratio : 1;
-      const uomName = text(row.uomName || row.selectedUom || row.unit);
+      const rawKey = text(row.key);
+      const uomName = text(
+        row.uomName || row.selectedUom || row.unit || rawKey,
+      );
       return {
-        key: text(row.key || `${uomName.toLowerCase()}::${safeRatio}`),
+        key: rawKey || `${uomName.toLowerCase()}::${safeRatio}`,
         uomName,
         baseUom: text(row.baseUom || row.baseUnit),
         ratio: safeRatio,
@@ -14940,11 +14955,11 @@ async function loadYocoOrderForWebhook(
   paymentId: string,
   eventDisposition: string,
 ) {
-  const isRefund = eventDisposition === 'refund';
-  if (payloadOrder && getObjectLineItems(payloadOrder).length && !isRefund) return payloadOrder;
+  const isRefundLookup = eventDisposition === 'refund' || eventDisposition === 'refund_refresh';
+  if (payloadOrder && getObjectLineItems(payloadOrder).length && !isRefundLookup) return payloadOrder;
   const apiKey = await getYocoApiKey(env, workspaceId);
 
-  if (isRefund) {
+  if (isRefundLookup) {
     // Yoco's payment.refunded webhook supplies only order_id and payment_id. Fetch
     // the payment first to identify approved refund summaries, then fetch the order
     // because returned_line_items and modifiers live on order.returns. These are
@@ -15397,18 +15412,22 @@ export async function postYocoWebhook(
 
   try {
     const isRefund = eventDisposition === "refund";
+    const isRefundRefresh = eventDisposition === "refund_refresh";
+    const isRefundWorkflow = isRefund || isRefundRefresh;
     const isReturn = eventDisposition === "return";
     const webhookRefund = isRefund ? extractYocoRefund(payload) : null;
-    const refundObjects = isRefund ? findRefunds(order, paymentId, webhookRefund) : [];
+    const refundObjects = isRefundWorkflow ? findRefunds(order, paymentId, webhookRefund) : [];
     let primaryRefundBehavior: "return" | "wastage" | "skip" = "return";
     let result: Record<string, any>;
 
-    if (isRefund) {
+    if (isRefundWorkflow) {
       if (!refundObjects.length) {
         result = {
           processed: false,
-          reason: "refund_details_not_available",
-          retryable: true,
+          reason: isRefundRefresh
+            ? "order_update_has_no_refund"
+            : "refund_details_not_available",
+          retryable: !isRefundRefresh,
           missingRecipes: 0,
           orderLines: 0,
           stockMovements: 0,
@@ -15469,7 +15488,7 @@ export async function postYocoWebhook(
     // Uses the same dedup-signature system so re-delivery of the same webhook is safe.
     const orderHasReturns = getOrderReturns(order).length > 0;
     const returnsResult =
-      isReturn || (!isRefund && orderHasReturns)
+      isReturn || (!isRefundWorkflow && orderHasReturns)
         ? await processYocoOrderReturns(env, workspaceId, order, {
             eventType,
             overrideBehavior:
@@ -15497,13 +15516,14 @@ export async function postYocoWebhook(
     const intentionallyIgnored = [
       'before_stock_depletion_start',
       'skipped_refund_reason',
-      'skipped_other_reason'
+      'skipped_other_reason',
+      'order_update_has_no_refund'
     ].includes(resultReason);
     const needsAttention = result.retryable === true || returnNeedsRetry || (
       totalMovements === 0 && !duplicateSuccess && !intentionallyIgnored
     );
     const webhookStatus = intentionallyIgnored ? 'ignored' : needsAttention ? 'attention' : 'processed';
-    const isRefundEvent = isRefund || isReturn;
+    const isRefundEvent = isRefundWorkflow || isReturn;
     const outcomeMessage = intentionallyIgnored
       ? `Webhook intentionally ignored: ${resultReason}. No stock was changed.`
       : needsAttention

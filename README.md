@@ -337,3 +337,7 @@ Phase 63 adds:
 The current legal document version is `2026-07-14`. When the legal documents change, update both `src/legal.js` and `CURRENT_LEGAL_VERSION` in `cloudflare-v2/src/legacy/auth-routes.ts`.
 
 The project does not contain a verified registered company name, physical address, or public legal email address. The legal pages therefore refer users to the service provider and contact details in their order form, subscription agreement, invoice, account, or onboarding communication. Add the final registered entity and public contact information before a formal legal review or public commercial launch.
+
+## Phase 69
+
+Phase 69 preserves custom-UOM stock-take draft counts and variance data across save/resume, and adds `order.updated` as the second-stage Yoco business webhook signal for completing pending refund stock and reporting updates. Reset the Yoco webhook subscription after deployment so the new event set is active.

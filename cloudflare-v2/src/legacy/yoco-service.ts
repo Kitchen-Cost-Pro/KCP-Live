@@ -325,7 +325,11 @@ function subscriptionSecret(subscription: Row) {
   return text(subscription.secret || subscription.webhook_secret || subscription.webhookSecret || subscription.signing_secret || subscription.signingSecret);
 }
 
-const YOCO_WEBHOOK_EVENT_TYPES = ['order.completed', 'payment.refunded', 'refund.succeeded'];
+// Yoco's business API exposes payment.refunded as the final refund signal. Order
+// Updated is the important second-stage signal because returned_line_items can be
+// attached to the order shortly after the payment refund event. Do not subscribe to
+// the Checkout-only refund.succeeded name on this API.
+const YOCO_WEBHOOK_EVENT_TYPES = ['order.completed', 'order.updated', 'payment.refunded'];
 const WEBHOOK_PREVIOUS_SECRET_GRACE_MS = 24 * 60 * 60 * 1000;
 
 type YocoSyncOptions = { full?: boolean; sinceIso?: string; resetWebhook?: boolean; refundOnly?: boolean };
@@ -2158,7 +2162,7 @@ export async function retryFailedYocoOrders(
     `WITH pending AS (
        SELECT event.created_at,
               CASE
-                WHEN lower(replace(event.event_type, '_', '.')) IN ('payment.refunded', 'refund.succeeded', 'refund.successful') THEN 1
+                WHEN lower(replace(event.event_type, '_', '.')) IN ('payment.refunded', 'order.updated', 'refund.succeeded', 'refund.successful') THEN 1
                 ELSE 0
               END AS is_refund
          FROM yoco_webhook_events event

@@ -66,7 +66,7 @@ export class WorkspaceDO extends DurableObject<Env> {
          FROM yoco_webhook_events
         WHERE workspace_id = ?1
           AND status IN ('attention', 'failed')
-          AND lower(replace(event_type, '_', '.')) IN ('payment.refunded', 'refund.succeeded', 'refund.successful')`
+          AND lower(replace(event_type, '_', '.')) IN ('payment.refunded', 'order.updated', 'refund.succeeded', 'refund.successful')`
     ).bind(workspaceId).first<{ pending?: number }>();
     return Number(row?.pending || 0) || 0;
   }

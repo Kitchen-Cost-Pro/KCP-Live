@@ -15988,6 +15988,30 @@ function refreshStockTakeSessionComputed() {
   }
 }
 
+function stockTakeUomCountMap(value = {}, baseUom = 'ea') {
+  if (!Array.isArray(value)) {
+    return Object.fromEntries(
+      Object.entries(value || {})
+        .map(([key, count]) => [String(key || '').trim(), parseDecimalInputValue(count, 0)])
+        .filter(([key, count]) => key && Number(count) > 0)
+    );
+  }
+
+  const normalizedBaseUom = String(baseUom || 'ea').trim().toLowerCase();
+  return value.reduce((result, row = {}) => {
+    const count = parseDecimalInputValue(row.count ?? row.quantity ?? row.scans, 0);
+    if (!(count > 0)) return result;
+    const ratio = parseDecimalInputValue(row.ratio ?? row.qtyInBase ?? row.qty_in_base ?? row.packSize, 1) || 1;
+    const name = String(row.uomName || row.selectedUom || row.unit || row.key || '').trim();
+    const rawKey = String(row.key || '').trim();
+    const key = rawKey === 'base' || (ratio === 1 && name.toLowerCase() === normalizedBaseUom)
+      ? 'base'
+      : (name || rawKey || 'base');
+    result[key] = (Number(result[key] || 0) || 0) + count;
+    return result;
+  }, {});
+}
+
 function updateStockTakeCount(stockItemId, value, uomKey = 'base') {
   const draft = hydrateStockTakeDraft(appState.stockTake.draftSession, appState.stockTake.locations || []);
   const raw = String(value ?? '').trim();
@@ -16005,7 +16029,7 @@ function updateStockTakeCount(stockItemId, value, uomKey = 'base') {
     uomCounts: {}
   };
 
-  const uomCounts = { ...(existingEntry.uomCounts || {}) };
+  const uomCounts = stockTakeUomCountMap(existingEntry.uomCounts || {}, stockItem.unit || 'ea');
   // Populate 'base' fallback if legacy count exists without detailed breakdown.
   if (existingEntry.shelfCount > 0 && Object.keys(uomCounts).length === 0) {
     uomCounts['base'] = existingEntry.shelfCount;

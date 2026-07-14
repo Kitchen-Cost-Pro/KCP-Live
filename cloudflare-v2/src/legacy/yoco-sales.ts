@@ -1565,6 +1565,10 @@ export function yocoWebhookPaymentSucceeded(payload: Row) {
 export function yocoWebhookEventDisposition(eventTypeValue: unknown) {
   const eventType = text(eventTypeValue).toLowerCase().trim().replace(/[\s_]+/g, '.').replace(/\.+/g, '.');
   if (['order.completed', 'payment.succeeded', 'payment.successful'].includes(eventType)) return 'sale';
+  // An order.updated event is not a sale trigger. It is used only to re-read the
+  // order after payment.refunded so newly attached returned_line_items can finish
+  // an exact stock return without waiting for an admin sync.
+  if (eventType === 'order.updated') return 'refund_refresh';
   if ([
     'refund.succeeded',
     'refund.successful',
@@ -1575,7 +1579,7 @@ export function yocoWebhookEventDisposition(eventTypeValue: unknown) {
   ].includes(eventType)) return 'refund';
   if (['return.completed', 'order.returned', 'order.partially.returned'].includes(eventType)) return 'return';
   if (
-    ['payment.created', 'order.created', 'order.updated', 'refund.created', 'refund.pending', 'refund.processing'].includes(eventType) ||
+    ['payment.created', 'order.created', 'refund.created', 'refund.pending', 'refund.processing'].includes(eventType) ||
     eventType.endsWith('.created') ||
     eventType.endsWith('.pending') ||
     eventType.endsWith('.processing')
