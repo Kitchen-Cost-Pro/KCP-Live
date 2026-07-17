@@ -4753,16 +4753,17 @@ export async function getStockItems(
     filters.push(`si.item_type = ?${binds.length}`);
   }
 
-  const locationPlaceholders = scopedLocationIds.map((id) => {
-    binds.push(id);
-    return `?${binds.length}`;
-  });
-  const stockBalanceLocationClause = locationPlaceholders.length
-    ? ` AND sb.location_id IN (${locationPlaceholders.join(", ")})`
-    : "";
-  const locationPriceLocationClause = locationPlaceholders.length
-    ? ` AND silp.location_id IN (${locationPlaceholders.join(", ")})`
-    : "";
+  // DO SQLite caps bound parameters at 100 (?1-?100). Passing one bound param per
+  // location blows past that cap for workspaces with many locations, so scope via a
+  // single JSON-array param expanded with json_each() instead.
+  let stockBalanceLocationClause = "";
+  let locationPriceLocationClause = "";
+  if (scopedLocationIds.length) {
+    binds.push(JSON.stringify(scopedLocationIds));
+    const locationParam = binds.length;
+    stockBalanceLocationClause = ` AND sb.location_id IN (SELECT value FROM json_each(?${locationParam}))`;
+    locationPriceLocationClause = ` AND silp.location_id IN (SELECT value FROM json_each(?${locationParam}))`;
+  }
   const locationSelect = `COALESCE((SELECT SUM(quantity) FROM stock_balances sb WHERE sb.workspace_id = si.workspace_id AND sb.stock_item_id = si.id${stockBalanceLocationClause}), 0)`;
 
   binds.push(limit, offset);
@@ -4811,34 +4812,28 @@ export async function getStockItems(
   const stockItems = (rows.results || []) as Record<string, unknown>[];
   const stockItemIds = stockItems.map((row) => text(row.id)).filter(Boolean);
   if (stockItemIds.length) {
-    const idPlaceholders = stockItemIds
-      .map((_, index) => `?${index + 2}`)
-      .join(", ");
     const recipeRows = await env.DB.prepare(
       `SELECT id, owner_id, yield_qty, yield_unit
          FROM recipes
         WHERE workspace_id = ?1
           AND owner_type = 'stock_item'
           AND active = 1
-          AND owner_id IN (${idPlaceholders})`,
+          AND owner_id IN (SELECT value FROM json_each(?2))`,
     )
-      .bind(workspaceId, ...stockItemIds)
+      .bind(workspaceId, JSON.stringify(stockItemIds))
       .all<Record<string, unknown>>();
     const recipes = (recipeRows.results || []) as Record<string, unknown>[];
     const recipeIds = recipes.map((recipe) => text(recipe.id)).filter(Boolean);
     const linesByRecipe = new Map<string, Record<string, unknown>[]>();
     if (recipeIds.length) {
-      const recipePlaceholders = recipeIds
-        .map((_, index) => `?${index + 2}`)
-        .join(", ");
       const lineRows = await env.DB.prepare(
         `SELECT recipe_id, stock_item_id, quantity, unit, sort_order
            FROM recipe_lines
           WHERE workspace_id = ?1
-            AND recipe_id IN (${recipePlaceholders})
+            AND recipe_id IN (SELECT value FROM json_each(?2))
           ORDER BY sort_order ASC`,
       )
-        .bind(workspaceId, ...recipeIds)
+        .bind(workspaceId, JSON.stringify(recipeIds))
         .all<Record<string, unknown>>();
       ((lineRows.results || []) as Record<string, unknown>[]).forEach(
         (line) => {

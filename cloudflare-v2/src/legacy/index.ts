@@ -1512,6 +1512,15 @@ export default {
       return await handle(request, env);
     } catch (cause) {
       const raw = cause instanceof Error ? cause.message : "Internal error.";
+      // Surface the real failure in logs (wrangler tail / dashboard). Without this the
+      // generic user-facing message below hides the actual cause of every 500.
+      console.error(
+        "request failed",
+        request.method,
+        new URL(request.url).pathname,
+        raw,
+        cause instanceof Error ? cause.stack : undefined,
+      );
       const isUserFacing =
         /token|session|expired|access|permission|denied|invalid|required|not found|sign in|password|email|already exists|duplicate|unique/i.test(
           raw,
