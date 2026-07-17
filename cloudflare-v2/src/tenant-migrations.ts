@@ -1,4 +1,6 @@
 import { TENANT_SCHEMA_SQL } from './tenant-schema.generated';
+import { YOCO_V2_FOUNDATION_MIGRATION, YOCO_V2_SALE_SHADOW_MIGRATION, YOCO_V2_REFUND_RECONCILIATION_MIGRATION, YOCO_V2_CONTROLLED_CUTOVER_MIGRATION, YOCO_V2_REFUND_CONTROLLED_CUTOVER_MIGRATION, YOCO_V2_LEGACY_SHUTDOWN_MIGRATION, YOCO_V2_ADMIN_CONTROL_CENTRE_MIGRATION } from './modules/yoco-engine-v2/migrations';
+import { MODIFIER_ENGINE_CORE_ACTIONS_MIGRATION, MODIFIER_ENGINE_REFUNDS_RELIABILITY_NOTES_MIGRATION } from './modules/modifier-engine/migrations';
 
 /**
  * Ordered per-tenant schema migrations, applied INSIDE each WorkspaceDO's own SQLite on first
@@ -458,5 +460,92 @@ ALTER TABLE yoco_connections ADD COLUMN api_key_locked_by_uid TEXT;`,
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_stocktake_drafts_workspace_user
-  ON stocktake_drafts(workspace_id, user_id, updated_at);`
+  ON stocktake_drafts(workspace_id, user_id, updated_at);`,
+  // 16 — provider-neutral operational diagnostics for webhook lifecycle, sync runs,
+  // signature verification, order ingestion and stock-deduction outcomes.
+  `CREATE TABLE IF NOT EXISTS integration_logs (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  provider TEXT NOT NULL DEFAULT 'yoco',
+  operation TEXT NOT NULL,
+  status TEXT NOT NULL,
+  severity TEXT NOT NULL DEFAULT 'info',
+  message TEXT NOT NULL,
+  details_json TEXT NOT NULL DEFAULT '{}',
+  correlation_id TEXT,
+  started_at TEXT,
+  completed_at TEXT,
+  duration_ms INTEGER,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_integration_logs_workspace_provider_date
+  ON integration_logs(workspace_id, provider, created_at);
+CREATE INDEX IF NOT EXISTS idx_integration_logs_workspace_status_date
+  ON integration_logs(workspace_id, status, created_at);`,
+  // 17 — make Yoco order-line retries idempotent independently from stock-movement
+  // signatures. Migration 13 already removed historical duplicate line keys.
+  `CREATE UNIQUE INDEX IF NOT EXISTS ux_yoco_order_lines_workspace_order_line
+  ON yoco_order_lines(workspace_id, yoco_order_id, yoco_line_id);`,
+  // 18 — preserve the initial connection boundary separately from rolling sync cursors.
+  // Normal background reconciliation never looks before this boundary; an explicit admin
+  // lookback may still inspect older orders and the Go Live timestamp remains the final guard.
+  `ALTER TABLE yoco_connections ADD COLUMN sales_baseline_at TEXT;
+UPDATE yoco_connections
+   SET sales_baseline_at = COALESCE(last_successful_order_updated_at, last_sales_sync_at, created_at)
+ WHERE COALESCE(sales_baseline_at, '') = '';`,
+  // 19 — use Yoco's stable provider event id as the primary webhook replay key.
+  // Payload hashes remain a fallback for older deliveries that omitted an event id.
+  `DELETE FROM yoco_webhook_events
+ WHERE COALESCE(TRIM(provider_event_id), '') <> ''
+   AND rowid NOT IN (
+     SELECT MIN(rowid)
+       FROM yoco_webhook_events
+      WHERE COALESCE(TRIM(provider_event_id), '') <> ''
+      GROUP BY workspace_id, provider_event_id
+   );
+CREATE UNIQUE INDEX IF NOT EXISTS ux_yoco_webhook_events_workspace_provider_event
+  ON yoco_webhook_events(workspace_id, provider_event_id)
+  WHERE COALESCE(TRIM(provider_event_id), '') <> '';`,
+  // 20 — store every provider refund as its own financial transaction while retaining
+  // the original receipt reference and the stock-handling decision used by reporting.
+  `ALTER TABLE yoco_orders ADD COLUMN parent_yoco_order_id TEXT;
+ALTER TABLE yoco_orders ADD COLUMN provider_refund_id TEXT;
+ALTER TABLE yoco_orders ADD COLUMN refund_reason TEXT;
+ALTER TABLE yoco_orders ADD COLUMN refund_behavior TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_yoco_orders_workspace_provider_refund
+  ON yoco_orders(workspace_id, provider_refund_id)
+  WHERE COALESCE(TRIM(provider_refund_id), '') <> '';
+CREATE INDEX IF NOT EXISTS idx_yoco_orders_workspace_parent_order
+  ON yoco_orders(workspace_id, parent_yoco_order_id, occurred_at);`,
+  // 21 — persist the signed gross, VAT and ex-VAT values used by sales reporting.
+  // `total` remains the backwards-compatible signed customer amount. Refund rows
+  // store all three accounting components as negative values.
+  `ALTER TABLE yoco_orders ADD COLUMN gross_total REAL;
+ALTER TABLE yoco_orders ADD COLUMN vat_total REAL;
+ALTER TABLE yoco_orders ADD COLUMN net_total REAL;
+UPDATE yoco_orders
+   SET gross_total = total
+ WHERE gross_total IS NULL;
+CREATE INDEX IF NOT EXISTS idx_yoco_orders_workspace_refund_financials
+  ON yoco_orders(workspace_id, order_type, occurred_at, gross_total);`,
+  // 22 — isolated Yoco V2 engine foundation: immutable raw capture, effect ownership,
+  // processing runs, append-only timeline, retry/dead-letter observability.
+  YOCO_V2_FOUNDATION_MIGRATION,
+  // 23 — Phase V2 04-06: controlled API request audit, canonical sale events,
+  // shadow-only stock proposals, per-sale comparisons and integration circuit state.
+  YOCO_V2_SALE_SHADOW_MIGRATION,
+  // 24 — Phase V2 07-09: canonical refunds, manual review, refund shadow proposals and reconciliation.
+  YOCO_V2_REFUND_RECONCILIATION_MIGRATION,
+  // 25 — Phase V2 10: controlled sale-only live effect cutover, outbox, readiness and rollback history.
+  YOCO_V2_CONTROLLED_CUTOVER_MIGRATION,
+  // 26 — Phase V2 11: controlled refund reporting/stock cutover with independent readiness and rollback.
+  YOCO_V2_REFUND_CONTROLLED_CUTOVER_MIGRATION,
+  // 27 — Phase V2 12: ownership-gated legacy business shutdown, observation telemetry and Phase 13 gate.
+  YOCO_V2_LEGACY_SHUTDOWN_MIGRATION,
+  // 28 — Enterprise Yoco V2 admin control centre: webhook receipt observability and append-only action audit.
+  YOCO_V2_ADMIN_CONTROL_CENTRE_MIGRATION,
+  // 29 — Modifier engine core actions: additive stock, ingredient removal/replacement, scopes, versions and observations.
+  MODIFIER_ENGINE_CORE_ACTIONS_MIGRATION,
+  // 30 — Modifier refunds, observation/cutover diagnostics, and exact approved note rules.
+  MODIFIER_ENGINE_REFUNDS_RELIABILITY_NOTES_MIGRATION
 ];

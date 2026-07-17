@@ -17,9 +17,9 @@ export function renderReportFilters({ filters = {}, locations = [], categories =
   const normalizedInventoryCategories = normalizeGenericOptions(inventoryCategories);
   const normalizedInventoryItems = normalizeObjectOptions(inventoryItems);
   const normalizedModifierGroups = normalizeObjectOptions(modifierGroups);
-  const normalizedModifierTypes = normalizeGenericOptions(modifierTypes.length ? modifierTypes : ['Product', 'Note']);
+  const normalizedModifierTypes = normalizeGenericOptions(modifierTypes.length ? modifierTypes : ['Product', 'Option', 'Note']);
   const normalizedModifierNames = normalizeGenericOptions(modifierNames);
-  const normalizedStockDeductionStatuses = normalizeGenericOptions(stockDeductionStatuses.length ? stockDeductionStatuses : ['Deducted', 'Missing Modifier Usage', 'No Stock Mapping Required', 'Deducted - Sale Line Missing']);
+  const normalizedStockDeductionStatuses = normalizeGenericOptions(stockDeductionStatuses.length ? stockDeductionStatuses : ['Deducted', 'Applied to Base Recipe', 'Missing Modifier Usage', 'No Stock Mapping Required', 'Deducted - Sale Line Missing']);
   const normalizedYocoCategories = normalizeGenericOptions(yocoCategories);
   const normalizedRecipeStatuses = normalizeGenericOptions(recipeStatuses.length ? recipeStatuses : ['Recipe Ready', 'Missing Recipe', 'Recipe Missing Ingredients']);
   const normalizedRiskStatuses = normalizeGenericOptions(riskStatuses.length ? riskStatuses : ['Healthy', 'Warning', 'Critical']);

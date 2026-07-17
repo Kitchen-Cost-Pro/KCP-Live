@@ -57,7 +57,8 @@ type SavedViewInput = {
 };
 type ScheduleReportItem = {
   reportGroupId?: string; reportId?: string; viewId?: string; savedViewId?: string;
-  filters?: Row; sort?: Row | null; visibleColumns?: string[];
+  savedViewSnapshotId?: string; savedViewSnapshotName?: string; savedViewUpdatedAt?: string;
+  filters?: Row; sort?: Row | null; visibleColumns?: string[]; dateRangeType?: string;
 };
 type ScheduleInput = {
   name?: string; reportGroupId?: string; reportId?: string; viewId?: string; savedViewId?: string;
@@ -103,6 +104,12 @@ const REPORTS: Record<string, { title: string; groupId?: string; views: string[]
 };
 
 function clean(value: unknown, fallback = '') { return String(value ?? fallback).trim(); }
+function reportFilterQueryValue(value: unknown) {
+  if (value === '' || value === null || value === undefined) return '';
+  if (Array.isArray(value)) return value.map((entry) => clean(entry)).filter(Boolean).join(',');
+  if (typeof value === 'object') return '';
+  return String(value);
+}
 function nowIso() { return new Date().toISOString(); }
 function makeId(prefix: string) { return `${prefix}_${crypto.randomUUID()}`; }
 function parseJson<T>(value: unknown, fallback: T): T { try { return value ? JSON.parse(String(value)) as T : fallback; } catch { return fallback; } }
@@ -339,9 +346,13 @@ function repairScheduleItem(item: ScheduleReportItem): ScheduleReportItem | null
     reportId: clean(resolved.reportId),
     viewId: clean(resolved.viewId),
     savedViewId: clean(item.savedViewId),
+    savedViewSnapshotId: clean(item.savedViewSnapshotId),
+    savedViewSnapshotName: clean(item.savedViewSnapshotName),
+    savedViewUpdatedAt: clean(item.savedViewUpdatedAt),
     filters: item.filters && typeof item.filters === 'object' ? item.filters : {},
     sort: item.sort && typeof item.sort === 'object' ? item.sort : null,
-    visibleColumns: Array.isArray(item.visibleColumns) ? item.visibleColumns.map((value) => clean(value)).filter(Boolean) : []
+    visibleColumns: Array.isArray(item.visibleColumns) ? item.visibleColumns.map((value) => clean(value)).filter(Boolean) : [],
+    dateRangeType: clean(item.dateRangeType || item.filters?.dateRangeType || '')
   };
 }
 
@@ -386,7 +397,8 @@ async function materializeScheduleItems(env: Env, workspaceId: string, input: Sc
       viewId: saved.viewId,
       filters: saved.filters,
       sort: saved.sort,
-      visibleColumns: saved.visibleColumns
+      visibleColumns: saved.visibleColumns,
+      dateRangeType: saved.dateRangeType
     });
     if (!resolvedSaved) {
       warnings.push(`Saved view ${savedViewId} targets a report that is no longer available; the schedule will use its stored report settings.`);
@@ -398,16 +410,65 @@ async function materializeScheduleItems(env: Env, workspaceId: string, input: Sc
       reportGroupId: resolvedSaved.reportGroupId || item.reportGroupId,
       reportId: resolvedSaved.reportId || item.reportId,
       viewId: resolvedSaved.viewId || item.viewId,
-      filters: { ...(saved.filters || {}), ...(item.filters || {}) },
-      sort: item.sort || saved.sort || null,
-      visibleColumns: item.visibleColumns?.length ? item.visibleColumns : (saved.visibleColumns || []),
-      savedViewId: ''
+      filters: { ...(saved.filters || {}) },
+      sort: saved.sort || null,
+      visibleColumns: Array.isArray(saved.visibleColumns) ? saved.visibleColumns : [],
+      savedViewId: '',
+      savedViewSnapshotId: saved.id,
+      savedViewSnapshotName: saved.name,
+      savedViewUpdatedAt: saved.updatedAt,
+      dateRangeType: saved.dateRangeType || saved.filters?.dateRangeType || item.dateRangeType || 'custom'
     });
   }
   const snapshots = normalizeScheduleItems({ ...input, reportItems: hydrated, savedViewId: '' }).map(({ savedViewId: _savedViewId, ...snapshot }) => snapshot);
   return { items: snapshots, warnings };
 }
 
+
+async function hydrateScheduleItemsForExecution(env: Env, workspaceId: string, input: ScheduleInput | Row) {
+  const items = normalizeScheduleItems(input);
+  const hydrated: ScheduleReportItem[] = [];
+  for (const item of items) {
+    const savedViewId = clean(item.savedViewSnapshotId || item.savedViewId);
+    if (!savedViewId) {
+      hydrated.push(item);
+      continue;
+    }
+    const row = await getSavedViewRow(env, workspaceId, savedViewId);
+    if (!row) {
+      hydrated.push(item);
+      continue;
+    }
+    const saved = mapSavedView(row);
+    const resolved = repairScheduleItem({
+      reportGroupId: saved.reportGroupId,
+      reportId: saved.reportId,
+      viewId: saved.viewId,
+      filters: saved.filters,
+      sort: saved.sort,
+      visibleColumns: saved.visibleColumns,
+      dateRangeType: saved.dateRangeType,
+    });
+    if (!resolved) {
+      hydrated.push(item);
+      continue;
+    }
+    hydrated.push({
+      ...item,
+      reportGroupId: resolved.reportGroupId || item.reportGroupId,
+      reportId: resolved.reportId || item.reportId,
+      viewId: resolved.viewId || item.viewId,
+      filters: { ...(saved.filters || {}) },
+      sort: saved.sort || null,
+      visibleColumns: Array.isArray(saved.visibleColumns) ? [...saved.visibleColumns] : [],
+      savedViewSnapshotId: saved.id,
+      savedViewSnapshotName: saved.name,
+      savedViewUpdatedAt: saved.updatedAt,
+      dateRangeType: saved.dateRangeType || saved.filters?.dateRangeType || item.dateRangeType || 'custom',
+    });
+  }
+  return hydrated;
+}
 
 async function reconcileExistingScheduleLocations(env: Env, auth: AuthContext, workspaceId: string, input: ScheduleInput) {
   const active = await listActiveScheduleLocations(env, workspaceId);
@@ -433,10 +494,16 @@ function normalizeLocationIds(input: ScheduleInput | Row) {
 export async function getReportSavedViews(request: Request, env: Env, auth: AuthContext, workspaceId: string) {
   await ensureReportSchedulingSchema(env);
   await assertWorkspaceAccess(env, auth, workspaceId);
+  const allowedLocationIds = await getUserAllowedLocationIds(env, auth, workspaceId);
   const rows = await env.DB.prepare(
     `SELECT * FROM report_saved_views WHERE workspace_id = ?1 AND (user_id = ?2 OR scope = 'workspace') ORDER BY is_default DESC, lower(name) ASC`
   ).bind(workspaceId, auth.uid).all<Row>();
-  return json(request, env, { ok: true, views: rows.results.map(mapSavedViewForClient).filter(Boolean) });
+  const views = rows.results
+    .map(mapSavedViewForClient)
+    .filter(Boolean)
+    .map((view: Row) => scopeSavedViewForLocations(view, allowedLocationIds))
+    .filter(Boolean);
+  return json(request, env, { ok: true, views });
 }
 
 export async function postReportSavedView(request: Request, env: Env, auth: AuthContext, workspaceId: string) {
@@ -450,23 +517,48 @@ export async function postReportSavedView(request: Request, env: Env, auth: Auth
   const reportId = clean(resolvedSelection?.reportId);
   const canonicalViewId = clean(resolvedSelection?.viewId);
   const scope = clean(body.scope || 'personal').toLowerCase() === 'workspace' ? 'workspace' : 'personal';
-  if (!name || !requestedReportId || !requestedViewId || !body.filters || typeof body.filters !== 'object') return error(request, env, 400, 'Name, report, view, and filters are required.');
+  const filters = body.filters && typeof body.filters === 'object' && !Array.isArray(body.filters) ? { ...body.filters } : {};
+  if (!name || !requestedReportId || !requestedViewId) return error(request, env, 400, 'Name, report, and view are required.');
   try { validateReport(reportId, canonicalViewId); validateDateRangeType(clean(body.dateRangeType || 'custom')); } catch (cause) { return error(request, env, 400, (cause as Error).message); }
   if (scope === 'workspace') {
     const denied = await requirePermission(request, env, auth, workspaceId, WORKSPACE_VIEW_PERMISSION);
     if (denied) return denied;
   }
+
+  const allowedLocationIds = await getUserAllowedLocationIds(env, auth, workspaceId);
+  const requestedLocationIds = savedViewLocationIds({ ...body, filters });
+  if (allowedLocationIds !== null) {
+    if (!allowedLocationIds.length) return error(request, env, 403, 'No locations are assigned to this user.');
+    const unauthorized = requestedLocationIds.find((id) => !allowedLocationIds.includes(id));
+    if (unauthorized) return error(request, env, 403, `Permission denied for location ${unauthorized}.`);
+    if (!requestedLocationIds.length) {
+      filters.locationIds = [...allowedLocationIds];
+      if (allowedLocationIds.length === 1) filters.locationId = allowedLocationIds[0];
+    }
+  }
+
   const id = makeId('rsv');
   const now = nowIso();
-  if (body.isDefault) await clearDefaultViews(env, workspaceId, auth.uid, reportId, clean(body.reportGroupId || REPORTS[reportId]?.groupId), scope);
-  await env.DB.prepare(
-    `INSERT INTO report_saved_views (id, workspace_id, user_id, name, description, scope, report_group_id, report_id, view_id, filters_json, sort_json, visible_columns_json, date_range_type, location_id, is_default, created_at, updated_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?16)`
-  ).bind(id, workspaceId, auth.uid, name, clean(body.description), scope, clean(body.reportGroupId || REPORTS[reportId]?.groupId), reportId, canonicalViewId,
-    JSON.stringify(body.filters || {}), body.sort ? JSON.stringify(body.sort) : null, JSON.stringify(body.visibleColumns || []),
-    validateDateRangeType(clean(body.dateRangeType || 'custom')), clean(body.locationId || (body.filters as Row)?.locationId), body.isDefault ? 1 : 0, now).run();
+  const dateRangeType = validateDateRangeType(clean(body.dateRangeType || 'custom'));
+  const visibleColumns = Array.isArray(body.visibleColumns) ? body.visibleColumns.map((value) => clean(value)).filter(Boolean) : [];
+  const storedLocationIds = savedViewLocationIds({ ...body, filters });
+  const storedLocationId = storedLocationIds.length === 1 ? storedLocationIds[0] : '';
+  try {
+    await withSchedulingWriteRetry(env, async () => {
+      if (body.isDefault) await clearDefaultViews(env, workspaceId, auth.uid, reportId, clean(body.reportGroupId || REPORTS[reportId]?.groupId), scope);
+      await env.DB.prepare(
+        `INSERT INTO report_saved_views (id, workspace_id, user_id, name, description, scope, report_group_id, report_id, view_id, filters_json, sort_json, visible_columns_json, date_range_type, location_id, is_default, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?16)`
+      ).bind(id, workspaceId, auth.uid, name, clean(body.description), scope, clean(body.reportGroupId || REPORTS[reportId]?.groupId), reportId, canonicalViewId,
+        JSON.stringify(filters), body.sort && typeof body.sort === 'object' ? JSON.stringify(body.sort) : null, JSON.stringify(visibleColumns),
+        dateRangeType, storedLocationId, body.isDefault ? 1 : 0, now).run();
+    });
+  } catch (cause) {
+    return error(request, env, 500, savedViewPersistenceMessage(cause));
+  }
   const row = await getSavedViewRow(env, workspaceId, id);
-  return json(request, env, { ok: true, view: mapSavedViewForClient(row || {}) }, { status: 201 });
+  const view = scopeSavedViewForLocations(mapSavedViewForClient(row || {}) as Row, allowedLocationIds);
+  return json(request, env, { ok: true, view }, { status: 201 });
 }
 
 export async function putReportSavedView(request: Request, env: Env, auth: AuthContext, workspaceId: string, viewId: string) {
@@ -479,20 +571,43 @@ export async function putReportSavedView(request: Request, env: Env, auth: AuthC
   const body = await readJson<SavedViewInput>(request);
   const merged = { ...mapSavedView(existing), ...body } as any;
   const scope = clean(merged.scope || 'personal').toLowerCase() === 'workspace' ? 'workspace' : 'personal';
-  if (!clean(merged.name) || !merged.filters || typeof merged.filters !== 'object') return error(request, env, 400, 'Name and filters are required.');
+  const filters = merged.filters && typeof merged.filters === 'object' && !Array.isArray(merged.filters) ? { ...merged.filters } : {};
+  if (!clean(merged.name)) return error(request, env, 400, 'Name is required.');
   const resolvedSelection = resolveScheduleReportSelection(clean(merged.reportId), clean(merged.viewId));
   if (!resolvedSelection) return error(request, env, 400, 'This report is no longer available for saved views.');
   merged.reportId = resolvedSelection.reportId;
   merged.viewId = resolvedSelection.viewId;
   merged.reportGroupId = clean(merged.reportGroupId || REPORTS[clean(merged.reportId)]?.groupId);
-  try { validateReport(clean(merged.reportId), clean(merged.viewId)); validateDateRangeType(clean(merged.dateRangeType)); } catch (cause) { return error(request, env, 400, (cause as Error).message); }
+  try { validateReport(clean(merged.reportId), clean(merged.viewId)); validateDateRangeType(clean(merged.dateRangeType || 'custom')); } catch (cause) { return error(request, env, 400, (cause as Error).message); }
   if (scope === 'workspace' && !manager.permissions.includes('*') && !manager.permissions.includes(WORKSPACE_VIEW_PERMISSION)) return error(request, env, 403, 'You cannot create workspace saved views.');
-  if (merged.isDefault) await clearDefaultViews(env, workspaceId, clean(existing.user_id), clean(merged.reportId), clean(merged.reportGroupId), scope, viewId);
-  await env.DB.prepare(
-    `UPDATE report_saved_views SET name=?1, description=?2, scope=?3, report_group_id=?4, report_id=?5, view_id=?6, filters_json=?7, sort_json=?8, visible_columns_json=?9, date_range_type=?10, location_id=?11, is_default=?12, updated_at=?13 WHERE id=?14 AND workspace_id=?15`
-  ).bind(clean(merged.name), clean(merged.description), scope, clean(merged.reportGroupId), clean(merged.reportId), clean(merged.viewId), JSON.stringify(merged.filters || {}), merged.sort ? JSON.stringify(merged.sort) : null, JSON.stringify(merged.visibleColumns || []), validateDateRangeType(clean(merged.dateRangeType || 'custom')), clean(merged.locationId || merged.filters?.locationId), merged.isDefault ? 1 : 0, nowIso(), viewId, workspaceId).run();
+
+  const allowedLocationIds = await getUserAllowedLocationIds(env, auth, workspaceId);
+  const requestedLocationIds = savedViewLocationIds({ ...merged, filters });
+  if (allowedLocationIds !== null) {
+    if (!allowedLocationIds.length) return error(request, env, 403, 'No locations are assigned to this user.');
+    const unauthorized = requestedLocationIds.find((id) => !allowedLocationIds.includes(id));
+    if (unauthorized) return error(request, env, 403, `Permission denied for location ${unauthorized}.`);
+    if (!requestedLocationIds.length) {
+      filters.locationIds = [...allowedLocationIds];
+      if (allowedLocationIds.length === 1) filters.locationId = allowedLocationIds[0];
+    }
+  }
+  const storedLocationIds = savedViewLocationIds({ ...merged, filters });
+  const storedLocationId = storedLocationIds.length === 1 ? storedLocationIds[0] : '';
+  const visibleColumns = Array.isArray(merged.visibleColumns) ? merged.visibleColumns.map((value: unknown) => clean(value)).filter(Boolean) : [];
+  try {
+    await withSchedulingWriteRetry(env, async () => {
+      if (merged.isDefault) await clearDefaultViews(env, workspaceId, clean(existing.user_id), clean(merged.reportId), clean(merged.reportGroupId), scope, viewId);
+      await env.DB.prepare(
+        `UPDATE report_saved_views SET name=?1, description=?2, scope=?3, report_group_id=?4, report_id=?5, view_id=?6, filters_json=?7, sort_json=?8, visible_columns_json=?9, date_range_type=?10, location_id=?11, is_default=?12, updated_at=?13 WHERE id=?14 AND workspace_id=?15`
+      ).bind(clean(merged.name), clean(merged.description), scope, clean(merged.reportGroupId), clean(merged.reportId), clean(merged.viewId), JSON.stringify(filters), merged.sort && typeof merged.sort === 'object' ? JSON.stringify(merged.sort) : null, JSON.stringify(visibleColumns), validateDateRangeType(clean(merged.dateRangeType || 'custom')), storedLocationId, merged.isDefault ? 1 : 0, nowIso(), viewId, workspaceId).run();
+    });
+  } catch (cause) {
+    return error(request, env, 500, savedViewPersistenceMessage(cause));
+  }
   const row = await getSavedViewRow(env, workspaceId, viewId);
-  return json(request, env, { ok: true, view: mapSavedViewForClient(row || {}) });
+  const view = scopeSavedViewForLocations(mapSavedViewForClient(row || {}) as Row, allowedLocationIds);
+  return json(request, env, { ok: true, view });
 }
 
 export async function deleteReportSavedView(request: Request, env: Env, auth: AuthContext, workspaceId: string, viewId: string) {
@@ -528,7 +643,7 @@ export async function getReportSchedules(request: Request, env: Env, auth: AuthC
     locations: selectableLocations,
     users,
     allowAllLocations: allowedLocationIds === null,
-    schedulerVersion: '33.17'
+    schedulerVersion: '33.19'
   });
 }
 
@@ -703,7 +818,7 @@ async function executeSchedule(request: Request, env: Env, auth: AuthContext, wo
     await withSchedulingWriteRetry(env, () => env.DB.prepare(`INSERT INTO report_schedule_runs (id,schedule_id,workspace_id,started_at,status,created_at) VALUES (?1,?2,?3,?4,'running',?4)`).bind(runId, rawSchedule.id, workspaceId, startedAt).run());
   }
   try {
-    const items = normalizeScheduleItems(schedule);
+    const items = await hydrateScheduleItemsForExecution(env, workspaceId, schedule);
     if (!items.length) throw new Error('This schedule does not contain any report views.');
     const locations = await resolveScheduleLocations(env, auth, workspaceId, schedule);
     const allowedLocations = await getUserAllowedLocationIds(env, auth, workspaceId);
@@ -711,35 +826,55 @@ async function executeSchedule(request: Request, env: Env, auth: AuthContext, wo
       throw new Error('Permission denied: restricted users cannot run an All Locations schedule.');
     }
     for (const location of locations) await assertLocationAccess(env, auth, workspaceId, clean(location.id), 'scheduled_report_run');
-    const outputCount = items.length * locations.length;
+    const itemPlans = items.map((item) => ({
+      item,
+      locations: resolveSavedViewExecutionLocations(item, locations),
+    }));
+    const outputCount = itemPlans.reduce((total, plan) => total + plan.locations.length, 0);
     if (schedule.format !== 'report_link' && outputCount > 60) throw new Error('This schedule would create more than 60 attachments. Select fewer report views or locations.');
     const tradingDayStartMinutes = await getScheduleTradingDayStartMinutes(env, workspaceId);
-    const range = resolveScheduledRelativeRange(
+    const scheduleRange = resolveScheduledRelativeRange(
       schedule.dateRangeType || 'today',
       schedule.filters || {},
       schedule.timezone,
       new Date(),
       tradingDayStartMinutes,
     );
+    if (!isTest && rawSchedule.id) {
+      await withSchedulingWriteRetry(env, () => env.DB.prepare(
+        `UPDATE report_schedules SET report_items_json=?1,updated_at=?2 WHERE id=?3 AND workspace_id=?4`
+      ).bind(JSON.stringify(items), nowIso(), rawSchedule.id, workspaceId).run()).catch((cause) => {
+        console.error('Could not refresh scheduled saved-view snapshots before execution', cause);
+      });
+    }
     const outputs: Row[] = [];
     let sourceSequence = 0;
 
-    for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
-      const item = items[itemIndex];
+    for (let itemIndex = 0; itemIndex < itemPlans.length; itemIndex += 1) {
+      const { item, locations: itemLocations } = itemPlans[itemIndex];
       const reportId = clean(item.reportId);
       const viewId = clean(item.viewId);
       const itemFilters = { ...(item.filters || {}) } as Row;
       const sort = item.sort || null;
       const visibleColumns = item.visibleColumns || [];
+      const isSavedViewItem = Boolean(clean(item.savedViewSnapshotId || item.savedViewId));
+      const itemDateRangeType = validateDateRangeType(clean(
+        isSavedViewItem
+          ? item.dateRangeType || itemFilters.dateRangeType || schedule.dateRangeType || 'custom'
+          : schedule.dateRangeType || item.dateRangeType || itemFilters.dateRangeType || 'today'
+      ));
+      const itemRange = isSavedViewItem
+        ? resolveScheduledRelativeRange(itemDateRangeType, itemFilters, schedule.timezone, new Date(), tradingDayStartMinutes)
+        : scheduleRange;
       validateReport(reportId, viewId);
 
-      for (const location of locations) {
+      for (const location of itemLocations) {
         const filters = normalizeScheduledReportFilters({
           reportId,
           scheduleFilters: schedule.filters || {},
           itemFilters,
-          range,
-          dateRangeType: schedule.dateRangeType || 'today',
+          range: itemRange,
+          dateRangeType: itemDateRangeType,
           location: location as any
         }) as Row;
         sourceSequence += 1;
@@ -773,6 +908,10 @@ async function executeSchedule(request: Request, env: Env, auth: AuthContext, wo
           totals,
           sourceGeneratedAt,
           executionId: runId,
+          savedViewId: clean(item.savedViewSnapshotId || item.savedViewId),
+          savedViewName: clean(item.savedViewSnapshotName),
+          savedViewUpdatedAt: clean(item.savedViewUpdatedAt),
+          appliedDateRangeType: itemDateRangeType,
           link: buildReportLink(env, reportId, viewId, filters)
         });
       }
@@ -803,7 +942,7 @@ async function executeSchedule(request: Request, env: Env, auth: AuthContext, wo
 
     const workspace = await env.CENTRAL_DB.prepare(`SELECT name FROM workspaces WHERE id=?1 LIMIT 1`).bind(workspaceId).first<Row>();
     const workspaceName = clean(workspace?.name || workspaceId);
-    const email = buildReportPackEmail({ schedule, workspaceName, range, generatedAt: startedAt, outputs, rowsExported, isTest });
+    const email = buildReportPackEmail({ schedule, workspaceName, range: scheduleRange, generatedAt: startedAt, outputs, rowsExported, isTest });
     const attachments = await buildScheduledAttachments(schedule.format, outputs);
     const totalAttachmentBytes = attachments.reduce((total, attachment) => total + attachmentSize(attachment.content), 0);
     if (totalAttachmentBytes > MAX_EMAIL_ATTACHMENT_BYTES) {
@@ -863,13 +1002,43 @@ async function resolveScheduleLocations(env: Env, auth: AuthContext, workspaceId
   const allowedIds = await getUserAllowedLocationIds(env, auth, workspaceId);
   const active = allowedIds === null ? allActive : allActive.filter((location) => allowedIds.includes(location.id));
   if (schedule.locationMode === 'selected') {
-    const selected = new Set((schedule.locationIds || []).map(clean).filter(Boolean));
+    const selected = new Set((schedule.locationIds || []).map((value: unknown) => clean(value)).filter(Boolean));
     const matches = active.filter((location) => selected.has(location.id));
-    if (!matches.length && active.length) return [active[0]];
-    if (!matches.length) throw new Error('This workspace has no active locations available for the schedule.');
+    if (!matches.length) throw new Error('The selected schedule location is no longer active or is outside your permitted location access. Edit the schedule before sending it.');
     return matches;
   }
   return active.length ? active : [{ id: '', name: 'All Locations' }];
+}
+
+function resolveSavedViewExecutionLocations(item: ScheduleReportItem, scheduleLocations: Array<{ id: string; name: string }>) {
+  const savedViewId = clean(item.savedViewSnapshotId || item.savedViewId);
+  if (!savedViewId) return scheduleLocations;
+  const requested = extractSavedViewLocationFilters(item.filters || {});
+  if (!requested.length) return scheduleLocations;
+  const requestedKeys = new Set(requested.map(normalizeLocationIdentity).filter(Boolean));
+  const matches = scheduleLocations.filter((location) =>
+    requestedKeys.has(normalizeLocationIdentity(location.id)) ||
+    requestedKeys.has(normalizeLocationIdentity(location.name))
+  );
+  if (!matches.length) {
+    throw new Error(`Saved view ${clean(item.savedViewSnapshotName || savedViewId)} is filtered to a location outside this schedule's permitted location selection.`);
+  }
+  return matches;
+}
+
+function extractSavedViewLocationFilters(filters: Row) {
+  const values = [
+    filters.locationId,
+    filters.locationName,
+    filters.locationIds,
+    filters.locations,
+    filters.location_id,
+    filters.location_ids,
+  ];
+  return Array.from(new Set(values.flatMap((value) => {
+    if (Array.isArray(value)) return value;
+    return clean(value).split(',');
+  }).map((value) => clean(value)).filter((value) => value && value.toLowerCase() !== 'all')));
 }
 
 function evaluatePackCondition(condition: Row, outputs: Row[]) {
@@ -897,8 +1066,9 @@ async function fetchCanonicalReport(
   const callRoute = async (sourceKey: string, handler: (...args: any[]) => Promise<Response>, args: any[] = []) => {
     const baseQuery: Row = {};
     for (const [key, value] of Object.entries(filters)) {
-      if (value === '' || value === null || value === undefined || typeof value === 'object') continue;
-      baseQuery[key === 'startDate' ? 'from' : key === 'endDate' ? 'to' : key] = String(value);
+      const queryValue = reportFilterQueryValue(value);
+      if (!queryValue) continue;
+      baseQuery[key === 'startDate' ? 'from' : key === 'endDate' ? 'to' : key] = queryValue;
     }
 
     return collectCompleteReportPages({
@@ -909,8 +1079,9 @@ async function fetchCanonicalReport(
         url.pathname = `/api/workspaces/${workspaceId}/reports/scheduled-source`;
         url.search = '';
         for (const [key, value] of Object.entries(query || {})) {
-          if (value === '' || value === null || value === undefined || typeof value === 'object') continue;
-          url.searchParams.set(key, String(value));
+          const queryValue = reportFilterQueryValue(value);
+          if (!queryValue) continue;
+          url.searchParams.set(key, queryValue);
         }
         sourceFetchSequence += 1;
         const offset = Number(query?.offset || 0);
@@ -1158,30 +1329,44 @@ function buildReportLink(env: Env, reportId: string, viewId: string, filters: Ro
   const url = new URL(base);
   url.searchParams.set('route', 'reporting'); url.searchParams.set('report', reportId); url.searchParams.set('view', viewId);
   for (const [rawKey, rawValue] of Object.entries(filters || {})) {
-    if (rawValue === '' || rawValue === null || rawValue === undefined || typeof rawValue === 'object') continue;
+    const queryValue = reportFilterQueryValue(rawValue);
+    if (!queryValue) continue;
     const key = rawKey === 'startDate' ? 'from' : rawKey === 'endDate' ? 'to' : rawKey;
     if (key === 'locationName') continue;
-    url.searchParams.set(key, String(rawValue));
+    url.searchParams.set(key, queryValue);
   }
   return url.toString();
 }
 
 
 async function clearDefaultViews(env: Env, workspaceId: string, userId: string, reportId: string, reportGroupId: string, scope: string, excludeId = '') {
-  const targetSql = reportGroupId
-    ? `workspace_id=?2 AND report_group_id=?3`
-    : `workspace_id=?2 AND report_id=?3`;
+  // Defaults are per canonical report. A report group is only navigation metadata; clearing by
+  // group made one child report silently remove another child's default.
+  const targetSql = `workspace_id=?2 AND report_id=?3`;
   if (scope === 'workspace') {
-    await env.DB.prepare(`UPDATE report_saved_views SET is_default=0,updated_at=?1 WHERE ${targetSql} AND scope='workspace' AND id<>?4`).bind(nowIso(), workspaceId, reportGroupId || reportId, excludeId).run();
+    await env.DB.prepare(`UPDATE report_saved_views SET is_default=0,updated_at=?1 WHERE ${targetSql} AND scope='workspace' AND id<>?4`).bind(nowIso(), workspaceId, reportId, excludeId).run();
     return;
   }
-  await env.DB.prepare(`UPDATE report_saved_views SET is_default=0,updated_at=?1 WHERE ${targetSql} AND scope='personal' AND user_id=?4 AND id<>?5`).bind(nowIso(), workspaceId, reportGroupId || reportId, userId, excludeId).run();
+  await env.DB.prepare(`UPDATE report_saved_views SET is_default=0,updated_at=?1 WHERE ${targetSql} AND scope='personal' AND user_id=?4 AND id<>?5`).bind(nowIso(), workspaceId, reportId, userId, excludeId).run();
 }
 async function getSavedViewRow(env: Env, workspaceId: string, id: string) { return env.DB.prepare(`SELECT * FROM report_saved_views WHERE id=?1 AND workspace_id=?2 LIMIT 1`).bind(id, workspaceId).first<Row>(); }
 async function getScheduleRow(env: Env, workspaceId: string, id: string) { return env.DB.prepare(`SELECT * FROM report_schedules WHERE id=?1 AND workspace_id=?2 LIMIT 1`).bind(id, workspaceId).first<Row>(); }
 async function listActiveScheduleLocations(env: Env, workspaceId: string) {
   const rows = await env.DB.prepare(`SELECT id, COALESCE(NULLIF(display_name,''), NULLIF(name,''), NULLIF(external_name,''), id) AS name FROM locations WHERE workspace_id=?1 AND COALESCE(active,1)=1 ORDER BY COALESCE(is_default,0) DESC, lower(COALESCE(NULLIF(display_name,''), NULLIF(name,''), NULLIF(external_name,''), id)) ASC`).bind(workspaceId).all<Row>();
-  return rows.results.map((row) => ({ id: clean(row.id), name: clean(row.name || row.id) })).filter((row) => row.id);
+  const seenIds = new Set<string>();
+  const seenNames = new Set<string>();
+  return rows.results.map((row) => ({ id: clean(row.id), name: clean(row.name || row.id) })).filter((row) => {
+    const idKey = normalizeLocationIdentity(row.id);
+    const nameKey = normalizeLocationIdentity(row.name);
+    if (!row.id || (idKey && seenIds.has(idKey)) || (nameKey && seenNames.has(nameKey))) return false;
+    if (idKey) seenIds.add(idKey);
+    if (nameKey) seenNames.add(nameKey);
+    return true;
+  });
+}
+
+function normalizeLocationIdentity(value: unknown) {
+  return clean(value).normalize('NFKC').toLowerCase().replace(/[^a-z0-9]+/g, '');
 }
 async function listActiveScheduleRecipientUsers(env: Env, workspaceId: string) {
   try {
@@ -1232,12 +1417,42 @@ function scheduleExecutionMessage(cause: unknown, fallback: string) {
   return raw || fallback;
 }
 
+function savedViewLocationIds(input: Row): string[] {
+  const filters = input.filters && typeof input.filters === 'object' ? input.filters : {};
+  const raw = [
+    input.locationId,
+    filters.locationId,
+    ...(Array.isArray(filters.locationIds) ? filters.locationIds : []),
+  ];
+  return Array.from(new Set(raw.map((value) => clean(value)).filter(Boolean)));
+}
+
+function scopeSavedViewForLocations(view: Row, allowedLocationIds: string[] | null): Row | null {
+  if (allowedLocationIds === null) return view;
+  if (!allowedLocationIds.length) return null;
+  const requested = savedViewLocationIds(view);
+  if (requested.some((id) => !allowedLocationIds.includes(id))) return null;
+  if (requested.length) return view;
+  const filters = { ...(view.filters || {}), locationIds: [...allowedLocationIds] };
+  if (allowedLocationIds.length === 1) filters.locationId = allowedLocationIds[0];
+  return { ...view, filters, locationId: allowedLocationIds.length === 1 ? allowedLocationIds[0] : '' };
+}
+
+function savedViewPersistenceMessage(cause: unknown) {
+  const message = clean((cause as Error)?.message || cause).toLowerCase();
+  if (/no such column|has no column named|no such table|duplicate column|schema repair incomplete/.test(message)) {
+    return 'Saved-view storage repair failed after an automatic retry. The view was not saved; deploy this Worker build and retry.';
+  }
+  if (/constraint|foreign key/.test(message)) return 'The saved view could not be stored because the reporting schema migration is incomplete.';
+  return clean((cause as Error)?.message) || 'Could not save the report view.';
+}
+
 function schedulePersistenceMessage(cause: unknown) {
   const message = clean((cause as Error)?.message || cause).toLowerCase();
   if (/no such column|has no column named|no such table|duplicate column|schema repair incomplete/.test(message)) {
     return 'Report scheduling storage repair failed after an automatic retry. The schedule was not saved; deploy this Worker build and try again.';
   }
-  if (/constraint|foreign key/.test(message)) return 'The schedule could not be saved because the scheduling schema migration is incomplete. Deploy Worker 33.17 and retry once.';
+  if (/constraint|foreign key/.test(message)) return 'The schedule could not be saved because the scheduling schema migration is incomplete. Deploy Worker 33.18 and retry once.';
   return 'Could not save the report schedule. The schedule was not partially created.';
 }
 function mapSavedView(row: Row) { return { id: clean(row.id), workspaceId: clean(row.workspace_id), userId: clean(row.user_id), name: clean(row.name), description: clean(row.description), scope: clean(row.scope || 'personal'), reportGroupId: clean(row.report_group_id), reportId: clean(row.report_id), viewId: clean(row.view_id), filters: parseJson<Row>(row.filters_json, {}), sort: parseJson<Row | null>(row.sort_json, null), visibleColumns: parseJson<string[]>(row.visible_columns_json, []), dateRangeType: clean(row.date_range_type || 'custom'), locationId: clean(row.location_id), isDefault: bool(row.is_default), createdAt: clean(row.created_at), updatedAt: clean(row.updated_at) }; }

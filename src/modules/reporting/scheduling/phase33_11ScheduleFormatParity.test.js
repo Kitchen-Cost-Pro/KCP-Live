@@ -106,10 +106,10 @@ test('every schedulable report view produces CSV, XLSX and PDF bytes from the sa
 test('Phase 33.11 browser and Worker use one canonical report/view resolver before format rendering', () => {
   assert.match(workerSource, /resolveScheduleReportSelection/);
   assert.match(workerSource, /mapSavedViewForClient/);
-  assert.match(workerSource, /schedulerVersion: '33\.17'/);
+  assert.match(workerSource, /schedulerVersion: '33\.19'/);
   assert.match(workerSource, /buildScheduledAttachments\(schedule\.format, outputs\)/);
   assert.match(schedulingPageSource, /resolveCatalogReportSelection/);
-  assert.match(schedulingPageSource, /major === 33 && minor >= 17/);
+  assert.match(schedulingPageSource, /major === 33 && minor >= 19/);
 });
 
 function sampleValue(column = {}) {

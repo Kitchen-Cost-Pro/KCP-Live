@@ -6,6 +6,8 @@ import { writeAdminAuditEvent, getEmailDeliveryConfig } from './admin-routes';
 import { sendEmail } from './email';
 import { timingSafeEqual } from './crypto';
 
+const CURRENT_LEGAL_VERSION = '2026-07-14';
+
 function text(value: unknown, fallback = '') {
   return String(value ?? fallback).trim();
 }
@@ -405,12 +407,21 @@ export async function postAuthRegister(request: Request, env: Env) {
   const email = text(payload.email).toLowerCase();
   const fullName = text(payload.fullName || payload.name);
   const siteName = text(payload.siteName || payload.workspaceName);
+  const termsAccepted = payload.termsAccepted === true;
+  const privacyAcknowledged = payload.privacyAcknowledged === true;
+  const legalVersion = text(payload.legalVersion);
   if (!email) return error(request, env, 400, 'Email is required.');
   if (!isValidEmail(email)) return error(request, env, 400, 'Please enter a valid email address.');
   if (fullName.length > 100) return error(request, env, 400, 'Name is too long.');
   if (siteName.length > 100) return error(request, env, 400, 'Workspace name is too long.');
   if (!fullName) return error(request, env, 400, 'Full name is required.');
   if (!siteName) return error(request, env, 400, 'Workspace name is required.');
+  if (!termsAccepted || !privacyAcknowledged) {
+    return error(request, env, 400, 'You must agree to the Terms of Service and acknowledge the Privacy Policy before registering.');
+  }
+  if (legalVersion !== CURRENT_LEGAL_VERSION) {
+    return error(request, env, 400, 'The legal terms have changed. Refresh the page and review the latest documents before registering.');
+  }
 
   const ip = request.headers.get('cf-connecting-ip') || request.headers.get('x-forwarded-for') || 'unknown';
   const limited = await checkRateLimit(env, `register:${ip}`, 5, 3600);
@@ -419,6 +430,13 @@ export async function postAuthRegister(request: Request, env: Env) {
   const user = await getOrCreateUser(env, email, fullName);
   const requestId = id('req');
   const now = nowIso();
+  const legalAcceptance = {
+    source: 'cloudflare-pages',
+    termsAccepted: true,
+    privacyAcknowledged: true,
+    legalVersion: CURRENT_LEGAL_VERSION,
+    acceptedAt: now
+  };
   await env.DB.batch([
     env.DB.prepare(
       `UPDATE app_users
@@ -430,7 +448,7 @@ export async function postAuthRegister(request: Request, env: Env) {
       `INSERT INTO workspace_registration_requests
         (id, email, full_name, site_name, status, requested_at, raw_json)
        VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6)`
-    ).bind(requestId, email, fullName, siteName, now, JSON.stringify({ source: 'cloudflare-pages' }))
+    ).bind(requestId, email, fullName, siteName, now, JSON.stringify(legalAcceptance))
   ]);
 
   return json(request, env, {

@@ -86,9 +86,15 @@ export async function registerWorkspaceAccount(payload = {}) {
   const email = String(payload.email || '').trim().toLowerCase();
   const fullName = String(payload.fullName || '').trim();
   const siteName = String(payload.siteName || '').trim();
+  const termsAccepted = payload.termsAccepted === true;
+  const privacyAcknowledged = payload.privacyAcknowledged === true;
+  const legalVersion = String(payload.legalVersion || '').trim();
   if (!fullName) throw new Error('Enter your full name.');
   if (!siteName) throw new Error('Enter your workspace or site name.');
   if (!email) throw new Error('Enter your email address.');
+  if (!termsAccepted || !privacyAcknowledged || !legalVersion) {
+    throw new Error('You must agree to the Terms of Service and acknowledge the Privacy Policy before registering.');
+  }
 
   return callCloudflareRoute('api/auth/register', {
     method: 'POST',
@@ -96,7 +102,10 @@ export async function registerWorkspaceAccount(payload = {}) {
       fullName,
       siteName,
       email,
-      turnstileToken: payload.turnstileToken || ''
+      turnstileToken: payload.turnstileToken || '',
+      termsAccepted,
+      privacyAcknowledged,
+      legalVersion
     }
   });
 }

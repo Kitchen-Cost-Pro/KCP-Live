@@ -58,10 +58,10 @@ test('Payout equals Net Sales plus Tips less Refunds and Fees', () => {
   assert.equal(summary.vat, 15);
   assert.equal(summary.netSales, 100);
   assert.equal(summary.tips, 5);
-  assert.equal(summary.refunds, 20);
+  assert.equal(summary.refunds, 23);
   assert.equal(summary.fees, 2);
-  assert.equal(summary.payoutAmount, 83);
-  assert.equal(paymentTotals([summary]).payoutAmount, 83);
+  assert.equal(summary.payoutAmount, 80);
+  assert.equal(paymentTotals([summary]).payoutAmount, 80);
 });
 
  test('Payout tooltip states the exact report formula', () => {

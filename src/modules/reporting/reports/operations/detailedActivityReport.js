@@ -162,7 +162,7 @@ export function validateDetailedActivityRows(rows = [], services = {}) {
     countWarning(reportRows, 'detailed-missing-unit-cost', 'critical', 'row(s) do not have a unit cost yet, so value columns may show R0 until item/location costs are loaded.', isMissingUnitCostAdvisory),
     countWarning(reportRows, 'detailed-missing-source-id', 'critical', 'row(s) are missing source IDs.', (row) => !text(row.sourceId)),
     countWarning(reportRows, 'detailed-qty-in-out-both-populated', 'critical', 'row(s) have both Qty In and Qty Out populated.', (row) => safeNumber(row.qtyIn) > 0 && safeNumber(row.qtyOut) > 0),
-    countWarning(reportRows, 'detailed-zero-movement-qty', 'critical', 'row(s) have both Qty In and Qty Out as zero.', (row) => safeNumber(row.qtyIn) === 0 && safeNumber(row.qtyOut) === 0 && !isAccountingOnlyManufacturingWastage(row)),
+    countWarning(reportRows, 'detailed-zero-movement-qty', 'critical', 'row(s) have both Qty In and Qty Out as zero.', (row) => safeNumber(row.qtyIn) === 0 && safeNumber(row.qtyOut) === 0 && !isAccountingOnlyWastage(row)),
     countWarning(reportRows, 'detailed-movement-value-mismatch', 'critical', 'row(s) have Movement Value values that do not match Net Qty x Unit Cost Ex VAT.', movementValueMismatch)
   ].filter(Boolean);
 }
@@ -181,7 +181,7 @@ function isMissingUnitCostAdvisory(row = {}) {
 }
 
 function movementValueMismatch(row = {}) {
-  if (isAccountingOnlyManufacturingWastage(row)) return false;
+  if (isAccountingOnlyWastage(row)) return false;
   const unitCost = safeNumber(row.unitCostExVat ?? row.unitCost);
   const actual = safeNumber(row.movementValue);
   if (unitCost === 0 && actual === 0) return false;
@@ -189,10 +189,10 @@ function movementValueMismatch(row = {}) {
   return Math.abs(actual - expected) > MOVEMENT_VALUE_TOLERANCE;
 }
 
-function isAccountingOnlyManufacturingWastage(row = {}) {
+function isAccountingOnlyWastage(row = {}) {
   const source = text(row.source || row.sourceType || row.movementType).toLowerCase();
-  if (!source.includes('manufacturing wastage')) return false;
-  return row.accountingOnly === true || safeNumber(row.wastageQty) > 0;
+  const isWastage = source.includes('wastage') || source.includes('waste');
+  return isWastage && (row.accountingOnly === true || safeNumber(row.wastageQty) > 0);
 }
 
 export default detailedActivityReport;

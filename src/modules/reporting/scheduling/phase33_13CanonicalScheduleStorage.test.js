@@ -24,7 +24,7 @@ test('Phase 33.13 Worker persists one canonical format and no live saved-view re
   assert.doesNotMatch(workerSource, /saved_view_id/);
   assert.doesNotMatch(workerSource, /legacyCompatibleScheduleFormat/);
   assert.doesNotMatch(workerSource, /resolveStoredScheduleFormat/);
-  assert.match(workerSource, /schedulerVersion: '33\.17'/);
+  assert.match(workerSource, /schedulerVersion: '33\.19'/);
 });
 
 test('Phase 33.13 atomically rebuilds schedule storage and keeps schedule run history', () => {
@@ -35,5 +35,5 @@ test('Phase 33.13 atomically rebuilds schedule storage and keeps schedule run hi
   assert.match(migrationSource, /DROP TABLE report_schedule_runs/);
   assert.match(migrationSource, /ALTER TABLE report_schedules_next RENAME TO report_schedules/);
   assert.match(workspaceDoSource, /storage\.transactionSync/);
-  assert.match(schedulingPageSource, /minor >= 17/);
+  assert.match(schedulingPageSource, /minor >= 19/);
 });

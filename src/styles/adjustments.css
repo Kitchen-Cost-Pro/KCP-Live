@@ -377,12 +377,22 @@
   color: rgba(255, 255, 255, 0.92);
   text-align: left;
   cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease, transform 140ms ease, box-shadow 140ms ease;
 }
 
 #view-adjustments .adj-dropdownMenu button:hover,
+#view-adjustments .adj-dropdownMenu button:focus-visible,
 #view-adjustments .adj-dropdownMenu button.is-active {
-  border-color: rgba(59, 130, 246, 0.35);
-  background: rgba(37, 99, 235, 0.18);
+  border-color: color-mix(in srgb, var(--accent-blue, #38bdf8) 68%, transparent);
+  background: color-mix(in srgb, var(--accent-blue, #38bdf8) 24%, rgba(11, 18, 33, 0.98));
+  color: #ffffff;
+  box-shadow: inset 3px 0 0 var(--accent-blue, #38bdf8), 0 8px 18px rgba(0, 0, 0, 0.18);
+  transform: translateX(2px);
+  outline: none;
+}
+
+#view-adjustments .adj-dropdownMenu button.is-active {
+  background: color-mix(in srgb, var(--accent-blue, #38bdf8) 32%, rgba(11, 18, 33, 0.98));
 }
 
 #view-adjustments .adj-panelHead,
@@ -1228,4 +1238,14 @@
 
 #view-adjustments .adj-table--picker tbody tr[data-adj-stock-row]:hover {
   background: rgba(59, 130, 246, 0.08);
+}
+
+/* Ensure every Wastage Actions entry has obvious pointer feedback. */
+#view-adjustments .adj-dropdownMenu button:not(:disabled) {
+  opacity: 0.9;
+  will-change: transform, background-color, border-color, opacity;
+}
+#view-adjustments .adj-dropdownMenu button:not(:disabled):hover,
+#view-adjustments .adj-dropdownMenu button:not(:disabled):focus-visible {
+  opacity: 1;
 }

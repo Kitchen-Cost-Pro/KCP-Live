@@ -1,5 +1,5 @@
 import type { AuthContext, Env } from "./types";
-import { assertWorkspaceAccess, assertReportLocationScope } from "./auth";
+import { assertWorkspaceAccess, assertReportLocationScope, getResolvedReportLocationScope } from "./auth";
 import { json, limitFromUrl, offsetFromUrl } from "./http";
 // @ts-ignore Shared timezone helpers used by the reporting client and Worker.
 import {
@@ -302,7 +302,7 @@ export async function getPurchaseOrdersReport(
     filters,
     timeZone,
   );
-  addSqlFilter(clauses, binds, filters.locationId, "po.target_location_id");
+  addSqlLocationScope(clauses, binds, filters, "po.target_location_id");
   addSqlFilter(clauses, binds, filters.supplierId, "po.supplier_id");
   addSqlFilter(clauses, binds, filters.itemId, "pol.stock_item_id");
   if (filters.status)
@@ -527,7 +527,7 @@ export async function getGrvLogReport(
   const clauses = ["g.workspace_id = ?1"];
   const binds: any[] = [workspaceId];
   addDateRange(clauses, binds, "g.received_at", filters, timeZone);
-  addSqlFilter(clauses, binds, filters.locationId, "gl.location_id");
+  addSqlLocationScope(clauses, binds, filters, "gl.location_id");
   addSqlFilter(clauses, binds, filters.supplierId, "g.supplier_id");
   addSqlFilter(clauses, binds, filters.itemId, "gl.stock_item_id");
   if (filters.category || filters.categoryId)
@@ -761,7 +761,7 @@ export async function getCreditNotesReport(
   const clauses = ["cn.workspace_id = ?1"];
   const binds: any[] = [workspaceId];
   addDateRange(clauses, binds, "cn.credited_at", filters, timeZone);
-  addSqlFilter(clauses, binds, filters.locationId, "cnl.location_id");
+  addSqlLocationScope(clauses, binds, filters, "cnl.location_id");
   addSqlFilter(clauses, binds, filters.supplierId, "cn.supplier_id");
   addSqlFilter(clauses, binds, filters.itemId, "cnl.stock_item_id");
   if (filters.category || filters.categoryId)
@@ -1016,7 +1016,7 @@ export async function getManufacturingTransactionsReport(
   const clauses = ["mb.workspace_id = ?1"];
   const binds: any[] = [workspaceId];
   addDateRange(clauses, binds, "mb.posted_at", filters, timeZone);
-  addSqlFilter(clauses, binds, filters.locationId, "mb.location_id");
+  addSqlLocationScope(clauses, binds, filters, "mb.location_id");
   addSqlFilter(clauses, binds, filters.itemId, "mb.stock_item_id");
   if (filters.category || filters.categoryId) {
     addSqlFilter(
@@ -1644,10 +1644,7 @@ export async function getStockTransferTransactionsReport(
     const timestamp = clean(row.sourceRequestedAt || row.requestedAt || row.timestamp);
     if (fromUtc && timestamp && new Date(timestamp).getTime() < new Date(fromUtc).getTime()) return false;
     if (toExclusiveUtc && timestamp && new Date(timestamp).getTime() >= new Date(toExclusiveUtc).getTime()) return false;
-    if (
-      filters.locationId &&
-      !toCleanStringArray(row.reportLocationIds).includes(filters.locationId)
-    ) return false;
+    if (!matchesLocationScope(toCleanStringArray(row.reportLocationIds), filters)) return false;
     if (filters.itemId && clean(row.itemId) !== filters.itemId) return false;
     if (filters.category && lower(row.category) !== lower(filters.category)) return false;
     if (filters.categoryId && lower(row.category) !== lower(filters.categoryId)) return false;
@@ -1876,7 +1873,7 @@ async function reportContext(
     tradingDayStartMinutes: reporting.tradingDayStartMinutes,
     tradingDayLabel: reporting.tradingDayLabel,
     filters: {
-      ...readFilters(url),
+      ...readFilters(url, request),
       tradingDayStartMinutes: reporting.tradingDayStartMinutes,
     },
     limit: limitFromUrl(url, defaultLimit, 5000),
@@ -1884,12 +1881,24 @@ async function reportContext(
     generatedAt: new Date().toISOString(),
   };
 }
-function readFilters(url: URL) {
+function readFilters(url: URL, request?: Request) {
   const get = (key: string) => clean(url.searchParams.get(key));
+  const requestedLocationIds = Array.from(new Set([
+    ...url.searchParams.getAll("locationId"),
+    ...url.searchParams.getAll("locationIds"),
+    ...url.searchParams.getAll("location"),
+  ].flatMap((value) => value.split(",")).map((value) => clean(value)).filter(Boolean)));
+  const resolvedScope = request ? getResolvedReportLocationScope(request) : undefined;
+  const locationIds = resolvedScope === null
+    ? requestedLocationIds
+    : Array.isArray(resolvedScope)
+      ? resolvedScope
+      : requestedLocationIds;
   return {
     from: get("from"),
     to: get("to"),
-    locationId: get("locationId"),
+    locationId: locationIds.length === 1 ? locationIds[0] : "",
+    locationIds,
     category: get("category"),
     categoryId: get("categoryId"),
     itemId: get("itemId"),
@@ -2030,6 +2039,30 @@ function addSqlFilter(
   binds.push(value);
   clauses.push(`${column}=?${binds.length}`);
 }
+function locationScopeIds(filters: Row): string[] {
+  const raw = Array.isArray(filters.locationIds)
+    ? filters.locationIds
+    : clean(filters.locationId)
+      ? [filters.locationId]
+      : [];
+  return Array.from(new Set(raw.map((value) => clean(value)).filter(Boolean)));
+}
+function addSqlLocationScope(clauses: string[], binds: any[], filters: Row, column: string) {
+  const ids = locationScopeIds(filters);
+  if (!ids.length) return;
+  const placeholders = ids.map((id) => {
+    binds.push(id);
+    return `?${binds.length}`;
+  });
+  clauses.push(`${column} IN (${placeholders.join(", ")})`);
+}
+function matchesLocationScope(value: unknown, filters: Row) {
+  const permitted = locationScopeIds(filters);
+  if (!permitted.length) return true;
+  const values = (Array.isArray(value) ? value : [value]).map((value) => clean(value)).filter(Boolean);
+  if (!values.length) return false;
+  return values.some((id) => permitted.includes(id));
+}
 function dedupeRowsByKey(rows: Row[], keySelector: (row: Row) => string) {
   const seen = new Set<string>();
   const output: Row[] = [];
@@ -2125,8 +2158,7 @@ function allowsStock(raw: Row) {
   );
 }
 function matchesCommon(row: Row, filters: Row) {
-  if (filters.locationId && clean(row.locationId) !== filters.locationId)
-    return false;
+  if (!matchesLocationScope(row.locationId, filters)) return false;
   if (filters.itemId && clean(row.itemId) !== filters.itemId) return false;
   const category = filters.category || filters.categoryId;
   if (category && lower(row.category) !== lower(category)) return false;

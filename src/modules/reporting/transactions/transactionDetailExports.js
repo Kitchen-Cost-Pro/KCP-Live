@@ -1,5 +1,6 @@
 import { downloadReportCsv } from "../exports/exportCsv.js";
 import { drawReportPdfHeader } from "../exports/exportPdf.js";
+import { KCP_PDF_THEME, kcpPdfTableTheme } from "../../../utils/pdfTheme.js";
 import { formatTransactionDetailValue,
   transactionDetailExportRows,
   transactionDetailFileStem,
@@ -292,12 +293,12 @@ export async function transactionDetailToPdfDocument(detail = {}, options = {}) 
     cursorY = ensurePdfSpace(doc, cursorY, 42, margin);
     const reconciled = model.reconciliation.toLowerCase().includes("reconciled")
       && !model.reconciliation.toLowerCase().includes("review");
-    doc.setFillColor(...(reconciled ? [236, 253, 245] : [255, 247, 237]));
-    doc.setDrawColor(...(reconciled ? [167, 243, 208] : [253, 186, 116]));
+    doc.setFillColor(...(reconciled ? KCP_PDF_THEME.successSurface : KCP_PDF_THEME.warningSurface));
+    doc.setDrawColor(...(reconciled ? KCP_PDF_THEME.successBorder : KCP_PDF_THEME.warningBorder));
     doc.roundedRect(margin, cursorY, contentWidth, 30, 6, 6, "FD");
     doc.setFont("helvetica", "bold");
     doc.setFontSize(8.5);
-    doc.setTextColor(...(reconciled ? [6, 95, 70] : [154, 52, 18]));
+    doc.setTextColor(...(reconciled ? KCP_PDF_THEME.successText : KCP_PDF_THEME.warningText));
     doc.text(`Ledger Reconciliation: ${model.reconciliation}`, margin + 12, cursorY + 19);
     cursorY += 42;
   }
@@ -310,6 +311,7 @@ export async function transactionDetailToPdfDocument(detail = {}, options = {}) 
   const body = model.rows.length
     ? model.rows
     : [headers.map((_, index) => index === 0 ? "No line items were recorded." : "")];
+  const tableTheme = kcpPdfTableTheme();
   const tableOptions = {
     startY: cursorY,
     head: [headers],
@@ -327,17 +329,13 @@ export async function transactionDetailToPdfDocument(detail = {}, options = {}) 
       cellPadding: headers.length > 13 ? 3 : 4,
       overflow: "linebreak",
       valign: "middle",
-      textColor: [55, 65, 81],
-      lineColor: [226, 232, 240],
+      textColor: KCP_PDF_THEME.text,
+      lineColor: KCP_PDF_THEME.border,
       lineWidth: 0.35,
     },
-    headStyles: {
-      fillColor: [17, 24, 39],
-      textColor: [255, 255, 255],
-      fontStyle: "bold",
-      minCellHeight: 23,
-    },
-    alternateRowStyles: { fillColor: [248, 250, 252] },
+    headStyles: { ...tableTheme.headStyles, minCellHeight: 23 },
+    bodyStyles: tableTheme.bodyStyles,
+    alternateRowStyles: tableTheme.alternateRowStyles,
     columnStyles: buildTransactionPdfColumnStyles(model.columns),
     didDrawPage: (data) => {
       drawTransactionPdfFooter(doc, model, data.pageNumber, pageHeight, margin);
@@ -362,16 +360,16 @@ function drawPdfSummaryCards(doc, cards = [], left = 32, startY = 90, contentWid
     const row = Math.floor(index / columns);
     const x = left + column * (cardWidth + gap);
     const y = cursorY + row * (cardHeight + gap);
-    doc.setFillColor(248, 250, 252);
-    doc.setDrawColor(226, 232, 240);
+    doc.setFillColor(...KCP_PDF_THEME.surfaceAlt);
+    doc.setDrawColor(...KCP_PDF_THEME.border);
     doc.roundedRect(x, y, cardWidth, cardHeight, 6, 6, "FD");
     doc.setFont("helvetica", "normal");
     doc.setFontSize(7);
-    doc.setTextColor(107, 114, 128);
+    doc.setTextColor(...KCP_PDF_THEME.muted);
     doc.text(String(card.label || "Summary"), x + 10, y + 14, { maxWidth: cardWidth - 20 });
     doc.setFont("helvetica", "bold");
     doc.setFontSize(11);
-    doc.setTextColor(17, 24, 39);
+    doc.setTextColor(...KCP_PDF_THEME.navy);
     doc.text(String(card.value || "-"), x + 10, y + 32, { maxWidth: cardWidth - 20 });
   });
   const rows = Math.ceil(cards.length / columns);
@@ -399,14 +397,14 @@ function drawPdfFactTable(doc, autoTable, facts = [], left = 32, startY = 160, c
       cellPadding: { top: 4, right: 6, bottom: 4, left: 6 },
       overflow: "linebreak",
       valign: "top",
-      textColor: [55, 65, 81],
-      lineColor: [226, 232, 240],
+      textColor: KCP_PDF_THEME.text,
+      lineColor: KCP_PDF_THEME.border,
       lineWidth: { bottom: 0.35 },
     },
     columnStyles: {
-      0: { cellWidth: 78, fontStyle: "bold", textColor: [107, 114, 128] },
+      0: { cellWidth: 78, fontStyle: "bold", textColor: KCP_PDF_THEME.muted },
       1: { cellWidth: contentWidth / 2 - 78 },
-      2: { cellWidth: 78, fontStyle: "bold", textColor: [107, 114, 128] },
+      2: { cellWidth: 78, fontStyle: "bold", textColor: KCP_PDF_THEME.muted },
       3: { cellWidth: contentWidth / 2 - 78 },
     },
   };
@@ -418,7 +416,7 @@ function drawPdfFactTable(doc, autoTable, facts = [], left = 32, startY = 160, c
 function drawPdfSectionTitle(doc, title = "", x = 32, y = 80) {
   doc.setFont("helvetica", "bold");
   doc.setFontSize(9.5);
-  doc.setTextColor(31, 41, 55);
+  doc.setTextColor(...KCP_PDF_THEME.navy);
   doc.text(String(title), x, y);
 }
 
@@ -447,7 +445,7 @@ function buildTransactionPdfColumnStyles(columns = []) {
 function drawTransactionPdfFooter(doc, model, pageNumber, pageHeight, margin) {
   doc.setFont("helvetica", "normal");
   doc.setFontSize(6.8);
-  doc.setTextColor(107, 114, 128);
+  doc.setTextColor(...KCP_PDF_THEME.muted);
   doc.text(`${model.reference} | Generated ${model.generatedAt} | ${model.timeZone}`, margin, pageHeight - 16);
   doc.text(`Page ${pageNumber}`, doc.internal.pageSize.getWidth() - margin - 36, pageHeight - 16);
 }

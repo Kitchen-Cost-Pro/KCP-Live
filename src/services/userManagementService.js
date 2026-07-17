@@ -1,7 +1,6 @@
 import { callCloudflareWorkspaceRoute } from './cloudflareApi.js';
 import {
   buildRoleOptions,
-  DEFAULT_ROLES,
   getAllowedSections,
   getRoleCatalog,
   isSuperUserRoleName,
@@ -70,9 +69,7 @@ export function subscribeWorkspaceAccess(workspaceId, user, { onSnapshot, onErro
 }
 
 function sanitizeCloudflareRoles(value = []) {
-  const roles = normalizeCustomRoles(value);
-  const presetNames = new Set(DEFAULT_ROLES.map((role) => role.name));
-  return roles.filter((role) => !presetNames.has(role.name));
+  return normalizeCustomRoles(value).filter((role) => !isSuperUserRoleName(role.name));
 }
 
 export async function createWorkspaceMember(workspaceId, workspaceName, actor, payload = {}) {
@@ -123,7 +120,7 @@ export async function saveWorkspaceRole(workspaceId, payload = {}) {
       name: roleName,
       label,
       permissions: Array.isArray(payload.permissions) ? payload.permissions.filter(Boolean) : [],
-      locations: Array.isArray(payload.locations) && payload.locations.length ? payload.locations : ['all']
+      locations: Array.isArray(payload.locations) ? payload.locations : ['all']
     }
   });
 }

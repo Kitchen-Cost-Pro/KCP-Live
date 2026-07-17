@@ -37,6 +37,11 @@ export function normalizeSalesFinancialRow(row = {}) {
   const vatRate = suppliedVatRate > 0 ? suppliedVatRate : DEFAULT_VAT_RATE;
   const status = text(row.status) || 'Unknown';
   const isRefund = status.toLowerCase().includes('refund') || text(row.orderType || row.order_type).toLowerCase() === 'refund';
+  const sourcePaymentMethod = text(row.paymentMethod || row.payment_method);
+  const originalPaymentMethod = text(row.originalPaymentMethod || row.original_payment_method);
+  const paymentMethod = isRefund && sourcePaymentMethod.toLowerCase() === 'refund'
+    ? (originalPaymentMethod || 'Unknown')
+    : (sourcePaymentMethod || originalPaymentMethod || 'Unknown');
   const refundGrossAmount = Math.abs(safeNumber(row.refundGrossAmount ?? row.refund_gross_amount ?? row.refundAmount ?? row.refund_amount));
   const discountAmount = Math.abs(safeNumber(row.discountAmount ?? row.discount_amount));
   const tipAmount = isRefund ? 0 : Math.abs(safeNumber(row.tipAmount ?? row.tip_amount));
@@ -66,16 +71,20 @@ export function normalizeSalesFinancialRow(row = {}) {
     : explicitNetReconciles
       ? explicitNetAmount
       : roundMoney(sourceGrossAmount - accountingVatAmount);
+  const suppliedRefundVat = row.refundVatAmount ?? row.refund_vat_amount;
   const suppliedRefundNet = row.refundNetAmount ?? row.refund_net_amount;
   const refundVatAmount = refundGrossAmount > 0
-    ? roundMoney(isVatExempt ? 0 : calculateVatFromGross(refundGrossAmount, vatRate))
+    ? hasValue(suppliedRefundVat)
+      ? Math.abs(roundMoney(safeNumber(suppliedRefundVat)))
+      : roundMoney(isVatExempt ? 0 : calculateVatFromGross(refundGrossAmount, vatRate))
     : 0;
-  const refundAmount = hasValue(suppliedRefundNet)
+  const refundNetAmount = hasValue(suppliedRefundNet)
     ? Math.abs(roundMoney(safeNumber(suppliedRefundNet)))
     : roundMoney(Math.max(0, refundGrossAmount - refundVatAmount));
+  const refundAmount = refundGrossAmount;
 
   // The displayed sales columns remain pre-refund so the report can be read left-to-right:
-  // Gross Sales - VAT = Net Sales; Net Sales + Tips - Refunds - Fees = Payout.
+  // Gross Sales - VAT = Net Sales; Net Sales + Tips - Gross Refunds - Fees = Payout.
   const grossAmount = isRefund ? 0 : sourceGrossAmount;
   const vatAmount = isRefund ? 0 : accountingVatAmount;
   const netAmount = isRefund ? 0 : accountingNetAmount;
@@ -91,7 +100,11 @@ export function normalizeSalesFinancialRow(row = {}) {
     saleTime: saleDateTime.time,
     reportingTimeZone: saleDateTime.timeZone,
     receiptNumber: text(row.receiptNumber || row.receipt_number),
-    paymentMethod: text(row.paymentMethod || row.payment_method) || 'Unknown',
+    refundId: text(row.refundId || row.refund_id || row.providerRefundId || row.provider_refund_id),
+    refundReason: text(row.refundReason || row.refund_reason),
+    refundHandling: text(row.refundHandling || row.refund_handling),
+    refundBehavior: text(row.refundBehavior || row.refund_behavior),
+    paymentMethod,
     status,
     isRefund,
     grossAmount,
@@ -101,6 +114,7 @@ export function normalizeSalesFinancialRow(row = {}) {
     refundAmount,
     refundGrossAmount,
     refundVatAmount,
+    refundNetAmount,
     tipAmount,
     feeAmount,
     payoutAmount,
@@ -118,12 +132,12 @@ export function normalizeSalesFinancialRow(row = {}) {
 export function normalizeSaleUsageRow(row = {}) {
   const saleDateTime = resolveSalesDateTime(row);
   const sourceType = text(row.sourceType || row.source_type || 'Sale Usage') || 'Sale Usage';
-  const qtyUsed = Math.abs(safeNumber(row.qtyUsed ?? row.qty_used));
+  const qtyUsed = safeNumber(row.qtyUsed ?? row.qty_used);
   const unitCostExVat = safeNumber(row.unitCostExVat ?? row.unit_cost_ex_vat ?? row.unitCost ?? row.unit_cost);
   const stockValueUsed = hasValue(row.stockValueUsed ?? row.stock_value_used)
-    ? Math.abs(safeNumber(row.stockValueUsed ?? row.stock_value_used))
+    ? safeNumber(row.stockValueUsed ?? row.stock_value_used)
     : roundMoney(qtyUsed * unitCostExVat);
-  const qtySold = Math.abs(safeNumber(row.qtySold ?? row.qty_sold ?? row.lineQuantity ?? row.line_quantity, 1)) || 1;
+  const qtySold = safeNumber(row.qtySold ?? row.qty_sold ?? row.lineQuantity ?? row.line_quantity, 1) || 1;
   const grossSaleAmount = safeNumber(row.grossSaleAmount ?? row.gross_sale_amount);
   const suppliedVatRate = row.vatRate !== undefined || row.vat_rate !== undefined
     ? normalizeRate(row.vatRate ?? row.vat_rate)
@@ -156,6 +170,14 @@ export function normalizeSaleUsageRow(row = {}) {
     saleTime: saleDateTime.time,
     reportingTimeZone: saleDateTime.timeZone,
     receiptNumber: text(row.receiptNumber || row.receipt_number),
+    refundId: text(row.refundId || row.refund_id || row.providerRefundId || row.provider_refund_id),
+    refundReason: text(row.refundReason || row.refund_reason),
+    refundHandling: text(row.refundHandling || row.refund_handling),
+    refundBehavior: text(row.refundBehavior || row.refund_behavior),
+    stockMovementType: text(row.stockMovementType || row.stock_movement_type),
+    stockQuantityChange: safeNumber(row.stockQuantityChange ?? row.stock_quantity_change),
+    wastageQty: Math.abs(safeNumber(row.wastageQty ?? row.wastage_qty)),
+    accountingOnly: booleanValue(row.accountingOnly ?? row.accounting_only),
     saleId: text(row.saleId || row.sale_id),
     saleLineId: text(row.saleLineId || row.sale_line_id),
     menuItemId: text(row.menuItemId || row.menu_item_id),
@@ -251,6 +273,8 @@ export function paymentTotals(rows = [], includeAverage = false) {
     grossSales: sumBy(rows, (row) => row.grossSales ?? row.grossAmount),
     discounts: sumBy(rows, (row) => row.discounts ?? row.discountAmount),
     refunds: sumBy(rows, (row) => row.refunds ?? row.refundAmount),
+    refundVat: sumBy(rows, (row) => row.refundVat ?? row.refundVatAmount),
+    refundNet: sumBy(rows, (row) => row.refundNet ?? row.refundNetAmount),
     vat: sumBy(rows, (row) => row.vat ?? row.vatAmount),
     netSales: sumBy(rows, (row) => row.netSales ?? row.netAmount),
     tips: sumBy(rows, (row) => row.tips ?? row.tipAmount),
@@ -302,6 +326,8 @@ function summarizePayments(rows, keySelector, baseSelector) {
     const netSales = sumBy(groupRows, 'netAmount');
     const tips = sumBy(groupRows, 'tipAmount');
     const refunds = sumBy(groupRows, 'refundAmount');
+    const refundVat = sumBy(groupRows, 'refundVatAmount');
+    const refundNet = sumBy(groupRows, 'refundNetAmount');
     const discounts = sumBy(groupRows, 'discountAmount');
     const fees = sumBy(groupRows, 'feeAmount');
     const payoutAmount = roundMoney(netSales + tips - refunds - fees);
@@ -311,6 +337,8 @@ function summarizePayments(rows, keySelector, baseSelector) {
       grossSales,
       discounts,
       refunds,
+      refundVat,
+      refundNet,
       vat,
       netSales,
       tips,
@@ -446,6 +474,12 @@ function toRecipeLineDetailRow(row = {}) {
     recipeLevel: row.recipeLevel,
     parentRecipe: row.parentRecipe,
     sourceType: row.sourceType,
+    stockMovementType: row.stockMovementType,
+    refundReason: row.refundReason,
+    refundHandling: row.refundHandling,
+    refundId: row.refundId,
+    stockQuantityChange: row.stockQuantityChange,
+    wastageQty: row.wastageQty,
     sourceId: row.sourceId
   };
 }
@@ -461,6 +495,12 @@ function toUsageTransactionDetailRow(row = {}) {
     inventoryIngredient: row.inventoryItemName,
     inventoryCategoryName: row.inventoryCategoryName,
     sourceType: row.sourceType,
+    stockMovementType: row.stockMovementType,
+    refundReason: row.refundReason,
+    refundHandling: row.refundHandling,
+    refundId: row.refundId,
+    stockQuantityChange: row.stockQuantityChange,
+    wastageQty: row.wastageQty,
     qtyUsed: row.qtyUsed,
     baseUom: row.baseUom,
     unitCostExVat: row.unitCostExVat,

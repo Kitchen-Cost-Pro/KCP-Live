@@ -1,0 +1,137 @@
+{
+  "event": {
+    "id": "evt_ref_mod",
+    "type": "refund.succeeded",
+    "data": {
+      "refund": {
+        "id": "ref_mod",
+        "original_order_id": "ord_mod_ref",
+        "status": "succeeded",
+        "refund_amount": {
+          "amount": 11000,
+          "currency": "ZAR"
+        },
+        "returned_line_items": [
+          {
+            "id": "rmod",
+            "original_line_id": "line_mod",
+            "product_id": "yoco_prod_1",
+            "name": "Burger",
+            "quantity": 1,
+            "total_price": {
+              "amount": 11000,
+              "currency": "ZAR"
+            },
+            "tax_amount": {
+              "amount": 1435,
+              "currency": "ZAR"
+            },
+            "net_amount": {
+              "amount": 9565,
+              "currency": "ZAR"
+            },
+            "modifiers": [
+              {
+                "id": "mod_cheese",
+                "group_id": "group_1",
+                "name": "Cheese",
+                "quantity": 1,
+                "price": {
+                  "amount": 1000,
+                  "currency": "ZAR"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "refund": {
+    "id": "ref_mod",
+    "original_order_id": "ord_mod_ref",
+    "status": "succeeded",
+    "refund_amount": {
+      "amount": 11000,
+      "currency": "ZAR"
+    },
+    "returned_line_items": [
+      {
+        "id": "rmod",
+        "original_line_id": "line_mod",
+        "product_id": "yoco_prod_1",
+        "name": "Burger",
+        "quantity": 1,
+        "total_price": {
+          "amount": 11000,
+          "currency": "ZAR"
+        },
+        "tax_amount": {
+          "amount": 1435,
+          "currency": "ZAR"
+        },
+        "net_amount": {
+          "amount": 9565,
+          "currency": "ZAR"
+        },
+        "modifiers": [
+          {
+            "id": "mod_cheese",
+            "group_id": "group_1",
+            "name": "Cheese",
+            "quantity": 1,
+            "price": {
+              "amount": 1000,
+              "currency": "ZAR"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "original_order": {
+    "id": "ord_mod_ref",
+    "status": "completed",
+    "closed_at": "2026-07-15T08:00:00.000Z",
+    "currency": "ZAR",
+    "location_id": "yoco_loc_1",
+    "payment_id": "pay_ref_1",
+    "line_items": [
+      {
+        "id": "line_mod",
+        "product_id": "yoco_prod_1",
+        "variant_id": "yoco_var_1",
+        "name": "Burger",
+        "quantity": 1,
+        "unit_price": {
+          "amount": 11000,
+          "currency": "ZAR"
+        },
+        "total_price": {
+          "amount": 11000,
+          "currency": "ZAR"
+        },
+        "tax_amount": {
+          "amount": 1435,
+          "currency": "ZAR"
+        },
+        "net_amount": {
+          "amount": 9565,
+          "currency": "ZAR"
+        },
+        "modifiers": [
+          {
+            "id": "mod_cheese",
+            "group_id": "group_1",
+            "name": "Cheese",
+            "quantity": 1,
+            "price": {
+              "amount": 1000,
+              "currency": "ZAR"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

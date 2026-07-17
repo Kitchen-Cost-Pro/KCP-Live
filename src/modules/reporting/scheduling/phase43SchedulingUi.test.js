@@ -23,7 +23,7 @@ test('Phase 43 retains all schedule fields and submission behavior', () => {
   }
   assert.doesNotMatch(schedulingSource, /name="emailSubject"|name="emailMessage"/);
   assert.match(schedulingSource, /data-schedule-recipient-select/);
-  assert.match(schedulingSource, /readScheduleForm\(form, catalog, savedViews\)/);
+  assert.match(schedulingSource, /readScheduleForm\(form, catalog, savedViews, values\.reportItems\)/);
   assert.match(schedulingSource, /createReportSchedule\(workspaceId, payload\)/);
   assert.match(schedulingSource, /updateReportSchedule\(workspaceId, schedule\.id, payload\)/);
 });

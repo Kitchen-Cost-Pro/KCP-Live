@@ -7,6 +7,7 @@ import {
   mapReportRowsForExport,
   mapReportTotalsForExport
 } from './exportMappers.js';
+import { drawKcpPdfTopAccent, KCP_PDF_THEME, kcpPdfTableTheme } from '../../../utils/pdfTheme.js';
 
 
 function pdfTableLayoutForColumns(columnCount = 0) {
@@ -24,7 +25,10 @@ function pdfTableLayoutForColumns(columnCount = 0) {
       cellPadding: count > 14 ? 3 : 4,
       overflow: 'linebreak',
       valign: 'top',
-      minCellHeight: count > 14 ? 15 : 18
+      minCellHeight: count > 14 ? 15 : 18,
+      textColor: KCP_PDF_THEME.text,
+      lineColor: KCP_PDF_THEME.border,
+      lineWidth: 0.35
     }
   };
 }
@@ -108,25 +112,22 @@ async function appendReportPdfSection(doc, autoTable, result = {}, options = {})
 
   const startY = header.tableStartY;
   const layout = pdfTableLayoutForColumns(safeHeaders.length);
+  const tableTheme = kcpPdfTableTheme();
   const tableOptions = {
     ...layout,
     startY,
     head: [safeHeaders],
     body,
-    headStyles: {
-      fillColor: [17, 24, 39],
-      textColor: [255, 255, 255],
-      fontStyle: 'bold'
-    },
-    alternateRowStyles: {
-      fillColor: [248, 250, 252]
-    },
+    styles: { ...layout.styles, ...tableTheme.styles },
+    headStyles: tableTheme.headStyles,
+    bodyStyles: tableTheme.bodyStyles,
+    alternateRowStyles: tableTheme.alternateRowStyles,
     columnStyles: buildReportPdfColumnStyles(safeHeaders),
     margin: { left: 28, right: 28 },
     didDrawPage: () => {
       const currentPage = doc.internal.getCurrentPageInfo?.().pageNumber || doc.internal.getNumberOfPages();
       doc.setFontSize(7);
-      doc.setTextColor(120);
+      doc.setTextColor(...KCP_PDF_THEME.muted);
       doc.text(`Page ${currentPage}`, doc.internal.pageSize.getWidth() - 68, doc.internal.pageSize.getHeight() - 18);
     }
   };
@@ -141,10 +142,11 @@ async function appendReportPdfSection(doc, autoTable, result = {}, options = {})
     const warningY = finalY > pageHeight - 90 ? 36 : finalY;
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(10);
-    doc.setTextColor(31, 41, 55);
+    doc.setTextColor(...KCP_PDF_THEME.navy);
     doc.text('Warnings', 36, warningY);
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(8);
+    doc.setTextColor(...KCP_PDF_THEME.text);
     const warningLines = warnings.slice(0, 12).map((warning) => `${text(warning.level || 'warning').toUpperCase()}: ${text(warning.message || warning.code || 'Report warning')}`);
     doc.text(doc.splitTextToSize(warningLines.join('\n'), 760), 36, warningY + 14);
   }
@@ -174,6 +176,7 @@ export async function drawReportPdfHeader(doc, { title = 'Report', subtitle = ''
   const pageWidth = doc.internal.pageSize.getWidth();
   const left = 36;
   let textRight = pageWidth - 36;
+  drawKcpPdfTopAccent(doc);
   const logo = await resolveReportPdfLogo(branding.logoDataUrl || branding.restaurantLogoDataUrl || '');
   if (logo?.dataUrl) {
     const maxWidth = 96;
@@ -192,11 +195,11 @@ export async function drawReportPdfHeader(doc, { title = 'Report', subtitle = ''
   const maxWidth = Math.max(320, textRight - left);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(17);
-  doc.setTextColor(17, 24, 39);
+  doc.setTextColor(...KCP_PDF_THEME.navy);
   doc.text(String(title || 'Report'), left, 38, { maxWidth });
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(9);
-  doc.setTextColor(75, 85, 99);
+  doc.setTextColor(...KCP_PDF_THEME.text);
   if (subtitle) doc.text(String(subtitle), left, 56, { maxWidth });
   let ruleY = 74;
   if (description) {
@@ -207,12 +210,12 @@ export async function drawReportPdfHeader(doc, { title = 'Report', subtitle = ''
   if (branding.companyName) {
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(8);
-    doc.setTextColor(107, 114, 128);
+    doc.setTextColor(...KCP_PDF_THEME.muted);
     doc.text(String(branding.companyName), left, ruleY, { maxWidth });
     ruleY += 10;
   }
-  doc.setDrawColor(203, 213, 225);
-  doc.setLineWidth(0.8);
+  doc.setDrawColor(...KCP_PDF_THEME.accent);
+  doc.setLineWidth(1.2);
   doc.line(left, ruleY, pageWidth - 36, ruleY);
   return { tableStartY: ruleY + 14 };
 }

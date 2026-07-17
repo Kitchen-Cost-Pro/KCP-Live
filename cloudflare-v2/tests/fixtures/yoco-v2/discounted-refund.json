@@ -1,0 +1,129 @@
+{
+  "event": {
+    "id": "evt_ref_disc",
+    "type": "refund.succeeded",
+    "data": {
+      "refund": {
+        "id": "ref_disc",
+        "original_order_id": "ord_disc",
+        "status": "succeeded",
+        "refund_amount": {
+          "amount": 9000,
+          "currency": "ZAR"
+        },
+        "discount_amount": {
+          "amount": 1000,
+          "currency": "ZAR"
+        },
+        "tax_amount": {
+          "amount": 1174,
+          "currency": "ZAR"
+        },
+        "returned_line_items": [
+          {
+            "id": "rdisc",
+            "original_line_id": "line_disc",
+            "product_id": "yoco_prod_1",
+            "name": "Burger",
+            "quantity": 1,
+            "total_price": {
+              "amount": 9000,
+              "currency": "ZAR"
+            },
+            "discount_amount": {
+              "amount": 1000,
+              "currency": "ZAR"
+            },
+            "tax_amount": {
+              "amount": 1174,
+              "currency": "ZAR"
+            },
+            "net_amount": {
+              "amount": 7826,
+              "currency": "ZAR"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "refund": {
+    "id": "ref_disc",
+    "original_order_id": "ord_disc",
+    "status": "succeeded",
+    "refund_amount": {
+      "amount": 9000,
+      "currency": "ZAR"
+    },
+    "discount_amount": {
+      "amount": 1000,
+      "currency": "ZAR"
+    },
+    "tax_amount": {
+      "amount": 1174,
+      "currency": "ZAR"
+    },
+    "returned_line_items": [
+      {
+        "id": "rdisc",
+        "original_line_id": "line_disc",
+        "product_id": "yoco_prod_1",
+        "name": "Burger",
+        "quantity": 1,
+        "total_price": {
+          "amount": 9000,
+          "currency": "ZAR"
+        },
+        "discount_amount": {
+          "amount": 1000,
+          "currency": "ZAR"
+        },
+        "tax_amount": {
+          "amount": 1174,
+          "currency": "ZAR"
+        },
+        "net_amount": {
+          "amount": 7826,
+          "currency": "ZAR"
+        }
+      }
+    ]
+  },
+  "original_order": {
+    "id": "ord_disc",
+    "status": "completed",
+    "closed_at": "2026-07-15T08:00:00.000Z",
+    "currency": "ZAR",
+    "location_id": "yoco_loc_1",
+    "payment_id": "pay_ref_1",
+    "line_items": [
+      {
+        "id": "line_disc",
+        "product_id": "yoco_prod_1",
+        "variant_id": "yoco_var_1",
+        "name": "Burger",
+        "quantity": 1,
+        "unit_price": {
+          "amount": 10000,
+          "currency": "ZAR"
+        },
+        "total_price": {
+          "amount": 10000,
+          "currency": "ZAR"
+        },
+        "discount_amount": {
+          "amount": 1000,
+          "currency": "ZAR"
+        },
+        "tax_amount": {
+          "amount": 1174,
+          "currency": "ZAR"
+        },
+        "net_amount": {
+          "amount": 7826,
+          "currency": "ZAR"
+        }
+      }
+    ]
+  }
+}

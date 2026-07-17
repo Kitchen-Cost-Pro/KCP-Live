@@ -388,6 +388,58 @@
   color: #bfdbfe;
 }
 
+.legalNotice {
+  margin: 16px 0 0;
+  color: #8fa1b8;
+  font-size: 0.74rem;
+  line-height: 1.55;
+  text-align: center;
+}
+
+.legalNotice a,
+.legalAcceptance a {
+  color: #7dd3fc;
+  font-weight: 850;
+  text-decoration: none;
+}
+
+.legalNotice a:hover,
+.legalAcceptance a:hover {
+  color: #bfdbfe;
+  text-decoration: underline;
+}
+
+.legalAcceptance {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-items: start;
+  gap: 11px;
+  margin: 0 0 18px;
+  border: 1px solid rgba(96, 165, 250, 0.22);
+  border-radius: 12px;
+  padding: 13px 14px;
+  background: rgba(15, 31, 55, 0.46);
+  color: #aebdd0;
+  cursor: pointer;
+  font-size: 0.77rem;
+  font-weight: 700;
+  line-height: 1.55;
+  text-transform: none;
+}
+
+.legalAcceptance input {
+  width: 18px;
+  height: 18px;
+  margin: 2px 0 0;
+  accent-color: #2563eb;
+  cursor: pointer;
+}
+
+.legalAcceptance:focus-within {
+  border-color: #38bdf8;
+  box-shadow: 0 0 0 4px rgba(56, 189, 248, 0.1);
+}
+
 .workspaceCard {
   max-height: min(76vh, 680px);
   display: flex;

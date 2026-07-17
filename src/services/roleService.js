@@ -22,6 +22,21 @@ export const SECTION_PERMISSION_MAP = {
   'settings-customization': 'nav-settings'
 };
 
+export const DATA_PERMISSION_SCHEMA_MARKER = 'permission-schema-import-export-v1';
+
+export const SECTION_DATA_PERMISSION_MAP = {
+  products: { import: 'action-import-products', export: 'action-export-products' },
+  recipes: { import: 'action-import-recipes', export: 'action-export-recipes' },
+  ingredients: { import: 'action-import-ingredients', export: 'action-export-ingredients' },
+  suppliers: { import: 'action-import-suppliers', export: 'action-export-suppliers' },
+  'purchase-orders': { export: 'action-export-purchase-orders' },
+  transfers: { import: 'action-import-transfers', export: 'action-export-transfers' },
+  'stock-count': { import: 'action-import-stock-count', export: 'action-export-stock-count' },
+  'mfg-products': { import: 'action-import-manufacturing', export: 'action-export-manufacturing' },
+  reporting: { export: 'action-export-reporting' },
+  settings: { import: 'action-import-settings', export: 'action-export-settings' }
+};
+
 export const ACTION_PERMISSION_MAP = {
   deleteRecords: 'action-delete-records',
   bulkDelete: 'action-bulk-delete',
@@ -35,10 +50,16 @@ export const ACTION_PERMISSION_MAP = {
   scheduleReports: 'action-schedule-reports',
   emailReports: 'action-email-reports',
   manageReportSchedules: 'action-manage-report-schedules',
-  deleteReportSchedules: 'action-delete-report-schedules'
+  deleteReportSchedules: 'action-delete-report-schedules',
+  ...Object.fromEntries(Object.entries(SECTION_DATA_PERMISSION_MAP).flatMap(([sectionId, actions]) =>
+    Object.entries(actions).map(([action, permissionId]) => [`${action}:${sectionId}`, permissionId])
+  ))
 };
 
-const FULL_ACTION_PERMISSIONS = Object.values(ACTION_PERMISSION_MAP);
+const FULL_ACTION_PERMISSIONS = [...new Set([
+  ...Object.values(ACTION_PERMISSION_MAP),
+  DATA_PERMISSION_SCHEMA_MARKER
+])];
 
 export function getAccessRenderRevision(access = {}) {
   const stableList = (values = []) => (Array.isArray(values) ? values : [])
@@ -259,7 +280,7 @@ export function normalizeCustomRoles(value) {
       name: normalizeRoleName(role.name),
       label: String(role.label || role.name || '')
         .trim(),
-      permissions: normalizePermissions(role.permissions),
+      permissions: normalizeRolePermissions(role.permissions),
       locations: normalizeLocations(role.locations)
     }))
     .filter((role) => role.name);
@@ -268,10 +289,11 @@ export function normalizeCustomRoles(value) {
 export function getRoleCatalog(customRoles = []) {
   const normalizedCustoms = normalizeCustomRoles(customRoles);
   const defaults = DEFAULT_ROLES.map((role) => {
+    const baseRole = { ...role, permissions: normalizeRolePermissions(role.permissions) };
     const override = normalizedCustoms.find((entry) => entry.name === role.name);
     return override
-      ? { ...role, ...override, label: override.label || role.label, isPreset: true, isModified: true }
-      : { ...role, isPreset: true, isModified: false };
+      ? { ...baseRole, ...override, label: override.label || role.label, isPreset: true, isModified: true }
+      : { ...baseRole, isPreset: true, isModified: false };
   });
 
   const customsOnly = normalizedCustoms
@@ -291,6 +313,7 @@ export function resolveRoleDefinition(roleName, customRoles = []) {
   const normalized = normalizeRoleName(roleName) || 'member';
   return getRoleCatalog(customRoles).find((role) => role.name === normalized) || {
     ...DEFAULT_ROLES.find((role) => role.name === 'member'),
+    permissions: normalizeRolePermissions(DEFAULT_ROLES.find((role) => role.name === 'member')?.permissions || []),
     label: 'Member'
   };
 }
@@ -316,6 +339,23 @@ export function hasLocationAccess(locationId, roleName, customRoles = []) {
   const role = resolveRoleDefinition(roleName, customRoles);
   if ((role.locations || []).includes('all')) return true;
   return (role.locations || []).includes(String(locationId || '').trim());
+}
+
+export function getSectionDataPermission(sectionId, action) {
+  return SECTION_DATA_PERMISSION_MAP[String(sectionId || '').trim()]?.[String(action || '').trim()] || '';
+}
+
+export function hasSectionDataPermission(sectionId, action, roleName, customRoles = []) {
+  const permissionId = getSectionDataPermission(sectionId, action);
+  if (!permissionId) return false;
+  return hasPermission(permissionId, roleName, customRoles);
+}
+
+export function ensureExplicitDataPermissionSchema(permissions = []) {
+  const normalized = normalizePermissions(permissions);
+  return normalized.includes(DATA_PERMISSION_SCHEMA_MARKER)
+    ? normalized
+    : [...normalized, DATA_PERMISSION_SCHEMA_MARKER];
 }
 
 export function hasPermission(permissionId, roleName, customRoles = []) {
@@ -371,9 +411,26 @@ function normalizePermissions(value) {
     .filter(Boolean))];
 }
 
+function normalizeRolePermissions(value) {
+  const permissions = normalizePermissions(value);
+  const hasExplicitSchema = permissions.includes(DATA_PERMISSION_SCHEMA_MARKER) || permissions.some((permission) =>
+    permission.startsWith('action-import-') || permission.startsWith('action-export-')
+  );
+  if (hasExplicitSchema) return permissions;
+
+  const migrated = new Set(permissions);
+  for (const [sectionId, actions] of Object.entries(SECTION_DATA_PERMISSION_MAP)) {
+    const navigationPermission = SECTION_PERMISSION_MAP[sectionId];
+    if (!navigationPermission || !migrated.has(navigationPermission)) continue;
+    Object.values(actions).forEach((permissionId) => migrated.add(permissionId));
+  }
+  migrated.add(DATA_PERMISSION_SCHEMA_MARKER);
+  return [...migrated];
+}
+
 function normalizeLocations(value) {
-  const list = Array.isArray(value) ? value : [];
-  if (!list.length) return ['all'];
-  const normalized = [...new Set(list.map((entry) => String(entry || '').trim()).filter(Boolean))];
+  if (!Array.isArray(value)) return ['all'];
+  if (!value.length) return [];
+  const normalized = [...new Set(value.map((entry) => String(entry || '').trim()).filter(Boolean))];
   return normalized.includes('all') ? ['all'] : normalized;
 }

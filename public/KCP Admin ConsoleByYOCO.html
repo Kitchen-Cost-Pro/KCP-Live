@@ -923,6 +923,7 @@
             100% { left: 100%; width: 30%; }
         }
     </style>
+    <link rel="stylesheet" href="/yoco-v2-admin.css">
 </head>
 <body class="h-[100dvh] w-full flex overflow-hidden">
 
@@ -1235,8 +1236,8 @@
         <div id="view-integrations" class="tab-view space-y-6">
             <div class="flex flex-col xl:flex-row xl:items-center xl:justify-between gap-4">
                 <div>
-                    <h3 class="text-2xl font-black text-white tracking-tight">Integration Manager</h3>
-                    <p class="text-sm text-slate-400 font-semibold mt-2">Live Yoco health, manual sync controls, and connection recovery across workspaces.</p>
+                    <h3 class="text-2xl font-black text-white tracking-tight">Yoco V2 Integration</h3>
+                    <p class="text-sm text-slate-400 font-semibold mt-2">Live canonical event health, rate-gated API diagnostics, reconciliation, manual review, and connection recovery across workspaces.</p>
                 </div>
                 <div class="flex flex-col sm:flex-row gap-3 w-full xl:w-auto">
                     <select id="integration-workspace-select" onchange="refreshIntegrationControlTower()" class="w-full sm:w-80"></select>
@@ -1287,8 +1288,8 @@
             <section class="glass-card p-0 overflow-hidden">
                 <div class="px-5 py-4 border-b border-white/5 flex items-center justify-between gap-3">
                     <div>
-                        <h4 class="text-sm font-black text-white">Webhook Event Log</h4>
-                        <p class="text-xs text-slate-500 font-semibold mt-1">Recent webhook processing records from the selected workspace database.</p>
+                        <h4 class="text-sm font-black text-white">Yoco Integration Log</h4>
+                        <p class="text-xs text-slate-500 font-semibold mt-1">Webhook capture, queue processing, canonical sales and refunds, stock effects, reconciliation, and errors.</p>
                     </div>
                     <span id="integration-queue-count" class="badge bg-white/5 text-slate-300 border border-white/10">0 entries</span>
                 </div>
@@ -1297,9 +1298,12 @@
                         <thead>
                             <tr class="border-b border-white/5 text-[9px] font-black uppercase tracking-widest text-slate-500">
                                 <th class="px-4 py-4">Timestamp</th>
-                                <th class="px-4 py-4">Event</th>
+                                <th class="px-4 py-4">Source</th>
+                                <th class="px-4 py-4">Operation</th>
                                 <th class="px-4 py-4">Order</th>
                                 <th class="px-4 py-4">Status</th>
+                                <th class="px-4 py-4">Message</th>
+                                <th class="px-4 py-4">V2 Correlation</th>
                             </tr>
                         </thead>
                         <tbody id="integration-queue-tbody"></tbody>
@@ -1719,7 +1723,7 @@ async function refreshAdminIntegrationQueueSnapshot(wsId = '') {
         return;
     }
     try {
-        const payload = await callAdminApi('GET', `/api/admin/workspaces/${encodeURIComponent(targetWsId)}/yoco/events?limit=25`);
+        const payload = await callAdminApi('GET', `/api/admin/workspaces/${encodeURIComponent(targetWsId)}/yoco/events?limit=100`);
         const current = { ...(KCPStore.state.integrationQueue || {}) };
         Object.keys(current).forEach(key => {
             if (String(current[key]?.workspaceId || '') === targetWsId) delete current[key];
@@ -1787,6 +1791,8 @@ function getIntegrationSelectedWorkspaceId() {
     return select.value;
 }
 
+const KCP_EXPECTED_WORKER_RELEASE = 'phase-v2-admin-yoco-engine-control-centre';
+
 function getYocoIntegrationSummaryForWorkspace(wsId) {
     const ws = KCPStore.state.workspaces?.[wsId];
     const live = ws?.data?.integrations?.yoco || {};
@@ -1798,16 +1804,23 @@ function getYocoIntegrationSummaryForWorkspace(wsId) {
     const connectionActive = sync.connectionActive === true || rawStatus === 'connected';
     const webhookEnabled = sync.webhook?.enabled === true;
     const lastError = sync.lastError || '';
+    const workerRelease = String(sync.workerRelease || '').trim();
+    const workerCurrent = workerRelease === KCP_EXPECTED_WORKER_RELEASE;
 
     let status = 'inactive';
     let detail = 'Not connected';
 
-    if (connectionActive || webhookEnabled) {
-        status = 'successful';
-        detail = webhookEnabled ? 'Connected — webhook active' : 'Connected';
-    } else if (lastError) {
+    if (lastError || rawStatus === 'error' || (connectionActive && !webhookEnabled)) {
         status = 'failing';
-        detail = lastError;
+        detail = lastError || 'Yoco API is connected, but the live webhook needs attention.';
+    } else if (connectionActive && webhookEnabled && !workerCurrent) {
+        status = 'failing';
+        detail = workerRelease
+            ? `Backend Worker is ${workerRelease}; ${KCP_EXPECTED_WORKER_RELEASE} must be deployed for Phase 12 observation controls.`
+            : `Backend Worker is not reporting a release. Deploy ${KCP_EXPECTED_WORKER_RELEASE}; updating Pages alone does not update webhook logic.`;
+    } else if (connectionActive && webhookEnabled) {
+        status = 'successful';
+        detail = 'Connected — webhook active and live refund worker verified';
     }
 
     return {
@@ -1816,8 +1829,13 @@ function getYocoIntegrationSummaryForWorkspace(wsId) {
         sync,
         credentials,
         queueRows,
-        queuedCount: queueRows.filter(row => ['received', 'pending', 'retry', 'failed'].includes(String(row.status || '').toLowerCase())).length,
+        queuedCount: Math.max(
+            queueRows.filter(row => ['received', 'pending', 'retry', 'failed', 'attention'].includes(String(row.status || '').toLowerCase())).length,
+            Number(sync.refundRecovery?.pendingEvents || 0) || 0
+        ),
         lastSyncAt,
+        workerRelease,
+        workerCurrent,
         status,
         detail
     };
@@ -1825,7 +1843,7 @@ function getYocoIntegrationSummaryForWorkspace(wsId) {
 
 function getYocoStatusPresentation(status) {
     if (status === 'successful') return { icon: 'fa-circle-check', label: 'Connected', chip: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20' };
-    if (status === 'failing') return { icon: 'fa-circle-xmark', label: 'Webhook Error', chip: 'text-red-400 bg-red-500/10 border-red-500/20' };
+    if (status === 'failing') return { icon: 'fa-circle-xmark', label: 'Integration Attention', chip: 'text-red-400 bg-red-500/10 border-red-500/20' };
     return { icon: 'fa-circle-minus', label: 'Not Connected', chip: 'text-slate-400 bg-white/5 border-white/10' };
 }
 
@@ -1840,21 +1858,23 @@ function renderWorkspaceIntegrationPanel(wsId, options = {}) {
     const locationCount = Number(sync.locations?.count || 0) || 0;
     const webhookEnabled = sync.webhook?.enabled === true;
     const syncState = sync.syncState || 'idle';
-    const queueHtml = queueRows.slice(0, 10).map(row => `
-        <tr class="border-b border-white/5">
+    const queueHtml = queueRows.slice(0, 20).map(row => `
+        <tr class="border-b border-white/5" title="${adminEscapeHtml(JSON.stringify(row.details || {}))}">
             <td class="px-3 py-3 text-[9px] text-slate-400">${formatAdminDateTime(row.timestamp, 'Unknown')}</td>
-            <td class="px-3 py-3 text-[9px] font-bold text-slate-200">${row.eventType || 'webhook'}</td>
-            <td class="px-3 py-3 text-[9px] text-slate-400">${row.orderId || '—'}</td>
-            <td class="px-3 py-3 text-[9px] font-black uppercase text-slate-300">${row.status || 'Queued'}</td>
+            <td class="px-3 py-3 text-[9px] font-bold text-slate-300 uppercase">${adminEscapeHtml(row.source || 'webhook')}</td>
+            <td class="px-3 py-3 text-[9px] font-bold text-slate-200">${adminEscapeHtml(row.operation || row.eventType || 'webhook')}</td>
+            <td class="px-3 py-3 text-[9px] text-slate-400">${adminEscapeHtml(row.orderId || '—')}</td>
+            <td class="px-3 py-3 text-[9px] font-black uppercase text-slate-300">${adminEscapeHtml(row.status || 'Queued')}</td>
+            <td class="px-3 py-3 text-[9px] text-slate-400 max-w-xs">${adminEscapeHtml(row.message || row.error || '—')}</td>
         </tr>
-    `).join('') || '<tr><td colspan="4" class="px-3 py-6 text-center text-slate-500 text-[10px]">No webhook events recorded for this workspace</td></tr>';
+    `).join('') || '<tr><td colspan="6" class="px-3 py-6 text-center text-slate-500 text-[10px]">No Yoco integration events recorded for this workspace</td></tr>';
 
     const queuePanel = options.queueType === 'email'
         ? renderWorkspaceEmailQueuePanel(wsId)
         : `
             <div class="space-y-3">
                 <div class="flex items-center justify-between">
-                    <h5 class="text-[9px] font-black text-slate-500 uppercase tracking-widest">Webhook Event Log</h5>
+                    <h5 class="text-[9px] font-black text-slate-500 uppercase tracking-widest">Yoco Integration Log</h5>
                     <span class="text-[9px] font-black uppercase tracking-widest text-slate-500">${queueRows.length} entr${queueRows.length === 1 ? 'y' : 'ies'}</span>
                 </div>
                 <div class="overflow-x-auto rounded-xl border border-white/5">
@@ -1862,9 +1882,11 @@ function renderWorkspaceIntegrationPanel(wsId, options = {}) {
                         <thead>
                             <tr class="border-b border-white/5 text-[8px] font-black uppercase tracking-widest text-slate-500">
                                 <th class="px-3 py-3">Timestamp</th>
-                                <th class="px-3 py-3">Event</th>
+                                <th class="px-3 py-3">Source</th>
+                                <th class="px-3 py-3">Operation</th>
                                 <th class="px-3 py-3">Order</th>
                                 <th class="px-3 py-3">Status</th>
+                                <th class="px-3 py-3">Message</th>
                             </tr>
                         </thead>
                         <tbody>${queueHtml}</tbody>
@@ -1905,6 +1927,10 @@ function renderWorkspaceIntegrationPanel(wsId, options = {}) {
                     <p class="text-[10px] font-bold ${webhookEnabled ? 'text-emerald-300' : 'text-amber-300'} normal-case mt-1">${webhookEnabled ? 'Active' : 'Needs check'}</p>
                 </div>
                 <div class="p-3 rounded-xl bg-black/10">
+                    <p class="text-[8px] text-slate-500 uppercase">Backend Release</p>
+                    <p class="text-[10px] font-bold ${summary.workerCurrent ? 'text-emerald-300' : 'text-red-300'} normal-case mt-1">${adminEscapeHtml(summary.workerRelease || 'Old Worker / not reported')}</p>
+                </div>
+                <div class="p-3 rounded-xl bg-black/10">
                     <p class="text-[8px] text-slate-500 uppercase">Events Needing Attention</p>
                     <p class="text-[10px] font-bold text-slate-200 normal-case mt-1">${summary.queuedCount || 0} pending events</p>
                 </div>
@@ -1929,17 +1955,17 @@ function renderWorkspaceIntegrationPanel(wsId, options = {}) {
                 </div>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <button onclick="syncYocoCatalogueFromAdmin(${adminInlineString(wsId)})" class="btn-ghost w-full text-blue-400"><i class="fa-solid fa-boxes-stacked mr-2"></i>Sync Products & Locations</button>
-                    <button onclick="syncYocoSalesFromAdmin(${adminInlineString(wsId)})" class="btn-ghost w-full text-blue-400"><i class="fa-solid fa-receipt mr-2"></i>Sync Sales</button>
-                    <button onclick="syncYocoSalesLast14DaysFromAdmin(${adminInlineString(wsId)})" class="btn-ghost w-full text-blue-400"><i class="fa-solid fa-calendar-week mr-2"></i>Sales Sync 2 Weeks</button>
+                    <button onclick="runYocoV2ReconciliationFromAdmin(${adminInlineString(wsId)})" class="btn-ghost w-full text-blue-400"><i class="fa-solid fa-scale-balanced mr-2"></i>Run V2 Reconciliation</button>
+                    <button onclick="openYocoV2ControlCentre(${adminInlineString(wsId)})" class="btn-ghost w-full text-violet-300"><i class="fa-solid fa-gauge-high mr-2"></i>Open V2 Control Centre</button>
                 </div>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <button onclick="sendLowStockSummaryFromAdmin(${adminInlineString(wsId)})" class="btn-ghost w-full text-emerald-300"><i class="fa-solid fa-envelope-circle-check mr-2"></i>Send Low Stock Email</button>
-                    <button onclick="syncYocoFullFromAdmin(${adminInlineString(wsId)})" class="btn-ghost w-full text-sky-300"><i class="fa-solid fa-arrows-spin mr-2"></i>Restart Sync</button>
+                    <button onclick="runYocoV2ReconciliationFromAdmin(${adminInlineString(wsId)})" class="btn-ghost w-full text-sky-300"><i class="fa-solid fa-arrows-spin mr-2"></i>Reconcile Now</button>
                 </div>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    <button onclick="retryAllErroredYocoOrders(${adminInlineString(wsId)})" class="btn-ghost w-full text-red-300"><i class="fa-solid fa-triangle-exclamation mr-2"></i>Resync Errored Orders</button>
-                    <button onclick="forceRetryIntegrationWorkspace(${adminInlineString(wsId)})" class="btn-ghost w-full text-blue-400"><i class="fa-solid fa-rotate mr-2"></i>Reconcile Recent Sales</button>
+                    <button onclick="openYocoV2ControlCentre(${adminInlineString(wsId)})" class="btn-ghost w-full text-orange-300"><i class="fa-solid fa-user-check mr-2"></i>Review Attention Items</button>
                     <button onclick="resetWebhookSubscriptionForWorkspace(${adminInlineString(wsId)})" class="btn-ghost w-full text-amber-400"><i class="fa-solid fa-tower-broadcast mr-2"></i>Webhook Reset</button>
+                    <button onclick="testWebhookSubscriptionForWorkspace(${adminInlineString(wsId)})" class="btn-ghost w-full text-violet-300"><i class="fa-solid fa-vial-circle-check mr-2"></i>Test Webhook</button>
                 </div>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <button onclick="factoryResetIntegrationCredentials(${adminInlineString(wsId)})" class="btn-danger w-full"><i class="fa-solid fa-power-off mr-2"></i>Factory Reset</button>
@@ -2179,13 +2205,12 @@ function renderWorkspaceVisualIntegrationSections(wsId) {
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <button onclick="connectYocoIntegrationFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn bg-blue-600/90 !text-white border-blue-400/30"><i class="fa-solid fa-plug-circle-bolt mr-2"></i>Connect / Rotate Key</button>
                     <button onclick="syncYocoCatalogueFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn"><i class="fa-solid fa-boxes-stacked mr-2"></i>Sync Products & Locations</button>
-                    <button onclick="syncYocoSalesFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn"><i class="fa-solid fa-chart-simple mr-2"></i>Sync Sales</button>
-                    <button onclick="syncYocoSalesLast14DaysFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn"><i class="fa-solid fa-calendar-week mr-2"></i>Sales Sync 2 Weeks</button>
+                    <button onclick="runYocoV2ReconciliationFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn"><i class="fa-solid fa-scale-balanced mr-2"></i>Run V2 Reconciliation</button>
+                    <button onclick="openYocoV2ControlCentre(${adminInlineString(wsId)})" class="workspace-action-btn"><i class="fa-solid fa-gauge-high mr-2"></i>Open V2 Control Centre</button>
                     <button onclick="sendLowStockSummaryFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn !text-emerald-300 border-emerald-500/30"><i class="fa-solid fa-envelope-circle-check mr-2"></i>Send Low Stock Email</button>
-                    <button onclick="syncYocoFullFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn"><i class="fa-solid fa-arrows-rotate mr-2"></i>Restart Sync</button>
-                    <button onclick="retryAllErroredYocoOrders(${adminInlineString(wsId)})" class="workspace-action-btn !text-red-300 border-red-500/30"><i class="fa-solid fa-triangle-exclamation mr-2"></i>Resync Errored Orders</button>
-                    <button onclick="forceRetryIntegrationWorkspace(${adminInlineString(wsId)})" class="workspace-action-btn"><i class="fa-solid fa-rotate mr-2"></i>Reconcile Recent Sales</button>
+                    <button onclick="openYocoV2ControlCentre(${adminInlineString(wsId)})" class="workspace-action-btn !text-orange-300 border-orange-500/30"><i class="fa-solid fa-user-check mr-2"></i>Review Attention Items</button>
                     <button onclick="resetWebhookSubscriptionForWorkspace(${adminInlineString(wsId)})" class="workspace-action-btn !text-amber-300 border-amber-500/30"><i class="fa-solid fa-tower-broadcast mr-2"></i>Webhook Reset</button>
+                    <button onclick="testWebhookSubscriptionForWorkspace(${adminInlineString(wsId)})" class="workspace-action-btn !text-violet-300 border-violet-500/30"><i class="fa-solid fa-vial-circle-check mr-2"></i>Test Webhook</button>
                 </div>
             </section>
         </div>
@@ -2298,14 +2323,17 @@ function renderIntegrationControlTower() {
 
     const queueTbody = document.getElementById('integration-queue-tbody');
     if (queueTbody) {
-        queueTbody.innerHTML = queueRows.slice(0, 50).map(row => `
-            <tr class="tbl-row border-b border-white/5">
+        queueTbody.innerHTML = queueRows.slice(0, 100).map(row => `
+            <tr class="tbl-row border-b border-white/5" title="${adminEscapeHtml(JSON.stringify(row.details || {}))}">
                 <td class="px-4 py-4 text-[10px] text-slate-400">${formatAdminDateTime(row.timestamp, 'Unknown')}</td>
-                <td class="px-4 py-4 text-[10px] font-bold">${row.eventType || 'webhook'}</td>
-                <td class="px-4 py-4 text-[10px] text-slate-400">${row.orderId || '—'}</td>
-                <td class="px-4 py-4 text-[10px] font-black uppercase">${row.status || 'Queued'}</td>
+                <td class="px-4 py-4 text-[10px] font-bold uppercase text-slate-300">${adminEscapeHtml(row.source || 'webhook')}</td>
+                <td class="px-4 py-4 text-[10px] font-bold">${adminEscapeHtml(row.operation || row.eventType || 'webhook')}</td>
+                <td class="px-4 py-4 text-[10px] text-slate-400">${adminEscapeHtml(row.orderId || '—')}</td>
+                <td class="px-4 py-4 text-[10px] font-black uppercase">${adminEscapeHtml(row.status || 'Queued')}</td>
+                <td class="px-4 py-4 text-[10px] text-slate-400 max-w-md">${adminEscapeHtml(row.message || row.error || '—')}</td>
+                <td class="px-4 py-4">${row.orderId ? `<button type="button" class="btn-ghost text-[9px] font-black uppercase px-2 py-1" onclick="event.stopPropagation(); KCPYocoV2Admin.search(${adminInlineString(row.orderId)}, ${adminInlineString(row.workspaceId)})">Open in V2</button>` : '<span class="text-[9px] text-slate-600">No source reference</span>'}</td>
             </tr>
-        `).join('') || '<tr><td colspan="4" class="px-4 py-8 text-center text-slate-500 text-xs">No queue events found</td></tr>';
+        `).join('') || '<tr><td colspan="7" class="px-4 py-8 text-center text-slate-500 text-xs">No Yoco integration events found</td></tr>';
     }
 
     const meta = document.getElementById('integration-selected-workspace-meta');
@@ -2405,10 +2433,14 @@ async function connectYocoIntegrationFromAdmin(wsId = '') {
     const apiKey = getAdminYocoApiKeyForWorkspace(targetWsId);
     if (!apiKey) return showToast('Enter the YOCO_SECRET_KEY before connecting or rotating credentials.', 'error');
     try {
-        const result = await runAdminYocoAction(targetWsId, 'Connecting Yoco Integration...', async (workspaceId) => {
+        const result = await runAdminYocoAction(targetWsId, 'Connecting Yoco and syncing the catalogue...', async (workspaceId) => {
             return callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(workspaceId)}/yoco/connect`, { apiKey });
         });
-        showToast(`Yoco connected. ${result?.ordersProcessed || 0} sales orders processed.`, 'success');
+        const catalogue = result?.catalogueSync || {};
+        const cleanupNote = result?.webhookCleanupPending
+            ? ` The live webhook is active; ${Number(result?.deferredSubscriptionCleanupCount || 0)} stale subscription cleanup attempt(s) were deferred by Yoco rate limiting.`
+            : '';
+        showToast(`Yoco connected and catalogue synced. Historical sales were not imported. ${catalogue?.productsImported || 0} products imported.${cleanupNote}`, result?.webhookCleanupPending ? 'warning' : 'success');
     } catch (e) { }
 }
 
@@ -2421,22 +2453,33 @@ async function syncYocoCatalogueFromAdmin(wsId = '') {
     } catch (e) { }
 }
 
-async function syncYocoSalesFromAdmin(wsId = '') {
+async function runYocoV2ReconciliationFromAdmin(wsId = '') {
+    const targetWsId = wsId || getIntegrationSelectedWorkspaceId();
+    if (!targetWsId) return showToast('Select a workspace first', 'error');
     try {
-        const result = await runAdminYocoAction(wsId, 'Syncing Yoco Sales...', async (workspaceId) => {
-            return callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(workspaceId)}/yoco/sync-sales`);
+        const result = await runAdminYocoAction(targetWsId, 'Running Yoco V2 reconciliation...', async (workspaceId) => {
+            const now = new Date();
+            const windowEnd = now.toISOString();
+            const windowStart = new Date(now.getTime() - (48 * 60 * 60 * 1000)).toISOString();
+            return callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(workspaceId)}/yoco-v2/reconciliation/run`, {
+                integration_id: `yoco:${workspaceId}`,
+                window_start: windowStart,
+                window_end: windowEnd
+            });
         });
-        showToast(`Sales sync complete. ${result?.ordersProcessed || 0} orders and ${result?.refundsProcessed || 0} refunds processed.`, 'success');
+        const run = result?.run || result || {};
+        showToast(`V2 reconciliation complete. ${Number(run.orders_examined || 0)} orders, ${Number(run.refunds_examined || 0)} refunds, ${Number(run.automatic_repairs || 0)} repairs, ${Number(run.manual_reviews || 0)} manual reviews.`, Number(run.mismatches || 0) ? 'warning' : 'success');
+        if (window.KCPYocoV2Admin?.refresh) window.KCPYocoV2Admin.refresh();
     } catch (e) { }
 }
 
-async function syncYocoSalesLast14DaysFromAdmin(wsId = '') {
-    try {
-        const result = await runAdminYocoAction(wsId, 'Syncing last 14 days of sales...', async (workspaceId) => {
-            return callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(workspaceId)}/yoco/sync-sales`, { sinceDays: 14 });
-        });
-        showToast(`2-week sales sync complete. ${result?.ordersProcessed || 0} orders and ${result?.refundsProcessed || 0} refunds processed.`, 'success');
-    } catch (e) { }
+function openYocoV2ControlCentre(wsId = '') {
+    const targetWsId = wsId || getIntegrationSelectedWorkspaceId();
+    if (targetWsId && window.KCPYocoV2Admin?.search) {
+        window.KCPYocoV2Admin.search('', targetWsId);
+        return;
+    }
+    switchTab('yoco-v2');
 }
 
 async function sendLowStockSummaryFromAdmin(wsId = '') {
@@ -2464,17 +2507,6 @@ async function sendLowStockSummaryFromAdmin(wsId = '') {
     }
 }
 
-async function syncYocoFullFromAdmin(wsId = '') {
-    try {
-        const result = await runAdminYocoAction(wsId, 'Restarting Yoco Sync...', async (workspaceId) => {
-            const catalogue = await callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(workspaceId)}/yoco/sync-catalogue`);
-            const sales = await callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(workspaceId)}/yoco/sync-sales`);
-            return { catalogue, sales };
-        });
-        showToast(`Restarted sync. ${result?.sales?.ordersProcessed || 0} orders processed.`, 'success');
-    } catch (e) { }
-}
-
 async function saveIntegrationCredentials(wsId = '') {
     const targetWsId = wsId || getIntegrationSelectedWorkspaceId();
     if (!targetWsId) return showToast('Select a workspace first', 'error');
@@ -2484,9 +2516,10 @@ async function saveIntegrationCredentials(wsId = '') {
     if (!secretKey) return showToast('Enter the Yoco Secret Key to connect', 'error');
     try {
         await callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(targetWsId)}/yoco/connect`, { apiKey: secretKey });
+        await callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(targetWsId)}/yoco/sync-catalogue`);
         if (secretKeyInput) secretKeyInput.value = '';
         if (window.currentAdminWorkspaceDetailId === targetWsId) showWsDetail(targetWsId);
-        showToast('Yoco connected successfully', 'success');
+        showToast('Yoco connected and catalogue synced. Historical sales were not imported.', 'success');
         await refreshAdminWorkspaceRecord(targetWsId);
         renderIntegrationControlTower();
     } catch(e) {
@@ -2511,43 +2544,29 @@ async function factoryResetIntegrationCredentials(wsId = '') {
     }
 }
 
-async function retryAllErroredYocoOrders(wsId = '') {
-    const targetWsId = wsId || getIntegrationSelectedWorkspaceId();
-    if (!targetWsId) return showToast('Select a workspace first', 'error');
-    try {
-        const result = await runAdminYocoAction(targetWsId, 'Resyncing Errored Orders...', async (workspaceId) => {
-            return callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(workspaceId)}/yoco/retry-failed-orders`);
-        });
-        if (result?.status === 'nothing_to_retry') {
-            showToast('No errored Yoco orders require resync.', 'success');
-        } else {
-            showToast(`Errored-order resync complete. ${result?.ordersProcessed || 0} orders and ${result?.refundsProcessed || 0} refunds recovered.`, result?.errors?.length ? 'error' : 'success');
-        }
-    } catch (e) { }
-}
-
-async function forceRetryIntegrationWorkspace(wsId = '') {
-    const targetWsId = wsId || getIntegrationSelectedWorkspaceId();
-    if (!targetWsId) return showToast('Select a workspace first', 'error');
-    try {
-        await callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(targetWsId)}/yoco/reconcile-sales`, { sinceDays: 2 });
-        if (window.currentAdminWorkspaceDetailId === targetWsId) showWsDetail(targetWsId);
-        showToast('Recent Yoco sales reconciled for workspace', 'success');
-        await refreshAdminWorkspaceRecord(targetWsId);
-    } catch (e) {
-        console.error('[Admin] Failed to force retry workspace integration', e);
-        showToast(`Sales reconciliation failed: ${e.message}`, 'error');
-    }
-}
-
 async function resetWebhookSubscriptionForWorkspace(wsId = '') {
     const targetWsId = wsId || getIntegrationSelectedWorkspaceId();
     if (!targetWsId) return showToast('Select a workspace first', 'error');
     try {
-        await runAdminYocoAction(targetWsId, 'Resetting Webhook...', async (workspaceId) => {
+        const result = await runAdminYocoAction(targetWsId, 'Resetting Webhook...', async (workspaceId) => {
             return callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(workspaceId)}/yoco/reset-webhook`);
         });
-        showToast('Yoco webhook subscription reset', 'success');
+        if (result?.webhookCleanupPending) {
+            showToast(`Replacement webhook is live. ${Number(result?.deferredSubscriptionCleanupCount || 0)} stale subscription cleanup attempt(s) were deferred by Yoco rate limiting.`, 'warning');
+        } else {
+            showToast('Yoco webhook subscription reset', 'success');
+        }
+    } catch (e) { }
+}
+
+async function testWebhookSubscriptionForWorkspace(wsId = '') {
+    const targetWsId = wsId || getIntegrationSelectedWorkspaceId();
+    if (!targetWsId) return showToast('Select a workspace first', 'error');
+    try {
+        const result = await runAdminYocoAction(targetWsId, 'Testing Webhook...', async (workspaceId) => {
+            return callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(workspaceId)}/yoco/test-webhook`);
+        });
+        showToast(`Yoco test webhook dispatched${result?.messageId ? ` (${result.messageId})` : ''}. Check the integration log for delivery.`, 'success');
     } catch (e) { }
 }
 
@@ -6201,6 +6220,8 @@ async function submitForcePasswordChange() {
     }
 }
 </script>
+
+<script src="/yoco-v2-admin.js"></script>
 
 <!-- Force Password Change Overlay (non-dismissable) -->
 <div id="force-pw-overlay" class="hidden fixed inset-0 z-[300] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">

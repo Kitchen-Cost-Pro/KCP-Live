@@ -84,7 +84,12 @@ export function renderReportViewer({
       workspaceId,
       initialActiveReportId: activeGroupChildId,
       initialView: initialView || reportLink.view,
+      initialSort,
+      initialVisibleColumns,
+      initialSavedViewId,
+      autoLoadDefault,
       allowUrlConfiguration,
+      onDefaultSavedViewApplied,
       onFiltersChange,
       onRefresh,
       datePresetContext,
@@ -226,7 +231,7 @@ export function renderReportViewer({
         ));
       root.append(reportHeader);
       root.append(renderReportViewTabs(result.report, result.view));
-      const filterOptions = deriveReportFilterOptions(dataSet, result.rows);
+      const filterOptions = deriveReportFilterOptions(dataSet, result.rows, services?.reportingPermissions || {});
       root.append(
         renderReportFilters({
           filters: activeFilters,
@@ -489,7 +494,12 @@ function renderGroupedReportViewer({
   workspaceId = "",
   initialActiveReportId = "",
   initialView = "",
+  initialSort = null,
+  initialVisibleColumns = null,
+  initialSavedViewId = "",
+  autoLoadDefault = false,
   allowUrlConfiguration = false,
+  onDefaultSavedViewApplied,
   onFiltersChange,
   onRefresh,
   datePresetContext = {},
@@ -501,9 +511,9 @@ function renderGroupedReportViewer({
   );
   let sharedFilters = applyDateRangePreset({ ...filters }, datePresetContext);
   let pendingView = initialView || "";
-  let pendingSort = null;
-  let pendingVisibleColumns = null;
-  let pendingSavedViewId = "";
+  let pendingSort = initialSort;
+  let pendingVisibleColumns = initialVisibleColumns;
+  let pendingSavedViewId = initialSavedViewId;
   let groupDefaultApplied = false;
   let activeChildId = childReports.some(
     (item) => item.id === initialActiveReportId,
@@ -547,10 +557,11 @@ function renderGroupedReportViewer({
         initialSort: pendingSort,
         initialVisibleColumns: pendingVisibleColumns,
         initialSavedViewId: pendingSavedViewId,
-        autoLoadDefault: false,
+        autoLoadDefault: autoLoadDefault && !groupDefaultApplied,
         allowUrlConfiguration,
         onDefaultSavedViewApplied: () => {
           groupDefaultApplied = true;
+          onDefaultSavedViewApplied?.();
         },
         onReportSelectionChange: (savedView) => {
           sharedFilters = applyDateRangePreset({
@@ -613,6 +624,8 @@ function readReportLinkConfiguration() {
     "dateRangeType",
     "time",
     'locationId',
+    'locationIds',
+    'locations',
     "category",
     "source",
     "sourceType",
@@ -642,9 +655,13 @@ function readReportLinkConfiguration() {
     "entityType",
     "entityName",
   ];
+  const arrayFilters = new Set(['locationIds', 'locations']);
   supportedFilters.forEach((key) => {
     const value = params.get(key);
-    if (value !== null && value !== "") filters[key] = value;
+    if (value === null || value === "") return;
+    filters[key] = arrayFilters.has(key)
+      ? value.split(',').map((entry) => entry.trim()).filter(Boolean)
+      : value;
   });
   const startDate = params.get('from') || params.get('startDate') || "";
   const endDate = params.get('to') || params.get('endDate') || "";
@@ -883,9 +900,9 @@ function resolveFilterConfig(report = {}, view = "") {
   return config[view] || config.default || null;
 }
 
-function deriveReportFilterOptions(dataSet = {}, rows = []) {
+function deriveReportFilterOptions(dataSet = {}, rows = [], reportingPermissions = {}) {
   return {
-    locations: deriveLocations(dataSet, rows),
+    locations: deriveLocations(dataSet, rows, reportingPermissions.locations),
     categories: deriveCategories(dataSet, rows),
     sources: deriveSources(rows),
     paymentMethods: uniqueValues(rows, (row) => row.paymentMethod),
@@ -992,11 +1009,22 @@ function deriveCategories(dataSet = {}, rows = []) {
   ).sort();
 }
 
-function deriveLocations(dataSet = {}, rows = []) {
-  const fromDataSet = dataSet.locations || [];
-  const fromMeta = extractFilterOptions(rows, "locations");
-  const seen = new Map();
-  [...fromDataSet, ...fromMeta].forEach((location) => {
+function deriveLocations(dataSet = {}, rows = [], authoritativeLocations = undefined) {
+  const sourceLocations = Array.isArray(authoritativeLocations)
+    ? authoritativeLocations
+    : [
+        ...(dataSet.locations || []),
+        ...extractFilterOptions(rows, "locations"),
+        ...(rows || []).map((row) => ({
+          id: row.locationId || row.locationName,
+          name: row.locationName || row.locationId,
+        })),
+      ];
+  const seenIds = new Set();
+  const seenNames = new Set();
+  const output = [];
+
+  for (const location of sourceLocations) {
     const id = text(
       location.id ||
         location.locationId ||
@@ -1012,19 +1040,19 @@ function deriveLocations(dataSet = {}, rows = []) {
         location.label ||
         id,
     );
-    if (!id && !name) return;
-    const key = id || name;
-    if (!seen.has(key)) seen.set(key, { ...location, id: key, name });
-  });
-  (rows || []).forEach((row) => {
-    const id = text(row.locationId || row.locationName);
-    if (!id || seen.has(id)) return;
-    seen.set(id, {
-      id: row.locationId || row.locationName,
-      name: row.locationName || row.locationId,
-    });
-  });
-  return [...seen.values()];
+    if (!id && !name) continue;
+    const idKey = normalizeLocationIdentity(id);
+    const nameKey = normalizeLocationIdentity(name);
+    if ((idKey && seenIds.has(idKey)) || (nameKey && seenNames.has(nameKey))) continue;
+    output.push({ ...location, id: id || name, name: name || id });
+    if (idKey) seenIds.add(idKey);
+    if (nameKey) seenNames.add(nameKey);
+  }
+  return output.sort((left, right) => text(left.name).localeCompare(text(right.name)));
+}
+
+function normalizeLocationIdentity(value = "") {
+  return text(value).normalize("NFKC").toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
 function extractFilterOptions(rows = [], key = "") {

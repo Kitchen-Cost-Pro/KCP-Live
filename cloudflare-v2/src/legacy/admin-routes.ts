@@ -1,9 +1,10 @@
 import type { AuthContext, Env, DbLike, DbStatementLike } from './types';
 import { error, json, readJson } from './http';
 import { requireAuth } from './auth';
-import { connectYoco, disconnectYoco, getYocoApiKey, getYocoConnection, syncYocoCatalogue, syncYocoSales } from './yoco-service';
+import { connectYoco, disconnectYoco, getYocoApiKey, getYocoConnection, resetYocoWebhook, syncYocoCatalogue } from '../modules/yoco-engine-v2/integration-service';
 import { sendEmail, type EmailDeliveryConfig } from './email';
 import { encryptTextWithSecret, decryptTextWithSecret } from './crypto';
+import { KCP_WORKER_RELEASE, KCP_WORKER_RELEASE_DATE, KCP_REFUND_PIPELINE_VERSION } from '../release';
 
 function text(value: unknown, fallback = '') {
   return String(value ?? fallback).trim();
@@ -1877,7 +1878,7 @@ export async function getAdminYocoStatus(request: Request, env: Env, workspaceId
 }
 
 export async function buildAdminYocoStatus(env: Env, workspaceId: string) {
-  const [connection, catalogue, modifierCatalogue, locations] = await Promise.all([
+  const [connection, catalogue, modifierCatalogue, locations, refundRecovery] = await Promise.all([
     getYocoConnection(env, workspaceId),
     env.DB.prepare(
       `SELECT COUNT(*) AS itemsCount
@@ -1894,11 +1895,39 @@ export async function buildAdminYocoStatus(env: Env, workspaceId: string) {
       `SELECT COUNT(*) AS count
          FROM locations
         WHERE workspace_id = ?1 AND external_provider = 'yoco' AND active = 1`
+    ).bind(workspaceId).first<{ count: number }>(),
+    env.DB.prepare(
+      `SELECT COUNT(*) AS count
+         FROM yoco_webhook_events event
+        WHERE event.workspace_id = ?1
+          AND lower(replace(event.event_type, '_', '.')) IN ('payment.refunded', 'order.updated', 'refund.succeeded', 'refund.successful')
+          AND (
+            event.status IN ('attention', 'failed')
+            OR (
+              event.status = 'processing'
+              AND datetime(COALESCE(event.processed_at, event.created_at)) <= datetime('now', '-5 minutes')
+            )
+            OR (
+              event.status = 'processed'
+              AND lower(replace(event.event_type, '_', '.')) IN ('payment.refunded', 'refund.succeeded', 'refund.successful')
+              AND COALESCE(event.yoco_order_id, '') <> ''
+              AND NOT EXISTS (
+                SELECT 1
+                  FROM yoco_orders refund_order
+                 WHERE refund_order.workspace_id = event.workspace_id
+                   AND refund_order.order_type = 'refund'
+                   AND refund_order.parent_yoco_order_id = event.yoco_order_id
+              )
+            )
+          )`
     ).bind(workspaceId).first<{ count: number }>()
   ]);
   const status = text(connection?.status || 'disconnected').toLowerCase();
   return {
     ok: true,
+    workerRelease: KCP_WORKER_RELEASE,
+    workerReleaseDate: KCP_WORKER_RELEASE_DATE,
+    refundPipelineVersion: KCP_REFUND_PIPELINE_VERSION,
     status,
     connectionActive: connection?.connection_active === 1 || status === 'connected',
     syncState: 'idle',
@@ -1920,19 +1949,26 @@ export async function buildAdminYocoStatus(env: Env, workspaceId: string) {
       modifierGroupsCount: Number(modifierCatalogue?.modifierGroupsCount || 0),
       productModifiersCount: Number(modifierCatalogue?.productModifiersCount || 0)
     },
-    locations: { count: Number(locations?.count || 0) }
+    locations: { count: Number(locations?.count || 0) },
+    refundRecovery: {
+      pendingEvents: Number(refundRecovery?.count || 0),
+      automaticRetryEnabled: true,
+      retryIntervalSeconds: 15
+    }
   };
 }
 
 export async function postAdminYocoConnect(request: Request, env: Env, workspaceId: string) {
   const adminSession = await requireAdmin(request, env);
   const payload = await readJson<Record<string, unknown>>(request);
-  const result = await connectYoco(env, workspaceId, text(payload.apiKey || payload.secretKey));
+  const connection = await connectYoco(env, workspaceId, text(payload.apiKey || payload.secretKey));
+  const catalogue = await syncYocoCatalogue(env, workspaceId);
   await writeAdminAuditEvent(env, adminAuditActor(adminSession), 'yoco.connect', workspaceId, {
-    webhookEnabled: Boolean(result.webhookEnabled),
-    connected: Boolean(result.connected)
+    webhookEnabled: Boolean(connection.webhookEnabled),
+    connected: Boolean(connection.connected),
+    historicalSalesImported: false
   });
-  return json(request, env, { ok: true, ...result });
+  return json(request, env, { ok: true, ...connection, catalogueSync: catalogue, historicalSalesImported: false });
 }
 
 export async function postAdminYocoDisconnect(request: Request, env: Env, workspaceId: string) {
@@ -1952,24 +1988,15 @@ export async function postAdminYocoSyncCatalogue(request: Request, env: Env, wor
   return json(request, env, { ok: true, ...result });
 }
 
-export async function postAdminYocoSyncSales(request: Request, env: Env, workspaceId: string) {
-  const adminSession = await requireAdmin(request, env);
-  const result = await syncYocoSales(env, workspaceId);
-  await writeAdminAuditEvent(env, adminAuditActor(adminSession), 'yoco.sync_sales', workspaceId, {
-    imported: (result as any)?.imported,
-    updated: (result as any)?.updated
-  });
-  return json(request, env, { ok: true, ...result });
-}
-
 export async function postAdminYocoResetWebhook(request: Request, env: Env, workspaceId: string) {
   const adminSession = await requireAdmin(request, env);
   const apiKey = await getYocoApiKey(env, workspaceId);
   if (!apiKey) return error(request, env, 409, 'No Yoco API key stored for this workspace — connect Yoco first.');
-  await disconnectYoco(env, workspaceId);
-  const result = await connectYoco(env, workspaceId, apiKey);
+  const result = await resetYocoWebhook(env, workspaceId, apiKey);
   await writeAdminAuditEvent(env, adminAuditActor(adminSession), 'yoco.reset_webhook', workspaceId, {
-    webhookEnabled: Boolean(result.webhookEnabled)
+    webhookEnabled: Boolean(result.webhookEnabled),
+    createBeforeCleanup: true,
+    cleanupPending: Boolean(result.webhookCleanupPending),
   });
   return json(request, env, { ok: true, ...result });
 }

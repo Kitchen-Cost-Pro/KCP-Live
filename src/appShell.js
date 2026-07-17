@@ -18,7 +18,8 @@ import { renderSettings } from './components/Settings.js';
 import { renderIntegrations } from './components/Integrations.js';
 import { renderReportingDashboard } from './modules/reporting/index.js';
 import { renderSchedulingPage } from './modules/reporting/scheduling/SchedulingPage.js';
-import { ACTION_PERMISSION_MAP, getAccessRenderRevision, hasPermission, hasSectionAccess, isSuperUserRoleName } from './services/roleService.js';
+import { ACTION_PERMISSION_MAP, getAccessRenderRevision, hasPermission, hasSectionAccess, hasSectionDataPermission, isSuperUserRoleName } from './services/roleService.js';
+import { filterLocationsByAccess } from './services/locationAccess.js';
 import styles from './styles/appShell.module.css';
 
 const BROADCAST_DISMISSED_KEY = 'kcp:dismissed-broadcasts:v1';
@@ -547,23 +548,23 @@ function renderActiveSection({
   }
 
   if (activeSection === 'products') {
-    return renderMenuCatalogue({ state, onFilterChange: onMenuFilterChange, onMenuAction });
+    return renderSectionWithDataPermissions('products', state, restrictSectionDataActions('products', state, onMenuAction), (actions) => renderMenuCatalogue({ state, onFilterChange: onMenuFilterChange, onMenuAction: actions }));
   }
 
   if (activeSection === 'recipes') {
-    return renderRecipes({ state, onRecipeFilterChange, onRecipeAction });
+    return renderSectionWithDataPermissions('recipes', state, restrictSectionDataActions('recipes', state, onRecipeAction), (actions) => renderRecipes({ state, onRecipeFilterChange, onRecipeAction: actions }));
   }
 
   if (activeSection === 'ingredients') {
-    return renderStockItems({ state, onStockFilterChange, onStockAction });
+    return renderSectionWithDataPermissions('ingredients', state, restrictSectionDataActions('ingredients', state, onStockAction), (actions) => renderStockItems({ state, onStockFilterChange, onStockAction: actions }));
   }
 
   if (activeSection === 'suppliers') {
-    return renderSuppliers({ state, onSupplierFilterChange, onSupplierAction });
+    return renderSectionWithDataPermissions('suppliers', state, restrictSectionDataActions('suppliers', state, onSupplierAction), (actions) => renderSuppliers({ state, onSupplierFilterChange, onSupplierAction: actions }));
   }
 
   if (activeSection === 'purchase-orders') {
-    return renderPurchaseOrders({ state, onPurchaseOrderFilterChange, onPurchaseOrderAction });
+    return renderSectionWithDataPermissions('purchase-orders', state, restrictSectionDataActions('purchase-orders', state, onPurchaseOrderAction), (actions) => renderPurchaseOrders({ state, onPurchaseOrderFilterChange, onPurchaseOrderAction: actions }));
   }
 
   if (activeSection === 'grv') {
@@ -579,11 +580,11 @@ function renderActiveSection({
   }
 
   if (activeSection === 'transfers') {
-    return renderTransfers({ state, onTransferFilterChange, onTransferAction });
+    return renderSectionWithDataPermissions('transfers', state, restrictSectionDataActions('transfers', state, onTransferAction), (actions) => renderTransfers({ state, onTransferFilterChange, onTransferAction: actions }));
   }
 
   if (activeSection === 'stock-count') {
-    return renderStockTake({ state, onStockTakeFilterChange, onStockTakeAction });
+    return renderSectionWithDataPermissions('stock-count', state, restrictSectionDataActions('stock-count', state, onStockTakeAction), (actions) => renderStockTake({ state, onStockTakeFilterChange, onStockTakeAction: actions }));
   }
 
   if (activeSection === 'locations') {
@@ -591,7 +592,7 @@ function renderActiveSection({
   }
 
   if (activeSection === 'mfg-products') {
-    return renderManufacturing({ state, onManufacturingFilterChange, onManufacturingAction });
+    return renderSectionWithDataPermissions('mfg-products', state, restrictSectionDataActions('mfg-products', state, onManufacturingAction), (actions) => renderManufacturing({ state, onManufacturingFilterChange, onManufacturingAction: actions }));
   }
 
   if (activeSection === 'reporting') {
@@ -606,7 +607,8 @@ function renderActiveSection({
       initialReportId: readReportingDeepLinkReportId(),
       services: {
         reportingPermissions: {
-          canExportReports: isSuper || hasSectionAccess('reporting', role, customRoles),
+          canExportReports: isSuper || hasSectionDataPermission('reporting', 'export', role, customRoles),
+          locations: filterLocationsByAccess(state.access?.locations || [], state.access || {}),
           canSavePersonalViews: true,
           canSaveWorkspaceViews: isSuper || hasPermission(ACTION_PERMISSION_MAP.saveWorkspaceReportViews, role, customRoles)
         },
@@ -670,7 +672,7 @@ function renderActiveSection({
   }
 
   if (activeSection === 'settings' || activeSection === 'settings-business' || activeSection === 'settings-customization') {
-    return renderSettings({ state, onSettingsAction });
+    return renderSectionWithDataPermissions('settings', state, restrictSectionDataActions('settings', state, onSettingsAction), (actions) => renderSettings({ state, onSettingsAction: actions }));
   }
 
   // Clean up portals when navigating away from their sections
@@ -679,6 +681,91 @@ function renderActiveSection({
   document.getElementById('kcp-grv-toast-portal')?.remove();
 
   return renderModuleShell(activeSection, state);
+}
+
+
+const SECTION_DATA_ACTION_CALLBACKS = {
+  products: { import: ['onImport'], export: ['onExport'] },
+  recipes: { import: ['onImport'], export: ['onExport'] },
+  ingredients: {
+    import: ['onImport', 'onLocationCostingImport', 'onLocationCostingConfirm'],
+    export: ['onExport', 'onLocationCostingExport']
+  },
+  suppliers: { import: ['onImport'], export: ['onExport'] },
+  'purchase-orders': { export: ['onExportCsv', 'onExportXlsx', 'onExportPdf'] },
+  transfers: { import: ['onImportTemplate'], export: ['onExportTemplate'] },
+  'stock-count': { import: ['onImportCountTemplate'], export: ['onExportTemplatePdf', 'onExportCountTemplate'] },
+  'mfg-products': { import: ['onImport'], export: ['onExport'] },
+  settings: { import: ['onImportSnapshot'], export: ['onExportSnapshot'] }
+};
+
+const SECTION_DATA_ACTION_SELECTORS = {
+  products: {
+    import: ['[data-menu-import-trigger]', '[data-menu-import-input]'],
+    export: ['[data-menu-export]']
+  },
+  recipes: {
+    import: ['[data-recipe-import-trigger]', '[data-recipe-import-input]'],
+    export: ['[data-recipe-export]', '[data-recipe-platform]']
+  },
+  ingredients: {
+    import: ['[data-stock-import-trigger]', '[data-stock-import-input]', '[data-location-costing-import-trigger]', '[data-location-costing-import-input]', '[data-location-costing-confirm]'],
+    export: ['[data-stock-export]', '[data-location-costing-export]', '[data-location-costing-open]']
+  },
+  suppliers: {
+    import: ['[data-supplier-import-trigger]', '[data-supplier-import-input]'],
+    export: ['[data-supplier-export]']
+  },
+  'purchase-orders': {
+    export: ['[data-po-export]', '[data-po-pdf]']
+  },
+  transfers: {
+    import: ['[data-transfer-template-import-trigger]', '[data-transfer-template-import]'],
+    export: ['[data-transfer-template-download]']
+  },
+  'stock-count': {
+    import: ['[data-stocktake-count-template-import-trigger]', '[data-stocktake-count-template-import]'],
+    export: ['[data-stocktake-count-template-download]', '[data-stocktake-template-export]', '[data-stocktake-template-export-confirm]', '[data-stocktake-count-template-confirm]']
+  },
+  'mfg-products': {
+    import: ['[data-mfg-import-trigger]', '[data-mfg-import-input]'],
+    export: ['[data-mfg-export]', '[data-mfg-platform]']
+  },
+  settings: {
+    import: ['[data-settings-import-trigger]', '[data-settings-import]'],
+    export: ['[data-settings-export]']
+  }
+};
+
+function hasSectionDataAction(state, sectionId, action) {
+  const role = state.access?.currentRole || '';
+  const customRoles = state.access?.customRoles || [];
+  const isSuper = state.access?.currentIsSuperUser === true ||
+    state.access?.currentIsKcpSuperUser === true ||
+    isSuperUserRoleName(role);
+  return isSuper || hasSectionDataPermission(sectionId, action, role, customRoles);
+}
+
+function restrictSectionDataActions(sectionId, state, actionMap = {}) {
+  const restricted = { ...(actionMap || {}) };
+  const callbackGroups = SECTION_DATA_ACTION_CALLBACKS[sectionId] || {};
+  for (const action of ['import', 'export']) {
+    if (hasSectionDataAction(state, sectionId, action)) continue;
+    for (const callbackName of callbackGroups[action] || []) delete restricted[callbackName];
+  }
+  return restricted;
+}
+
+function renderSectionWithDataPermissions(sectionId, state, actionMap, renderer) {
+  const view = renderer(actionMap);
+  const selectors = SECTION_DATA_ACTION_SELECTORS[sectionId] || {};
+  for (const action of ['import', 'export']) {
+    if (hasSectionDataAction(state, sectionId, action)) continue;
+    for (const selector of selectors[action] || []) {
+      view?.querySelectorAll?.(selector)?.forEach((element) => element.remove());
+    }
+  }
+  return view;
 }
 
 function renderModuleShell(sectionId, state) {

@@ -8,8 +8,7 @@ import {
   startGmailConnection,
   subscribeGmailIntegration,
   subscribeYocoIntegration,
-  syncYocoCatalogue,
-  syncYocoSales
+  syncYocoCatalogue
 } from '../services/integrationService.js';
 
 const INTEGRATIONS = [
@@ -234,15 +233,7 @@ function bindIntegrationEvents(view) {
       const result = await connectYocoIntegration(workspaceId, apiKey);
       if (input) input.value = '';
       setYocoSummary(view, result);
-      setYocoModalStatus(view, 'Yoco connected. Run Sync Sales when you need historical orders.', 'success');
-    });
-  });
-
-  view.querySelector('[data-yoco-sync-sales]')?.addEventListener('click', async () => {
-    await runYocoAction(view, 'Syncing Yoco sales...', async () => {
-      const result = await syncYocoSales(view.dataset.workspaceId || '', { resetWebhook: true });
-      setYocoSummary(view, result);
-      setYocoModalStatus(view, 'Yoco sales sync complete.', 'success');
+      setYocoModalStatus(view, 'Yoco connected. Products and locations were synced; historical sales were not imported. New paid sales will deduct after Go Live.', 'success');
     });
   });
 
@@ -454,7 +445,7 @@ function renderYocoModal({ canDisconnectYoco = false } = {}) {
             </article>
             <article>
               <span>Product Modifiers</span>
-              <strong data-yoco-modifier-count>0 modifiers</strong>
+              <strong data-yoco-modifier-count>0 modifier options</strong>
             </article>
             <article>
               <span>Locations</span>
@@ -472,10 +463,6 @@ function renderYocoModal({ canDisconnectYoco = false } = {}) {
               <strong>Run a focused Yoco sync when required.</strong>
             </div>
             <div class="yocoActionRow">
-              <button type="button" class="yocoActionButton" data-yoco-sync-sales>
-                <span class="yocoActionIcon">${icon('receiptText')}</span>
-                <span><strong>Sync Sales</strong><small>Orders and refunds</small></span>
-              </button>
               <button type="button" class="yocoActionButton" data-yoco-sync-catalogue>
                 <span class="yocoActionIcon">${icon('boxes')}</span>
                 <span><strong>Sync Catalogue</strong><small>Menu items and locations</small></span>
@@ -609,7 +596,7 @@ function updateYocoStatus(view, status = {}, options = {}) {
   setText(view, '[data-yoco-live-status]', statusText);
   setText(view, '[data-yoco-last-sync]', formatDateTime(status.lastSyncCompletedAt) || 'Not synced yet');
   setText(view, '[data-yoco-catalogue-count]', `${Number(status.catalogue?.itemsCount || 0)} items`);
-  setText(view, '[data-yoco-modifier-count]', `${Number(status.catalogue?.productModifiersCount || 0)} modifiers`);
+  setText(view, '[data-yoco-modifier-count]', `${Number(status.catalogue?.productModifiersCount || 0)} modifier options`);
   setText(view, '[data-yoco-location-count]', `${Number(status.locations?.count || 0)} locations`);
   setText(view, '[data-yoco-webhook-status]', status.webhook?.enabled ? 'Active' : 'Not active');
   updateYocoCardStatus(view, isActive ? 'Active' : 'Available');
@@ -830,7 +817,7 @@ async function runGmailAction(view, message, task, options = {}) {
 
 function setYocoBusy(view, busy) {
   yocoDrawerState.busy = busy;
-  view.querySelectorAll('[data-yoco-submit], [data-yoco-sync-sales], [data-yoco-sync-catalogue], [data-yoco-disconnect]').forEach((button) => {
+  view.querySelectorAll('[data-yoco-submit], [data-yoco-sync-catalogue], [data-yoco-disconnect]').forEach((button) => {
     button.disabled = busy;
   });
 }
@@ -881,7 +868,10 @@ function renderYocoSummaryEntries(result = {}) {
     ['Products imported', result.productsImported],
     ['Products matched', result.productsMatched],
     ['Modifier groups stored', result.modifierGroupsStored],
-    ['Product modifiers stored', result.productModifiersStored],
+    ['Modifier choices stored', result.modifierOptionsStored ?? result.productModifiersStored],
+    ['Product modifiers', result.productModifiersStored],
+    ['Option modifiers', result.optionModifiersStored],
+    ['Note modifiers', result.noteModifiersStored],
     ['Orders', result.ordersProcessed],
     ['Refunds', result.refundsProcessed],
     ['Missing recipes', result.missingRecipes],

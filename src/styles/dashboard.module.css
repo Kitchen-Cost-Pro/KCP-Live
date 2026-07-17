@@ -17,9 +17,7 @@
   width: 100%;
   min-height: 100%;
   color: var(--dash-text);
-  background:
-    linear-gradient(180deg, color-mix(in srgb, var(--restaurant-theme-panel) 50%, var(--surface-primary)), color-mix(in srgb, var(--surface-primary) 24%, transparent)),
-    var(--dash-bg);
+  background: transparent;
   font-family: var(--font-main);
 }
 
@@ -298,6 +296,127 @@
   padding: 12px 14px;
   border-bottom: 1px solid var(--dash-border);
 }
+
+
+.notificationHeaderActions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.notificationSettingsActive {
+  color: var(--dash-green);
+  border-color: color-mix(in srgb, var(--dash-green) 35%, var(--dash-border));
+}
+
+.notificationSettingsPanel {
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+}
+
+.notificationSettingsIntro {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--dash-green) 22%, var(--dash-border));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--dash-green) 7%, var(--dash-elev));
+  color: var(--dash-green);
+}
+
+.notificationSettingsIntro div,
+.notificationTimeField,
+.notificationRecipientSection {
+  display: grid;
+  gap: 4px;
+}
+
+.notificationSettingsIntro strong,
+.notificationTimeField > span,
+.notificationRecipientHeader > span {
+  color: var(--dash-text);
+  font-size: 0.68rem;
+  font-weight: 750;
+}
+
+.notificationSettingsIntro span,
+.notificationTimeField small,
+.notificationRecipientHeader small {
+  color: var(--dash-muted);
+  font-size: 0.58rem;
+  line-height: 1.45;
+}
+
+.notificationTimeField input {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid var(--dash-border);
+  border-radius: 8px;
+  padding: 0 10px;
+  background: var(--dash-elev);
+  color: var(--dash-text);
+  font: inherit;
+}
+
+.notificationRecipientHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.notificationRecipientList {
+  max-height: 230px;
+  overflow-y: auto;
+  border: 1px solid var(--dash-border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--dash-elev) 70%, transparent);
+}
+
+.notificationRecipient {
+  min-height: 52px;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--dash-row-border);
+  cursor: pointer;
+}
+
+.notificationRecipient:last-child { border-bottom: 0; }
+.notificationRecipient:hover { background: var(--dash-hover); }
+.notificationRecipient input { accent-color: var(--dash-green); }
+.notificationRecipient > span { min-width: 0; display: grid; gap: 2px; }
+.notificationRecipient strong { overflow: hidden; color: var(--dash-text); font-size: 0.64rem; text-overflow: ellipsis; white-space: nowrap; }
+.notificationRecipient small { overflow: hidden; color: var(--dash-muted); font-size: 0.55rem; text-overflow: ellipsis; white-space: nowrap; }
+
+.notificationSettingsActions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.notificationSettingsActions button {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid color-mix(in srgb, var(--dash-green) 35%, var(--dash-border));
+  border-radius: 7px;
+  padding: 0 12px;
+  background: color-mix(in srgb, var(--dash-green) 10%, var(--dash-elev));
+  color: var(--dash-green);
+  font-size: 0.62rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.notificationSettingsActions button:disabled { cursor: wait; opacity: .65; }
+.notificationSettingsState { min-height: 180px; display: grid; place-items: center; align-content: center; gap: 8px; color: var(--dash-muted); font-size: .64rem; }
+.notificationSettingsEmpty { margin: 0; padding: 18px 12px; color: var(--dash-muted); font-size: .6rem; text-align: center; }
 
 .notificationHeader > div {
   min-width: 0;

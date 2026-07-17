@@ -7,7 +7,9 @@ const rootDir = process.cwd();
 const read = (relativePath) => fs.readFileSync(path.join(rootDir, relativePath), 'utf8');
 
 const routes = read('cloudflare-v2/src/legacy/routes.ts');
-const yocoSales = read('cloudflare-v2/src/legacy/yoco-sales.ts');
+const yocoSaleEffects = read('cloudflare-v2/src/modules/yoco-engine-v2/effect-proposals.ts');
+const yocoWebhook = read('cloudflare-v2/src/modules/yoco-engine-v2/webhook-ingress.ts');
+const yocoAdmin = read('cloudflare-v2/src/modules/yoco-engine-v2/admin-routes.ts');
 const costing = read('cloudflare-v2/src/legacy/inventory-costing.ts');
 const reporting = read('cloudflare-v2/src/legacy/reporting-routes.ts');
 const phase21Reporting = read('cloudflare-v2/src/legacy/reporting-phase21-routes.ts');
@@ -57,8 +59,8 @@ test('Phase 24 all core inventory transaction paths resolve location cost', () =
     const section = routes.slice(start, next > start ? next : routes.length);
     assert.match(section, /resolveLocationUnitCost|getWorkspaceInventoryCostingMethod/, `${functionName} does not use authoritative location costing`);
   }
-  assert.match(yocoSales, /stock_item_location_prices/);
-  assert.match(yocoSales, /valuationCostSource/);
+  assert.match(yocoSaleEffects, /stock_item_location_prices/);
+  assert.match(yocoSaleEffects, /unit_cost_ex_vat/);
 });
 
 test('Phase 24 manufacturing updates location cost and does not overwrite global master cost', () => {
@@ -95,10 +97,11 @@ test('Phase 33.16 interactive and scheduled reports paginate beyond the old 100,
 });
 
 test('Phase 26 invalid Yoco webhook signatures are rejected without a processing fallback', () => {
-  const webhook = functionSource(routes, 'postYocoWebhook', 'postYocoSalesSync');
-  assert.match(webhook, /if \(!verified\)/);
-  assert.match(webhook, /return\s+error\(\s*request,\s*env,\s*401/);
-  assert.doesNotMatch(webhook, /processed_signature_fallback/);
+  assert.match(yocoWebhook, /verifyYocoV2WebhookSignature/);
+  assert.match(yocoWebhook, /if \(!signatureValid\)/);
+  assert.match(yocoWebhook, /signatureStatus:\s*'INVALID'/);
+  assert.match(yocoWebhook, /401/);
+  assert.doesNotMatch(yocoWebhook, /processed_signature_fallback/);
 });
 
 test('Phase 24 local development CORS supports Vite fallback ports', () => {
@@ -106,9 +109,9 @@ test('Phase 24 local development CORS supports Vite fallback ports', () => {
   assert.match(workerConfig, /http:\/\/127\.0\.0\.1:\*/);
 });
 
-test('Phase 26 adds rolling Yoco signature alerts and authenticated reconciliation', () => {
-  assert.match(routes, /YOCO_SIGNATURE_ALERT_THRESHOLD\s*=\s*3/);
-  assert.match(routes, /checkYocoWebhookSignatureHealth/);
-  assert.match(routes, /action\s*===\s*[\"']reconcile-sales[\"']/);
-  assert.match(routes, /syncYocoSales\(env, workspaceId, \{ sinceIso \}\)/);
+test('Final V2 records rejected signatures and exposes authenticated reconciliation', () => {
+  assert.match(yocoWebhook, /recordRejectedReceipt/);
+  assert.match(yocoWebhook, /captureStatus:\s*'REJECTED'/);
+  assert.match(yocoAdmin, /suffix === 'reconciliation'/);
+  assert.match(yocoAdmin, /suffix === 'reconciliation\/run'/);
 });

@@ -13,17 +13,8 @@ import {
   assertWorkspacePermission,
   assertLocationAccess,
 } from "./auth";
-import {
-  expandProductIngredients,
-  extractYocoOrder,
-  getOrderReturns,
-  processYocoOrder,
-  processYocoOrderReturns,
-  resolveRefundReturnBehavior,
-  stockValuationUnitCost,
-  yocoWebhookEventFields,
-} from "./yoco-sales";
-import { fetchModifierGroup, fetchOrder, listOrders } from "./yoco-client";
+import { expandProductIngredients } from "../inventory/recipe-expansion";
+import { fetchModifierGroup } from "../modules/yoco-engine-v2/catalog-client";
 import {
   connectYoco,
   disconnectYoco,
@@ -32,12 +23,11 @@ import {
   getYocoConnection,
   getYocoModifierGroup,
   listYocoModifierGroups,
-  productLinkedYocoModifierGroup,
+  actionableYocoModifierGroup,
   syncYocoCatalogue,
-  syncYocoSales,
-  retryFailedYocoOrders,
-} from "./yoco-service";
-import { findRefund, verifyYocoWebhook } from "./yoco-webhooks";
+  resetYocoWebhook,
+  testYocoWebhook,
+} from "../modules/yoco-engine-v2/integration-service";
 import {
   decryptTextWithSecret,
   encryptTextWithSecret,
@@ -69,6 +59,20 @@ import {
 import { resolveLocationDisplayName } from "./location-display";
 // @ts-ignore Shared unit-aware Yoco Money conversion. Money objects are minor units; normalized scalars are major units.
 import { yocoMoneyToMajor } from "../../../src/modules/reporting/engine/yocoFinancials.js";
+import { KCP_WORKER_RELEASE, KCP_REFUND_PIPELINE_VERSION } from "../release";
+import {
+  ModifierRuleValidationError,
+  serializeModifierRule,
+  upsertModifierRule,
+  validateModifierRule,
+} from "../modules/modifier-engine/rules";
+import {
+  getModifierEngineControl,
+  listModifierEngineDiagnostics,
+  listModifierNoteSuggestions,
+  setModifierNoteDisposition,
+  upsertModifierNoteRule,
+} from "../modules/modifier-engine/reliability";
 
 function text(value: unknown, fallback = "") {
   return String(value ?? fallback).trim();
@@ -149,7 +153,7 @@ async function readLegacyMemberPreferences(
       `PRAGMA table_info(workspace_members)`,
     ).all<{ name?: string }>();
     const hasLegacyColumn = (info.results || []).some(
-      (row) => text(row.name).toLowerCase() === 'user_preferences_json',
+      (row) => text(row.name).toLowerCase() === "user_preferences_json",
     );
     if (!hasLegacyColumn) return {};
     const row = await env.CENTRAL_DB.prepare(
@@ -341,7 +345,14 @@ function normalizeUomConfigurations(value: unknown) {
         isDefaultOrdering:
           row.isDefaultOrdering === true ||
           row.defaultOrdering === true ||
-          ['true', '1', 'yes', 'on'].includes(text(row.isDefaultOrdering ?? row.defaultOrdering ?? row.is_default_ordering ?? row.defaultOrderUom).toLowerCase()),
+          ["true", "1", "yes", "on"].includes(
+            text(
+              row.isDefaultOrdering ??
+                row.defaultOrdering ??
+                row.is_default_ordering ??
+                row.defaultOrderUom,
+            ).toLowerCase(),
+          ),
       };
     })
     .filter((entry) => entry.customUom && entry.ratio > 0);
@@ -2394,6 +2405,7 @@ const TENANT_TABLE_ALLOWLIST = new Set([
   "grv_lines",
   "grvs",
   "integration_errors",
+  "integration_logs",
   "locations",
   "low_stock_email_runs",
   "low_stock_email_settings",
@@ -2687,7 +2699,7 @@ export async function adminYocoActionDO(
         env,
         workspaceId,
         text(body.apiKey || body.secretKey),
-        { allowKeyReplacement: true, actorUid: 'kcp-admin' },
+        { allowKeyReplacement: true, actorUid: "kcp-admin" },
       );
       return json(request, env, { ok: true, ...result });
     }
@@ -2699,59 +2711,12 @@ export async function adminYocoActionDO(
       const result = await syncYocoCatalogue(env, workspaceId);
       return json(request, env, { ok: true, ...result });
     }
-    if (action === "sync-sales") {
-      const sinceDays = Number(body.sinceDays || 0);
-      // Clamp an explicit lookback window to a sane maximum (31 days).
-      const clampedDays =
-        Number.isFinite(sinceDays) && sinceDays > 0
-          ? Math.min(sinceDays, 31)
-          : 0;
-      const sinceIso =
-        clampedDays > 0
-          ? new Date(
-              Date.now() - clampedDays * 24 * 60 * 60 * 1000,
-            ).toISOString()
-          : "";
-      const result = await syncYocoSales(
-        env,
-        workspaceId,
-        sinceIso ? { sinceIso } : {},
-      );
-      return json(request, env, { ok: true, ...result });
-    }
-    if (action === "reconcile-sales") {
-      const sinceDays = Number(body.sinceDays || 2);
-      const clampedDays =
-        Number.isFinite(sinceDays) && sinceDays > 0
-          ? Math.min(Math.max(sinceDays, 1), 31)
-          : 2;
-      const sinceIso = new Date(
-        Date.now() - clampedDays * 24 * 60 * 60 * 1000,
-      ).toISOString();
-      const result = await syncYocoSales(env, workspaceId, { sinceIso });
-      return json(request, env, {
-        ok: true,
-        reconciliation: true,
-        sinceIso,
-        sinceDays: clampedDays,
-        ...result,
-      });
-    }
-    if (action === "retry-failed-orders") {
-      const result = await retryFailedYocoOrders(env, workspaceId, { automatic: false });
-      return json(request, env, { ok: true, ...result });
-    }
     if (action === "reset-webhook") {
-      const apiKey = await getYocoApiKey(env, workspaceId);
-      if (!apiKey)
-        return error(
-          request,
-          env,
-          409,
-          "No Yoco API key stored for this workspace — connect Yoco first.",
-        );
-      await disconnectYoco(env, workspaceId);
-      const result = await connectYoco(env, workspaceId, apiKey);
+      const result = await resetYocoWebhook(env, workspaceId);
+      return json(request, env, { ok: true, ...result });
+    }
+    if (action === "test-webhook") {
+      const result = await testYocoWebhook(env, workspaceId);
       return json(request, env, { ok: true, ...result });
     }
     return error(request, env, 404, `Unknown Yoco admin action: ${action}`);
@@ -2764,19 +2729,255 @@ export async function adminYocoActionDO(
   }
 }
 
-export async function postDashboardLowStockEmail(
+function normalizeLowStockDispatchTime(value: unknown) {
+  const match = text(value || "08:00").match(/^(\d{1,2})(?::(\d{2}))?$/);
+  if (!match) return "";
+  const hour = Number(match[1]);
+  const minute = Number(match[2] || 0);
+  if (
+    !Number.isInteger(hour) ||
+    hour < 0 ||
+    hour > 23 ||
+    !Number.isInteger(minute) ||
+    minute < 0 ||
+    minute > 59
+  )
+    return "";
+  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+}
+
+async function readLowStockNotificationSettings(env: Env, workspaceId: string) {
+  const [settings, members] = await Promise.all([
+    env.DB.prepare(
+      `SELECT dispatch_time AS dispatchTime
+         FROM low_stock_email_settings
+        WHERE workspace_id = ?1
+        LIMIT 1`,
+    )
+      .bind(workspaceId)
+      .first<Record<string, unknown>>(),
+    env.CENTRAL_DB.prepare(
+      `SELECT id, email, COALESCE(NULLIF(display_name, ''), email) AS name, can_receive_low_stock_email AS selected
+         FROM workspace_members
+        WHERE workspace_id = ?1
+          AND lower(COALESCE(status, 'active')) NOT IN ('removed', 'deleted', 'disabled', 'inactive')
+          AND email IS NOT NULL
+          AND trim(email) <> ''
+        ORDER BY lower(COALESCE(NULLIF(display_name, ''), email)), lower(email)`,
+    )
+      .bind(workspaceId)
+      .all<Record<string, unknown>>(),
+  ]);
+  const users = arrayValue(members.results)
+    .map((entry) => {
+      const row = objectValue(entry);
+      return {
+        id: text(row.id),
+        name: text(row.name || row.email),
+        email: text(row.email).toLowerCase(),
+        selected: Number(row.selected || 0) === 1,
+      };
+    })
+    .filter((user) => user.id && user.email);
+  return {
+    frequency: "daily",
+    dispatchTime:
+      normalizeLowStockDispatchTime(settings?.dispatchTime) || "08:00",
+    timezone: "Africa/Johannesburg",
+    recipientMemberIds: users
+      .filter((user) => user.selected)
+      .map((user) => user.id),
+    users,
+  };
+}
+
+export async function getLowStockNotificationSettingsRoute(
   request: Request,
   env: Env,
   auth: AuthContext,
   workspaceId: string,
 ) {
   await scoped(request, env, auth, workspaceId);
-  const payload: Record<string, unknown> = await readJson<Record<string, unknown>>(request)
-    .catch((): Record<string, unknown> => ({}));
-  const locationId = text(payload.locationId);
-  if (locationId) await assertLocationAccess(env, auth, workspaceId, locationId, 'dashboard notifications');
-  const result = await sendWorkspaceLowStockToUser(env, workspaceId, auth.email, locationId);
-  return json(request, env, { ok: true, ...result });
+  const denied = await denyUnlessPermissionManager(
+    request,
+    env,
+    auth,
+    workspaceId,
+  );
+  if (denied) return denied;
+  await env.DB.prepare(
+    `INSERT INTO low_stock_email_settings (workspace_id, period, dispatch_time, timezone, enabled, updated_at)
+     VALUES (?1, '1 day', '08:00', 'Africa/Johannesburg', 1, ?2)
+     ON CONFLICT(workspace_id) DO UPDATE SET period='1 day', timezone='Africa/Johannesburg', enabled=1`,
+  )
+    .bind(workspaceId, nowIso())
+    .run();
+  return json(request, env, {
+    ok: true,
+    settings: await readLowStockNotificationSettings(env, workspaceId),
+  });
+}
+
+export async function putLowStockNotificationSettingsRoute(
+  request: Request,
+  env: Env,
+  auth: AuthContext,
+  workspaceId: string,
+) {
+  await scoped(request, env, auth, workspaceId);
+  const denied = await denyUnlessPermissionManager(
+    request,
+    env,
+    auth,
+    workspaceId,
+  );
+  if (denied) return denied;
+  const payload = await readJson<Record<string, unknown>>(request);
+  const dispatchTime = normalizeLowStockDispatchTime(payload.dispatchTime);
+  if (!dispatchTime)
+    return error(request, env, 400, "Send time must be a valid 24-hour time.");
+  const requestedIds = Array.from(
+    new Set(
+      (Array.isArray(payload.recipientMemberIds)
+        ? payload.recipientMemberIds
+        : []
+      )
+        .map((value) => text(value))
+        .filter(Boolean),
+    ),
+  );
+  const activeRows = await env.CENTRAL_DB.prepare(
+    `SELECT id FROM workspace_members
+      WHERE workspace_id = ?1
+        AND lower(COALESCE(status, 'active')) NOT IN ('removed', 'deleted', 'disabled', 'inactive')`,
+  )
+    .bind(workspaceId)
+    .all<Record<string, unknown>>();
+  const activeIds = new Set(
+    arrayValue(activeRows.results)
+      .map((row) => text(objectValue(row).id))
+      .filter(Boolean),
+  );
+  if (requestedIds.some((id) => !activeIds.has(id))) {
+    return error(
+      request,
+      env,
+      400,
+      "One or more selected users are no longer active in this workspace.",
+    );
+  }
+
+  const now = nowIso();
+  if (requestedIds.length) {
+    const placeholders = requestedIds
+      .map((_, index) => `?${index + 3}`)
+      .join(",");
+    await env.CENTRAL_DB.prepare(
+      `UPDATE workspace_members
+          SET can_receive_low_stock_email = CASE WHEN id IN (${placeholders}) THEN 1 ELSE 0 END,
+              updated_at = ?2
+        WHERE workspace_id = ?1
+          AND lower(COALESCE(status, 'active')) NOT IN ('removed', 'deleted')`,
+    )
+      .bind(workspaceId, now, ...requestedIds)
+      .run();
+  } else {
+    await env.CENTRAL_DB.prepare(
+      `UPDATE workspace_members
+          SET can_receive_low_stock_email = 0,
+              updated_at = ?2
+        WHERE workspace_id = ?1
+          AND lower(COALESCE(status, 'active')) NOT IN ('removed', 'deleted')`,
+    )
+      .bind(workspaceId, now)
+      .run();
+  }
+
+  const currentSettings = await env.DB.prepare(
+    `SELECT raw_json FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`,
+  )
+    .bind(workspaceId)
+    .first<{ raw_json?: string }>();
+  const raw = {
+    ...objectValue(jsonParse(currentSettings?.raw_json)),
+    lowStockEmailFrequency: "1_day",
+    lowStockEmailDispatchTime: dispatchTime,
+    lowStockEmailTimeZone: "Africa/Johannesburg",
+  };
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO low_stock_email_settings (workspace_id, period, dispatch_time, timezone, enabled, updated_at)
+       VALUES (?1, '1 day', ?2, 'Africa/Johannesburg', 1, ?3)
+       ON CONFLICT(workspace_id) DO UPDATE SET
+         period='1 day', dispatch_time=excluded.dispatch_time, timezone='Africa/Johannesburg', enabled=1, updated_at=excluded.updated_at`,
+    ).bind(workspaceId, dispatchTime, now),
+    env.DB.prepare(
+      `INSERT INTO workspace_settings (workspace_id, low_stock_email_period, low_stock_email_time, raw_json, updated_at)
+       VALUES (?1, '1 day', ?2, ?3, ?4)
+       ON CONFLICT(workspace_id) DO UPDATE SET
+         low_stock_email_period='1 day', low_stock_email_time=excluded.low_stock_email_time,
+         raw_json=excluded.raw_json, updated_at=excluded.updated_at`,
+    ).bind(workspaceId, dispatchTime, JSON.stringify(raw), now),
+  ]);
+  return json(request, env, {
+    ok: true,
+    settings: await readLowStockNotificationSettings(env, workspaceId),
+  });
+}
+
+export async function postDashboardLowStockEmail(
+  request: Request,
+  env: Env,
+  auth: AuthContext,
+  workspaceId: string,
+) {
+  try {
+    await scoped(request, env, auth, workspaceId);
+    const payload: Record<string, unknown> = await readJson<
+      Record<string, unknown>
+    >(request).catch((): Record<string, unknown> => ({}));
+    const locationId = text(payload.locationId);
+    const allowedLocationIds = await getUserAllowedLocationIds(
+      env,
+      auth,
+      workspaceId,
+    );
+    if (allowedLocationIds !== null && !allowedLocationIds.length)
+      return error(
+        request,
+        env,
+        403,
+        "Permission denied: no locations are assigned to this user.",
+      );
+    if (locationId)
+      await assertLocationAccess(
+        env,
+        auth,
+        workspaceId,
+        locationId,
+        "dashboard notifications",
+      );
+    const locationScope = locationId
+      ? [locationId]
+      : allowedLocationIds === null
+        ? []
+        : allowedLocationIds;
+    const result = await sendWorkspaceLowStockToUser(
+      env,
+      workspaceId,
+      auth.email,
+      locationScope,
+    );
+    return json(request, env, { ok: true, ...result });
+  } catch (cause) {
+    const message =
+      cause instanceof Error
+        ? cause.message
+        : "Low-stock email could not be sent.";
+    const status = /permission|denied|no locations/i.test(message) ? 403 : 502;
+    console.error(`[low-stock-email] ws=${workspaceId} failed: ${message}`);
+    return error(request, env, status, message);
+  }
 }
 
 export async function adminYocoStatusDO(
@@ -2800,10 +3001,44 @@ export async function adminYocoEventsDO(
     100,
   );
   const rows = await env.DB.prepare(
-    `SELECT id, provider_event_id, event_type, yoco_order_id, status, error_message,
-            processed_at, created_at
-       FROM yoco_webhook_events
-      WHERE workspace_id = ?1
+    `SELECT *
+       FROM (
+         SELECT id,
+                'webhook' AS source,
+                provider_event_id,
+                event_type AS operation,
+                yoco_order_id,
+                status,
+                COALESCE(
+                  NULLIF(error_message, ''),
+                  CASE
+                    WHEN lower(replace(event_type, '_', '.')) = 'payment.refunded' AND status = 'processed'
+                      THEN 'Refund webhook marked processed. Confirm the linked refund reporting row and stock movement were created.'
+                    ELSE event_type
+                  END
+                ) AS message,
+                raw_json AS details_json,
+                processed_at,
+                NULL AS duration_ms,
+                created_at
+           FROM yoco_webhook_events
+          WHERE workspace_id = ?1
+         UNION ALL
+         SELECT id,
+                'operation' AS source,
+                correlation_id AS provider_event_id,
+                operation,
+                NULL AS yoco_order_id,
+                status,
+                message,
+                details_json,
+                completed_at AS processed_at,
+                duration_ms,
+                created_at
+           FROM integration_logs
+          WHERE workspace_id = ?1
+            AND provider = 'yoco'
+       ) combined
       ORDER BY created_at DESC
       LIMIT ?2`,
   )
@@ -2811,13 +3046,22 @@ export async function adminYocoEventsDO(
     .all<any>();
   return json(request, env, {
     ok: true,
+    workerRelease: KCP_WORKER_RELEASE,
+    refundPipelineVersion: KCP_REFUND_PIPELINE_VERSION,
     events: (rows.results || []).map((row) => ({
       id: text(row.id),
+      source: text(row.source || "webhook"),
       providerEventId: text(row.provider_event_id),
-      eventType: text(row.event_type || "webhook"),
+      eventType: text(row.operation || "webhook"),
+      operation: text(row.operation || "webhook"),
       orderId: text(row.yoco_order_id),
       status: text(row.status || "received"),
-      error: text(row.error_message),
+      message: text(row.message),
+      error: ["failed", "rejected"].includes(text(row.status).toLowerCase())
+        ? text(row.message)
+        : "",
+      details: jsonParse(row.details_json) || {},
+      durationMs: Number(row.duration_ms || 0) || 0,
       processedAt: text(row.processed_at),
       timestamp: text(row.created_at),
     })),
@@ -2859,17 +3103,6 @@ export async function adminActionDO(
       // Scheduled cron fan-out: due/window-gated per-workspace send (runs in this DO).
       const result = await sendWorkspaceLowStockDue(env, workspaceId);
       return json(request, env, { ok: true, ...result });
-    }
-    if (action === "yoco-webhook-health") {
-      const health = await checkYocoWebhookSignatureHealth(env, workspaceId);
-      const retry = await retryFailedYocoOrders(env, workspaceId, {
-        automatic: true,
-        maxAutomaticLookbackDays: 31,
-      }).catch((caught) => ({
-        status: 'retry_failed',
-        error: caught instanceof Error ? caught.message : String(caught),
-      }));
-      return json(request, env, { ...health, retry });
     }
     if (action === "repair-baseline") {
       let changes = 0;
@@ -3667,7 +3900,7 @@ export async function getUserPreferencesRoute(
   return json(request, env, {
     ok: true,
     preferences,
-    scope: 'user',
+    scope: "user",
   });
 }
 
@@ -3681,11 +3914,11 @@ export async function patchUserPreferencesRoute(
   const payload = await readJson<Record<string, unknown>>(request);
   const incoming = objectValue(payload.preferences || payload);
   const allowedKeys = new Set([
-    'uiScale',
-    'restaurantThemeId',
-    'restaurantBackgroundId',
-    'restaurantBackgroundDataUrl',
-    'restaurantBackgroundName',
+    "uiScale",
+    "restaurantThemeId",
+    "restaurantBackgroundId",
+    "restaurantBackgroundDataUrl",
+    "restaurantBackgroundName",
   ]);
   const safeIncoming = Object.fromEntries(
     Object.entries(incoming).filter(([key]) => allowedKeys.has(key)),
@@ -3710,7 +3943,7 @@ export async function patchUserPreferencesRoute(
   )
     .bind(principalKey, auth.uid, auth.email, JSON.stringify(next), updatedAt)
     .run();
-  return json(request, env, { ok: true, preferences: next, scope: 'user' });
+  return json(request, env, { ok: true, preferences: next, scope: "user" });
 }
 
 export async function patchWorkspaceSettingsRoute(
@@ -3830,19 +4063,6 @@ function normalizeRoleRow(row: Record<string, unknown>) {
   };
 }
 
-const SYSTEM_ROLE_KEYS = new Set([
-  "owner",
-  "admin",
-  "manager",
-  "member",
-  "storeman",
-  "prep",
-  "stocktaker",
-  "stocktracker",
-  "transfer_agent",
-  "corporate_viewer",
-]);
-
 export async function getWorkspaceAccessRoute(
   request: Request,
   env: Env,
@@ -3919,7 +4139,7 @@ export async function getWorkspaceAccessRoute(
   const actorRole = await getWorkspaceActorRole(env, auth, workspaceId);
   const customRoles = arrayValue(roleRows.results)
     .map((row) => normalizeRoleRow(objectValue(row)))
-    .filter((role) => !SYSTEM_ROLE_KEYS.has(text(role.name)));
+    .filter((role) => !isReservedHiddenRoleKey(role.name));
   return json(request, env, {
     ok: true,
     team,
@@ -4245,16 +4465,19 @@ export async function patchWorkspaceMemberRoute(
       : payload.canAccessExternalTransfers !== false
         ? 1
         : 0;
-  const allowedLocationsJson =
-    Array.isArray(payload.allowedLocations) && payload.allowedLocations.length
-      ? JSON.stringify(
-          payload.allowedLocations.map((v: unknown) => text(v)).filter(Boolean),
-        )
-      : payload.allowedLocations === null ||
-          (Array.isArray(payload.allowedLocations) &&
-            !payload.allowedLocations.length)
-        ? null
-        : undefined;
+  const hasAllowedLocations = Object.prototype.hasOwnProperty.call(
+    payload,
+    "allowedLocations",
+  );
+  const allowedLocationsJson = hasAllowedLocations
+    ? JSON.stringify(
+        Array.isArray(payload.allowedLocations)
+          ? payload.allowedLocations
+              .map((v: unknown) => text(v))
+              .filter(Boolean)
+          : [],
+      )
+    : null;
   // Editing ANY member field (role, allowed locations, external-transfer access, email,
   // display name, low-stock tag) is a privileged action. Previously the permission check
   // only fired on role changes, letting a member widen their own location scope or rewrite
@@ -4275,7 +4498,7 @@ export async function patchWorkspaceMemberRoute(
             role_key = ?5,
             can_receive_low_stock_email = ?6,
             can_access_external_transfers = COALESCE(?9, can_access_external_transfers),
-            allowed_locations_json = COALESCE(?8, allowed_locations_json),
+            allowed_locations_json = CASE WHEN ?10 = 1 THEN ?8 ELSE allowed_locations_json END,
             updated_at = ?7
       WHERE workspace_id = ?1
         AND id = ?2`,
@@ -4290,6 +4513,7 @@ export async function patchWorkspaceMemberRoute(
       nowIso(),
       allowedLocationsJson ?? null,
       canAccessExternalTransfers,
+      hasAllowedLocations ? 1 : 0,
     )
     .run();
   return json(request, env, { ok: true });
@@ -4361,10 +4585,7 @@ export async function postWorkspaceRoleRoute(
     permissions: Array.isArray(payload.permissions)
       ? payload.permissions.filter(Boolean)
       : [],
-    locations:
-      Array.isArray(payload.locations) && payload.locations.length
-        ? payload.locations
-        : ["all"],
+    locations: Array.isArray(payload.locations) ? payload.locations : ["all"],
   });
   await env.CENTRAL_DB.prepare(
     `INSERT INTO roles (id, workspace_id, role_key, name, permissions_json, created_at, updated_at)
@@ -4490,19 +4711,17 @@ export async function getStockItems(
   const search = `%${getParam(url, "search")}%`;
   const category = getParam(url, "category");
   const itemType = getParam(url, "itemType");
-  let locationId = getParam(url, "locationId");
+  const locationId = getParam(url, "locationId");
   const allowedLocationIds = await getUserAllowedLocationIds(
     env,
     auth,
     workspaceId,
   );
-  if (allowedLocationIds !== null) {
-    if (!locationId && allowedLocationIds.length === 1)
-      locationId = allowedLocationIds[0];
-    if (!locationId)
-      throw new Error(
-        "Permission denied: select one of your assigned locations to view stock.",
-      );
+  if (allowedLocationIds !== null && !allowedLocationIds.length)
+    throw new Error(
+      "Permission denied: no locations are assigned to this user.",
+    );
+  if (locationId)
     await assertLocationAccess(
       env,
       auth,
@@ -4510,7 +4729,11 @@ export async function getStockItems(
       locationId,
       "stock_items_read",
     );
-  }
+  const scopedLocationIds = locationId
+    ? [locationId]
+    : allowedLocationIds === null
+      ? []
+      : allowedLocationIds;
 
   const filters = ["si.workspace_id = ?1", "si.active = 1"];
   const binds: unknown[] = [workspaceId];
@@ -4530,10 +4753,17 @@ export async function getStockItems(
     filters.push(`si.item_type = ?${binds.length}`);
   }
 
-  const locationSelect = locationId
-    ? `COALESCE((SELECT quantity FROM stock_balances sb WHERE sb.workspace_id = si.workspace_id AND sb.stock_item_id = si.id AND sb.location_id = ?${binds.length + 1}), 0)`
-    : `COALESCE((SELECT SUM(quantity) FROM stock_balances sb WHERE sb.workspace_id = si.workspace_id AND sb.stock_item_id = si.id), 0)`;
-  if (locationId) binds.push(locationId);
+  const locationPlaceholders = scopedLocationIds.map((id) => {
+    binds.push(id);
+    return `?${binds.length}`;
+  });
+  const stockBalanceLocationClause = locationPlaceholders.length
+    ? ` AND sb.location_id IN (${locationPlaceholders.join(", ")})`
+    : "";
+  const locationPriceLocationClause = locationPlaceholders.length
+    ? ` AND silp.location_id IN (${locationPlaceholders.join(", ")})`
+    : "";
+  const locationSelect = `COALESCE((SELECT SUM(quantity) FROM stock_balances sb WHERE sb.workspace_id = si.workspace_id AND sb.stock_item_id = si.id${stockBalanceLocationClause}), 0)`;
 
   binds.push(limit, offset);
   const limitIndex = binds.length - 1;
@@ -4561,14 +4791,14 @@ export async function getStockItems(
 	            FROM stock_balances sb
 	           WHERE sb.workspace_id = si.workspace_id
 	             AND sb.stock_item_id = si.id
-                 ${locationId ? `AND sb.location_id = ?${binds.indexOf(locationId) + 1}` : ""}
+                 ${stockBalanceLocationClause}
 	        ), '{}') AS balances_json,
         COALESCE((
           SELECT json_group_object(silp.location_id, silp.price)
             FROM stock_item_location_prices silp
            WHERE silp.workspace_id = si.workspace_id
              AND silp.stock_item_id = si.id
-             ${locationId ? `AND silp.location_id = ?${binds.indexOf(locationId) + 1}` : ""}
+             ${locationPriceLocationClause}
         ), '{}') AS location_costs_json
        FROM stock_items si
       WHERE ${filters.join(" AND ")}
@@ -8357,8 +8587,14 @@ function normalizeCreditNotePayload(raw: Record<string, unknown>) {
         ),
         returnedQty,
         packQty: returnedQty,
-        originalOrderQty: numberValue(line.originalOrderQty ?? line.maxReturnQty, 0),
-        maxReturnQty: numberValue(line.maxReturnQty ?? line.originalOrderQty, 0),
+        originalOrderQty: numberValue(
+          line.originalOrderQty ?? line.maxReturnQty,
+          0,
+        ),
+        maxReturnQty: numberValue(
+          line.maxReturnQty ?? line.originalOrderQty,
+          0,
+        ),
         packSize,
         baseQuantity,
         unitCost,
@@ -8567,13 +8803,23 @@ export async function postCreditNote(
 
   const sourcePoId = text(payload.normalized.sourcePoId);
   if (sourcePoId) {
-    const requestedByStockItem = new Map<string, { quantity: number; name: string; fallbackMaximum: number }>();
+    const requestedByStockItem = new Map<
+      string,
+      { quantity: number; name: string; fallbackMaximum: number }
+    >();
     for (const line of payload.normalized.items) {
       const stockItemId = text(line.stockItemId);
       if (!stockItemId) continue;
-      const current = requestedByStockItem.get(stockItemId) || { quantity: 0, name: text(line.stockItemName || stockItemId), fallbackMaximum: 0 };
+      const current = requestedByStockItem.get(stockItemId) || {
+        quantity: 0,
+        name: text(line.stockItemName || stockItemId),
+        fallbackMaximum: 0,
+      };
       current.quantity += numberValue(line.returnedQty ?? line.packQty, 0);
-      current.fallbackMaximum += numberValue(line.maxReturnQty ?? line.originalOrderQty, 0);
+      current.fallbackMaximum += numberValue(
+        line.maxReturnQty ?? line.originalOrderQty,
+        0,
+      );
       requestedByStockItem.set(stockItemId, current);
     }
 
@@ -8596,7 +8842,10 @@ export async function postCreditNote(
       for (const line of arrayValue(prior.items).map(objectValue)) {
         const stockItemId = text(line.stockItemId || line.itemId || line.id);
         if (!stockItemId) continue;
-        const quantity = numberValue(line.returnedQty ?? line.packQty ?? line.quantity, 0);
+        const quantity = numberValue(
+          line.returnedQty ?? line.packQty ?? line.quantity,
+          0,
+        );
         previouslyReturnedByStockItem.set(
           stockItemId,
           (previouslyReturnedByStockItem.get(stockItemId) || 0) + quantity,
@@ -8614,11 +8863,21 @@ export async function postCreditNote(
       )
         .bind(workspaceId, sourcePoId, stockItemId)
         .first<{ quantity: number }>();
-      const originalQuantity = numberValue(ordered?.quantity, requested.fallbackMaximum);
-      const previouslyReturned = previouslyReturnedByStockItem.get(stockItemId) || 0;
+      const originalQuantity = numberValue(
+        ordered?.quantity,
+        requested.fallbackMaximum,
+      );
+      const previouslyReturned =
+        previouslyReturnedByStockItem.get(stockItemId) || 0;
       const cumulativeReturn = previouslyReturned + requested.quantity;
-      if (originalQuantity > 0 && cumulativeReturn > originalQuantity + 0.000001) {
-        const remainingQuantity = Math.max(originalQuantity - previouslyReturned, 0);
+      if (
+        originalQuantity > 0 &&
+        cumulativeReturn > originalQuantity + 0.000001
+      ) {
+        const remainingQuantity = Math.max(
+          originalQuantity - previouslyReturned,
+          0,
+        );
         return error(
           request,
           env,
@@ -8898,6 +9157,17 @@ export async function getStockTakes(
 ) {
   await scoped(request, env, auth, workspaceId);
   const limit = limitFromUrl(new URL(request.url), 500, 1000);
+  const allowedLocationIds = await getUserAllowedLocationIds(
+    env,
+    auth,
+    workspaceId,
+  );
+  if (allowedLocationIds !== null && !allowedLocationIds.length)
+    return json(request, env, { ok: true, stockTakes: [] });
+  const locationBinds = allowedLocationIds === null ? [] : allowedLocationIds;
+  const locationClause = locationBinds.length
+    ? ` AND sts.location_id IN (${locationBinds.map((_, index) => `?${index + 3}`).join(", ")})`
+    : "";
   const rows = await env.DB.prepare(
     `SELECT
         sts.id,
@@ -8915,10 +9185,11 @@ export async function getStockTakes(
        LEFT JOIN locations l ON l.id = sts.location_id AND l.workspace_id = sts.workspace_id
       WHERE sts.workspace_id = ?1
         AND sts.status = 'posted'
+        ${locationClause}
       ORDER BY sts.counted_at DESC, sts.updated_at DESC
       LIMIT ?2`,
   )
-    .bind(workspaceId, limit)
+    .bind(workspaceId, limit, ...locationBinds)
     .all();
 
   const stockTakeRows = (rows.results || []) as Record<string, unknown>[];
@@ -8982,6 +9253,13 @@ export async function getStockTakeTemplates(
   workspaceId: string,
 ) {
   await scoped(request, env, auth, workspaceId);
+  const allowedLocationIds = await getUserAllowedLocationIds(
+    env,
+    auth,
+    workspaceId,
+  );
+  if (allowedLocationIds !== null && !allowedLocationIds.length)
+    return json(request, env, { ok: true, templates: [] });
   const rows = await env.DB.prepare(
     `SELECT id, name, location_id, raw_json, created_at, updated_at
        FROM stocktake_templates
@@ -8991,21 +9269,29 @@ export async function getStockTakeTemplates(
   )
     .bind(workspaceId)
     .all();
-  const templates = (rows.results || []).map((row) => {
-    const record = row as Record<string, unknown>;
-    const raw = objectValue(jsonParse(record.raw_json));
-    return {
-      ...raw,
-      id: text(record.id),
-      name: text(raw.name || record.name),
-      targetLocation: text(raw.targetLocation || record.location_id),
-      targetLocations: arrayValue(raw.targetLocations).length
-        ? arrayValue(raw.targetLocations)
-        : [text(record.location_id)].filter(Boolean),
-      createdAt: text(record.created_at),
-      updatedAt: text(record.updated_at),
-    };
-  });
+  const templates = (rows.results || [])
+    .map((row) => {
+      const record = row as Record<string, unknown>;
+      const raw = objectValue(jsonParse(record.raw_json));
+      return {
+        ...raw,
+        id: text(record.id),
+        name: text(raw.name || record.name),
+        targetLocation: text(raw.targetLocation || record.location_id),
+        targetLocations: arrayValue(raw.targetLocations).length
+          ? arrayValue(raw.targetLocations)
+          : [text(record.location_id)].filter(Boolean),
+        createdAt: text(record.created_at),
+        updatedAt: text(record.updated_at),
+      };
+    })
+    .filter((template) => {
+      if (allowedLocationIds === null) return true;
+      const targets = arrayValue(template.targetLocations)
+        .map((value) => text(value))
+        .filter(Boolean);
+      return targets.some((id) => allowedLocationIds.includes(id));
+    });
   return json(request, env, { ok: true, templates });
 }
 
@@ -9022,6 +9308,14 @@ export async function postStockTakeTemplate(
   if (!payload.name) return error(request, env, 400, "Enter a template name.");
   if (!payload.normalized.targetLocations.length)
     return error(request, env, 400, "Choose at least one target location.");
+  for (const locationId of payload.normalized.targetLocations)
+    await assertLocationAccess(
+      env,
+      auth,
+      workspaceId,
+      locationId,
+      "stock_take_template_write",
+    );
   if (!payload.normalized.selections.length)
     return error(
       request,
@@ -9125,7 +9419,19 @@ export async function deleteStockTakeTemplateRoute(
 }
 
 function normalizeStockTakeUomCounts(value: unknown) {
-  const rows = Array.isArray(value) ? value : Object.values(objectValue(value));
+  const rows = Array.isArray(value)
+    ? value
+    : Object.entries(objectValue(value)).map(([key, rawValue]) => {
+        const row = objectValue(rawValue);
+        return Object.keys(row).length
+          ? { key, ...row }
+          : {
+              key,
+              uomName: key,
+              ratio: key === "base" ? 1 : undefined,
+              count: rawValue,
+            };
+      });
   return rows
     .map(objectValue)
     .map((row) => {
@@ -9135,9 +9441,12 @@ function normalizeStockTakeUomCounts(value: unknown) {
       );
       const count = numberValue(row.count ?? row.scannedCount ?? row.qty, 0);
       const safeRatio = ratio > 0 ? ratio : 1;
-      const uomName = text(row.uomName || row.selectedUom || row.unit);
+      const rawKey = text(row.key);
+      const uomName = text(
+        row.uomName || row.selectedUom || row.unit || rawKey,
+      );
       return {
-        key: text(row.key || `${uomName.toLowerCase()}::${safeRatio}`),
+        key: rawKey || `${uomName.toLowerCase()}::${safeRatio}`,
         uomName,
         baseUom: text(row.baseUom || row.baseUnit),
         ratio: safeRatio,
@@ -9795,15 +10104,27 @@ export async function getStockTakeDrafts(
   // Draft ownership is always derived from the authenticated Worker session. Never allow a
   // browser-supplied query parameter to read another workspace member's active count drafts.
   const userId = auth.uid;
+  const allowedLocationIds = await getUserAllowedLocationIds(
+    env,
+    auth,
+    workspaceId,
+  );
+  if (allowedLocationIds !== null && !allowedLocationIds.length)
+    return json(request, env, { ok: true, drafts: [] });
+  const locationBinds = allowedLocationIds === null ? [] : allowedLocationIds;
+  const locationClause = locationBinds.length
+    ? ` AND location_id IN (${locationBinds.map((_, index) => `?${index + 3}`).join(", ")})`
+    : "";
   const rows = await env.DB.prepare(
-    `SELECT id, raw_json, saved_at, updated_at
+    `SELECT id, location_id, raw_json, saved_at, updated_at
        FROM stocktake_drafts
       WHERE workspace_id = ?1
         AND user_id = ?2
+        ${locationClause}
       ORDER BY updated_at DESC
       LIMIT 100`,
   )
-    .bind(workspaceId, userId)
+    .bind(workspaceId, userId, ...locationBinds)
     .all();
   const drafts = (rows.results || []).map((row) => {
     const record = row as Record<string, unknown>;
@@ -9839,6 +10160,13 @@ export async function postStockTakeDraft(
       400,
       "Choose a stock take location before saving a draft.",
     );
+  await assertLocationAccess(
+    env,
+    auth,
+    workspaceId,
+    locationId,
+    "stock_take_draft_write",
+  );
   const now = nowIso();
   const saved = { ...draft, id: draftId, savedByUserId: userId, savedAt: now };
   await env.DB.prepare(
@@ -12772,35 +13100,61 @@ export async function getDashboardSource(
     1,
     Math.min(2000, Number(getParam(url, "limit", "500")) || 500),
   );
+  const allowedLocationIds = await getUserAllowedLocationIds(
+    env,
+    auth,
+    workspaceId,
+  );
+  if (allowedLocationIds !== null && !allowedLocationIds.length) {
+    return json(request, env, {
+      logs_inventory_audit: [],
+      logs_sales: [],
+      logs_sales_errors: [],
+    });
+  }
+  const locationIds = allowedLocationIds === null ? [] : allowedLocationIds;
+  const locationPlaceholders = locationIds
+    .map((_, index) => `?${index + 2}`)
+    .join(", ");
+  const limitIndex = locationIds.length + 2;
+  const movementLocationClause = locationIds.length
+    ? ` AND location_id IN (${locationPlaceholders})`
+    : "";
+  const orderLocationClause = locationIds.length
+    ? ` AND location_id IN (${locationPlaceholders})`
+    : "";
+  const binds = [workspaceId, ...locationIds, limit];
 
   const [movementRows, orderRows, errorRows] = await Promise.all([
     env.DB.prepare(
-      `SELECT id, movement_type, document_type, document_id, quantity_delta, unit_cost, value_delta, occurred_at, created_by, metadata_json, created_at
+      `SELECT id, movement_type, document_type, document_id, location_id, quantity_delta, unit_cost, value_delta, occurred_at, created_by, metadata_json, created_at
          FROM stock_movements
-        WHERE workspace_id = ?1
+        WHERE workspace_id = ?1${movementLocationClause}
         ORDER BY occurred_at DESC
-        LIMIT ?2`,
+        LIMIT ?${limitIndex}`,
     )
-      .bind(workspaceId, limit)
+      .bind(...binds)
       .all(),
     env.DB.prepare(
       `SELECT id, yoco_order_id, yoco_payment_id, location_id, order_type, status, payment_method, total, occurred_at, raw_json, created_at
          FROM yoco_orders
-        WHERE workspace_id = ?1
+        WHERE workspace_id = ?1${orderLocationClause}
         ORDER BY occurred_at DESC
-        LIMIT ?2`,
+        LIMIT ?${limitIndex}`,
     )
-      .bind(workspaceId, limit)
+      .bind(...binds)
       .all(),
-    env.DB.prepare(
-      `SELECT id, provider, error_type, message, context_json, created_at
-         FROM integration_errors
-        WHERE workspace_id = ?1
-        ORDER BY created_at DESC
-        LIMIT ?2`,
-    )
-      .bind(workspaceId, limit)
-      .all(),
+    allowedLocationIds === null
+      ? env.DB.prepare(
+          `SELECT id, provider, error_type, message, context_json, created_at
+             FROM integration_errors
+            WHERE workspace_id = ?1
+            ORDER BY created_at DESC
+            LIMIT ?2`,
+        )
+          .bind(workspaceId, limit)
+          .all()
+      : Promise.resolve({ results: [] }),
   ]);
 
   return json(request, env, {
@@ -12819,18 +13173,45 @@ export async function getDashboard(
   await scoped(request, env, auth, workspaceId);
   const url = new URL(request.url);
   const rawLocationId = getParam(url, "locationId");
+  const allowedLocationIds = await getUserAllowedLocationIds(
+    env,
+    auth,
+    workspaceId,
+  );
+  if (allowedLocationIds !== null && !allowedLocationIds.length)
+    throw new Error(
+      "Permission denied: no locations are assigned to this user.",
+    );
   // Resolve the requested location through the fuzzy resolver (matches by id, name,
   // display_name, external_name) so a name/legacy id still filters correctly. Falls
   // back to the raw value if it can't be resolved.
-  const locationId = rawLocationId
+  let locationId = rawLocationId
     ? (await resolveActiveLocationId(env, workspaceId, rawLocationId)) ||
       rawLocationId
     : "";
+  if (locationId)
+    await assertLocationAccess(
+      env,
+      auth,
+      workspaceId,
+      locationId,
+      "dashboard_read",
+    );
+  const dashboardLocationIds = locationId
+    ? [locationId]
+    : allowedLocationIds === null
+      ? []
+      : allowedLocationIds;
   const from = getParam(url, "from", new Date().toISOString().slice(0, 10));
   const to = getParam(url, "to", new Date().toISOString().slice(0, 10));
 
-  const locationClause = locationId ? "AND sb.location_id = ?2" : "";
-  const balanceBinds = locationId ? [workspaceId, locationId] : [workspaceId];
+  const locationPlaceholders = dashboardLocationIds
+    .map((_, index) => `?${index + 2}`)
+    .join(", ");
+  const locationClause = dashboardLocationIds.length
+    ? `AND sb.location_id IN (${locationPlaceholders})`
+    : "";
+  const balanceBinds = [workspaceId, ...dashboardLocationIds];
 
   const valuation = await env.DB.prepare(
     `SELECT
@@ -12861,13 +13242,15 @@ export async function getDashboard(
     .bind(...balanceBinds)
     .first();
 
-  const movementBinds = locationId
-    ? [workspaceId, locationId, from, to]
-    : [workspaceId, from, to];
-  const movementLocationClause = locationId ? "AND location_id = ?2" : "";
-  const adjustmentLocationClause = locationId ? "AND al.location_id = ?2" : "";
-  const fromIndex = locationId ? 3 : 2;
-  const toIndex = locationId ? 4 : 3;
+  const movementBinds = [workspaceId, ...dashboardLocationIds, from, to];
+  const movementLocationClause = dashboardLocationIds.length
+    ? `AND sm.location_id IN (${locationPlaceholders})`
+    : "";
+  const adjustmentLocationClause = dashboardLocationIds.length
+    ? `AND al.location_id IN (${locationPlaceholders})`
+    : "";
+  const fromIndex = dashboardLocationIds.length + 2;
+  const toIndex = dashboardLocationIds.length + 3;
 
   // --- Shared movement classification + valuation: ONE source of truth so the Wastage
   // TILE (summary total) and the Wastage GRAPH (daily series) can never disagree, and so
@@ -12943,7 +13326,7 @@ export async function getDashboard(
          ON silp.workspace_id = sm.workspace_id
         AND silp.stock_item_id = sm.stock_item_id
         AND silp.location_id = sm.location_id
-      WHERE sm.workspace_id = ?1 ${movementLocationClause ? "AND sm.location_id = ?2" : ""}
+      WHERE sm.workspace_id = ?1 ${movementLocationClause}
         AND date(sm.occurred_at) BETWEEN date(?${fromIndex}) AND date(?${toIndex})
       GROUP BY sm.movement_type, sm.metadata_json`,
   )
@@ -12969,7 +13352,7 @@ export async function getDashboard(
          ON silp.workspace_id = sm.workspace_id
         AND silp.stock_item_id = sm.stock_item_id
         AND silp.location_id = sm.location_id
-      WHERE sm.workspace_id = ?1 ${movementLocationClause ? "AND sm.location_id = ?2" : ""}
+      WHERE sm.workspace_id = ?1 ${movementLocationClause}
         AND date(sm.occurred_at) BETWEEN date(?${fromIndex}) AND date(?${toIndex})`,
     )
       .bind(...movementBinds)
@@ -13033,7 +13416,7 @@ export async function getDashboard(
          ON silp.workspace_id = sm.workspace_id
         AND silp.stock_item_id = sm.stock_item_id
         AND silp.location_id = sm.location_id
-      WHERE sm.workspace_id = ?1 ${movementLocationClause ? "AND sm.location_id = ?2" : ""}
+      WHERE sm.workspace_id = ?1 ${movementLocationClause}
         AND date(sm.occurred_at) BETWEEN date(?${fromIndex}) AND date(?${toIndex})
       GROUP BY day
       ORDER BY day ASC`,
@@ -13147,7 +13530,7 @@ export async function getDashboard(
          ON silp.workspace_id = sb.workspace_id
         AND silp.stock_item_id = sb.stock_item_id
         AND silp.location_id = sb.location_id
-	      WHERE sb.workspace_id = ?1 ${locationId ? "AND sb.location_id = ?2" : ""}
+	      WHERE sb.workspace_id = ?1 ${locationClause}
 	        AND si.active = 1
 	        AND ${STOCKED_ITEM_ALIAS_SQL("si")}
         AND sb.quantity <= si.threshold_qty
@@ -13365,7 +13748,9 @@ export async function getDashboard(
   return json(request, env, {
     ok: true,
     range: { from, to },
-    locationId: locationId || null,
+    locationId:
+      dashboardLocationIds.length === 1 ? dashboardLocationIds[0] : null,
+    locationIds: dashboardLocationIds,
     valuation,
     movements: movements.results || [],
     movementTotals,
@@ -14054,28 +14439,67 @@ export async function postYocoConnect(
   await scoped(request, env, auth, workspaceId);
   const payload = await readJson<{
     apiKey?: string;
-    syncSalesOnConnect?: boolean;
   }>(request);
-  const denied = await denyUnlessPermissionManager(request, env, auth, workspaceId);
+  const denied = await denyUnlessPermissionManager(
+    request,
+    env,
+    auth,
+    workspaceId,
+  );
   if (denied) return denied;
-  const connection = await connectYoco(env, workspaceId, payload.apiKey || "", { actorUid: auth.uid });
-  const catalogue = await syncYocoCatalogue(env, workspaceId);
-  const sales =
-    payload.syncSalesOnConnect === true
-      ? await syncYocoSales(env, workspaceId, { full: true })
-      : {
-          skipped: true,
-          reason:
-            "Full sales history sync is run manually to avoid unnecessary connection-time API calls.",
-        };
-  return json(request, env, {
-    ok: true,
-    ...connection,
-    ...catalogue,
-    ...sales,
-    catalogueSync: catalogue,
-    salesSync: sales,
-  });
+  try {
+    const connection = await connectYoco(
+      env,
+      workspaceId,
+      payload.apiKey || "",
+      { actorUid: auth.uid },
+    );
+    const catalogue = await syncYocoCatalogue(env, workspaceId);
+    const sales = {
+      skipped: true,
+      reason:
+        "Initial Yoco connection imports the catalogue only. Historical orders are not imported or deducted.",
+    };
+    return json(request, env, {
+      ok: true,
+      engine: "yoco-v2",
+      ...connection,
+      ...catalogue,
+      ...sales,
+      catalogueSync: catalogue,
+      salesSync: sales,
+    });
+  } catch (cause) {
+    const message =
+      cause instanceof Error
+        ? cause.message
+        : String(cause || "Yoco V2 connection failed.");
+    const normalized = message.toLowerCase();
+    const status = /rate.?limit|too many requests|429/.test(normalized)
+      ? 429
+      : /unauthori[sz]ed|forbidden|api key|credential|401|403/.test(normalized)
+        ? 400
+        : /not configured|binding|schema|no such table|no such column/.test(
+              normalized,
+            )
+          ? 503
+          : 502;
+    console.error(
+      JSON.stringify({
+        component: "kcp-yoco-engine-v2",
+        operation: "yoco.v2.connect.failed",
+        workspace_id: workspaceId,
+        actor_uid: auth.uid,
+        status,
+        error: message,
+      }),
+    );
+    return error(request, env, status, message, {
+      code: "YOCO_V2_CONNECT_FAILED",
+      engine: "yoco-v2",
+      retryable: status === 429 || status >= 500,
+    });
+  }
 }
 
 // Lightweight change signal for the cross-user live-refresh poll. Combines the Yoco sync markers
@@ -14183,7 +14607,7 @@ export async function getYocoStatus(
 
 function rawModifierId(modifier: Record<string, unknown>) {
   return text(
-    modifier.modifier_id || modifier.modifierId || modifier.id || modifier.uuid,
+    modifier._kcp_modifier_id || modifier.modifier_id || modifier.modifierId || modifier.id || modifier.uuid,
   );
 }
 
@@ -14229,8 +14653,11 @@ function rawModifierName(
     modifier.name ||
       modifier.display_name ||
       modifier.displayName ||
+      modifier.title ||
+      modifier.label ||
       modifier.product_name ||
-      modifier.productName,
+      modifier.productName ||
+      modifier.value,
     fallback,
   );
 }
@@ -14276,14 +14703,101 @@ function rawModifierProductDisplayName(
 
 function rawModifierType(modifier: Record<string, unknown>) {
   return text(
-    modifier.type ||
+    modifier._kcp_modifier_kind ||
+      modifier.type ||
       modifier.kind ||
       modifier.modifier_type ||
-      modifier.modifierType,
+      modifier.modifierType ||
+      modifier.input_type ||
+      modifier.inputType ||
+      modifier.selection_type ||
+      modifier.selectionType,
   )
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
+}
+
+
+function isRawNoteModifier(modifier: Record<string, unknown>) {
+  const type = rawModifierType(modifier);
+  return Boolean(type) && (
+    type === "note" || type === "customer note" || type === "free text" || type === "freeform text" ||
+    type === "text" || type === "text input" || type === "open text" || type.includes("note") || type.includes("free text")
+  );
+}
+
+function rawModifierRows(group: Record<string, unknown>) {
+  const keys = [
+    "modifiers", "modifier_items", "modifierItems", "modifier_options", "modifierOptions",
+    "product_modifiers", "productModifiers", "linked_product_modifiers", "linkedProductModifiers",
+    "option_modifiers", "optionModifiers", "add_on_modifiers", "addOnModifiers",
+    "note_modifiers", "noteModifiers", "text_modifiers", "textModifiers",
+    "options", "option_items", "optionItems", "option_values", "optionValues",
+    "choices", "values", "items", "entries", "modifier_group_items", "modifierGroupItems",
+    "selections", "selection_options", "selectionOptions",
+  ];
+  const rows: Array<Record<string, unknown>> = [];
+  const containers = [
+    group,
+    objectValue(group.data),
+    objectValue(group.result),
+    objectValue(group.payload),
+    objectValue(group.attributes),
+    objectValue(group.configuration),
+    objectValue(group.config),
+    objectValue(group.metadata),
+  ];
+  for (const container of containers) {
+    for (const key of keys) {
+      const value = container[key];
+      const add = (entry: unknown, entryId: string, index: number) => {
+        const outer = objectValue(entry);
+        const nested = objectValue(
+          outer.modifier || outer.option || outer.choice || outer.product_modifier || outer.productModifier || outer.note_modifier || outer.noteModifier,
+        );
+        const row = Object.keys(nested).length ? { ...outer, ...nested } : outer;
+        const normalizedKey = key.toLowerCase();
+        const collectionType = normalizedKey.includes("note") || normalizedKey.includes("text")
+          ? "note"
+          : normalizedKey.includes("product")
+            ? "product"
+            : "option";
+        rows.push({
+          ...row,
+          id: text(row.id || row.uuid || row.modifier_id || row.modifierId || row.option_id || row.optionId, entryId),
+          name: rawModifierName(row, text(entry, `Option ${index + 1}`)),
+          _kcp_modifier_kind: text(row._kcp_modifier_kind || row.type || row.kind, collectionType),
+        });
+      };
+      if (Array.isArray(value)) value.forEach((entry, index) => add(entry, `${text(group.id || group.uuid || "group")}:${key}:${index + 1}`, index));
+      else if (value && typeof value === "object") Object.entries(value as Record<string, unknown>).forEach(([entryId, entry], index) => add(entry, entryId, index));
+    }
+  }
+  if (rows.length) {
+    const deduped = new Map<string, Record<string, unknown>>();
+    rows.forEach((row, index) => {
+      const key = rawModifierId(row) || `${rawModifierName(row)}:${index}`;
+      if (!deduped.has(key)) deduped.set(key, row);
+    });
+    return [...deduped.values()];
+  }
+  const groupType = rawModifierType(group);
+  if (
+    groupType.includes("note") || groupType.includes("free text") || groupType === "text" || groupType === "text input" ||
+    group.is_note === true || group.isNote === true || group.free_text === true || group.freeText === true
+  ) {
+    const groupId = text(group.id || group.modifier_group_id || group.modifierGroupId || group.uuid);
+    return [{
+      id: `${groupId || "note"}:note`,
+      name: text(group.name || group.display_name || group.title, "Note"),
+      type: "note",
+      _kcp_modifier_kind: "note",
+      _kcp_note_source: true,
+      _kcp_modifier_id: `${groupId || "note"}:note`,
+    }];
+  }
+  return rows;
 }
 
 function yocoModifierRecipeOwnerIds(
@@ -14421,6 +14935,133 @@ function findProductByModifierVariant(
   return null;
 }
 
+export async function getModifierNoteSuggestionsRoute(
+  request: Request,
+  env: Env,
+  auth: AuthContext,
+  workspaceId: string,
+) {
+  await scoped(request, env, auth, workspaceId);
+  const url = new URL(request.url);
+  const suggestions = await listModifierNoteSuggestions(env, workspaceId, {
+    includeIgnored: url.searchParams.get("includeIgnored") === "1",
+    minimumSeen: numberValue(url.searchParams.get("minimumSeen"), 3),
+  });
+  return json(request, env, {
+    ok: true,
+    suggestions,
+    count: suggestions.length,
+  });
+}
+
+export async function postModifierNoteRuleRoute(
+  request: Request,
+  env: Env,
+  auth: AuthContext,
+  workspaceId: string,
+) {
+  await scoped(request, env, auth, workspaceId);
+  const payload = objectValue(await readJson<Record<string, unknown>>(request));
+  const noteText = text(
+    payload.noteText || payload.notePhrase || payload.normalizedText,
+  );
+  const rule = objectValue(payload.rule);
+  if (!noteText) return error(request, env, 400, "Note phrase is required.");
+  if (!Object.keys(rule).length)
+    return error(request, env, 400, "A stock action is required.");
+  try {
+    const saved = await upsertModifierNoteRule(env, {
+      workspaceId,
+      noteText,
+      rule,
+      actor: auth.uid || auth.email,
+    });
+    return json(request, env, { ok: true, rule: saved });
+  } catch (cause) {
+    if (cause instanceof ModifierRuleValidationError) {
+      return error(request, env, 400, cause.message, { code: cause.code });
+    }
+    throw cause;
+  }
+}
+
+async function updateModifierNoteDispositionRoute(
+  request: Request,
+  env: Env,
+  auth: AuthContext,
+  workspaceId: string,
+  disposition: "IGNORED" | "SUGGESTED",
+) {
+  await scoped(request, env, auth, workspaceId);
+  const payload = objectValue(await readJson<Record<string, unknown>>(request));
+  const noteText = text(
+    payload.noteText || payload.notePhrase || payload.normalizedText,
+  );
+  if (!noteText) return error(request, env, 400, "Note phrase is required.");
+  await setModifierNoteDisposition(env, { workspaceId, noteText, disposition });
+  return json(request, env, { ok: true, noteText, disposition });
+}
+
+export async function postModifierNoteIgnoreRoute(
+  request: Request,
+  env: Env,
+  auth: AuthContext,
+  workspaceId: string,
+) {
+  return updateModifierNoteDispositionRoute(
+    request,
+    env,
+    auth,
+    workspaceId,
+    "IGNORED",
+  );
+}
+
+export async function postModifierNoteRestoreRoute(
+  request: Request,
+  env: Env,
+  auth: AuthContext,
+  workspaceId: string,
+) {
+  return updateModifierNoteDispositionRoute(
+    request,
+    env,
+    auth,
+    workspaceId,
+    "SUGGESTED",
+  );
+}
+
+export async function getModifierEngineControlRoute(
+  request: Request,
+  env: Env,
+  auth: AuthContext,
+  workspaceId: string,
+) {
+  await scoped(request, env, auth, workspaceId);
+  const control = await getModifierEngineControl(env, workspaceId);
+  return json(request, env, { ok: true, control });
+}
+
+export async function getModifierEngineDiagnosticsRoute(
+  request: Request,
+  env: Env,
+  auth: AuthContext,
+  workspaceId: string,
+) {
+  await scoped(request, env, auth, workspaceId);
+  const url = new URL(request.url);
+  const diagnostics = await listModifierEngineDiagnostics(env, workspaceId, {
+    status: text(url.searchParams.get("status")),
+    limit: numberValue(url.searchParams.get("limit"), 100),
+  });
+  return json(request, env, {
+    ok: true,
+    diagnostics,
+    count: diagnostics.length,
+  });
+}
+
 export async function getYocoModifierRecipes(
   request: Request,
   env: Env,
@@ -14467,10 +15108,25 @@ export async function getYocoModifierRecipes(
       .bind(workspaceId)
       .all<Record<string, unknown>>(),
   ]);
+  let modifierRuleRows: Array<Record<string, unknown>> = [];
+  try {
+    const result = await env.DB.prepare(
+      `SELECT * FROM modifier_rules WHERE workspace_id = ?1 ORDER BY updated_at DESC`,
+    )
+      .bind(workspaceId)
+      .all<Record<string, unknown>>();
+    modifierRuleRows = result.results || [];
+  } catch {
+    modifierRuleRows = [];
+  }
+  const modifierRulesByOwner = new Map(
+    modifierRuleRows.map((row) => [text(row.modifier_owner_id), row]),
+  );
 
   const productsByVariant = new Map<string, Record<string, unknown>>();
   const productsById = new Map<string, Record<string, unknown>>();
   const productsByName = new Map<string, Record<string, unknown>>();
+  const productsByModifierGroupId = new Map<string, Array<Record<string, unknown>>>();
   arrayValue(productRows.results).forEach((entry) => {
     const row = objectValue(entry);
     const productId = text(row.id);
@@ -14482,6 +15138,11 @@ export async function getYocoModifierRecipes(
     });
     if (normalizedName && !productsByName.has(normalizedName))
       productsByName.set(normalizedName, row);
+    productModifierGroupIds(objectValue(jsonParse(row.raw_json))).forEach((groupId) => {
+      const current = productsByModifierGroupId.get(groupId) || [];
+      if (!current.some((product) => text(product.id) === productId)) current.push(row);
+      productsByModifierGroupId.set(groupId, current);
+    });
   });
 
   const recipesByOwner = new Map<string, Record<string, unknown>>();
@@ -14506,21 +15167,23 @@ export async function getYocoModifierRecipes(
     const raw = objectValue(jsonParse(group.raw_json));
     const groupId = text(raw.id || group.yoco_modifier_group_id || group.id);
     const groupName = text(raw.name || group.name, "Yoco Modifier Group");
-    const modifiers = arrayValue(
-      raw.modifiers ||
-        raw.modifier_items ||
-        raw.modifierItems ||
-        raw.modifier_options ||
-        raw.modifierOptions ||
-        raw.options ||
-        raw.items ||
-        raw.values,
-    ).map(objectValue);
+    const modifiers = rawModifierRows(raw).map(objectValue);
     modifiers.forEach((modifier) => {
       const variantId = rawModifierVariantId(modifier);
       const type = rawModifierType(modifier);
-      if (type && type !== "product") return;
-      if (!type && !variantId) return;
+      const modifierId = rawModifierId(modifier);
+      const sourceName = text(
+        modifier.name ||
+          modifier.display_name ||
+          modifier.displayName ||
+          modifier.title,
+      );
+      const modifierName = rawModifierName(
+        modifier,
+        modifierId || variantId || "Yoco Modifier",
+      );
+      const isNoteRule = isRawNoteModifier(modifier);
+      if (!modifierId && !variantId && !sourceName) return;
 
       const ownerIds = yocoModifierRecipeOwnerIds(groupId, modifier);
       const ownerId = ownerIds[0] || "";
@@ -14531,7 +15194,6 @@ export async function getYocoModifierRecipes(
         )
         .find(Boolean);
       if (manualRecipe && Number(manualRecipe.active ?? 1) === 0) return;
-      const modifierName = rawModifierName(modifier, ownerId);
       const manualLinkedProductIds = linkedProductIdsFromValue(
         manualRecipe?.linked_product_id,
       );
@@ -14547,14 +15209,16 @@ export async function getYocoModifierRecipes(
           ? "variant"
           : "name"
         : "";
-      const linkedProducts = manualLinkedProductIds.length
+      const recipeLinkedProducts = manualLinkedProductIds.length
         ? (manualLinkedProductIds
             .map((idValue) => productsById.get(idValue))
             .filter(Boolean) as Array<Record<string, unknown>>)
         : autoLinkedProduct
           ? [autoLinkedProduct]
           : [];
-      const productLineSets = linkedProducts.map((product) =>
+      const assignedMenuItems = productsByModifierGroupId.get(groupId) || [];
+      const linkedItems = assignedMenuItems.length ? assignedMenuItems : recipeLinkedProducts;
+      const productLineSets = recipeLinkedProducts.map((product) =>
         recipeLinesForRecipe(
           recipesByOwner.get(`product:${text(product.id)}`),
           linesByRecipe,
@@ -14563,9 +15227,11 @@ export async function getYocoModifierRecipes(
       const productLines = mergeRecipeLines(productLineSets);
       const manualLines = recipeLinesForRecipe(manualRecipe, linesByRecipe);
       const recipe = productLines.length ? productLines : manualLines;
-      const linkedProductNames = linkedProducts
+      const linkedProductNames = recipeLinkedProducts
         .map((product) => text(product.name))
         .filter(Boolean);
+      const linkedItemIds = linkedItems.map((product) => text(product.id)).filter(Boolean);
+      const linkedItemNames = linkedItems.map((product) => text(product.name)).filter(Boolean);
       const yocoModifierProductName = rawModifierProductDisplayName(
         modifier,
         modifierName,
@@ -14578,6 +15244,11 @@ export async function getYocoModifierRecipes(
         id: `modifier:${ownerId}`,
         recipeOwnerType: "yoco_modifier",
         recipeOwnerId: ownerId,
+        stockRule: serializeModifierRule(
+          ownerIds
+            .map((candidateOwnerId) => modifierRulesByOwner.get(candidateOwnerId))
+            .find(Boolean),
+        ),
         source: "Yoco modifier",
         name: modifierName,
         category: `Modifier - ${groupName}`,
@@ -14593,23 +15264,29 @@ export async function getYocoModifierRecipes(
         yocoModifierProductName,
         yocoModifierGroupId: groupId,
         yocoModifierGroupName: groupName,
+        modifierKind: isNoteRule ? "note" : variantId ? "product" : "option",
+        isNoteModifier: isNoteRule,
+        noteSource: isNoteRule,
+        linkedItemIds,
+        linkedItemNames,
+        linkedItemCount: linkedItemIds.length,
         linkedProductId:
-          linkedProducts.length === 1
-            ? text(linkedProducts[0].id)
+          recipeLinkedProducts.length === 1
+            ? text(recipeLinkedProducts[0].id)
             : encodeLinkedProductIds(
-                linkedProducts.map((product) => text(product.id)),
+                recipeLinkedProducts.map((product) => text(product.id)),
               ),
-        linkedProductIds: linkedProducts
+        linkedProductIds: recipeLinkedProducts
           .map((product) => text(product.id))
           .filter(Boolean),
         linkedProductName: linkedProductNames.join(", "),
         linkedProductNames,
         modifierLinkStatus:
-          linkedProducts.length || hasYocoProductVariantLink
+          recipeLinkedProducts.length || assignedMenuItems.length || hasYocoProductVariantLink
             ? "linked"
             : variantId
               ? "variant_unmatched"
-              : "missing",
+              : "option_unmapped",
         modifierLinkSource: manualLinkedProductIds.length
           ? "manual"
           : autoLinkedProductSource ||
@@ -14628,11 +15305,17 @@ export async function getYocoModifierRecipes(
           ? "linked_product"
           : manualLines.length
             ? "manual_modifier"
-            : "missing",
-        recipe,
+            : isNoteRule
+              ? "catalogue_note"
+              : "missing",
+        recipe: recipe,
         recipeCount: recipe.length,
-        status: recipe.length ? "complete" : "missing",
-        missingRecipe: recipe.length === 0,
+        status: ownerIds.some((candidateOwnerId) => modifierRulesByOwner.has(candidateOwnerId))
+          ? "configured"
+          : recipe.length
+            ? "complete"
+            : "missing",
+        missingRecipe: !ownerIds.some((candidateOwnerId) => modifierRulesByOwner.has(candidateOwnerId)) && recipe.length === 0,
         active: true,
         archived: false,
         deleted: false,
@@ -14668,6 +15351,52 @@ export async function patchYocoModifierRecipe(
   if (!cleanOwnerId)
     return error(request, env, 400, "Modifier recipe id is required.");
   const payload = objectValue(await readJson<Record<string, unknown>>(request));
+  const stockRulePayload = objectValue(payload.stockRule);
+  const modifierRuleInput = Object.keys(stockRulePayload).length
+    ? {
+        ...stockRulePayload,
+        sourceModifierId: text(
+          stockRulePayload.sourceModifierId || payload.yocoModifierId,
+        ),
+        sourceModifierGroupId: text(
+          stockRulePayload.sourceModifierGroupId || payload.yocoModifierGroupId,
+        ),
+        sourceModifierVariantId: text(
+          stockRulePayload.sourceModifierVariantId ||
+            payload.yocoModifierVariantId,
+        ),
+        sourceName: text(stockRulePayload.sourceName || payload.name),
+      }
+    : {
+        actionType: "ADD_RECIPE",
+        targetOwnerType: "yoco_modifier",
+        targetOwnerId: cleanOwnerId,
+        quantity: 1,
+        unit: "ea",
+        applyAllMatchingProducts: true,
+        active: true,
+        sourceModifierId: text(payload.yocoModifierId),
+        sourceModifierGroupId: text(payload.yocoModifierGroupId),
+        sourceModifierVariantId: text(payload.yocoModifierVariantId),
+        sourceName: text(payload.name),
+      };
+
+  // Validate scopes, stock targets and UOM compatibility before replacing recipe lines.
+  // A brand-new modifier may point at the recipe being created by this same request.
+  try {
+    await validateModifierRule(env, {
+      workspaceId,
+      ownerId: cleanOwnerId,
+      rule: modifierRuleInput,
+      allowPendingRecipeOwnerId: cleanOwnerId,
+    });
+  } catch (cause) {
+    if (cause instanceof ModifierRuleValidationError) {
+      return error(request, env, 400, cause.message, { code: cause.code });
+    }
+    throw cause;
+  }
+
   await saveYocoModifierRecipe(
     env,
     workspaceId,
@@ -14681,10 +15410,17 @@ export async function patchYocoModifierRecipe(
         ? text(payload.linkedProductId)
         : undefined,
   );
+  const stockRule = await upsertModifierRule(env, {
+    workspaceId,
+    ownerId: cleanOwnerId,
+    actor: auth.uid || auth.email,
+    rule: modifierRuleInput,
+  });
   return json(request, env, {
     ok: true,
     id: `modifier:${cleanOwnerId}`,
     recipeOwnerId: cleanOwnerId,
+    stockRule: serializeModifierRule(stockRule),
   });
 }
 
@@ -14700,6 +15436,14 @@ export async function deleteYocoModifierRecipeRoute(
   if (!cleanOwnerId)
     return error(request, env, 400, "Modifier recipe id is required.");
   await deleteYocoModifierRecipe(env, workspaceId, cleanOwnerId);
+  try {
+    await env.DB.prepare(
+      `UPDATE modifier_rules SET status = 'inactive', updated_at = ?3
+        WHERE workspace_id = ?1 AND modifier_owner_id = ?2`,
+    )
+      .bind(workspaceId, cleanOwnerId, nowIso())
+      .run();
+  } catch {}
   return json(request, env, {
     ok: true,
     id: `modifier:${cleanOwnerId}`,
@@ -14718,7 +15462,11 @@ export async function getYocoModifierGroups(
   const url = new URL(request.url);
   if (url.searchParams.get("live") === "1") {
     const apiKey = await getYocoApiKey(env, workspaceId);
-    const groups = await fetchAssignedYocoModifierGroups(env, apiKey);
+    const groups = await fetchAssignedYocoModifierGroups(
+      env,
+      workspaceId,
+      apiKey,
+    );
     return json(request, env, {
       ok: true,
       source: "yoco",
@@ -14746,9 +15494,14 @@ export async function getYocoModifierGroupRoute(
   const url = new URL(request.url);
   if (url.searchParams.get("live") === "1") {
     const apiKey = await getYocoApiKey(env, workspaceId);
-    const group = productLinkedYocoModifierGroup(
+    const group = actionableYocoModifierGroup(
       objectValue(
-        await fetchModifierGroup(env, apiKey, routeText(modifierGroupId)),
+        await fetchModifierGroup(
+          env,
+          workspaceId,
+          apiKey,
+          routeText(modifierGroupId),
+        ),
       ),
     );
     if (!group)
@@ -14756,7 +15509,7 @@ export async function getYocoModifierGroupRoute(
         request,
         env,
         404,
-        "Yoco modifier group with product-linked modifiers not found.",
+        "Yoco modifier group with actionable modifiers not found.",
       );
     return json(request, env, { ok: true, source: "yoco", data: group });
   }
@@ -14777,8 +15530,13 @@ export async function postYocoDisconnect(
 ) {
   await scoped(request, env, auth, workspaceId);
   const actorRole = await getWorkspaceActorRole(env, auth, workspaceId);
-  if (normalizeRoleKey(actorRole) !== 'superuser') {
-    return error(request, env, 403, 'Only a KCP super user can disconnect the workspace Yoco integration.');
+  if (normalizeRoleKey(actorRole) !== "superuser") {
+    return error(
+      request,
+      env,
+      403,
+      "Only a KCP super user can disconnect the workspace Yoco integration.",
+    );
   }
   const result = await disconnectYoco(env, workspaceId);
   return json(request, env, { ok: true, ...result });
@@ -14800,321 +15558,7 @@ export async function postYocoSyncCatalogue(
   return json(request, env, { ok: true, ...result });
 }
 
-export async function postYocoSyncSales(
-  request: Request,
-  env: Env,
-  auth: AuthContext,
-  workspaceId: string,
-) {
-  await scoped(request, env, auth, workspaceId);
-  const payload = await readJson<Record<string, unknown>>(request).catch(
-    () => ({}) as Record<string, unknown>,
-  );
-  const result = await syncYocoSales(env, workspaceId, {
-    resetWebhook: payload.resetWebhook === true,
-  });
-  return json(request, env, { ok: true, ...result });
-}
-
-async function loadYocoOrderForWebhook(
-  env: Env,
-  workspaceId: string,
-  payloadOrder: Record<string, unknown> | null,
-  orderId: string,
-  paymentId: string,
-) {
-  if (payloadOrder && (!orderId || getObjectLineItems(payloadOrder).length))
-    return payloadOrder;
-  const apiKey = await getYocoApiKey(env, workspaceId);
-  if (orderId) {
-    const byOrderId = (await fetchOrder(env, apiKey, orderId).catch(
-      () => payloadOrder,
-    )) as Record<string, unknown> | null;
-    if (byOrderId) return byOrderId;
-  }
-  if (!paymentId) return payloadOrder;
-
-  // Some Yoco payment webhooks identify the payment, not the order. Pull a small
-  // recent order window and match the payment id before giving up. This keeps
-  // stock deduction live even when the webhook payload is payment-shaped.
-  const candidateOrders = (await listOrders(env, apiKey, {
-    status: ["completed"],
-    payment_id: paymentId,
-    limit: 25,
-  }).catch(() => [])) as Record<string, unknown>[];
-  const matched = candidateOrders.find((order) =>
-    orderHasPayment(order, paymentId),
-  );
-  if (matched) {
-    const matchedOrderId = text(
-      matched.id || matched.order_id || matched.orderId,
-    );
-    return matchedOrderId
-      ? ((await fetchOrder(env, apiKey, matchedOrderId).catch(
-          () => matched,
-        )) as Record<string, unknown>)
-      : matched;
-  }
-  return payloadOrder;
-}
-
-function getObjectLineItems(order: Record<string, unknown>) {
-  for (const key of [
-    "line_items",
-    "lineItems",
-    "items",
-    "order_lines",
-    "orderLines",
-  ]) {
-    const value = order[key];
-    if (Array.isArray(value)) return value;
-  }
-  return [];
-}
-
-function orderHasPayment(order: Record<string, unknown>, paymentId: string) {
-  const wanted = text(paymentId);
-  if (!wanted) return false;
-  if (
-    [order.payment_id, order.paymentId].some((value) => text(value) === wanted)
-  )
-    return true;
-  const payments = Array.isArray(order.payments)
-    ? (order.payments as Record<string, unknown>[])
-    : [];
-  return payments.some((payment) =>
-    [payment.id, payment.payment_id, payment.paymentId].some(
-      (value) => text(value) === wanted,
-    ),
-  );
-}
-
-export async function postYocoWebhook(
-  request: Request,
-  env: Env,
-  workspaceId: string,
-) {
-  const body = await request.text();
-  const eventId =
-    request.headers.get("webhook-id") ||
-    request.headers.get("svix-id") ||
-    request.headers.get("x-yoco-event-id") ||
-    id("yoco_evt");
-  let webhookDbId = id("yoco_evt");
-  const hash = Array.from(
-    new Uint8Array(
-      await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body)),
-    ),
-  )
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-  let payload: Record<string, unknown> = {};
-  try {
-    payload = body.trim() ? (JSON.parse(body) as Record<string, unknown>) : {};
-  } catch {
-    await recordYocoWebhookRejection(env, {
-      workspaceId,
-      eventId,
-      eventType: request.headers.get("x-yoco-event-type") || "unknown",
-      orderId: "",
-      payloadHash: hash,
-      message: "Yoco webhook payload was not valid JSON.",
-    });
-    return error(request, env, 400, "Yoco webhook payload was not valid JSON.");
-  }
-  const { eventType, orderId, paymentId } = yocoWebhookEventFields(payload);
-  const connection = await getYocoConnection(env, workspaceId);
-  if (!connection?.webhook_secret) {
-    await recordYocoWebhookRejection(env, {
-      workspaceId,
-      eventId,
-      eventType:
-        eventType || request.headers.get("x-yoco-event-type") || "unknown",
-      orderId,
-      payloadHash: hash,
-      message: "Yoco webhook secret is not configured for this workspace.",
-    });
-    return error(
-      request,
-      env,
-      401,
-      "Yoco webhook secret is not configured for this workspace.",
-    );
-  }
-  const webhookSecrets = activeYocoWebhookSecrets(connection);
-  const verified = await verifyYocoWebhook(
-    body,
-    request.headers,
-    webhookSecrets,
-  );
-  if (!verified) {
-    await markYocoWebhookSignatureMismatch(env, workspaceId);
-    await recordYocoWebhookRejection(env, {
-      workspaceId,
-      eventId,
-      eventType:
-        eventType || request.headers.get("x-yoco-event-type") || "unknown",
-      orderId,
-      payloadHash: hash,
-      message: "Yoco webhook signature could not be verified.",
-    });
-    // Never process an unauthenticated webhook, even when it contains a valid-looking
-    // order id. Missed events are recovered through the authenticated Yoco sales sync.
-    return error(
-      request,
-      env,
-      401,
-      "Yoco webhook signature could not be verified.",
-    );
-  }
-
-  await env.DB.prepare(
-    `INSERT OR IGNORE INTO yoco_webhook_events
-      (id, workspace_id, provider_event_id, event_type, yoco_order_id, payload_hash, status, raw_json, created_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'received', ?7, ?8)`,
-  )
-    .bind(
-      webhookDbId,
-      workspaceId,
-      eventId,
-      eventType || request.headers.get("x-yoco-event-type") || "unknown",
-      orderId || null,
-      hash,
-      body || "{}",
-      nowIso(),
-    )
-    .run();
-
-  const existing = await env.DB.prepare(
-    `SELECT id, status
-       FROM yoco_webhook_events
-      WHERE workspace_id = ?1 AND payload_hash = ?2
-      LIMIT 1`,
-  )
-    .bind(workspaceId, hash)
-    .first<{ id: string; status: string }>();
-
-  if (existing?.id) webhookDbId = existing.id;
-  if (existing?.status === "processed") {
-    return json(request, env, { ok: true, status: "duplicate" });
-  }
-
-  let order = extractYocoOrder(payload);
-  if (!order && !orderId && !paymentId) {
-    await env.DB.prepare(
-      `UPDATE yoco_webhook_events
-          SET status = 'failed',
-              error_message = 'Webhook payload did not include an order id or payment id.'
-        WHERE id = ?1`,
-    )
-      .bind(webhookDbId)
-      .run();
-    return error(
-      request,
-      env,
-      400,
-      "Webhook payload did not include an order id or payment id.",
-    );
-  }
-  order = (await loadYocoOrderForWebhook(
-    env,
-    workspaceId,
-    order,
-    orderId,
-    paymentId,
-  )) as Record<string, unknown> | null;
-  if (!order)
-    return error(request, env, 400, "Yoco order could not be loaded.");
-
-  try {
-    const isRefund = String(eventType || "")
-      .toLowerCase()
-      .includes("refund");
-    const isReturn = String(eventType || "")
-      .toLowerCase()
-      .includes("return");
-    const refundObj = isRefund ? findRefund(order, paymentId) : null;
-    const refundBehavior = refundObj
-      ? resolveRefundReturnBehavior(refundObj)
-      : "return";
-
-    // Process the main event (sale or financial refund)
-    // Skip entirely if reason maps to 'skip' (e.g. other+scrap note)
-    let result =
-      refundBehavior === "skip"
-        ? {
-            processed: false,
-            reason: "skipped_refund_reason",
-            missingRecipes: 0,
-            orderLines: 0,
-            stockMovements: 0,
-          }
-        : await processYocoOrder(env, workspaceId, order, {
-            mode: isRefund ? "refund" : "sale",
-            refund: refundObj,
-            eventType,
-            returnBehavior: isRefund ? refundBehavior : undefined,
-          });
-
-    // Process any order.returns entries (stock restorations from physical item returns).
-    // Uses the same dedup-signature system so re-delivery of the same webhook is safe.
-    const orderHasReturns = getOrderReturns(order).length > 0;
-    const returnsResult =
-      isReturn || (!isRefund && orderHasReturns)
-        ? await processYocoOrderReturns(env, workspaceId, order, {
-            eventType,
-            overrideBehavior:
-              isRefund && refundBehavior !== "return"
-                ? refundBehavior
-                : undefined,
-          })
-        : { returnsProcessed: 0, totalMovements: 0, results: [] };
-
-    // If this was a pure return event and the main pass found nothing to process,
-    // surface the first return result so the caller gets meaningful feedback.
-    if (
-      isReturn &&
-      !isRefund &&
-      !result.orderLines &&
-      returnsResult.results.length
-    ) {
-      result = returnsResult.results[0];
-    }
-
-    await env.DB.prepare(
-      `UPDATE yoco_webhook_events
-          SET status = 'processed',
-              processed_at = ?2,
-              error_message = ''
-        WHERE id = ?1`,
-    )
-      .bind(webhookDbId, nowIso())
-      .run();
-
-    return json(request, env, {
-      ok: true,
-      status: "processed",
-      result,
-      ...(returnsResult.returnsProcessed > 0
-        ? {
-            returnsProcessed: returnsResult.returnsProcessed,
-            returnMovements: returnsResult.totalMovements,
-          }
-        : {}),
-    });
-  } catch (caught) {
-    const message = caught instanceof Error ? caught.message : String(caught);
-    await env.DB.prepare(
-      `UPDATE yoco_webhook_events
-          SET status = 'failed',
-              error_message = ?2
-        WHERE id = ?1`,
-    )
-      .bind(webhookDbId, message)
-      .run();
-    throw caught;
-  }
-}
+// Sale, refund, retry, and webhook business processing moved permanently to yoco-engine-v2.
 
 export function notFound(request: Request, env: Env) {
   return error(request, env, 404, "Route not found.");

@@ -2406,3 +2406,11 @@
   background: rgba(96, 165, 250, 0.12);
   color: #ffffff;
 }
+
+/* Keep Rand-denominated stock-take values on one line. */
+#view-stock-take .stockTakeTable td[data-stocktake-impact],
+#view-stock-take .stockTakeSessionImpact strong,
+#view-stock-take [data-stocktake-variance-total] {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
