@@ -4,9 +4,8 @@ function text(value: unknown, fallback = "") {
   return String(value ?? fallback).trim();
 }
 
-// Manager-tier roles that are never location-restricted. Mirrors PERMISSION_MANAGER_ROLE_KEYS in
-// routes.ts (kept local to avoid an import cycle). Compared against a normalized role key
-// (lowercased, spaces/underscores → hyphens).
+// Workspace owners/admins and KCP superusers are never location-restricted. Managers can be
+// assigned to one or more locations and must respect that scope like every other operational role.
 const FULL_PERMISSION_ROLE_KEYS = new Set([
   "owner",
   "admin",
@@ -18,10 +17,27 @@ const FULL_PERMISSION_ROLE_KEYS = new Set([
   "kcp-super-user",
 ]);
 
-const MANAGER_ROLE_KEYS = new Set([
-  ...FULL_PERMISSION_ROLE_KEYS,
-  "manager",
-]);
+// Request-local resolved location scopes. Report handlers validate and resolve the
+// requested scope once, then query builders consume the exact permitted IDs.
+const RESOLVED_REPORT_LOCATION_SCOPES = new WeakMap<Request, string[] | null>();
+
+const DATA_PERMISSION_SCHEMA_MARKER = "permission-schema-import-export-v1";
+const SECTION_DATA_PERMISSIONS: Record<string, { nav: string; import?: string; export?: string }> = {
+  products: { nav: "nav-products", import: "action-import-products", export: "action-export-products" },
+  recipes: { nav: "nav-recipes", import: "action-import-recipes", export: "action-export-recipes" },
+  ingredients: { nav: "nav-ingredients", import: "action-import-ingredients", export: "action-export-ingredients" },
+  suppliers: { nav: "nav-suppliers", import: "action-import-suppliers", export: "action-export-suppliers" },
+  "purchase-orders": { nav: "nav-purchase-orders", export: "action-export-purchase-orders" },
+  transfers: { nav: "nav-transfers", import: "action-import-transfers", export: "action-export-transfers" },
+  "stock-count": { nav: "nav-stock-count", import: "action-import-stock-count", export: "action-export-stock-count" },
+  "mfg-products": { nav: "nav-mfg-products", import: "action-import-manufacturing", export: "action-export-manufacturing" },
+  reporting: { nav: "nav-reporting", export: "action-export-reporting" },
+  settings: { nav: "nav-settings", import: "action-import-settings", export: "action-export-settings" },
+};
+
+export function getResolvedReportLocationScope(request: Request): string[] | null | undefined {
+  return RESOLVED_REPORT_LOCATION_SCOPES.get(request);
+}
 
 const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
   manager: [
@@ -136,13 +152,12 @@ export async function getUserAllowedLocationIds(
     .first<{ role_key: string; allowed_locations_json?: string }>();
 
   if (!memberRow) return [];
-  // Manager-tier roles are never location-restricted (mirrors PERMISSION_MANAGER_ROLE_KEYS in
-  // routes.ts). Previously only a literal 'admin' was exempt, so a location-scoped OWNER/manager
-  // could not see locations they created (a fresh location id isn't in their allowed list yet).
+  // Owners/admins and KCP superusers are unrestricted. Managers are intentionally not included:
+  // their member assignment is authoritative for dashboard and report location scope.
   const normalizedRole = text(memberRow.role_key)
     .toLowerCase()
     .replace(/[_\s]+/g, "-");
-  if (MANAGER_ROLE_KEYS.has(normalizedRole)) return null;
+  if (FULL_PERMISSION_ROLE_KEYS.has(normalizedRole)) return null;
 
   // Workspace owner is always unrestricted, even if their member role_key isn't a manager key.
   const ownerRow = await env.CENTRAL_DB.prepare(
@@ -157,28 +172,24 @@ export async function getUserAllowedLocationIds(
   )
     return null;
 
-  // Parse JSON location list. Security is fail-closed for non-manager roles:
-  // missing, malformed, or empty assignments mean zero accessible locations.
-  // Unrestricted access must be explicit via the string/array value 'all'.
-  let ids: string[] = [];
-  try {
-    const parsed = JSON.parse(memberRow.allowed_locations_json || "null");
-    if (parsed === "all") return null;
-    if (Array.isArray(parsed)) {
-      const values = parsed.map((v) => String(v).trim()).filter(Boolean);
-      if (values.some((v) => v.toLowerCase() === "all")) return null;
-      ids = values;
-    } else if (parsed && typeof parsed === "object") {
-      const record = parsed as Record<string, unknown>;
-      if (record.all === true || record.unrestricted === true) return null;
-      const values = Array.isArray(record.locations) ? record.locations : [];
-      ids = values.map((v) => String(v).trim()).filter(Boolean);
-    }
-  } catch {
-    return [];
-  }
+  // Role location rules define the maximum scope. A member assignment can narrow that scope.
+  // This keeps role-level location permissions and per-user location assignments consistent.
+  const roleRow = await env.CENTRAL_DB.prepare(
+    `SELECT permissions_json FROM roles WHERE workspace_id = ?1 AND role_key = ?2 LIMIT 1`,
+  )
+    .bind(workspaceId, memberRow.role_key)
+    .first<{ permissions_json?: string }>();
 
-  return ids;
+  const roleLocations = parseRoleLocationScope(roleRow?.permissions_json);
+  const memberLocations = parseMemberLocationScope(memberRow.allowed_locations_json);
+
+  if (roleLocations === null && memberLocations === null) return null;
+  if (roleLocations === null) return memberLocations || [];
+  if (memberLocations === null) return roleLocations;
+  if (!memberLocations.length || !roleLocations.length) return [];
+
+  const memberSet = new Set(memberLocations);
+  return roleLocations.filter((locationId) => memberSet.has(locationId));
 }
 
 export async function getWorkspacePermissions(
@@ -208,9 +219,63 @@ export async function getWorkspacePermissions(
         ? ((parsed as Record<string, unknown>).permissions as unknown[])
         : [];
     const explicit = values.map((value) => text(value)).filter(Boolean);
-    return explicit.length ? explicit : [...(DEFAULT_ROLE_PERMISSIONS[normalizedRole] || [])];
+    return expandLegacyDataPermissions(explicit.length ? explicit : [...(DEFAULT_ROLE_PERMISSIONS[normalizedRole] || [])]);
   } catch {
-    return [...(DEFAULT_ROLE_PERMISSIONS[normalizedRole] || [])];
+    return expandLegacyDataPermissions([...(DEFAULT_ROLE_PERMISSIONS[normalizedRole] || [])]);
+  }
+}
+
+function expandLegacyDataPermissions(permissions: string[]): string[] {
+  const normalized = Array.from(new Set(permissions.map((permission) => text(permission)).filter(Boolean)));
+  const explicit = normalized.includes(DATA_PERMISSION_SCHEMA_MARKER) || normalized.some((permission) =>
+    permission.startsWith("action-import-") || permission.startsWith("action-export-")
+  );
+  if (explicit) return normalized;
+
+  const migrated = new Set(normalized);
+  for (const definition of Object.values(SECTION_DATA_PERMISSIONS)) {
+    if (!migrated.has(definition.nav)) continue;
+    if (definition.import) migrated.add(definition.import);
+    if (definition.export) migrated.add(definition.export);
+  }
+  migrated.add(DATA_PERMISSION_SCHEMA_MARKER);
+  return [...migrated];
+}
+
+function parseMemberLocationScope(value: unknown): string[] | null {
+  // For restricted users, missing, malformed, or empty assignments mean zero accessible locations.
+  try {
+    const parsed = JSON.parse(text(value) || "null");
+    if (parsed === "all") return null;
+    if (Array.isArray(parsed)) {
+      const ids = Array.from(new Set(parsed.map((entry) => text(entry)).filter(Boolean)));
+      if (ids.some((entry) => entry.toLowerCase() === "all")) return null;
+      return ids;
+    }
+    if (parsed && typeof parsed === "object") {
+      const record = parsed as Record<string, unknown>;
+      if (record.all === true || record.unrestricted === true) return null;
+      const values = Array.isArray(record.locations) ? record.locations : [];
+      const ids = Array.from(new Set(values.map((entry) => text(entry)).filter(Boolean)));
+      return ids;
+    }
+  } catch {
+    return [];
+  }
+  return [];
+}
+
+function parseRoleLocationScope(value: unknown): string[] | null {
+  try {
+    const parsed = JSON.parse(text(value) || "{}");
+    const values = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>).locations
+      : null;
+    if (!Array.isArray(values)) return null;
+    const normalized = Array.from(new Set(values.map((entry) => text(entry)).filter(Boolean)));
+    return normalized.some((entry) => entry.toLowerCase() === "all") ? null : normalized;
+  } catch {
+    return null;
   }
 }
 
@@ -289,27 +354,33 @@ export async function assertReportLocationScope(
 ): Promise<void> {
   await assertWorkspacePermission(env, auth, workspaceId, "nav-reporting");
   const allowed = await getUserAllowedLocationIds(env, auth, workspaceId);
-  if (allowed === null) return;
   const url = new URL(request.url);
-  const raw = [
+  const requested = Array.from(new Set([
     ...url.searchParams.getAll("locationId"),
     ...url.searchParams.getAll("locationIds"),
     ...url.searchParams.getAll("location"),
   ]
     .flatMap((value) => value.split(","))
     .map((value) => value.trim())
-    .filter(Boolean);
-  if (!raw.length) {
+    .filter(Boolean)));
+
+  if (allowed === null) {
+    RESOLVED_REPORT_LOCATION_SCOPES.set(request, requested.length ? requested : null);
+    return;
+  }
+
+  if (!allowed.length) {
     await recordPermissionDenial(env, auth, workspaceId, {
       permission: "nav-reporting",
-      reason: "unscoped_report_request",
+      reason: "no_assigned_locations",
     });
-    throw new Error(
-      "Permission denied: restricted users must select an assigned location for reports.",
-    );
+    throw new Error("Permission denied: no locations are assigned to this user.");
   }
-  for (const locationId of raw)
+
+  const resolved = requested.length ? requested : allowed;
+  for (const locationId of resolved)
     await assertLocationAccess(env, auth, workspaceId, locationId, "report");
+  RESOLVED_REPORT_LOCATION_SCOPES.set(request, resolved);
 }
 
 export async function assertWorkspaceAccess(

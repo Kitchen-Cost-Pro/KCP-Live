@@ -25,8 +25,9 @@ test('location assignments fail closed for non-manager users', () => {
   assert.doesNotMatch(auth, /return ids\.length \? ids : null/);
 });
 
-test('unrestricted location access requires an explicit manager role, owner, superuser, or all marker', () => {
-  assert.match(auth, /MANAGER_ROLE_KEYS\.has\(normalizedRole\)/);
+test('unrestricted location access requires owner, admin, superuser, or an explicit all marker', () => {
+  assert.match(auth, /FULL_PERMISSION_ROLE_KEYS\.has\(normalizedRole\)/);
+  assert.doesNotMatch(auth, /MANAGER_ROLE_KEYS\.has\(normalizedRole\)/);
   assert.match(auth, /parsed === ["']all["']/);
   assert.match(auth, /record\.all === true/);
 });
@@ -52,11 +53,14 @@ test('major inventory mutations require action permission and assigned location'
   assert.match(transfer, /["']transfer_destination["']/);
 });
 
-test('reporting routes enforce reporting permission and explicit assigned-location scope', () => {
+test('reporting routes enforce reporting permission and automatically scope restricted users to assigned locations', () => {
   assert.match(auth, /assertWorkspacePermission\(env, auth, workspaceId, ["']nav-reporting["']\)/);
-  assert.match(auth, /restricted users must select an assigned location for reports/);
-  assert.match(reporting, /assertReportLocationScope/);
-  assert.match(reporting21, /assertReportLocationScope/);
+  assert.match(auth, /const resolved = requested\.length \? requested : allowed/);
+  assert.match(auth, /RESOLVED_REPORT_LOCATION_SCOPES\.set\(request, resolved\)/);
+  assert.match(reporting, /getResolvedReportLocationScope/);
+  assert.match(reporting, /addLocationSqlScope/);
+  assert.match(reporting21, /getResolvedReportLocationScope/);
+  assert.match(reporting21, /addSqlLocationScope/);
 });
 
 test('permission denials are audited and returned as HTTP 403', () => {

@@ -11,33 +11,31 @@ import { resolveScheduledRelativeRange } from './modules/reporting/scheduling/sc
 
 const read = (file) => fs.readFileSync(file, 'utf8');
 
-test('Phase 56 notification bubble can email its location-scoped stock data to the signed-in user', () => {
+test('dashboard notification bubble configures the daily workspace low-stock email list', () => {
   const dashboard = read('src/dashboard.js');
   const service = read('src/services/notificationService.js');
   const routes = read('cloudflare-v2/src/legacy/routes.ts');
   const dispatcher = read('cloudflare-v2/src/legacy/index.ts');
-  assert.match(dashboard, /data-dashboard-notification-email/);
-  assert.match(dashboard, /Email this list/);
-  assert.match(service, /notifications\/low-stock-email/);
-  assert.match(routes, /sendWorkspaceLowStockToUser\(env, workspaceId, auth\.email, locationId\)/);
-  assert.match(routes, /assertLocationAccess\(env, auth, workspaceId, locationId/);
-  assert.match(dispatcher, /resource === 'notifications\/low-stock-email'/);
+  assert.doesNotMatch(dashboard, /Email this list/);
+  assert.match(dashboard, /data-dashboard-notification-settings/);
+  assert.match(dashboard, /data-dashboard-notification-time/);
+  assert.match(dashboard, /data-dashboard-notification-recipient/);
+  assert.match(service, /notifications\/low-stock-settings/);
+  assert.match(routes, /can_receive_low_stock_email = CASE WHEN id IN/);
+  assert.match(routes, /lowStockEmailDispatchTime/);
+  assert.match(dispatcher, /resource === [\"']notifications\/low-stock-settings[\"']/);
 });
 
-test('Phase 56 Yoco recovery retries the oldest errored period automatically and from the admin console', () => {
-  const yoco = read('cloudflare-v2/src/legacy/yoco-service.ts');
-  const routes = read('cloudflare-v2/src/legacy/routes.ts');
-  const worker = read('cloudflare-v2/src/index.ts');
+test('Final V2 Yoco recovery uses structured reconciliation from the admin console', () => {
+  const reconciliation = read('cloudflare-v2/src/modules/yoco-engine-v2/reconciliation.ts');
+  const adminRoutes = read('cloudflare-v2/src/modules/yoco-engine-v2/admin-routes.ts');
   const admin = read('public/KCP Admin ConsoleByYOCO.html');
-  assert.match(yoco, /MIN\(created_at\) AS earliest_error_at/);
-  assert.match(yoco, /status IN \('failed', 'rejected', 'attention'\)/);
-  assert.match(yoco, /syncYocoSales\(env, workspaceId, \{ sinceIso \}\)/);
-  assert.match(yoco, /SET status = 'processed'/);
-  assert.match(routes, /automatic: true/);
-  assert.match(routes, /action === "retry-failed-orders"/);
-  assert.match(worker, /'retry-failed-orders'/);
-  assert.match(admin, /Resync Errored Orders/);
-  assert.match(admin, /retryAllErroredYocoOrders/);
+  assert.match(reconciliation, /runYocoV2Reconciliation/);
+  assert.match(reconciliation, /applyControlledLiveSaleEffects/);
+  assert.match(reconciliation, /applyControlledLiveRefundEffects/);
+  assert.match(adminRoutes, /reconciliation\/run/);
+  assert.match(admin, /Reconciliation|reconciliation/);
+  assert.doesNotMatch(adminRoutes, /retry-failed-orders|sync-sales/);
 });
 
 test('Phase 56 trading time treats 04:59 as a 05:00 rollover and 23:59 as midnight', () => {

@@ -102,6 +102,7 @@ export function renderReportingDashboard({
       initialActiveReportId: activeReportState.initialActiveReportId,
       initialView: activeReportState.initialView,
       allowUrlConfiguration: activeReportState.allowUrlConfiguration === true,
+      autoLoadDefault: true,
       datePresetContext,
       onRefresh
     }));

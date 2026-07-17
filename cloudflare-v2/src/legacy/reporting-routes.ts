@@ -1,5 +1,5 @@
 import type { AuthContext, Env } from "./types";
-import { assertWorkspaceAccess, assertReportLocationScope } from "./auth";
+import { assertWorkspaceAccess, assertReportLocationScope, getResolvedReportLocationScope } from "./auth";
 import { json, limitFromUrl, offsetFromUrl, readJson } from "./http";
 // Shared browser/Worker calculations keep interactive and scheduled reports identical.
 // @ts-ignore JavaScript module shared with the Vite reporting client.
@@ -53,7 +53,7 @@ export async function getDetailedActivityReport(
   const reportingContext = await getWorkspaceReportingContext(env, workspaceId);
   const timeZone = reportingContext.timeZone;
   const filters = {
-    ...readFilters(url),
+    ...readFilters(url, request),
     reportingTimeZone: timeZone,
     tradingDayStartMinutes: reportingContext.tradingDayStartMinutes,
     tradingDayLabel: reportingContext.tradingDayLabel,
@@ -113,7 +113,12 @@ export async function getDetailedActivityReport(
         si.name AS item_name,
         si.category AS category_name,
         si.item_type AS item_type,
-        si.unit AS base_uom,
+        COALESCE(
+          NULLIF(si.unit, ''),
+          NULLIF(json_extract(sm.metadata_json, '$.baseUom'), ''),
+          NULLIF(json_extract(sm.metadata_json, '$.base_uom'), ''),
+          NULLIF(json_extract(sm.metadata_json, '$.unit'), '')
+        ) AS base_uom,
         si.unit_cost AS stock_unit_cost,
         si.raw_json AS stock_item_raw_json,
         silp.price AS location_unit_cost,
@@ -173,7 +178,7 @@ export async function getDetailedActivityReport(
        LEFT JOIN stocktake_sessions st ON st.id = sm.document_id AND st.workspace_id = sm.workspace_id AND sm.document_type = 'stock_take'
        LEFT JOIN transfers t ON t.id = sm.document_id AND t.workspace_id = sm.workspace_id AND sm.document_type = 'transfer'
        LEFT JOIN manufacturing_batches mb ON mb.id = sm.document_id AND mb.workspace_id = sm.workspace_id AND sm.document_type = 'manufacturing_batch'
-       LEFT JOIN yoco_orders yo ON yo.id = sm.document_id AND yo.workspace_id = sm.workspace_id AND sm.document_type = 'yoco_order'
+       LEFT JOIN yoco_orders yo ON yo.workspace_id = sm.workspace_id AND sm.document_type = 'yoco_order' AND yo.yoco_order_id = COALESCE(NULLIF(json_extract(sm.metadata_json, '$.reportOrderKey'), ''), sm.document_id)
       WHERE ${whereSql}
       ORDER BY datetime(sm.occurred_at) ASC, datetime(sm.created_at) ASC, sm.movement_type ASC, sm.id ASC
       LIMIT ?${binds.length + 1}`,
@@ -245,7 +250,7 @@ export async function getStockTakeAuditReport(
   const reportingContext = await getWorkspaceReportingContext(env, workspaceId);
   const timeZone = reportingContext.timeZone;
   const filters = {
-    ...readFilters(url),
+    ...readFilters(url, request),
     reportingTimeZone: timeZone,
     tradingDayStartMinutes: reportingContext.tradingDayStartMinutes,
     tradingDayLabel: reportingContext.tradingDayLabel,
@@ -423,7 +428,7 @@ export async function getSalesFinancialReport(
   const reportingContext = await getWorkspaceReportingContext(env, workspaceId);
   const timeZone = reportingContext.timeZone;
   const filters = {
-    ...readFilters(url),
+    ...readFilters(url, request),
     reportingTimeZone: timeZone,
     tradingDayStartMinutes: reportingContext.tradingDayStartMinutes,
     tradingDayLabel: reportingContext.tradingDayLabel,
@@ -505,7 +510,15 @@ export async function getSalesFinancialReport(
         yo.location_id,
         yo.order_type,
         yo.status,
-        yo.payment_method,
+        CASE
+          WHEN lower(COALESCE(yo.order_type, '')) = 'refund' THEN COALESCE(
+            NULLIF(CASE WHEN lower(COALESCE(yo.payment_method, '')) NOT IN ('', 'refund') THEN yo.payment_method ELSE '' END, ''),
+            NULLIF(parent_yo.payment_method, ''),
+            'Unknown'
+          )
+          ELSE COALESCE(NULLIF(yo.payment_method, ''), 'Unknown')
+        END AS payment_method,
+        parent_yo.payment_method AS original_payment_method,
         yo.total,
         yo.gross_total,
         yo.vat_total,
@@ -522,6 +535,10 @@ export async function getSalesFinancialReport(
         } AS vat_rate,
         COUNT(*) OVER() AS __total_rows
        FROM canonical_yoco_orders yo
+       LEFT JOIN canonical_yoco_orders parent_yo
+         ON parent_yo.workspace_id = yo.workspace_id
+        AND parent_yo.yoco_order_id = yo.parent_yoco_order_id
+        AND lower(COALESCE(parent_yo.order_type, 'sale')) <> 'refund'
        LEFT JOIN locations l ON l.id = yo.location_id AND l.workspace_id = yo.workspace_id
       WHERE ${whereSql}
      )
@@ -582,7 +599,7 @@ export async function getSaleStockUsageReport(
   const reportingContext = await getWorkspaceReportingContext(env, workspaceId);
   const timeZone = reportingContext.timeZone;
   const filters = {
-    ...readFilters(url),
+    ...readFilters(url, request),
     reportingTimeZone: timeZone,
     tradingDayStartMinutes: reportingContext.tradingDayStartMinutes,
     tradingDayLabel: reportingContext.tradingDayLabel,
@@ -651,7 +668,12 @@ export async function getSaleStockUsageReport(
         sm.created_at,
         si.name AS item_name,
         si.category AS category_name,
-        si.unit AS base_uom,
+        COALESCE(
+          NULLIF(si.unit, ''),
+          NULLIF(json_extract(sm.metadata_json, '$.baseUom'), ''),
+          NULLIF(json_extract(sm.metadata_json, '$.base_uom'), ''),
+          NULLIF(json_extract(sm.metadata_json, '$.unit'), '')
+        ) AS base_uom,
         l.name AS location_name,
         l.display_name AS location_display_name,
         yo.id AS yoco_order_db_id,
@@ -665,13 +687,13 @@ export async function getSaleStockUsageReport(
         yo.status AS sale_status,
         yo.total AS order_total,
         yo.raw_json AS order_raw_json,
-        yol.id AS yoco_order_line_db_id,
-        yol.yoco_line_id,
-        yol.product_id AS line_product_id,
-        yol.name AS line_name,
-        yol.quantity AS line_quantity,
-        yol.total AS line_total,
-        yol.raw_json AS line_raw_json,
+        COALESCE(yol.id, original_yol.id) AS yoco_order_line_db_id,
+        COALESCE(yol.yoco_line_id, original_yol.yoco_line_id) AS yoco_line_id,
+        COALESCE(yol.product_id, original_yol.product_id) AS line_product_id,
+        COALESCE(yol.name, original_yol.name) AS line_name,
+        COALESCE(yol.quantity, original_yol.quantity) AS line_quantity,
+        COALESCE(yol.total, original_yol.total) AS line_total,
+        COALESCE(yol.raw_json, original_yol.raw_json) AS line_raw_json,
         p.name AS product_name,
         p.category AS product_category,
         ${
@@ -709,8 +731,65 @@ export async function getSaleStockUsageReport(
              FROM yoco_order_lines yol_source
             WHERE yol_source.workspace_id = ?1
          ) WHERE canonical_rank = 1
-       ) yol ON yol.workspace_id = sm.workspace_id AND yol.yoco_order_id = yo.id AND yol.yoco_line_id = json_extract(sm.metadata_json, '$.componentLineId')
-       LEFT JOIN products p ON p.workspace_id = sm.workspace_id AND p.id = COALESCE(yol.product_id, json_extract(sm.metadata_json, '$.productId'), json_extract(sm.metadata_json, '$.parentProductId'))
+       ) yol ON yol.workspace_id = sm.workspace_id
+             AND yol.yoco_order_id = yo.id
+             AND yol.yoco_line_id = COALESCE(
+               NULLIF(json_extract(sm.metadata_json, '$.componentLineId'), ''),
+               NULLIF(json_extract(sm.metadata_json, '$.component_line_id'), ''),
+               NULLIF(json_extract(sm.metadata_json, '$.sourceLineId'), ''),
+               NULLIF(json_extract(sm.metadata_json, '$.source_line_id'), ''),
+               NULLIF(json_extract(sm.metadata_json, '$.sourceRefundLineId'), ''),
+               NULLIF(json_extract(sm.metadata_json, '$.sourceOriginalLineId'), '')
+             )
+       LEFT JOIN (
+         SELECT * FROM (
+           SELECT original_yo_source.*,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY original_yo_source.workspace_id,
+                                 COALESCE(NULLIF(original_yo_source.yoco_order_id, ''), original_yo_source.id),
+                                 COALESCE(NULLIF(original_yo_source.order_type, ''), 'sale')
+                    ORDER BY datetime(COALESCE(NULLIF(original_yo_source.occurred_at, ''), original_yo_source.created_at)) DESC,
+                             datetime(original_yo_source.created_at) DESC,
+                             original_yo_source.id DESC
+                  ) AS canonical_rank
+             FROM yoco_orders original_yo_source
+            WHERE original_yo_source.workspace_id = ?1
+         ) WHERE canonical_rank = 1
+       ) original_yo ON original_yo.workspace_id = sm.workspace_id
+                    AND original_yo.yoco_order_id = COALESCE(
+                      NULLIF(json_extract(sm.metadata_json, '$.sourceOrderId'), ''),
+                      NULLIF(json_extract(sm.metadata_json, '$.originalOrderId'), ''),
+                      sm.document_id
+                    )
+                    AND lower(COALESCE(original_yo.order_type, 'sale')) <> 'refund'
+       LEFT JOIN (
+         SELECT * FROM (
+           SELECT original_yol_source.*,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY original_yol_source.workspace_id,
+                                 original_yol_source.yoco_order_id,
+                                 COALESCE(NULLIF(original_yol_source.yoco_line_id, ''), original_yol_source.id)
+                    ORDER BY original_yol_source.id DESC
+                  ) AS canonical_rank
+             FROM yoco_order_lines original_yol_source
+            WHERE original_yol_source.workspace_id = ?1
+         ) WHERE canonical_rank = 1
+       ) original_yol ON original_yol.workspace_id = sm.workspace_id
+                     AND original_yol.yoco_order_id = original_yo.id
+                     AND original_yol.yoco_line_id = COALESCE(
+                       NULLIF(json_extract(sm.metadata_json, '$.sourceOriginalLineId'), ''),
+                       NULLIF(json_extract(sm.metadata_json, '$.componentLineId'), '')
+                     )
+       LEFT JOIN products p ON p.workspace_id = sm.workspace_id AND p.id = COALESCE(
+         yol.product_id,
+         original_yol.product_id,
+         json_extract(sm.metadata_json, '$.productId'),
+         json_extract(sm.metadata_json, '$.product_id'),
+         json_extract(sm.metadata_json, '$.menuItemId'),
+         json_extract(sm.metadata_json, '$.menu_item_id'),
+         json_extract(sm.metadata_json, '$.parentProductId'),
+         json_extract(sm.metadata_json, '$.parent_product_id')
+       )
       WHERE ${whereSql}
       ORDER BY datetime(sm.occurred_at) DESC, sm.id DESC
       LIMIT ?${binds.length + 1}`,
@@ -764,7 +843,7 @@ export async function getModifierSalesReport(
   const reportingContext = await getWorkspaceReportingContext(env, workspaceId);
   const timeZone = reportingContext.timeZone;
   const filters = {
-    ...readFilters(url),
+    ...readFilters(url, request),
     reportingTimeZone: timeZone,
     tradingDayStartMinutes: reportingContext.tradingDayStartMinutes,
     tradingDayLabel: reportingContext.tradingDayLabel,
@@ -783,6 +862,8 @@ export async function getModifierSalesReport(
     "stock_items",
     "workspace_settings",
     "yoco_modifier_groups",
+    "modifier_rules",
+    "modifier_sale_action_snapshots",
   ];
   const tableStatus: Record<string, boolean> = {};
   for (const table of requiredTables)
@@ -890,6 +971,43 @@ export async function getModifierSalesReport(
     .bind(...binds, MAX_REPORT_ROWS)
     .all<Row>();
 
+  const modifierRulesReportingReady = tableStatus.modifier_rules
+    ? await tableHasColumns(env, "modifier_rules", [
+        "workspace_id",
+        "modifier_owner_id",
+        "source_modifier_id",
+        "source_modifier_group_id",
+        "source_modifier_variant_id",
+        "source_name",
+        "action_type",
+        "status",
+      ])
+    : false;
+  const modifierActionSnapshotsReportingReady = tableStatus.modifier_sale_action_snapshots
+    ? await tableHasColumns(env, "modifier_sale_action_snapshots", [
+        "workspace_id",
+        "source_order_id",
+        "source_line_id",
+        "source_kind",
+        "source_key",
+        "source_name",
+        "rule_id",
+        "action_type",
+      ])
+    : false;
+  tableStatus.modifier_rules_reporting_ready = modifierRulesReportingReady;
+  tableStatus.modifier_sale_action_snapshots_reporting_ready =
+    modifierActionSnapshotsReportingReady;
+
+  // Do not join modifier_sale_action_snapshots directly onto stock_movements.
+  // The historical OR/LIKE join can produce a workspace-wide nested scan and breach
+  // the Durable Object CPU budget. Snapshot enrichment is loaded in bounded chunks
+  // after the ledger rows have been selected.
+  const modifierActionColumns = `,
+        '' AS movement_modifier_source_id,
+        '' AS movement_modifier_source_name,
+        '' AS movement_modifier_action_type`;
+
   const usageWhere = buildModifierUsageOnlyWhere(
     workspaceId,
     filters,
@@ -914,10 +1032,16 @@ export async function getModifierSalesReport(
         sm.created_at,
         si.name AS item_name,
         si.category AS category_name,
-        si.unit AS base_uom
+        COALESCE(
+          NULLIF(si.unit, ''),
+          NULLIF(json_extract(sm.metadata_json, '$.baseUom'), ''),
+          NULLIF(json_extract(sm.metadata_json, '$.base_uom'), ''),
+          NULLIF(json_extract(sm.metadata_json, '$.unit'), '')
+        ) AS base_uom
+        ${modifierActionColumns}
        FROM stock_movements sm
        LEFT JOIN stock_items si ON si.id = sm.stock_item_id AND si.workspace_id = sm.workspace_id
-      WHERE ${usageWhere.whereSql}`,
+      WHERE ${usageWhere.whereSql}`
       )
         .bind(...usageWhere.binds)
         .all<Row>()
@@ -943,48 +1067,86 @@ export async function getModifierSalesReport(
         sm.created_at,
         si.name AS item_name,
         si.category AS category_name,
-        si.unit AS base_uom
+        COALESCE(
+          NULLIF(si.unit, ''),
+          NULLIF(json_extract(sm.metadata_json, '$.baseUom'), ''),
+          NULLIF(json_extract(sm.metadata_json, '$.base_uom'), ''),
+          NULLIF(json_extract(sm.metadata_json, '$.unit'), '')
+        ) AS base_uom
+        ${modifierActionColumns}
        FROM stock_movements sm
        LEFT JOIN stock_items si ON si.id = sm.stock_item_id AND si.workspace_id = sm.workspace_id
-      WHERE ${menuUsageWhere.whereSql}`,
+      WHERE ${menuUsageWhere.whereSql}`
       )
         .bind(...menuUsageWhere.binds)
         .all<Row>()
     : { results: [] };
 
   const modifierCatalogue = tableStatus.yoco_modifier_groups
-    ? await loadModifierCatalogue(env, workspaceId)
+    ? await loadModifierCatalogue(env, workspaceId, modifierRulesReportingReady, warnings)
     : new Map<string, Row>();
-  const canonicalModifierUsageRows = dedupeRowsByKey(
-    usageRows.results || [],
-    (row) => clean(row.id),
-  );
   const canonicalModifierSalesRows = dedupeRowsByKey(
     salesRows.results || [],
     (row) => clean(row.yoco_order_line_db_id || row.id),
   );
-  const canonicalMenuUsageRows = dedupeRowsByKey(
+  const rawModifierUsageRows = dedupeRowsByKey(
+    usageRows.results || [],
+    (row) => clean(row.id),
+  );
+  const rawMenuUsageRows = dedupeRowsByKey(
     menuUsageRows.results || [],
     (row) => clean(row.id),
   );
+  const canonicalModifierUsageRows = modifierActionSnapshotsReportingReady
+    ? await enrichModifierUsageRowsWithActionSnapshots(
+        env,
+        workspaceId,
+        rawModifierUsageRows,
+        warnings,
+      )
+    : rawModifierUsageRows;
+  const canonicalMenuUsageRows = modifierActionSnapshotsReportingReady
+    ? await enrichModifierUsageRowsWithActionSnapshots(
+        env,
+        workspaceId,
+        rawMenuUsageRows,
+        warnings,
+      )
+    : rawMenuUsageRows;
   const usageIndex = buildModifierUsageIndex(canonicalModifierUsageRows);
   const menuUsageIndex = buildMenuItemUsageIndex(canonicalMenuUsageRows);
   const standardizedRows: Row[] = [];
 
   for (const row of canonicalModifierSalesRows) {
-    const extracted = extractModifierSelectionsFromLine(row, modifierCatalogue);
-    for (const selection of extracted) {
-      const standardized = standardizeModifierSalesRow(
-        row,
-        selection,
-        usageIndex,
-        menuUsageIndex,
-        warnings,
-        timeZone,
-        reportingContext.tradingDayStartMinutes,
-      );
-      if (modifierSalesRowMatchesFilters(standardized, filters))
-        standardizedRows.push(standardized);
+    try {
+      const extracted = extractModifierSelectionsFromLine(row, modifierCatalogue);
+      for (const selection of extracted) {
+        try {
+          const standardized = standardizeModifierSalesRow(
+            row,
+            selection,
+            usageIndex,
+            menuUsageIndex,
+            warnings,
+            timeZone,
+            reportingContext.tradingDayStartMinutes,
+          );
+          if (modifierSalesRowMatchesFilters(standardized, filters))
+            standardizedRows.push(standardized);
+        } catch (error) {
+          warnings.push({
+            code: "modifier-sale-selection-skipped",
+            level: "warning",
+            message: `One malformed modifier selection was skipped instead of failing the report: ${reportErrorMessage(error)}`,
+          });
+        }
+      }
+    } catch (error) {
+      warnings.push({
+        code: "modifier-sale-line-skipped",
+        level: "warning",
+        message: `One malformed Yoco sale line was skipped instead of failing the report: ${reportErrorMessage(error)}`,
+      });
     }
   }
 
@@ -1030,6 +1192,7 @@ export async function getModifierSalesReport(
         filterOptions: await getReportFilterOptions(env, workspaceId),
         dataSource: "real",
         sourceDeduplicated: true,
+        modifierReportVersion: "phase91-bounded-snapshot-enrichment",
       },
     ),
   });
@@ -1048,7 +1211,7 @@ export async function getMenuRecipeHealthReport(
   const reportingContext = await getWorkspaceReportingContext(env, workspaceId);
   const timeZone = reportingContext.timeZone;
   const filters = {
-    ...readFilters(url),
+    ...readFilters(url, request),
     reportingTimeZone: timeZone,
     tradingDayStartMinutes: reportingContext.tradingDayStartMinutes,
     tradingDayLabel: reportingContext.tradingDayLabel,
@@ -1244,7 +1407,7 @@ export async function getStockControlReport(
   const reportingContext = await getWorkspaceReportingContext(env, workspaceId);
   const timeZone = reportingContext.timeZone;
   const filters = {
-    ...readFilters(url),
+    ...readFilters(url, request),
     reportingTimeZone: timeZone,
     tradingDayStartMinutes: reportingContext.tradingDayStartMinutes,
     tradingDayLabel: reportingContext.tradingDayLabel,
@@ -1463,7 +1626,7 @@ function buildStockControlWhere(
     binds.push(value);
     clauses.push(sql.replace(/\?/g, `?${binds.length}`));
   };
-  if (filters.locationId) add("l.id = ?", filters.locationId);
+  addLocationSqlScope(clauses, binds, "l.id", filters);
   if (filters.category)
     add("lower(COALESCE(si.category, '')) = lower(?)", filters.category);
   if (filters.categoryId)
@@ -1805,8 +1968,7 @@ function stockControlWarningMatchesFilters(
     clean(row.severity).toLowerCase() !== filters.warningSeverity.toLowerCase()
   )
     return false;
-  if (filters.locationId && clean(row.locationId) !== filters.locationId)
-    return false;
+  if (!rowMatchesLocationScope(row.locationId, filters)) return false;
   if (
     filters.category &&
     clean(row.category).toLowerCase() !== filters.category.toLowerCase()
@@ -2676,12 +2838,7 @@ function menuRecipeHealthRowMatches(
     clean(row.riskStatus).toLowerCase() !== filters.riskStatus.toLowerCase()
   )
     return false;
-  if (filters.locationId) {
-    const ids = (row.locationIds || [])
-      .map((id: string) => clean(id))
-      .filter(Boolean);
-    if (ids.length && !ids.includes(filters.locationId)) return false;
-  }
+  if (!rowMatchesLocationScope(row.locationIds || row.locationId, filters)) return false;
   return true;
 }
 
@@ -2704,8 +2861,7 @@ function recipeDetailMatches(
 }
 
 function pricingMatches(row: Row, filters: ReturnType<typeof readFilters>) {
-  if (filters.locationId && clean(row.locationId) !== filters.locationId)
-    return false;
+  if (!rowMatchesLocationScope(row.locationId, filters)) return false;
   if (
     filters.riskStatus &&
     clean(row.riskStatus).toLowerCase() !== filters.riskStatus.toLowerCase()
@@ -3545,7 +3701,7 @@ function buildStockTakeWhere(
     clauses.push(sql.replace("?", `?${binds.length}`));
   };
   addZonedDateRange(clauses, binds, "sts.counted_at", filters, timeZone);
-  if (filters.locationId) add("stcl.location_id = ?", filters.locationId);
+  addLocationSqlScope(clauses, binds, "stcl.location_id", filters);
   if (filters.itemId) add("stcl.stock_item_id = ?", filters.itemId);
   if (filters.categoryId) add("si.category = ?", filters.categoryId);
   if (filters.category) add("lower(si.category) = lower(?)", filters.category);
@@ -3747,10 +3903,10 @@ function buildSalesWhere(
     clauses.push(sql.replace(/\?/g, `?${binds.length}`));
   };
   addZonedDateRange(clauses, binds, "yo.occurred_at", filters, timeZone);
-  if (filters.locationId) add("yo.location_id = ?", filters.locationId);
+  addLocationSqlScope(clauses, binds, "yo.location_id", filters);
   if (filters.paymentMethod)
     add(
-      "lower(COALESCE(yo.payment_method, '')) = lower(?)",
+      "lower(CASE WHEN lower(COALESCE(yo.order_type, '')) = 'refund' THEN COALESCE(NULLIF(CASE WHEN lower(COALESCE(yo.payment_method, '')) NOT IN ('', 'refund') THEN yo.payment_method ELSE '' END, ''), NULLIF(parent_yo.payment_method, ''), 'Unknown') ELSE COALESCE(NULLIF(yo.payment_method, ''), 'Unknown') END) = lower(?)",
       filters.paymentMethod,
     );
   if (filters.status)
@@ -3844,10 +4000,13 @@ function buildSaleUsageWhere(
   };
   if (sourceScope === "modifier")
     clauses.push(
-      "json_extract(sm.metadata_json, '$.componentType') = 'modifier'",
+      `(
+        lower(COALESCE(json_extract(sm.metadata_json, '$.componentType'), json_extract(sm.metadata_json, '$.component_type'), '')) = 'modifier'
+        OR NULLIF(COALESCE(json_extract(sm.metadata_json, '$.modifierId'), json_extract(sm.metadata_json, '$.modifier_id'), json_extract(sm.metadata_json, '$.modifierName'), json_extract(sm.metadata_json, '$.modifier_name'), ''), '') IS NOT NULL
+      )`,
     );
   addZonedDateRange(clauses, binds, "sm.occurred_at", filters, timeZone);
-  if (filters.locationId) add("sm.location_id = ?", filters.locationId);
+  addLocationSqlScope(clauses, binds, "sm.location_id", filters);
   if (filters.inventoryItemId || filters.itemId)
     add("sm.stock_item_id = ?", filters.inventoryItemId || filters.itemId);
   if (filters.categoryId)
@@ -3879,28 +4038,34 @@ function buildSaleUsageWhere(
     binds.push(filters.menuItemId);
     const idx = binds.length;
     clauses.push(
-      `(json_extract(sm.metadata_json, '$.productId') = ?${idx} OR json_extract(sm.metadata_json, '$.parentProductId') = ?${idx})`,
+      `(COALESCE(json_extract(sm.metadata_json, '$.productId'), json_extract(sm.metadata_json, '$.product_id'), json_extract(sm.metadata_json, '$.menuItemId'), json_extract(sm.metadata_json, '$.menu_item_id')) = ?${idx} OR COALESCE(json_extract(sm.metadata_json, '$.parentProductId'), json_extract(sm.metadata_json, '$.parent_product_id')) = ?${idx})`,
     );
   }
   if (filters.modifierGroupId)
     add(
-      "json_extract(sm.metadata_json, '$.modifierGroupId') = ?",
+      "COALESCE(json_extract(sm.metadata_json, '$.modifierGroupId'), json_extract(sm.metadata_json, '$.modifier_group_id')) = ?",
       filters.modifierGroupId,
     );
   if (filters.modifierId)
     add(
-      "json_extract(sm.metadata_json, '$.modifierId') = ?",
+      "COALESCE(json_extract(sm.metadata_json, '$.sourceModifierId'), json_extract(sm.metadata_json, '$.source_modifier_id'), json_extract(sm.metadata_json, '$.modifierId'), json_extract(sm.metadata_json, '$.modifier_id')) = ?",
       filters.modifierId,
     );
   if (filters.sourceType) {
     const source = clean(filters.sourceType).toLowerCase();
     if (source.includes("modifier"))
       clauses.push(
-        "json_extract(sm.metadata_json, '$.componentType') = 'modifier'",
+        `(
+          lower(COALESCE(json_extract(sm.metadata_json, '$.componentType'), json_extract(sm.metadata_json, '$.component_type'), '')) = 'modifier'
+          OR NULLIF(COALESCE(json_extract(sm.metadata_json, '$.modifierId'), json_extract(sm.metadata_json, '$.modifier_id'), json_extract(sm.metadata_json, '$.modifierName'), json_extract(sm.metadata_json, '$.modifier_name'), ''), '') IS NOT NULL
+        )`,
       );
     if (source.includes("sale"))
       clauses.push(
-        "COALESCE(json_extract(sm.metadata_json, '$.componentType'), 'product') <> 'modifier'",
+        `NOT (
+          lower(COALESCE(json_extract(sm.metadata_json, '$.componentType'), json_extract(sm.metadata_json, '$.component_type'), '')) = 'modifier'
+          OR NULLIF(COALESCE(json_extract(sm.metadata_json, '$.modifierId'), json_extract(sm.metadata_json, '$.modifier_id'), json_extract(sm.metadata_json, '$.modifierName'), json_extract(sm.metadata_json, '$.modifier_name'), ''), '') IS NOT NULL
+        )`,
       );
   }
   if (filters.search) {
@@ -3974,7 +4139,7 @@ function standardizeSalesFinancialRow(
       ? 'Scrap / Wastage'
       : clean(row.order_type).toLowerCase() === 'refund' ? 'Returned to Stock' : '',
     refundBehavior: clean(row.refund_behavior || kcpRefund.behavior),
-    paymentMethod: clean(row.payment_method || "Unknown"),
+    paymentMethod: clean((clean(row.order_type).toLowerCase() === 'refund' && clean(row.payment_method).toLowerCase() === 'refund' ? row.original_payment_method : row.payment_method) || row.original_payment_method || "Unknown"),
     status: clean(row.status || row.order_type || "completed"),
     grossAmount: financials.grossAmount,
     vatAmount: financials.vatAmount,
@@ -4006,10 +4171,7 @@ function standardizeSaleStockUsageRow(
   const metadata = parseJson(row.metadata_json);
   const orderRaw = parseJson(row.order_raw_json);
   const lineRaw = parseJson(row.line_raw_json);
-  const componentType =
-    clean(metadata.componentType).toLowerCase() === "modifier"
-      ? "modifier"
-      : "product";
+  const componentType = movementComponentType(metadata);
   const sourceType =
     componentType === "modifier" ? "Modifier Usage" : "Sale Usage";
   const physicalQuantityDelta = numberValue(row.quantity_delta, 0);
@@ -4046,8 +4208,8 @@ function standardizeSaleStockUsageRow(
   const netSaleAmount = lineFinancials.netAmount;
   const saleAt = clean(row.occurred_at || row.created_at);
   const local = zonedTradingDateTimeStrings(saleAt, timeZone, tradingDayStartMinutes);
-  const modifierId = clean(metadata.modifierId);
-  const modifierGroupId = clean(metadata.modifierGroupId);
+  const modifierId = movementModifierId(row, metadata);
+  const modifierGroupId = movementModifierGroupId(metadata);
 
   for (const issue of lineFinancials.issues || []) {
     warnings.push({
@@ -4079,7 +4241,7 @@ function standardizeSaleStockUsageRow(
     occurredAt: saleAt,
     reportingTimeZone: local.timeZone || timeZone,
     receiptNumber: clean(
-      row.parent_yoco_order_id || metadata.orderId || row.yoco_order_id || row.yoco_payment_id || row.document_id,
+      row.parent_yoco_order_id || metadata.orderId || metadata.order_id || row.yoco_order_id || row.yoco_payment_id || row.document_id,
     ),
     saleId: clean(row.provider_refund_id || row.yoco_order_id || row.document_id),
     refundId: clean(row.provider_refund_id || metadata.refundId),
@@ -4093,16 +4255,16 @@ function standardizeSaleStockUsageRow(
     wastageQty,
     accountingOnly: isRefundWastage || metadata.accountingOnly === true || numberValue(metadata.accountingOnly, 0) === 1,
     saleLineId: clean(
-      row.yoco_line_id || metadata.componentLineId || metadata.parentLineId,
+      row.yoco_line_id || movementLineId(metadata),
     ),
     menuItemId:
       sourceType === "Modifier Usage"
-        ? clean(metadata.parentProductId || row.line_product_id)
-        : clean(metadata.productId || row.line_product_id),
+        ? clean(metadata.parentProductId || metadata.parent_product_id || metadata.menuItemId || metadata.menu_item_id || row.line_product_id)
+        : clean(metadata.productId || metadata.product_id || metadata.menuItemId || metadata.menu_item_id || row.line_product_id),
     menuItemName:
       sourceType === "Modifier Usage"
-        ? clean(metadata.parentProductName || row.line_name || row.product_name)
-        : clean(metadata.productName || row.line_name || row.product_name),
+        ? clean(metadata.parentProductName || metadata.parent_product_name || metadata.productName || metadata.product_name || row.line_name || row.product_name || orderRaw.display_name || orderRaw.displayName)
+        : clean(metadata.productName || metadata.parentProductName || row.line_name || metadata.product_name || metadata.parent_product_name || row.product_name || orderRaw.display_name || orderRaw.displayName),
     menuCategory: clean(row.product_category),
     qtySold: isRefundMovement
       ? -Math.abs(numberValue(row.line_quantity, 1) || 1)
@@ -4131,9 +4293,9 @@ function standardizeSaleStockUsageRow(
         : qtyUsed,
     totalQtyUsed: qtyUsed,
     modifierGroupId,
-    modifierGroupName: clean(metadata.modifierGroupName),
+    modifierGroupName: movementModifierGroupName(metadata),
     modifierId,
-    modifierName: clean(metadata.modifierName),
+    modifierName: movementModifierName(row, metadata),
     inventoryItemId: clean(row.stock_item_id),
     inventoryItemName: clean(row.item_name || metadata.stockItemName),
     inventoryCategoryId: clean(row.category_name || metadata.stockCategory),
@@ -4142,7 +4304,7 @@ function standardizeSaleStockUsageRow(
     sourceType,
     sourceId: clean(row.document_id || row.id),
     qtyUsed,
-    baseUom: clean(row.base_uom || metadata.unit || "ea"),
+    baseUom: movementBaseUom(row, metadata),
     unitCostExVat,
     stockValueUsed,
     grossSaleAmount: lineGross,
@@ -4298,7 +4460,7 @@ function buildModifierSalesWhere(
     clauses.push(sql.replace(/\?/g, `?${binds.length}`));
   };
   addZonedDateRange(clauses, binds, "yo.occurred_at", filters, timeZone);
-  if (filters.locationId) add("yo.location_id = ?", filters.locationId);
+  addLocationSqlScope(clauses, binds, "yo.location_id", filters);
   if (filters.menuItemId) add("yol.product_id = ?", filters.menuItemId);
   if (filters.menuCategory && tableStatus.products)
     add("lower(COALESCE(p.category, '')) = lower(?)", filters.menuCategory);
@@ -4342,7 +4504,20 @@ function buildModifierUsageOnlyWhere(
     "sm.workspace_id = ?1",
     "sm.document_type = 'yoco_order'",
     "(sm.movement_type IN ('sale_depletion', 'sale_refund') OR (sm.movement_type = 'wastage' AND json_extract(sm.metadata_json, '$.mode') = 'refund'))",
-    "json_extract(sm.metadata_json, '$.componentType') = 'modifier'",
+    `(
+      lower(COALESCE(
+        json_extract(sm.metadata_json, '$.componentType'),
+        json_extract(sm.metadata_json, '$.component_type'),
+        ''
+      )) = 'modifier'
+      OR NULLIF(COALESCE(
+        json_extract(sm.metadata_json, '$.modifierId'),
+        json_extract(sm.metadata_json, '$.modifier_id'),
+        json_extract(sm.metadata_json, '$.modifierName'),
+        json_extract(sm.metadata_json, '$.modifier_name'),
+        ''
+      ), '') IS NOT NULL
+    )`,
   ];
   const binds: unknown[] = [workspaceId];
   const add = (sql: string, value: unknown) => {
@@ -4350,17 +4525,17 @@ function buildModifierUsageOnlyWhere(
     clauses.push(sql.replace(/\?/g, `?${binds.length}`));
   };
   addZonedDateRange(clauses, binds, "sm.occurred_at", filters, timeZone);
-  if (filters.locationId) add("sm.location_id = ?", filters.locationId);
+  addLocationSqlScope(clauses, binds, "sm.location_id", filters);
   if (filters.inventoryItemId || filters.itemId)
     add("sm.stock_item_id = ?", filters.inventoryItemId || filters.itemId);
   if (filters.modifierGroupId)
     add(
-      "json_extract(sm.metadata_json, '$.modifierGroupId') = ?",
+      "COALESCE(json_extract(sm.metadata_json, '$.modifierGroupId'), json_extract(sm.metadata_json, '$.modifier_group_id')) = ?",
       filters.modifierGroupId,
     );
   if (filters.modifierId)
     add(
-      "json_extract(sm.metadata_json, '$.modifierId') = ?",
+      "COALESCE(json_extract(sm.metadata_json, '$.sourceModifierId'), json_extract(sm.metadata_json, '$.source_modifier_id'), json_extract(sm.metadata_json, '$.modifierId'), json_extract(sm.metadata_json, '$.modifier_id')) = ?",
       filters.modifierId,
     );
   if (filters.search) {
@@ -4389,18 +4564,52 @@ function buildMenuItemUsageWhere(
     clauses.push(sql.replace(/\?/g, `?${binds.length}`));
   };
   addZonedDateRange(clauses, binds, "sm.occurred_at", filters, timeZone);
-  if (filters.locationId) add("sm.location_id = ?", filters.locationId);
+  addLocationSqlScope(clauses, binds, "sm.location_id", filters);
   return { whereSql: clauses.join(" AND "), binds };
 }
 
-async function loadModifierCatalogue(env: Env, workspaceId: string) {
-  const rows = await env.DB.prepare(
-    `SELECT id, yoco_modifier_group_id, name, raw_json
-       FROM yoco_modifier_groups
-      WHERE workspace_id = ?1`,
-  )
-    .bind(workspaceId)
-    .all<Row>();
+async function loadModifierCatalogue(
+  env: Env,
+  workspaceId: string,
+  includeRules = false,
+  warnings: Array<{ code: string; level: string; message: string }> = [],
+) {
+  let rows: { results?: Row[] } = { results: [] };
+  try {
+    rows = await env.DB.prepare(
+      `SELECT id, yoco_modifier_group_id, name, raw_json
+         FROM yoco_modifier_groups
+        WHERE workspace_id = ?1`,
+    )
+      .bind(workspaceId)
+      .all<Row>();
+  } catch (error) {
+    warnings.push({
+      code: "modifier-catalogue-unavailable",
+      level: "warning",
+      message: `Modifier catalogue enrichment was skipped: ${reportErrorMessage(error)}`,
+    });
+  }
+  let rules: Row[] = [];
+  if (includeRules) {
+    try {
+      const ruleRows = await env.DB.prepare(
+        `SELECT modifier_owner_id, action_type, source_modifier_id,
+                source_modifier_group_id, source_modifier_variant_id, source_name
+           FROM modifier_rules
+          WHERE workspace_id = ?1 AND status = 'active'`,
+      )
+        .bind(workspaceId)
+        .all<Row>();
+      rules = ruleRows.results || [];
+    } catch (error) {
+      warnings.push({
+        code: "modifier-rule-enrichment-unavailable",
+        level: "warning",
+        message: `Modifier rule enrichment was skipped: ${reportErrorMessage(error)}`,
+      });
+    }
+  }
   const catalogue = new Map<string, Row>();
   for (const group of rows.results || []) {
     const rawGroup = parseJson(group.raw_json);
@@ -4417,8 +4626,35 @@ async function loadModifierCatalogue(env: Env, workspaceId: string) {
           modifier.kind ||
           modifier.modifier_type ||
           modifier.modifierType ||
-          (variantId ? "product" : "note"),
+          (variantId ? "product" : "option"),
       );
+      const ownerCandidates = new Set(
+        [
+          groupId && id ? `${groupId}:${id}` : "",
+          id,
+          variantId ? `variant:${variantId}` : "",
+          variantId,
+          slug(name).replace(/-/g, "_"),
+        ].filter(Boolean),
+      );
+      const normalizedName = clean(name).toLowerCase();
+      const rule = rules.find((candidate) => {
+        const ownerId = clean(candidate.modifier_owner_id);
+        const sourceId = clean(candidate.source_modifier_id);
+        const sourceVariantId = clean(candidate.source_modifier_variant_id);
+        const sourceGroupId = clean(candidate.source_modifier_group_id);
+        const sourceName = clean(candidate.source_name).toLowerCase();
+        return (
+          ownerCandidates.has(ownerId) ||
+          Boolean(id && sourceId === id) ||
+          Boolean(variantId && sourceVariantId === variantId) ||
+          Boolean(
+            normalizedName &&
+              sourceName === normalizedName &&
+              (!sourceGroupId || sourceGroupId === groupId),
+          )
+        );
+      });
       const entry = {
         id,
         variantId,
@@ -4426,6 +4662,7 @@ async function loadModifierCatalogue(env: Env, workspaceId: string) {
         type,
         groupId,
         groupName,
+        stockActionType: normalizeModifierStockAction(rule?.action_type),
         raw: modifier,
       };
       setModifierCatalogue(catalogue, id, entry);
@@ -4564,6 +4801,7 @@ function standardizeRawModifierSelection(
   catalogue: Map<string, Row>,
   index: number,
 ) {
+  const metadata = objectFromUnknown(modifier.metadata);
   const id = modifierIdentity(modifier);
   const variantId = modifierVariantIdentity(modifier);
   const name = modifierDisplayName(
@@ -4620,8 +4858,19 @@ function standardizeRawModifierSelection(
         modifier.kind ||
         modifier.modifier_type ||
         modifier.modifierType ||
+        metadata.modifier_type ||
+        metadata.modifierType ||
         catalog.type ||
-        (variantId ? "product" : "note"),
+        (variantId ? "product" : "option"),
+    ),
+    stockActionType: normalizeModifierStockAction(
+      modifier.stock_action_type ||
+        modifier.stockActionType ||
+        modifier.modifier_action_type ||
+        metadata.modifier_action_type ||
+        metadata.note_action_type ||
+        catalog.stockActionType ||
+        (normalizeModifierType(catalog.type || (variantId ? "product" : "option")) === "Product" ? "ADD_RECIPE" : ""),
     ),
     qty: quantity * parentQty,
     grossAmount,
@@ -4631,8 +4880,223 @@ function standardizeRawModifierSelection(
   };
 }
 
+function reportErrorMessage(error: unknown) {
+  const message = error instanceof Error ? error.message : clean(error);
+  return clean(message || "Unknown reporting error").slice(0, 240);
+}
+
+async function enrichModifierUsageRowsWithActionSnapshots(
+  env: Env,
+  workspaceId: string,
+  rows: Row[],
+  warnings: Array<{ code: string; level: string; message: string }>,
+) {
+  if (!rows.length) return rows;
+  const orderIds = uniqueText(
+    rows.map((row) => movementReportOrderKey(row, parseJson(row.metadata_json))),
+  );
+  if (!orderIds.length) return rows;
+
+  const snapshots: Row[] = [];
+  const chunkSize = 75;
+  try {
+    for (let start = 0; start < orderIds.length; start += chunkSize) {
+      const chunk = orderIds.slice(start, start + chunkSize);
+      const placeholders = chunk.map((_, index) => `?${index + 2}`).join(", ");
+      const result = await env.DB.prepare(
+        `SELECT source_order_id, source_line_id, source_key, source_name,
+                rule_id, action_type
+           FROM modifier_sale_action_snapshots
+          WHERE workspace_id = ?1
+            AND source_kind = 'MODIFIER'
+            AND source_order_id IN (${placeholders})`,
+      )
+        .bind(workspaceId, ...chunk)
+        .all<Row>();
+      snapshots.push(...(result.results || []));
+    }
+  } catch (error) {
+    warnings.push({
+      code: "modifier-action-snapshot-enrichment-unavailable",
+      level: "warning",
+      message: `Sale-time modifier action enrichment was skipped: ${reportErrorMessage(error)}`,
+    });
+    return rows;
+  }
+
+  const snapshotIndex = new Map<string, Row>();
+  const set = (key: string, value: Row) => {
+    const normalized = clean(key);
+    if (normalized && !snapshotIndex.has(normalized)) snapshotIndex.set(normalized, value);
+  };
+  for (const snapshot of snapshots) {
+    const orderId = clean(snapshot.source_order_id);
+    const lineId = clean(snapshot.source_line_id);
+    const sourceKey = clean(snapshot.source_key);
+    const ruleId = clean(snapshot.rule_id);
+    const sourceName = clean(snapshot.source_name).toLowerCase();
+    if (!orderId || !lineId) continue;
+    set(sourceKey ? `${orderId}|${lineId}|source:${sourceKey}` : "", snapshot);
+    set(ruleId ? `${orderId}|${lineId}|rule:${ruleId}` : "", snapshot);
+    set(sourceName ? `${orderId}|${lineId}|name:${sourceName}` : "", snapshot);
+  }
+
+  return rows.map((row) => {
+    const metadata = parseJson(row.metadata_json);
+    const orderId = movementReportOrderKey(row, metadata);
+    const lineId = movementLineId(metadata);
+    if (!orderId || !lineId) return row;
+    const modifierIds = uniqueText([
+      clean(metadata.sourceModifierId),
+      clean(metadata.source_modifier_id),
+      clean(metadata.modifierId),
+      clean(metadata.modifier_id),
+      clean(metadata.modifierVariantId),
+      clean(metadata.modifier_variant_id),
+    ]);
+    const ownerId = clean(metadata.modifierOwnerId || metadata.modifier_owner_id);
+    if (ownerId) {
+      modifierIds.push(ownerId);
+      const suffix = ownerId.includes(":") ? ownerId.split(":").pop() || "" : "";
+      if (suffix) modifierIds.push(suffix);
+    }
+    const ruleId = clean(
+      metadata.modifierRuleId ||
+        metadata.modifier_rule_id ||
+        metadata.ruleId ||
+        metadata.rule_id,
+    );
+    const modifierName = clean(
+      metadata.modifierName ||
+        metadata.modifier_name ||
+        metadata.noteSourceName ||
+        metadata.note_source_name,
+    ).toLowerCase();
+
+    let snapshot: Row | undefined;
+    for (const id of uniqueText(modifierIds)) {
+      snapshot = snapshotIndex.get(`${orderId}|${lineId}|source:${id}`);
+      if (snapshot) break;
+    }
+    if (!snapshot && ruleId)
+      snapshot = snapshotIndex.get(`${orderId}|${lineId}|rule:${ruleId}`);
+    if (!snapshot && modifierName)
+      snapshot = snapshotIndex.get(`${orderId}|${lineId}|name:${modifierName}`);
+    if (!snapshot) return row;
+    return {
+      ...row,
+      movement_modifier_source_id: clean(snapshot.source_key),
+      movement_modifier_source_name: clean(snapshot.source_name),
+      movement_modifier_action_type: clean(snapshot.action_type),
+    };
+  });
+}
+
 function movementReportOrderKey(row: Row, metadata: Row) {
-  return clean(metadata.reportOrderKey || row.document_id);
+  return clean(
+    metadata.reportOrderKey ||
+      metadata.report_order_key ||
+      metadata.orderId ||
+      metadata.order_id ||
+      metadata.sourceOrderId ||
+      metadata.source_order_id ||
+      row.document_id,
+  );
+}
+
+function movementComponentType(metadata: Row) {
+  const explicit = clean(
+    metadata.componentType || metadata.component_type,
+  ).toLowerCase();
+  if (explicit === "modifier") return "modifier";
+  if (explicit === "product") return "product";
+  return clean(
+    metadata.modifierId ||
+      metadata.modifier_id ||
+      metadata.modifierName ||
+      metadata.modifier_name,
+  )
+    ? "modifier"
+    : "product";
+}
+
+function movementLineId(metadata: Row) {
+  return clean(
+    metadata.componentLineId ||
+      metadata.component_line_id ||
+      metadata.sourceLineId ||
+      metadata.source_line_id ||
+      metadata.parentLineId ||
+      metadata.parent_line_id ||
+      metadata.saleLineId ||
+      metadata.sale_line_id ||
+      metadata.lineId ||
+      metadata.line_id,
+  );
+}
+
+function movementModifierId(row: Row, metadata: Row) {
+  return clean(
+    row.movement_modifier_source_id ||
+      metadata.sourceModifierId ||
+      metadata.source_modifier_id ||
+      metadata.modifierId ||
+      metadata.modifier_id ||
+      metadata.modifierVariantId ||
+      metadata.modifier_variant_id,
+  );
+}
+
+function movementModifierOwnerId(row: Row, metadata: Row) {
+  return clean(
+    metadata.modifierOwnerId ||
+      metadata.modifier_owner_id ||
+      metadata.modifier_id ||
+      metadata.modifierId,
+  );
+}
+
+function movementModifierName(row: Row, metadata: Row) {
+  return clean(
+    row.movement_modifier_source_name ||
+      metadata.modifierName ||
+      metadata.modifier_name ||
+      metadata.noteSourceName ||
+      metadata.note_source_name ||
+      metadata.sourceName ||
+      metadata.source_name,
+  );
+}
+
+function movementModifierGroupId(metadata: Row) {
+  return clean(
+    metadata.modifierGroupId || metadata.modifier_group_id,
+  );
+}
+
+function movementModifierGroupName(metadata: Row) {
+  return clean(
+    metadata.modifierGroupName || metadata.modifier_group_name,
+  );
+}
+
+function movementActionType(row: Row, metadata: Row) {
+  return clean(
+    row.movement_modifier_action_type ||
+      metadata.modifierActionType ||
+      metadata.modifier_action_type ||
+      metadata.noteActionType ||
+      metadata.note_action_type,
+  );
+}
+
+function movementBaseUom(row: Row, metadata: Row) {
+  return clean(
+    row.base_uom ||
+      metadata.baseUom ||
+      metadata.base_uom ||
+      metadata.unit,
+  );
 }
 
 function isAccountingOnlyRefundWastage(row: Row) {
@@ -4650,7 +5114,7 @@ function buildMenuItemUsageIndex(rows: Row[]) {
   for (const row of rows) {
     const metadata = parseJson(row.metadata_json);
     const orderId = movementReportOrderKey(row, metadata);
-    const lineId = clean(metadata.componentLineId || metadata.parentLineId || metadata.saleLineId || metadata.lineId);
+    const lineId = movementLineId(metadata);
     if (!orderId || !lineId) continue;
     const key = `${orderId}|${lineId}`;
     if (!index.has(key)) index.set(key, []);
@@ -4690,12 +5154,16 @@ function buildModifierUsageIndex(rows: Row[]) {
 
 function modifierUsageKeys(row: Row, metadata: Row) {
   const orderId = movementReportOrderKey(row, metadata);
-  const lineId = clean(metadata.componentLineId || metadata.parentLineId);
-  const modifierId = clean(metadata.modifierId || metadata.modifierVariantId);
-  const modifierName = clean(metadata.modifierName).toLowerCase();
-  const groupId = clean(metadata.modifierGroupId);
+  const lineId = movementLineId(metadata);
+  const modifierId = movementModifierId(row, metadata);
+  const modifierOwnerId = movementModifierOwnerId(row, metadata);
+  const modifierName = movementModifierName(row, metadata).toLowerCase();
+  const groupId = movementModifierGroupId(metadata);
   return [
     orderId && lineId && modifierId ? `${orderId}|${lineId}|${modifierId}` : "",
+    orderId && lineId && modifierOwnerId
+      ? `${orderId}|${lineId}|${modifierOwnerId}`
+      : "",
     orderId && lineId && modifierName
       ? `${orderId}|${lineId}|name:${modifierName}`
       : "",
@@ -4706,6 +5174,7 @@ function modifierUsageKeys(row: Row, metadata: Row) {
       ? `${orderId}|group:${groupId}|name:${modifierName}`
       : "",
     orderId && modifierId ? `${orderId}|${modifierId}` : "",
+    orderId && modifierOwnerId ? `${orderId}|${modifierOwnerId}` : "",
     orderId && modifierName ? `${orderId}|name:${modifierName}` : "",
   ].filter(Boolean);
 }
@@ -4789,12 +5258,12 @@ function standardizeModifierSalesRow(
   });
   const menuItemModifierStockCost = roundMoneyNumber(
     menuUsageRows
-      .filter((usage) => clean(parseJson(usage.metadata_json).componentType).toLowerCase() === "modifier")
+      .filter((usage) => movementComponentType(parseJson(usage.metadata_json)) === "modifier")
       .reduce((sum, usage) => sum + signedMovementStockCost(usage), 0),
   );
   const menuItemBaseStockCost = roundMoneyNumber(
     menuUsageRows
-      .filter((usage) => clean(parseJson(usage.metadata_json).componentType).toLowerCase() !== "modifier")
+      .filter((usage) => movementComponentType(parseJson(usage.metadata_json)) !== "modifier")
       .reduce((sum, usage) => sum + signedMovementStockCost(usage), 0),
   );
   const menuItemTotalStockCost = roundMoneyNumber(menuItemBaseStockCost + menuItemModifierStockCost);
@@ -4827,9 +5296,24 @@ function standardizeModifierSalesRow(
     usageRows.map((usage) => clean(usage.item_name || usage.stock_item_id)),
   ).join(", ");
   const baseUom =
-    sameText(usageRows.map((usage) => clean(usage.base_uom))) || "";
+    sameText(
+      usageRows.map((usage) =>
+        movementBaseUom(usage, parseJson(usage.metadata_json)),
+      ),
+    ) || "";
   const modifierType = normalizeModifierType(selection.modifierType);
-  const shouldDeduct = modifierType === "Product" || usageRows.length > 0;
+  const usageActionType = sameText(usageRows.map((usage) => {
+    const metadata = parseJson(usage.metadata_json);
+    return movementActionType(usage, metadata);
+  }));
+  const stockActionType = normalizeModifierStockAction(selection.stockActionType || usageActionType || (modifierType === "Product" ? "ADD_RECIPE" : ""));
+  const stockAction = modifierStockActionLabel(stockActionType);
+  const expectsSeparateModifierMovement = [
+    "ADD_RECIPE",
+    "ADD_STOCK_ITEM",
+    "REPLACE_INGREDIENT",
+  ].includes(stockActionType);
+  const shouldDeduct = usageRows.length > 0 || expectsSeparateModifierMovement;
   const status = isRefundRow
     ? accountingWastageRows.length
       ? "Scrapped / Wastage"
@@ -4842,7 +5326,9 @@ function standardizeModifierSalesRow(
       ? "Deducted"
       : shouldDeduct
         ? "Missing Modifier Usage"
-        : "No Stock Mapping Required";
+        : stockActionType === "REMOVE_INGREDIENT"
+          ? "Applied to Base Recipe"
+          : "No Stock Mapping Required";
   const selectionQty = Math.abs(numberValue(selection.qty, 1)) || 1;
   const saleQty = isRefundRow ? 0 : selectionQty;
   const refundQty = isRefundRow ? selectionQty : 0;
@@ -4907,6 +5393,8 @@ function standardizeModifierSalesRow(
     yocoModifierId: clean(selection.modifierId),
     modifierName: clean(selection.modifierName || "Yoco Modifier"),
     modifierType,
+    stockActionType,
+    stockAction,
     qty: signedQty,
     saleQty,
     refundQty,
@@ -5019,16 +5507,18 @@ function buildOrphanModifierUsageRows(
             "Unmapped Menu Item",
         ),
         menuCategory: "",
-        modifierGroupId: clean(metadata.modifierGroupId),
+        modifierGroupId: movementModifierGroupId(metadata),
         modifierGroupName: clean(
-          metadata.modifierGroupName || "Modifier Group",
+          movementModifierGroupName(metadata) || "Modifier Group",
         ),
-        modifierId: clean(metadata.modifierId || metadata.modifierVariantId),
+        modifierId: movementModifierId(row, metadata),
         yocoModifierId: clean(
-          metadata.modifierId || metadata.modifierVariantId,
+          movementModifierId(row, metadata),
         ),
-        modifierName: clean(metadata.modifierName || "Yoco Modifier"),
-        modifierType: normalizeModifierType(metadata.modifierType || "product"),
+        modifierName: movementModifierName(row, metadata) || "Yoco Modifier",
+        modifierType: normalizeModifierType(metadata.modifierType || (metadata.note_action_type ? "note" : "product")),
+        stockActionType: normalizeModifierStockAction(movementActionType(row, metadata)),
+        stockAction: modifierStockActionLabel(normalizeModifierStockAction(movementActionType(row, metadata))),
         qty: isRefund ? -1 : 1,
         saleQty: isRefund ? 0 : 1,
         refundQty: isRefund ? 1 : 0,
@@ -5043,7 +5533,7 @@ function buildOrphanModifierUsageRows(
         refunds: 0,
         vat: 0,
         netSales: 0,
-        linkedProduct: clean(metadata.modifierName),
+        linkedProduct: movementModifierName(row, metadata),
         linkedStockItemId: clean(row.stock_item_id),
         linkedStockItemName: clean(row.item_name || row.stock_item_id),
         stockQuantityChange: physicalStockQuantityChange,
@@ -5053,7 +5543,7 @@ function buildOrphanModifierUsageRows(
         wastageQty,
         wastageCost,
         accountingOnlyWastage: isWastage,
-        baseUom: clean(row.base_uom || metadata.unit || "ea"),
+        baseUom: movementBaseUom(row, metadata),
         unitCostExVat,
         stockCost,
         grossProfit: -stockCost,
@@ -5110,6 +5600,8 @@ function modifierSalesRowMatchesFilters(
       row.modifierGroupName,
       row.modifierName,
       row.modifierType,
+      row.stockAction,
+      row.stockActionType,
       row.linkedStockItemName,
       row.stockDeductionStatus,
       row.sourceId,
@@ -5285,7 +5777,11 @@ function modifierIdentity(modifier: Row) {
     modifier.product_variant || modifier.productVariant,
   );
   return clean(
-    modifier.id ||
+    modifier.source_modifier_id ||
+      modifier.sourceModifierId ||
+      modifier.mapped_modifier_id ||
+      modifier.mappedModifierId ||
+      modifier.id ||
       modifier.modifier_id ||
       modifier.modifierId ||
       modifier.product_id ||
@@ -5298,6 +5794,7 @@ function modifierIdentity(modifier: Row) {
 }
 
 function modifierVariantIdentity(modifier: Row) {
+  const metadata = objectFromUnknown(modifier.metadata);
   const product = objectFromUnknown(modifier.product);
   const item = objectFromUnknown(modifier.item);
   const variant = objectFromUnknown(modifier.variant);
@@ -5305,7 +5802,11 @@ function modifierVariantIdentity(modifier: Row) {
     modifier.product_variant || modifier.productVariant,
   );
   return clean(
-    modifier.variant_id ||
+    modifier.source_variant_id ||
+      modifier.sourceVariantId ||
+      metadata.source_variant_id ||
+      metadata.sourceVariantId ||
+      modifier.variant_id ||
       modifier.variantId ||
       modifier.product_variant_id ||
       modifier.productVariantId ||
@@ -5326,7 +5827,9 @@ function modifierGroupIdentity(modifier: Row) {
     modifier.group || modifier.modifier_group || modifier.modifierGroup,
   );
   return clean(
-    modifier.group_id ||
+    modifier.source_modifier_group_id ||
+      modifier.sourceModifierGroupId ||
+      modifier.group_id ||
       modifier.groupId ||
       modifier.modifier_group_id ||
       modifier.modifierGroupId ||
@@ -5359,7 +5862,9 @@ function modifierDisplayName(modifier: Row, fallback = "Yoco Modifier") {
     modifier.product_variant || modifier.productVariant,
   );
   return clean(
-    modifier.name ||
+    modifier.source_name ||
+      modifier.sourceName ||
+      modifier.name ||
       modifier.display_name ||
       modifier.displayName ||
       modifier.product_name ||
@@ -5385,7 +5890,30 @@ function normalizeModifierType(value: unknown) {
   if (raw.includes("product")) return "Product";
   if (raw.includes("note")) return "Note";
   if (raw.includes("text")) return "Note";
-  return raw ? titleCase(raw) : "Note";
+  return raw ? titleCase(raw) : "Option";
+}
+
+function normalizeModifierStockAction(value: unknown) {
+  const action = clean(value).toUpperCase();
+  if ([
+    "ADD_RECIPE",
+    "ADD_STOCK_ITEM",
+    "REMOVE_INGREDIENT",
+    "REPLACE_INGREDIENT",
+    "NO_STOCK_CHANGE",
+  ].includes(action)) return action;
+  return "";
+}
+
+function modifierStockActionLabel(value: unknown) {
+  const action = normalizeModifierStockAction(value);
+  return ({
+    ADD_RECIPE: "Add recipe",
+    ADD_STOCK_ITEM: "Add stock item",
+    REMOVE_INGREDIENT: "Remove ingredient",
+    REPLACE_INGREDIENT: "Replace ingredient",
+    NO_STOCK_CHANGE: "No stock change",
+  } as Record<string, string>)[action] || "Not recorded";
 }
 
 function moneyToMajorReport(value: unknown) {
@@ -5408,6 +5936,18 @@ function sameText(values: string[]) {
   return unique.length > 1 ? "Mixed" : "";
 }
 
+export const __modifierReportingInternals = {
+  buildModifierUsageIndex,
+  enrichModifierUsageRowsWithActionSnapshots,
+  loadModifierCatalogue,
+  movementBaseUom,
+  movementComponentType,
+  movementLineId,
+  movementModifierId,
+  movementModifierName,
+  standardizeModifierSalesRow,
+};
+
 export async function getInventoryAuditReport(
   request: Request,
   env: Env,
@@ -5421,7 +5961,7 @@ export async function getInventoryAuditReport(
   const reportingContext = await getWorkspaceReportingContext(env, workspaceId);
   const timeZone = reportingContext.timeZone;
   const filters = {
-    ...readFilters(url),
+    ...readFilters(url, request),
     reportingTimeZone: timeZone,
     tradingDayStartMinutes: reportingContext.tradingDayStartMinutes,
     tradingDayLabel: reportingContext.tradingDayLabel,
@@ -5811,7 +6351,7 @@ async function getInventorySourceActionRows(
     clauses.push(sql.replace(/\?/g, `?${binds.length}`));
   };
   addZonedDateRange(clauses, binds, "sm.occurred_at", filters, timeZone);
-  if (filters.locationId) add("sm.location_id = ?", filters.locationId);
+  addLocationSqlScope(clauses, binds, "sm.location_id", filters);
   if (filters.user)
     add("lower(COALESCE(sm.created_by, '')) = lower(?)", filters.user);
   if (filters.search) {
@@ -6212,11 +6752,23 @@ function humanReadableAuditValue(value: unknown) {
   return clean(value);
 }
 
-function readFilters(url: URL) {
+function readFilters(url: URL, request?: Request) {
+  const requestedLocationIds = Array.from(new Set([
+    ...url.searchParams.getAll("locationId"),
+    ...url.searchParams.getAll("locationIds"),
+    ...url.searchParams.getAll("location"),
+  ].flatMap((value) => value.split(",")).map((value) => clean(value)).filter(Boolean)));
+  const resolvedScope = request ? getResolvedReportLocationScope(request) : undefined;
+  const locationIds = resolvedScope === null
+    ? requestedLocationIds
+    : Array.isArray(resolvedScope)
+      ? resolvedScope
+      : requestedLocationIds;
   return {
     from: clean(url.searchParams.get("from")),
     to: clean(url.searchParams.get("to")),
-    locationId: clean(url.searchParams.get("locationId")),
+    locationId: locationIds.length === 1 ? locationIds[0] : "",
+    locationIds,
     categoryId: clean(url.searchParams.get("categoryId")),
     category: clean(url.searchParams.get("category")),
     itemId: clean(url.searchParams.get("itemId")),
@@ -6254,6 +6806,33 @@ function readFilters(url: URL) {
   };
 }
 
+function reportLocationIds(filters: Row): string[] {
+  const raw = Array.isArray(filters.locationIds)
+    ? filters.locationIds
+    : clean(filters.locationId)
+      ? [filters.locationId]
+      : [];
+  return Array.from(new Set(raw.map((value) => clean(value)).filter(Boolean)));
+}
+
+function addLocationSqlScope(clauses: string[], binds: unknown[], column: string, filters: Row) {
+  const ids = reportLocationIds(filters);
+  if (!ids.length) return;
+  const placeholders = ids.map((id) => {
+    binds.push(id);
+    return `?${binds.length}`;
+  });
+  clauses.push(`${column} IN (${placeholders.join(", ")})`);
+}
+
+function rowMatchesLocationScope(value: unknown, filters: Row): boolean {
+  const permitted = reportLocationIds(filters);
+  if (!permitted.length) return true;
+  const values = (Array.isArray(value) ? value : [value]).map((value) => clean(value)).filter(Boolean);
+  if (!values.length) return false;
+  return values.some((id) => permitted.includes(id));
+}
+
 function buildMovementWhere(
   workspaceId: string,
   filters: ReturnType<typeof readFilters>,
@@ -6266,7 +6845,7 @@ function buildMovementWhere(
     clauses.push(sql.replace("?", `?${binds.length}`));
   };
   addZonedDateRange(clauses, binds, "sm.occurred_at", filters, timeZone);
-  if (filters.locationId) add("sm.location_id = ?", filters.locationId);
+  addLocationSqlScope(clauses, binds, "sm.location_id", filters);
   if (filters.itemId) add("sm.stock_item_id = ?", filters.itemId);
   if (filters.categoryId) add("si.category = ?", filters.categoryId);
   if (filters.category) add("lower(si.category) = lower(?)", filters.category);
@@ -7097,9 +7676,7 @@ function classifySourceType(row: Row, metadata: Row) {
     return "Wastage Adjustment";
   if (
     document === "yoco_order" &&
-    (clean(metadata.componentType).toLowerCase() === "modifier" ||
-      clean(metadata.modifierId) ||
-      clean(metadata.modifierName))
+    movementComponentType(metadata) === "modifier"
   )
     return "Modifier Usage";
   if (
@@ -7254,6 +7831,23 @@ async function tableExists(env: Env, tableName: string) {
       .bind(tableName)
       .first<Row>();
     return Boolean(row?.name);
+  } catch {
+    return false;
+  }
+}
+
+async function tableHasColumns(
+  env: Env,
+  tableName: string,
+  requiredColumns: string[],
+) {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(tableName)) return false;
+  try {
+    const info = await env.DB.prepare(`PRAGMA table_info(${tableName})`).all<Row>();
+    const columns = new Set(
+      (info.results || []).map((row) => clean(row.name)).filter(Boolean),
+    );
+    return requiredColumns.every((column) => columns.has(column));
   } catch {
     return false;
   }

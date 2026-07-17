@@ -1,4 +1,6 @@
 import { TENANT_SCHEMA_SQL } from './tenant-schema.generated';
+import { YOCO_V2_FOUNDATION_MIGRATION, YOCO_V2_SALE_SHADOW_MIGRATION, YOCO_V2_REFUND_RECONCILIATION_MIGRATION, YOCO_V2_CONTROLLED_CUTOVER_MIGRATION, YOCO_V2_REFUND_CONTROLLED_CUTOVER_MIGRATION, YOCO_V2_LEGACY_SHUTDOWN_MIGRATION, YOCO_V2_ADMIN_CONTROL_CENTRE_MIGRATION } from './modules/yoco-engine-v2/migrations';
+import { MODIFIER_ENGINE_CORE_ACTIONS_MIGRATION, MODIFIER_ENGINE_REFUNDS_RELIABILITY_NOTES_MIGRATION } from './modules/modifier-engine/migrations';
 
 /**
  * Ordered per-tenant schema migrations, applied INSIDE each WorkspaceDO's own SQLite on first
@@ -525,5 +527,25 @@ UPDATE yoco_orders
    SET gross_total = total
  WHERE gross_total IS NULL;
 CREATE INDEX IF NOT EXISTS idx_yoco_orders_workspace_refund_financials
-  ON yoco_orders(workspace_id, order_type, occurred_at, gross_total);`
+  ON yoco_orders(workspace_id, order_type, occurred_at, gross_total);`,
+  // 22 — isolated Yoco V2 engine foundation: immutable raw capture, effect ownership,
+  // processing runs, append-only timeline, retry/dead-letter observability.
+  YOCO_V2_FOUNDATION_MIGRATION,
+  // 23 — Phase V2 04-06: controlled API request audit, canonical sale events,
+  // shadow-only stock proposals, per-sale comparisons and integration circuit state.
+  YOCO_V2_SALE_SHADOW_MIGRATION,
+  // 24 — Phase V2 07-09: canonical refunds, manual review, refund shadow proposals and reconciliation.
+  YOCO_V2_REFUND_RECONCILIATION_MIGRATION,
+  // 25 — Phase V2 10: controlled sale-only live effect cutover, outbox, readiness and rollback history.
+  YOCO_V2_CONTROLLED_CUTOVER_MIGRATION,
+  // 26 — Phase V2 11: controlled refund reporting/stock cutover with independent readiness and rollback.
+  YOCO_V2_REFUND_CONTROLLED_CUTOVER_MIGRATION,
+  // 27 — Phase V2 12: ownership-gated legacy business shutdown, observation telemetry and Phase 13 gate.
+  YOCO_V2_LEGACY_SHUTDOWN_MIGRATION,
+  // 28 — Enterprise Yoco V2 admin control centre: webhook receipt observability and append-only action audit.
+  YOCO_V2_ADMIN_CONTROL_CENTRE_MIGRATION,
+  // 29 — Modifier engine core actions: additive stock, ingredient removal/replacement, scopes, versions and observations.
+  MODIFIER_ENGINE_CORE_ACTIONS_MIGRATION,
+  // 30 — Modifier refunds, observation/cutover diagnostics, and exact approved note rules.
+  MODIFIER_ENGINE_REFUNDS_RELIABILITY_NOTES_MIGRATION
 ];

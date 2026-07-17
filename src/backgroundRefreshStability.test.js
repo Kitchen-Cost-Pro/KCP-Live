@@ -34,6 +34,16 @@ test('data version polling records changes without repainting the page', () => {
   assert.match(block, /kcp:data-version-changed/);
 });
 
+test('stock tab live-refreshes from the data-version signal, only on ingredients and without a remount', () => {
+  const refresh = section('async function refreshStockFromDataVersion(', 'function installStockLiveRefresh()');
+  assert.match(refresh, /appState\.route\.active !== 'ingredients'/);
+  assert.match(refresh, /clearApiCache\(\)/);
+  assert.match(refresh, /applyRealtimeSnapshot\('stock'/);
+  assert.doesNotMatch(refresh, /createStockState\('loading'/);
+  const install = section('function installStockLiveRefresh()', 'function startDataVersionPoll()');
+  assert.match(install, /addEventListener\('kcp:data-version-changed'/);
+});
+
 test('background system broadcast polling does not replace the active module', () => {
   const block = section('function startSystemBroadcastRefresh()', 'function stopSystemBroadcastRefresh()');
   const silentCalls = block.match(/loadSystemBroadcast\(\{ render: false \}\)/g) || [];

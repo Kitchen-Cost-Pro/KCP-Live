@@ -6,7 +6,10 @@ import {
 import { fetchWorkspaceLocationOptions } from './services/locationService.js';
 import { mergeCanonicalLocations } from './utils/locationDisplayName.js';
 import { positionDashboardSelectMenu } from './utils/dashboardDropdown.js';
-import { emailDashboardStockNotifications } from './services/notificationService.js';
+import {
+  loadLowStockNotificationSettings,
+  saveLowStockNotificationSettings
+} from './services/notificationService.js';
 
 const DASHBOARD_CACHE_TTL = 60_000;
 const dashboardCache = new Map();
@@ -60,8 +63,12 @@ export function renderDashboard({ state = {}, onNavigate, onStockFilterChange, o
     calendarCursor: startOfCalendarMonth(initialRange.from),
     pendingRangeStart: '',
     notificationsOpen: false,
-    notificationEmailState: 'idle',
-    notificationEmailMessage: ''
+    notificationSettingsOpen: false,
+    notificationSettingsStatus: 'idle',
+    notificationSettingsMessage: '',
+    notificationDispatchTime: '08:00',
+    notificationRecipientIds: new Set(),
+    notificationWorkspaceUsers: []
   };
 
   renderLoading(view, workspaceName);
@@ -201,6 +208,26 @@ function getScopedInventoryAlerts(ui) {
     lowCount: low.length,
     criticalNames: critical.slice(0, 3).map((item) => item.name),
     locationName: getInventoryLocationOptions(ui.model).find((location) => location.id === ui.inventoryLocationId)?.name || ''
+  };
+}
+
+function getNotificationInventoryItems(ui) {
+  const items = Array.isArray(ui.model?.inventoryItems) ? ui.model.inventoryItems : [];
+  if (!ui.locationId) return items;
+  return items.filter((item) => String(item.locationId || '') === ui.locationId);
+}
+
+function getNotificationInventoryAlerts(ui) {
+  const items = getNotificationInventoryItems(ui);
+  const critical = items.filter((item) => item.status === 'critical');
+  const low = items.filter((item) => item.status === 'low');
+  return {
+    criticalCount: critical.length,
+    lowCount: low.length,
+    criticalNames: critical.slice(0, 3).map((item) => item.name),
+    locationName: ui.locationId
+      ? ui.locationOptions.find((location) => location.id === ui.locationId)?.name || 'Selected location'
+      : 'All permitted locations'
   };
 }
 
@@ -351,7 +378,7 @@ function formatShortDate(value = '') {
 function renderModel(view, ui, context) {
   const model = ui.model;
   syncInventoryLocation(ui, model);
-  const inventoryAlerts = getScopedInventoryAlerts(ui);
+  const inventoryAlerts = getNotificationInventoryAlerts(ui);
   const criticalCount = inventoryAlerts.criticalCount;
   const attentionCount = inventoryAlerts.criticalCount + inventoryAlerts.lowCount;
   const alertNames = inventoryAlerts.criticalNames.join(', ');
@@ -679,12 +706,12 @@ function renderNotificationCenter(view, ui, context) {
   const menu = view.querySelector('[data-dashboard-notification-menu]');
   if (!wrap || !bell || !menu) return;
 
-  const scopedItems = getScopedInventoryItems(ui);
+  const scopedItems = getNotificationInventoryItems(ui);
   const criticalItems = scopedItems.filter((item) => item.status === 'critical');
   const lowItems = scopedItems.filter((item) => item.status === 'low');
   const attentionItems = [...criticalItems, ...lowItems].slice(0, 8);
   const count = criticalItems.length + lowItems.length;
-  const locationName = getInventoryLocationOptions(ui.model).find((location) => location.id === ui.inventoryLocationId)?.name || 'Selected location';
+  const locationName = getNotificationInventoryAlerts(ui).locationName;
 
   bell.classList.toggle(styles.iconButtonActive, ui.notificationsOpen);
   bell.setAttribute('aria-expanded', String(ui.notificationsOpen));
@@ -696,57 +723,59 @@ function renderNotificationCenter(view, ui, context) {
   menu.innerHTML = `
     <div class="${styles.notificationHeader}">
       <div>
-        <strong>Stock notifications</strong>
-        <span>${escapeHtml(locationName)}</span>
+        <strong>${ui.notificationSettingsOpen ? 'Low-stock email settings' : 'Stock notifications'}</strong>
+        <span>${ui.notificationSettingsOpen ? 'Daily workspace alert' : escapeHtml(locationName)}</span>
       </div>
-      <button type="button" class="${styles.notificationClose}" aria-label="Close stock notifications" data-dashboard-notification-close>${icon('x', 14)}</button>
+      <div class="${styles.notificationHeaderActions}">
+        <button type="button" class="${styles.notificationClose} ${ui.notificationSettingsOpen ? styles.notificationSettingsActive : ''}" aria-label="${ui.notificationSettingsOpen ? 'Back to stock notifications' : 'Configure low-stock email'}" title="${ui.notificationSettingsOpen ? 'Back to notifications' : 'Email settings'}" data-dashboard-notification-settings>${icon(ui.notificationSettingsOpen ? 'arrowLeft' : 'settings', 14)}</button>
+        <button type="button" class="${styles.notificationClose}" aria-label="Close stock notifications" data-dashboard-notification-close>${icon('x', 14)}</button>
+      </div>
     </div>
-    ${count ? `
-      <div class="${styles.notificationSummary}">
-        <span class="${styles.notificationSummaryCritical}">${criticalItems.length} critical</span>
-        <span class="${styles.notificationSummaryLow}">${lowItems.length} low stock</span>
-      </div>
-      <div class="${styles.notificationList}">
-        ${attentionItems.map((item) => notificationItem(item)).join('')}
-      </div>
-      ${count > attentionItems.length ? `<p class="${styles.notificationMore}">+${count - attentionItems.length} more item${count - attentionItems.length === 1 ? '' : 's'}</p>` : ''}
-      <div class="${styles.notificationActions}">
-        <button type="button" data-dashboard-notification-email ${ui.notificationEmailState === 'sending' ? 'disabled' : ''}>${ui.notificationEmailState === 'sending' ? `${icon('refresh', 12)} Sending…` : `${icon('mail', 12)} Email this list`}</button>
-        <button type="button" data-dashboard-notification-review>Review on dashboard</button>
-        <button type="button" data-dashboard-notification-open-stock>Open Stock Items ${icon('arrowRight', 12)}</button>
-      </div>
-      ${ui.notificationEmailMessage ? `<p class="${styles.notificationEmailStatus} ${ui.notificationEmailState === 'error' ? styles.notificationEmailStatusError : ''}">${escapeHtml(ui.notificationEmailMessage)}</p>` : ''}
-    ` : `
-      <div class="${styles.notificationEmpty}">
-        ${icon('check', 20)}
-        <strong>All clear</strong>
-        <span>No critical or low-stock items at this location.</span>
-      </div>
-    `}
+    ${ui.notificationSettingsOpen ? renderLowStockNotificationSettings(ui) : renderStockNotificationList({ count, criticalItems, lowItems, attentionItems })}
   `;
 
   menu.querySelector('[data-dashboard-notification-close]')?.addEventListener('click', (event) => {
     event.preventDefault();
     event.stopPropagation();
     ui.notificationsOpen = false;
+    ui.notificationSettingsOpen = false;
     renderNotificationCenter(view, ui, context);
     bell.focus();
   });
-  menu.querySelector('[data-dashboard-notification-email]')?.addEventListener('click', async () => {
-    if (ui.notificationEmailState === 'sending') return;
-    ui.notificationEmailState = 'sending';
-    ui.notificationEmailMessage = '';
+
+  menu.querySelector('[data-dashboard-notification-settings]')?.addEventListener('click', async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    ui.notificationSettingsOpen = !ui.notificationSettingsOpen;
+    renderNotificationCenter(view, ui, context);
+    if (ui.notificationSettingsOpen && ui.notificationSettingsStatus === 'idle') {
+      await loadDashboardNotificationSettings(view, ui, context);
+    }
+  });
+
+  menu.querySelector('[data-dashboard-notification-settings-save]')?.addEventListener('click', async () => {
+    if (ui.notificationSettingsStatus === 'saving') return;
+    const dispatchTime = String(menu.querySelector('[data-dashboard-notification-time]')?.value || '08:00');
+    const recipientMemberIds = [...menu.querySelectorAll('[data-dashboard-notification-recipient]:checked')]
+      .map((input) => String(input.value || ''))
+      .filter(Boolean);
+    ui.notificationDispatchTime = dispatchTime;
+    ui.notificationRecipientIds = new Set(recipientMemberIds);
+    ui.notificationSettingsStatus = 'saving';
+    ui.notificationSettingsMessage = '';
     renderNotificationCenter(view, ui, context);
     try {
-      const result = await emailDashboardStockNotifications(context.workspaceId, ui.inventoryLocationId);
-      ui.notificationEmailState = 'sent';
-      ui.notificationEmailMessage = `Email sent to your account with ${Number(result?.lowStockCount || count)} stock notification${Number(result?.lowStockCount || count) === 1 ? '' : 's'}.`;
+      const result = await saveLowStockNotificationSettings(context.workspaceId, { dispatchTime, recipientMemberIds });
+      applyLowStockNotificationSettings(ui, result);
+      ui.notificationSettingsStatus = 'saved';
+      ui.notificationSettingsMessage = 'Daily low-stock email settings saved.';
     } catch (cause) {
-      ui.notificationEmailState = 'error';
-      ui.notificationEmailMessage = cause?.message || 'The stock notification email could not be sent.';
+      ui.notificationSettingsStatus = 'error';
+      ui.notificationSettingsMessage = cause?.message || 'Low-stock email settings could not be saved.';
     }
     renderNotificationCenter(view, ui, context);
   });
+
   menu.querySelector('[data-dashboard-notification-review]')?.addEventListener('click', () => {
     ui.notificationsOpen = false;
     renderNotificationCenter(view, ui, context);
@@ -765,6 +794,92 @@ function renderNotificationCenter(view, ui, context) {
       context.onNavigate?.('ingredients');
     });
   });
+}
+
+function renderStockNotificationList({ count, criticalItems, lowItems, attentionItems }) {
+  if (!count) {
+    return `
+      <div class="${styles.notificationEmpty}">
+        ${icon('check', 20)}
+        <strong>All clear</strong>
+        <span>No critical or low-stock items at this location.</span>
+      </div>
+      <div class="${styles.notificationActions}">
+        <button type="button" data-dashboard-notification-review>Review on dashboard</button>
+        <button type="button" data-dashboard-notification-open-stock>Open Stock Items ${icon('arrowRight', 12)}</button>
+      </div>`;
+  }
+  return `
+    <div class="${styles.notificationSummary}">
+      <span class="${styles.notificationSummaryCritical}">${criticalItems.length} critical</span>
+      <span class="${styles.notificationSummaryLow}">${lowItems.length} low stock</span>
+    </div>
+    <div class="${styles.notificationList}">
+      ${attentionItems.map((item) => notificationItem(item)).join('')}
+    </div>
+    ${count > attentionItems.length ? `<p class="${styles.notificationMore}">+${count - attentionItems.length} more item${count - attentionItems.length === 1 ? '' : 's'}</p>` : ''}
+    <div class="${styles.notificationActions}">
+      <button type="button" data-dashboard-notification-review>Review on dashboard</button>
+      <button type="button" data-dashboard-notification-open-stock>Open Stock Items ${icon('arrowRight', 12)}</button>
+    </div>`;
+}
+
+function renderLowStockNotificationSettings(ui) {
+  if (ui.notificationSettingsStatus === 'loading') {
+    return `<div class="${styles.notificationSettingsState}">${icon('refresh', 16)}<span>Loading workspace users…</span></div>`;
+  }
+  const users = Array.isArray(ui.notificationWorkspaceUsers) ? ui.notificationWorkspaceUsers : [];
+  return `
+    <div class="${styles.notificationSettingsPanel}">
+      <div class="${styles.notificationSettingsIntro}">
+        ${icon('mail', 16)}
+        <div><strong>Daily low-stock alert</strong><span>KCP checks low-stock thresholds every day and emails the selected workspace users.</span></div>
+      </div>
+      <label class="${styles.notificationTimeField}">
+        <span>Send time</span>
+        <input type="time" value="${escapeAttribute(ui.notificationDispatchTime || '08:00')}" data-dashboard-notification-time />
+        <small>Africa/Johannesburg time</small>
+      </label>
+      <div class="${styles.notificationRecipientSection}">
+        <div class="${styles.notificationRecipientHeader}"><span>Email list</span><small>${ui.notificationRecipientIds.size} selected</small></div>
+        <div class="${styles.notificationRecipientList}">
+          ${users.length ? users.map((user) => `
+            <label class="${styles.notificationRecipient}">
+              <input type="checkbox" value="${escapeAttribute(user.id)}" data-dashboard-notification-recipient ${ui.notificationRecipientIds.has(String(user.id)) ? 'checked' : ''} />
+              <span><strong>${escapeHtml(user.name || user.email)}</strong><small>${escapeHtml(user.email)}</small></span>
+            </label>`).join('') : '<p class="' + styles.notificationSettingsEmpty + '">No active workspace users are available.</p>'}
+        </div>
+      </div>
+      ${ui.notificationSettingsMessage ? `<p class="${styles.notificationEmailStatus} ${ui.notificationSettingsStatus === 'error' ? styles.notificationEmailStatusError : ''}">${escapeHtml(ui.notificationSettingsMessage)}</p>` : ''}
+      <div class="${styles.notificationSettingsActions}">
+        <button type="button" data-dashboard-notification-settings-save ${ui.notificationSettingsStatus === 'saving' ? 'disabled' : ''}>${ui.notificationSettingsStatus === 'saving' ? `${icon('refresh', 12)} Saving…` : 'Save email settings'}</button>
+      </div>
+    </div>`;
+}
+
+async function loadDashboardNotificationSettings(view, ui, context) {
+  ui.notificationSettingsStatus = 'loading';
+  ui.notificationSettingsMessage = '';
+  renderNotificationCenter(view, ui, context);
+  try {
+    const result = await loadLowStockNotificationSettings(context.workspaceId);
+    applyLowStockNotificationSettings(ui, result);
+    ui.notificationSettingsStatus = 'ready';
+  } catch (cause) {
+    ui.notificationSettingsStatus = 'error';
+    ui.notificationSettingsMessage = cause?.message || 'Low-stock email settings could not be loaded.';
+  }
+  renderNotificationCenter(view, ui, context);
+}
+
+function applyLowStockNotificationSettings(ui, result = {}) {
+  const settings = result.settings || result;
+  ui.notificationDispatchTime = String(settings.dispatchTime || '08:00');
+  ui.notificationWorkspaceUsers = Array.isArray(settings.users) ? settings.users : [];
+  const selected = Array.isArray(settings.recipientMemberIds)
+    ? settings.recipientMemberIds
+    : ui.notificationWorkspaceUsers.filter((user) => user.selected).map((user) => user.id);
+  ui.notificationRecipientIds = new Set(selected.map(String));
 }
 
 function notificationItem(item = {}) {

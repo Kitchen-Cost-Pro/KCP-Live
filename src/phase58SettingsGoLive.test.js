@@ -30,16 +30,19 @@ test('Phase 58 normalizes Go Live state and activation timestamp', () => {
   assert.equal(disabled.stockDepletionEnabledAt, '');
 });
 
-test('Phase 58 Go Live saves an activation instant and backend gates every Yoco processing path', () => {
+test('Phase 58 Go Live saves an activation instant while V2 effects fail closed on ownership', () => {
   const main = read('src/main.js');
-  const yoco = read('cloudflare-v2/src/legacy/yoco-sales.ts');
+  const ownership = read('cloudflare-v2/src/modules/yoco-engine-v2/ownership.ts');
+  const saleRuntime = read('cloudflare-v2/src/modules/yoco-engine-v2/cutover.ts');
+  const refundRuntime = read('cloudflare-v2/src/modules/yoco-engine-v2/refund-cutover.ts');
   const settings = read('src/components/Settings.js');
   assert.match(main, /stockDepletionEnabledAt: new Date\(\)\.toISOString\(\)/);
-  assert.match(yoco, /getStockDepletionPolicy/);
-  assert.match(yoco, /reason: 'stock_depletion_disabled'/);
-  assert.match(yoco, /reason: 'before_stock_depletion_start'/);
-  assert.match(yoco, /reason: 'original_sale_not_depleted'/);
-  assert.match(yoco, /movement_type = 'sale_depletion'/);
+  assert.match(ownership, /assertAllYocoEffectsOwnedByV2/);
+  assert.match(ownership, /YOCO_V2_OWNERSHIP_NOT_READY/);
+  assert.match(saleRuntime, /engine_version/);
+  assert.match(saleRuntime, /ownerIsV2/);
+  assert.match(refundRuntime, /engine_version/);
+  assert.match(refundRuntime, /ownerIsV2/);
   assert.match(settings, /Complete the checklist before enabling stock depletion/);
   assert.match(settings, /Going Live\.\.\./);
 });

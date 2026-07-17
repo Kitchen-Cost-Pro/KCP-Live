@@ -24,8 +24,8 @@ test('admin workspace actions are explicitly routed to workspace Durable Objects
   assert.match(worker, /adminWorkspaceActionM/);
   assert.match(worker, /admin-action\/\$\{action\}/);
   assert.match(worker, /send-low-stock-email/);
-  assert.match(tenantDispatcher, /resource === 'admin-yoco\/events'/);
-  assert.match(tenantDispatcher, /resource === 'admin-audit-events'/);
+  assert.match(tenantDispatcher, /resource === [\"']admin-yoco\/events[\"']/);
+  assert.match(tenantDispatcher, /resource === [\"']admin-audit-events[\"']/);
   assert.match(tenantRoutes, /adminYocoEventsDO/);
   assert.match(tenantRoutes, /repair-baseline/);
   assert.match(worker, /new Request\(request, \{ headers \}\)/);

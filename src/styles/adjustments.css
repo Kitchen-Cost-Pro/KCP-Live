@@ -1239,3 +1239,13 @@
 #view-adjustments .adj-table--picker tbody tr[data-adj-stock-row]:hover {
   background: rgba(59, 130, 246, 0.08);
 }
+
+/* Ensure every Wastage Actions entry has obvious pointer feedback. */
+#view-adjustments .adj-dropdownMenu button:not(:disabled) {
+  opacity: 0.9;
+  will-change: transform, background-color, border-color, opacity;
+}
+#view-adjustments .adj-dropdownMenu button:not(:disabled):hover,
+#view-adjustments .adj-dropdownMenu button:not(:disabled):focus-visible {
+  opacity: 1;
+}

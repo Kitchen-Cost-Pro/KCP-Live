@@ -445,7 +445,7 @@ function renderYocoModal({ canDisconnectYoco = false } = {}) {
             </article>
             <article>
               <span>Product Modifiers</span>
-              <strong data-yoco-modifier-count>0 modifiers</strong>
+              <strong data-yoco-modifier-count>0 modifier options</strong>
             </article>
             <article>
               <span>Locations</span>
@@ -596,7 +596,7 @@ function updateYocoStatus(view, status = {}, options = {}) {
   setText(view, '[data-yoco-live-status]', statusText);
   setText(view, '[data-yoco-last-sync]', formatDateTime(status.lastSyncCompletedAt) || 'Not synced yet');
   setText(view, '[data-yoco-catalogue-count]', `${Number(status.catalogue?.itemsCount || 0)} items`);
-  setText(view, '[data-yoco-modifier-count]', `${Number(status.catalogue?.productModifiersCount || 0)} modifiers`);
+  setText(view, '[data-yoco-modifier-count]', `${Number(status.catalogue?.productModifiersCount || 0)} modifier options`);
   setText(view, '[data-yoco-location-count]', `${Number(status.locations?.count || 0)} locations`);
   setText(view, '[data-yoco-webhook-status]', status.webhook?.enabled ? 'Active' : 'Not active');
   updateYocoCardStatus(view, isActive ? 'Active' : 'Available');
@@ -868,7 +868,10 @@ function renderYocoSummaryEntries(result = {}) {
     ['Products imported', result.productsImported],
     ['Products matched', result.productsMatched],
     ['Modifier groups stored', result.modifierGroupsStored],
-    ['Product modifiers stored', result.productModifiersStored],
+    ['Modifier choices stored', result.modifierOptionsStored ?? result.productModifiersStored],
+    ['Product modifiers', result.productModifiersStored],
+    ['Option modifiers', result.optionModifiersStored],
+    ['Note modifiers', result.noteModifiersStored],
     ['Orders', result.ordersProcessed],
     ['Refunds', result.refundsProcessed],
     ['Missing recipes', result.missingRecipes],

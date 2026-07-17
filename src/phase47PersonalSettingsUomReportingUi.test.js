@@ -34,14 +34,14 @@ test('Phase 47 removes low-stock summary controls from business settings and use
 });
 
 test('Phase 47 locks the Yoco key fingerprint and restricts replacement and disconnect operations', () => {
-  const yoco = read('../cloudflare-v2/src/legacy/yoco-service.ts');
+  const yoco = read('../cloudflare-v2/src/modules/yoco-engine-v2/integration-service.ts');
   const routes = read('../cloudflare-v2/src/legacy/routes.ts');
 
   assert.match(yoco, /api_key_fingerprint/);
   assert.match(yoco, /allowKeyReplacement/);
   assert.match(yoco, /lockedFingerprint !== fingerprint/);
   assert.match(routes, /allowKeyReplacement: true/);
-  assert.match(routes, /normalizeRoleKey\(actorRole\) !== 'superuser'/);
+  assert.match(routes, /normalizeRoleKey\(actorRole\) !== [\"']superuser[\"']/);
 });
 
 test('Phase 47 portals report dropdowns above report surfaces and widens pagination controls', () => {

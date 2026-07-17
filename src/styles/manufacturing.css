@@ -2628,3 +2628,49 @@
   border-color: rgba(92, 158, 255, 0.72);
   box-shadow: 0 8px 22px rgba(37, 99, 235, 0.18);
 }
+
+
+/* Phase 78: action-menu hover/focus must keep labels visible and clearly identify the target. */
+.manufacturingActionDropdown__menu .manufacturingDropdownOption {
+  position: relative;
+  color: #f2f6ff;
+  transition: transform 140ms ease, border-color 140ms ease, background-color 140ms ease, color 140ms ease, box-shadow 140ms ease;
+}
+
+.manufacturingActionDropdown__menu .manufacturingDropdownOption span {
+  color: inherit;
+  opacity: 1;
+  visibility: visible;
+}
+
+.manufacturingActionDropdown__menu .manufacturingDropdownOption:hover:not(:disabled),
+.manufacturingActionDropdown__menu .manufacturingDropdownOption:focus-visible:not(:disabled) {
+  transform: translateX(2px);
+  border-color: rgba(106, 167, 255, 0.78);
+  background: rgba(44, 78, 126, 0.96);
+  color: #ffffff;
+  box-shadow: inset 3px 0 0 #6aa7ff, 0 8px 18px rgba(0, 0, 0, 0.24);
+  outline: none;
+}
+
+.manufacturingActionDropdown__menu .manufacturingDropdownOption:hover:not(:disabled) svg,
+.manufacturingActionDropdown__menu .manufacturingDropdownOption:focus-visible:not(:disabled) svg {
+  color: #ffffff;
+}
+
+/* Phase 78 hardening: app-wide button hover rules must never blank manufacturing action labels. */
+.manufacturingActionDropdown__menu button.manufacturingDropdownOption:hover:not(:disabled),
+.manufacturingActionDropdown__menu button.manufacturingDropdownOption:focus-visible:not(:disabled) {
+  background-color: rgba(44, 78, 126, 0.98) !important;
+  color: #ffffff !important;
+  opacity: 1 !important;
+}
+
+.manufacturingActionDropdown__menu button.manufacturingDropdownOption:hover:not(:disabled) span,
+.manufacturingActionDropdown__menu button.manufacturingDropdownOption:focus-visible:not(:disabled) span,
+.manufacturingActionDropdown__menu button.manufacturingDropdownOption:hover:not(:disabled) svg,
+.manufacturingActionDropdown__menu button.manufacturingDropdownOption:focus-visible:not(:disabled) svg {
+  color: #ffffff !important;
+  opacity: 1 !important;
+  visibility: visible !important;
+}

@@ -20,6 +20,7 @@ const modifierRows = [
     yocoModifierId: 'cheese',
     modifierName: 'Extra Cheese',
     modifierType: 'Product',
+    stockActionType: 'ADD_RECIPE',
     qty: 2,
     timesSelected: 2,
     grossAmount: 46,
@@ -64,6 +65,7 @@ const modifierRows = [
     yocoModifierId: 'no-onion',
     modifierName: 'No Onion',
     modifierType: 'Note',
+    stockActionType: 'REMOVE_INGREDIENT',
     qty: 1,
     timesSelected: 1,
     grossAmount: 0,
@@ -103,6 +105,7 @@ const modifierRows = [
     yocoModifierId: 'bacon',
     modifierName: 'Extra Bacon',
     modifierType: 'Product',
+    stockActionType: 'ADD_STOCK_ITEM',
     qty: 1,
     timesSelected: 1,
     grossAmount: 0,
@@ -159,6 +162,12 @@ test('Modifier Report builds summary, GP tracker, group, menu item, modifier, an
   assert.equal(cheese.grossProfit, 30);
   assert.equal(cheese.gpPercent, 0.75);
   assert.equal(cheese.selectedPercent, 0.5);
+  assert.equal(cheese.modifierType, 'Product');
+  assert.equal(cheese.stockAction, 'Add recipe');
+
+  const noOnion = model.views.summary.find((row) => row.modifierName === 'No Onion');
+  assert.equal(noOnion.modifierType, 'Note');
+  assert.equal(noOnion.stockAction, 'Remove ingredient');
 
   const bacon = model.views.summary.find((row) => row.modifierName === 'Extra Bacon');
   assert.equal(bacon.netSales, 0);
@@ -185,6 +194,8 @@ test('Modifier mapper keeps modifier payment values and usage costs separate', (
     modifier_group_name: 'Burger Extras',
     modifier_name: 'Extra Cheese',
     modifier_type: 'Product',
+    stock_action_type: 'REPLACE_INGREDIENT',
+    stock_action: 'Replace ingredient',
     gross_amount: 46,
     vat_amount: 6,
     net_amount: 40,
@@ -196,4 +207,16 @@ test('Modifier mapper keeps modifier payment values and usage costs separate', (
   assert.equal(row.netAmount, 40);
   assert.equal(row.stockCost, 10);
   assert.equal(row.grossProfit, 30);
+  assert.equal(row.modifierType, 'Product');
+  assert.equal(row.stockActionType, 'REPLACE_INGREDIENT');
+  assert.equal(row.stockAction, 'Replace ingredient');
+});
+
+
+test('Modifier report does not misclassify missing modifier types as notes', () => {
+  const mapped = normalizeApiModifierSalesRow({ modifier_name: 'Choose Sauce' });
+  assert.equal(mapped.modifierType, 'Option');
+  const model = buildModifierReportModel([{ modifierName: 'Choose Sauce', stockActionType: 'NO_STOCK_CHANGE' }]);
+  assert.equal(model.views.summary[0].modifierType, 'Option');
+  assert.equal(model.views.summary[0].stockAction, 'No stock change');
 });

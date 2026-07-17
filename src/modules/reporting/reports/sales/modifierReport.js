@@ -37,6 +37,7 @@ const summaryColumns = [
   { key: 'modifierGroupName', label: 'Modifier Group', sortable: true },
   { key: 'modifierName', label: 'Modifier Name', sortable: true },
   { key: 'modifierType', label: 'Modifier Type', sortable: true },
+  { key: 'stockAction', label: 'Stock Action', sortable: true },
   numberColumn('timesSelected', 'Times Selected'),
   numberColumn('refundedSelections', 'Refunded'),
   numberColumn('netSelections', 'Net Selections'),
@@ -56,6 +57,7 @@ const gpTrackerColumns = [
   { key: 'modifierGroupName', label: 'Modifier Group', sortable: true },
   { key: 'modifierName', label: 'Modifier Name', sortable: true },
   { key: 'modifierType', label: 'Modifier Type', sortable: true },
+  { key: 'stockAction', label: 'Stock Action', sortable: true },
   { key: 'linkedProduct', label: 'Linked Product', sortable: true },
   numberColumn('qtySelected', 'Qty Selected'),
   numberColumn('refundedSelections', 'Refunded'),
@@ -77,6 +79,7 @@ const gpTrackerColumns = [
 const byGroupColumns = [
   { key: 'modifierGroupName', label: 'Modifier Group', sortable: true },
   { key: 'modifierType', label: 'Modifier Type', sortable: true },
+  { key: 'stockAction', label: 'Stock Action', sortable: true },
   numberColumn('totalSelections', 'Total Selections'),
   numberColumn('refundedSelections', 'Refunded'),
   numberColumn('netSelections', 'Net Selections'),
@@ -112,6 +115,7 @@ const byModifierColumns = [
   { key: 'modifierName', label: 'Modifier Name', sortable: true },
   { key: 'modifierGroupName', label: 'Modifier Group', sortable: true },
   { key: 'modifierType', label: 'Modifier Type', sortable: true },
+  { key: 'stockAction', label: 'Stock Action', sortable: true },
   { key: 'linkedStockItemName', label: 'Linked Stock Item', sortable: true },
   numberColumn('timesSelected', 'Times Selected'),
   numberColumn('refundedSelections', 'Refunded'),
@@ -141,6 +145,7 @@ const salesLogColumns = [
   { key: 'modifierGroupName', label: 'Modifier Group', sortable: true },
   { key: 'modifierName', label: 'Modifier Name', sortable: true },
   { key: 'modifierType', label: 'Modifier Type', sortable: true },
+  { key: 'stockAction', label: 'Stock Action', sortable: true },
   qtyColumn('qty', 'Qty'),
   moneyColumn('grossAmount', 'Gross Amount', 'grossSales'),
   moneyColumn('refundAmount', 'Refund Amount', 'refunds'),
@@ -161,6 +166,7 @@ const summaryExportMapping = {
   modifierGroupName: 'Modifier Group',
   modifierName: 'Modifier Name',
   modifierType: 'Modifier Type',
+  stockAction: 'Stock Action',
   timesSelected: 'Times Selected',
   refundedSelections: 'Refunded',
   netSelections: 'Net Selections',
@@ -180,6 +186,7 @@ const gpTrackerExportMapping = {
   modifierGroupName: 'Modifier Group',
   modifierName: 'Modifier Name',
   modifierType: 'Modifier Type',
+  stockAction: 'Stock Action',
   linkedProduct: 'Linked Product',
   qtySelected: 'Qty Selected',
   refundedSelections: 'Refunded',
@@ -211,6 +218,7 @@ const salesLogExportMapping = {
   modifierGroupName: 'Modifier Group',
   modifierName: 'Modifier Name',
   modifierType: 'Modifier Type',
+  stockAction: 'Stock Action',
   qty: 'Qty',
   grossAmount: 'Gross Amount',
   refundAmount: 'Refund Amount',
@@ -230,6 +238,7 @@ const salesLogExportMapping = {
 const groupExportMapping = {
   modifierGroupName: 'Modifier Group',
   modifierType: 'Modifier Type',
+  stockAction: 'Stock Action',
   totalSelections: 'Total Selections',
   refundedSelections: 'Refunded',
   netSelections: 'Net Selections',
@@ -265,6 +274,7 @@ const byModifierExportMapping = {
   modifierName: 'Modifier Name',
   modifierGroupName: 'Modifier Group',
   modifierType: 'Modifier Type',
+  stockAction: 'Stock Action',
   linkedStockItemName: 'Linked Stock Item',
   timesSelected: 'Times Selected',
   refundedSelections: 'Refunded',
@@ -394,6 +404,11 @@ function normalizeModifierRow(row = {}) {
   const timesSelected = safeNumber(row.timesSelected, saleQty);
   const refundedSelections = safeNumber(row.refundedSelections, refundQty);
   const netSelections = safeNumber(row.netSelections, timesSelected - refundedSelections);
+  const modifierType = normalizeModifierType(row.modifierType);
+  const stockActionType = normalizeModifierStockActionType(
+    row.stockActionType || row.stock_action_type || row.modifierActionType || row.modifier_action_type || row.noteActionType || row.note_action_type || (modifierType === 'Product' ? 'ADD_RECIPE' : '')
+  );
+  const stockAction = text(row.stockAction || row.stock_action) || modifierStockActionLabel(stockActionType);
   return {
     ...row,
     id: text(row.id || row.sourceId || row.modifierId || row.modifierName),
@@ -427,7 +442,9 @@ function normalizeModifierRow(row = {}) {
     modifierId: text(row.modifierId || row.yocoModifierId),
     yocoModifierId: text(row.yocoModifierId || row.modifierId),
     modifierName: text(row.modifierName) || 'Yoco Modifier',
-    modifierType: normalizeModifierType(row.modifierType),
+    modifierType,
+    stockActionType,
+    stockAction,
     qty: netSelections,
     saleQty,
     refundQty,
@@ -443,7 +460,7 @@ function normalizeModifierRow(row = {}) {
     grossSales: grossAmount,
     vat: vatAmount,
     netSales: netAmount,
-    linkedProduct: text(row.linkedProduct) || (normalizeModifierType(row.modifierType) === 'Product' ? text(row.modifierName) : ''),
+    linkedProduct: text(row.linkedProduct) || (modifierType === 'Product' ? text(row.modifierName) : ''),
     linkedStockItemName: text(row.linkedStockItemName),
     stockQuantityChange: safeNumber(row.stockQuantityChange ?? row.stock_quantity_change),
     stockQtyDeducted: safeNumber(row.stockQtyDeducted ?? row.stockDeducted ?? row.qtyDeducted),
@@ -487,6 +504,8 @@ function buildModifierSummary(rows = []) {
       modifierGroupName: first.modifierGroupName,
       modifierName: first.modifierName,
       modifierType: mixedOrFirst(groupRows, 'modifierType'),
+      stockActionType: mixedOrFirst(groupRows, 'stockActionType'),
+      stockAction: mixedOrFirst(groupRows, 'stockAction'),
       timesSelected,
       refundedSelections,
       netSelections,
@@ -539,6 +558,8 @@ function buildByGroup(rows = []) {
       id: `modifier-group:${key || index}`,
       modifierGroupName: first.modifierGroupName,
       modifierType: mixedOrFirst(groupRows, 'modifierType'),
+      stockActionType: mixedOrFirst(groupRows, 'stockActionType'),
+      stockAction: mixedOrFirst(groupRows, 'stockAction'),
       totalSelections: sumBy(groupRows, 'timesSelected'),
       refundedSelections,
       netSelections,
@@ -740,10 +761,28 @@ function topModifier(rows = []) {
   return grouped.sort((a, b) => b.count - a.count)[0]?.name || '';
 }
 
+function normalizeModifierStockActionType(value = '') {
+  const action = text(value).toUpperCase();
+  return ['ADD_RECIPE', 'ADD_STOCK_ITEM', 'REMOVE_INGREDIENT', 'REPLACE_INGREDIENT', 'NO_STOCK_CHANGE'].includes(action)
+    ? action
+    : '';
+}
+
+function modifierStockActionLabel(value = '') {
+  return {
+    ADD_RECIPE: 'Add recipe',
+    ADD_STOCK_ITEM: 'Add stock item',
+    REMOVE_INGREDIENT: 'Remove ingredient',
+    REPLACE_INGREDIENT: 'Replace ingredient',
+    NO_STOCK_CHANGE: 'No stock change'
+  }[normalizeModifierStockActionType(value)] || 'Not recorded';
+}
+
 function normalizeModifierType(value = '') {
   const raw = text(value).toLowerCase();
   if (raw.includes('product')) return 'Product';
   if (raw.includes('note')) return 'Note';
   if (raw.includes('text')) return 'Note';
-  return text(value) || 'Note';
+  if (raw.includes('option') || raw.includes('choice') || raw.includes('add-on') || raw.includes('addon')) return 'Option';
+  return text(value) || 'Option';
 }

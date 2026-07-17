@@ -1,4 +1,4 @@
-const expected = 'phase73-yoco-refund-original-order-resolution';
+const expected = 'phase-v2-12-yoco-legacy-shutdown';
 const endpoint = process.env.KCP_API_BASE_URL
   ? `${String(process.env.KCP_API_BASE_URL).replace(/\/+$/, '')}/api/runtime-version`
   : 'https://kcp-api-v2.adminkitchencostpro.workers.dev/api/runtime-version';

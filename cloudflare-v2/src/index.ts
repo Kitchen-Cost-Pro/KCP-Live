@@ -16,8 +16,13 @@ import {
 import type { AdminTenantSummary } from './legacy/admin-routes';
 import { dispatchCentralRoute } from './legacy/index';
 import { KCP_WORKER_RELEASE, KCP_WORKER_RELEASE_DATE, KCP_REFUND_PIPELINE_VERSION } from './release';
+import { consumeYocoV2QueueBatch } from './modules/yoco-engine-v2/queue-consumer';
+import type { YocoV2QueueDispatchResult, YocoV2QueueMessage } from './modules/yoco-engine-v2/contracts';
+import { permissionsForAdminRole } from './modules/yoco-engine-v2/admin-permissions';
+import { normalizeYocoV2AdminActionPath } from './modules/yoco-engine-v2/admin-route-path';
 
 export { WorkspaceDO } from './workspace-do';
+export { YocoV2RateGateDO } from './yoco-v2-rate-gate-do';
 
 /** A legacy Env whose env.DB is the CENTRAL D1 — for central-plane handlers (auth/admin). */
 function centralLegacyEnv(env: Env): LegacyEnv {
@@ -37,12 +42,32 @@ async function dispatchCentral(request: Request, env: Env, url: URL): Promise<Re
   // Admin workspace actions are mixed-plane: authentication/auditing live in CENTRAL_DB while
   // Yoco, stock, webhook and low-stock data live in the workspace Durable Object. Never allow
   // these routes to fall through to the legacy central dispatcher, where tenant-table queries fail.
+  const adminWorkspaceYocoV2M = url.pathname.match(/^\/api\/admin\/workspaces\/([^/]+)\/yoco-v2\/(.+)$/);
+  if (adminWorkspaceYocoV2M && (request.method === 'GET' || request.method === 'POST' || request.method === 'PATCH')) {
+    const workspaceId = decodeURIComponent(adminWorkspaceYocoV2M[1]);
+    const decodedActionPath = adminWorkspaceYocoV2M[2].split('/').map((segment) => decodeURIComponent(segment)).join('/');
+    const actionPath = normalizeYocoV2AdminActionPath(decodedActionPath);
+    const adminSession = await requireAdmin(request, lenv);
+    const auth = adminAuthContext(adminSession);
+    const response = await forwardToWorkspaceDO(request, env, workspaceId, `yoco-v2/admin/${actionPath}`, auth);
+    if ((request.method === 'POST' || request.method === 'PATCH') && response.ok) {
+      await writeAdminAuditEvent(
+        lenv,
+        { uid: auth.uid, email: auth.email },
+        `yoco-v2.${actionPath.replace(/[^a-z0-9._-]+/gi, '.')}`,
+        workspaceId,
+        { workspaceId, actionPath }
+      );
+    }
+    return response;
+  }
+
   const adminWorkspaceYocoM = url.pathname.match(/^\/api\/admin\/workspaces\/([^/]+)\/yoco\/([^/]+)$/);
   if (adminWorkspaceYocoM) {
     const workspaceId = decodeURIComponent(adminWorkspaceYocoM[1]);
     const action = decodeURIComponent(adminWorkspaceYocoM[2]);
     const allowedGetActions = new Set(['status', 'events']);
-    const allowedPostActions = new Set(['connect', 'disconnect', 'sync-catalogue', 'sync-sales', 'reconcile-sales', 'retry-failed-orders', 'retry-refunds', 'reset-webhook', 'test-webhook']);
+    const allowedPostActions = new Set(['connect', 'disconnect', 'sync-catalogue', 'reset-webhook', 'test-webhook']);
     if ((request.method === 'GET' && allowedGetActions.has(action)) || (request.method === 'POST' && allowedPostActions.has(action))) {
       const adminSession = await requireAdmin(request, lenv);
       const auth = adminAuthContext(adminSession);
@@ -196,9 +221,13 @@ async function dispatchCentral(request: Request, env: Env, url: URL): Promise<Re
 }
 
 function adminAuthContext(adminSession: Awaited<ReturnType<typeof requireAdmin>>): AuthContext {
+  const adminRole = text(adminSession.admin?.role || 'admin');
   return {
     uid: text(adminSession.auth?.uid || adminSession.admin?.id || 'admin'),
-    email: text(adminSession.admin?.email || adminSession.auth?.email || '')
+    email: text(adminSession.admin?.email || adminSession.auth?.email || ''),
+    systemRole: 'admin',
+    adminRole,
+    permissions: permissionsForAdminRole(adminRole, Boolean(adminSession.admin?.isSuper))
   };
 }
 
@@ -547,6 +576,28 @@ async function forwardToWorkspaceDO(
   // draining the outer request after a JSON-reading action (for example Yoco disconnect/connect).
   const forwarded = new Request(request, { headers });
   return stub.fetch(forwarded);
+}
+
+async function dispatchYocoV2QueueMessage(env: Env, message: YocoV2QueueMessage): Promise<YocoV2QueueDispatchResult> {
+  const workspaceId = String(message.workspace_id || '');
+  if (!workspaceId) return { ok: false, action: 'ack', status: 'FAILED_PERMANENTLY', error: 'Queue message has no workspace_id.' };
+  const stub = env.WORKSPACE.get(env.WORKSPACE.idFromName(workspaceId));
+  const headers = new Headers({ 'content-type': 'application/json' });
+  headers.set('x-kcp-workspace', workspaceId);
+  headers.set('x-kcp-resource', 'yoco-v2/queue/process');
+  headers.set('x-kcp-auth', JSON.stringify({ uid: 'yoco-v2-queue', email: '', systemRole: 'queue' }));
+  const request = new Request(`https://do/api/workspaces/${encodeURIComponent(workspaceId)}/yoco-v2/queue/process`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(message)
+  });
+  const response = await stub.fetch(request);
+  const data = await response.json<YocoV2QueueDispatchResult>().catch(() => ({
+    ok: false,
+    action: response.status >= 500 ? 'retry' : 'ack',
+    error: `V2 queue route returned HTTP ${response.status}.`
+  } as YocoV2QueueDispatchResult));
+  return data;
 }
 
 /**
@@ -1032,16 +1083,13 @@ async function handle(request: Request, env: Env): Promise<Response> {
     return json(request, env, { ok: false, error: 'Unknown migrate route' }, 404);
   }
 
-  // Yoco webhook ingress. Yoco POSTs to /webhooks/yoco/:workspaceId (registered URL). This is a
-  // TENANT operation — it reads yoco_connections + depletes stock via processYocoOrder, all tenant
-  // tables — so it MUST run in the workspace DO. Previously it fell through to the central dispatcher
-  // (env.DB = CENTRAL_DB), where the connection lookup returned nothing and it rejected before
-  // depleting (webhook depletion silently never happened; only manual sync worked). Signature
-  // verification runs inside the DO handler using the tenant-stored webhook_secret.
+  // Sole external Yoco webhook ingress. The tenant DO verifies the signature, captures the immutable
+  // V2 raw event, and publishes identifier-only queue work. No sale, refund, reporting, or stock
+  // business effect executes in the request path.
   const yocoWebhookM = url.pathname.match(/^\/webhooks\/yoco\/([^/]+)$/);
   if (yocoWebhookM && request.method === 'POST') {
     const wsId = decodeURIComponent(yocoWebhookM[1]);
-    const response = await forwardToWorkspaceDO(request, env, wsId, 'yoco-webhook', { uid: 'yoco-webhook', email: '' });
+    const response = await forwardToWorkspaceDO(request, env, wsId, 'yoco-v2/webhook', { uid: 'yoco-webhook', email: '' });
     const headers = new Headers(response.headers);
     for (const [k, v] of Object.entries(corsHeaders(request, env))) headers.set(k, v);
     return new Response(response.body, { status: response.status, headers });
@@ -1115,15 +1163,24 @@ export default {
       return await handle(request, env);
     } catch (cause) {
       console.error('FETCH ERROR:', cause);
-      // Map auth/permission errors thrown by handlers (requireAuth/requireAdmin/scoped) to 401 so the
-      // frontend treats them as "not signed in" rather than a server error. Mirrors legacy behaviour.
+      // Authentication failures are 401. Authenticated users who lack workspace/location access are
+      // 403; treating those as 401 caused report and dashboard permission failures to look like an
+      // expired login and triggered misleading sign-in errors across the app.
       const raw = cause instanceof Error ? cause.message : 'Internal error.';
-      const status = /token|access|permission|denied|sign in|session|expired/i.test(raw) ? 401 : 500;
+      const status = /permission|denied|no locations are assigned|access to this workspace/i.test(raw)
+        ? 403
+        : /token|sign in|session|expired|missing bearer|authentication/i.test(raw)
+          ? 401
+          : 500;
       const message = /token|session|expired|access|permission|denied|invalid|required|not found|sign in|password|email|already exists|duplicate|unique/i.test(raw)
         ? raw
         : 'Something went wrong. Please try again.';
       return json(request, env, { ok: false, error: message }, status);
     }
+  },
+
+  async queue(batch: MessageBatch<YocoV2QueueMessage>, env: Env): Promise<void> {
+    await consumeYocoV2QueueBatch(batch, (message) => dispatchYocoV2QueueMessage(env, message));
   },
 
   // Low-stock email cron. The per-workspace stock/settings/run tables are tenant-only, so we
@@ -1142,8 +1199,8 @@ export default {
           .catch((cause) => { console.error(`[low-stock-cron] ws=${id} failed: ${cause}`); return null; }),
         callWorkspaceDO(env, id, 'admin-action/report-schedules-due', { uid: 'system', email: '' }, 'POST', {})
           .catch((cause) => { console.error(`[report-schedule-cron] ws=${id} failed: ${cause}`); return null; }),
-        callWorkspaceDO(env, id, 'admin-action/yoco-webhook-health', { uid: 'system', email: '' }, 'POST', {})
-          .catch((cause) => { console.error(`[yoco-webhook-health-cron] ws=${id} failed: ${cause}`); return null; })
+        callWorkspaceDO(env, id, 'yoco-v2/reconciliation/scheduled', { uid: 'system', email: '', systemRole: 'queue' }, 'POST', {})
+          .catch((cause) => { console.error(`[yoco-v2-reconciliation-cron] ws=${id} failed: ${cause}`); return null; })
       ])
     );
   }

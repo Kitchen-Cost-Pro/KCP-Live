@@ -28,10 +28,10 @@ export function renderSavedViewsControl({
   let activeSavedViewId = initialActiveSavedViewId;
   let defaultNotified = false;
 
-  const relevantViews = () => views.filter((view) => {
-    if (reportGroupId && view.reportGroupId === reportGroupId) return true;
-    return view.reportId === reportId;
-  });
+  // A default belongs to the exact report, not every child report in the same dashboard group.
+  // Group-wide matching caused a Payment Summary default to overwrite Stock Movement (and vice
+  // versa), making defaults appear random and schedules pick the wrong saved configuration.
+  const relevantViews = () => views.filter((view) => view.reportId === reportId);
 
   const draw = () => {
     const relevant = relevantViews();
@@ -103,6 +103,7 @@ export function renderSavedViewsControl({
       onLoad?.(selected);
     }));
     root.querySelectorAll('[data-saved-view-default]').forEach((button) => button.addEventListener('click', async () => {
+      activeSavedViewId = button.dataset.savedViewDefault || activeSavedViewId;
       await mutate(async () => updateSavedView(workspaceId, button.dataset.savedViewDefault, { isDefault: true }));
     }));
     root.querySelectorAll('[data-saved-view-duplicate]').forEach((button) => button.addEventListener('click', async () => {
@@ -212,7 +213,7 @@ export function renderSavedViewsControl({
     draw();
     try {
       views = await listSavedViews(workspaceId);
-      const relevantDefault = views.find((view) => view.isDefault && ((reportGroupId && view.reportGroupId === reportGroupId) || view.reportId === reportId));
+      const relevantDefault = views.find((view) => view.isDefault && view.reportId === reportId);
       if (relevantDefault && !defaultNotified && typeof onDefaultAvailable === 'function') {
         defaultNotified = true;
         activeSavedViewId = relevantDefault.id;

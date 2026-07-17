@@ -9,10 +9,11 @@ export function subscribeRecipeWorkspace(workspaceId, { onSnapshot, onError } = 
 
   const load = async () => {
     try {
-      const [productResponse, modifierResponse, stockResponse] = await Promise.all([
+      const [productResponse, modifierResponse, stockResponse, noteResponse] = await Promise.all([
         callCloudflareWorkspaceRoute(workspaceKey, 'products', { query: { limit: 500 } }),
         callCloudflareWorkspaceRoute(workspaceKey, 'yoco/modifier-recipes', { method: 'GET' }).catch(() => ({ items: [] })),
-        fetchStock(workspaceKey)
+        fetchStock(workspaceKey),
+        fetchModifierNoteSuggestions(workspaceKey).catch(() => ({ suggestions: [] }))
       ]);
       if (closed) return;
       const productItems = (productResponse.products || productResponse.items || []).map(normalizeRecipeItem);
@@ -23,12 +24,14 @@ export function subscribeRecipeWorkspace(workspaceId, { onSnapshot, onError } = 
         items,
         ingredients: stockResponse.items || [],
         locations: stockResponse.locations || [],
+        noteSuggestions: noteResponse.suggestions || [],
         source: 'Live catalogue',
         loaded: {
           firestoreItems: false,
           realtimeItems: false,
           menuItems: true,
-          ingredients: true
+          ingredients: true,
+          noteSuggestions: true
         },
         updatedAt: new Date().toISOString()
       });
@@ -46,7 +49,7 @@ export function subscribeRecipeWorkspace(workspaceId, { onSnapshot, onError } = 
 
 export async function fetchRecipeItems(workspaceId, options = {}) {
   const workspaceKey = requireWorkspace(workspaceId);
-  const [productResponse, modifierResponse, stockResponse] = await Promise.all([
+  const [productResponse, modifierResponse, stockResponse, noteResponse] = await Promise.all([
     callCloudflareWorkspaceRoute(workspaceKey, 'products', {
       query: {
         limit: 500,
@@ -59,15 +62,56 @@ export async function fetchRecipeItems(workspaceId, options = {}) {
         _refresh: options.cacheBust ? Date.now() : ''
       }
     }).catch(() => ({ items: [] })),
-    fetchStock(workspaceKey)
+    fetchStock(workspaceKey),
+    fetchModifierNoteSuggestions(workspaceKey, {
+      includeIgnored: options.includeIgnored,
+      cacheBust: options.cacheBust
+    }).catch(() => ({ suggestions: [] }))
   ]);
   const productItems = (productResponse.products || productResponse.items || []).map(normalizeRecipeItem);
   const modifierItems = (modifierResponse.modifiers || modifierResponse.items || []).map(normalizeRecipeItem);
   return {
     items: sortRecipeItems(filterActiveRecipeItems([...productItems, ...modifierItems])),
     ingredients: stockResponse.items || [],
-    locations: stockResponse.locations || []
+    locations: stockResponse.locations || [],
+    noteSuggestions: noteResponse.suggestions || []
   };
+}
+
+export async function fetchModifierNoteSuggestions(workspaceId, options = {}) {
+  const workspaceKey = requireWorkspace(workspaceId);
+  return callCloudflareWorkspaceRoute(workspaceKey, 'yoco/modifier-note-suggestions', {
+    method: 'GET',
+    query: {
+      includeIgnored: options.includeIgnored ? 1 : 0,
+      minimumSeen: 3,
+      _refresh: options.cacheBust ? Date.now() : ''
+    }
+  });
+}
+
+export async function saveModifierNoteRule(workspaceId, noteText, rule = {}) {
+  const workspaceKey = requireWorkspace(workspaceId);
+  return callCloudflareWorkspaceRoute(workspaceKey, 'yoco/modifier-note-rules', {
+    method: 'POST',
+    payload: { noteText, rule }
+  });
+}
+
+export async function ignoreModifierNoteSuggestion(workspaceId, noteText) {
+  const workspaceKey = requireWorkspace(workspaceId);
+  return callCloudflareWorkspaceRoute(workspaceKey, 'yoco/modifier-note-ignore', {
+    method: 'POST',
+    payload: { noteText }
+  });
+}
+
+export async function restoreModifierNoteSuggestion(workspaceId, noteText) {
+  const workspaceKey = requireWorkspace(workspaceId);
+  return callCloudflareWorkspaceRoute(workspaceKey, 'yoco/modifier-note-restore', {
+    method: 'POST',
+    payload: { noteText }
+  });
 }
 
 export async function updateRecipe(workspaceId, item, recipe = []) {
@@ -80,7 +124,12 @@ export async function updateRecipe(workspaceId, item, recipe = []) {
       payload: {
         recipe: normalizeRecipeLines(recipe),
         linkedProductId: item.linkedProductId || '',
-        linkedProductIds: Array.isArray(item.linkedProductIds) ? item.linkedProductIds : linkedProductIdsFromValue(item.linkedProductId)
+        linkedProductIds: Array.isArray(item.linkedProductIds) ? item.linkedProductIds : linkedProductIdsFromValue(item.linkedProductId),
+        stockRule: normalizeModifierStockRule(item),
+        yocoModifierId: item.yocoModifierId || '',
+        yocoModifierGroupId: item.yocoModifierGroupId || '',
+        yocoModifierVariantId: item.yocoModifierVariantId || '',
+        name: item.name || ''
       }
     });
     return;
@@ -283,6 +332,7 @@ function normalizeRecipeItem(item = {}) {
 	    recipeSourceRecipeLines,
 	    recipeOwnerType: item.recipeOwnerType || 'product',
 	    recipeOwnerId: item.recipeOwnerId || item.id || '',
+      stockRule: isModifierRecipeItem(item) ? normalizeModifierStockRule(item) : null,
 	    recipeSource: item.recipeSource || (recipeStatus === RECIPE_STATUS.COMPLETE_VIA_LINKED_STOCK_ITEM ? 'linked_stock_item' : recipe.length ? 'direct' : 'missing'),
 	    recipe,
 	    directRecipe: recipe,
@@ -317,6 +367,30 @@ function stripSkuSuffix(name = '', sku = '') {
 function displaySourceLabel(source = '', fallback = 'Live data') {
   const value = String(source || '').trim();
   return value && !/flare|d1/i.test(value) ? value : fallback;
+}
+
+function normalizeModifierStockRule(item = {}) {
+  const source = item.stockRule && typeof item.stockRule === 'object' ? item.stockRule : {};
+  const ownerId = String(item.recipeOwnerId || item.id || '').replace(/^modifier:/, '');
+  const actionType = String(source.actionType || (item.recipeCount || item.linkedProductId ? 'ADD_RECIPE' : 'NO_STOCK_CHANGE')).toUpperCase();
+  return {
+    ...source,
+    actionType,
+    targetOwnerType: String(source.targetOwnerType || (actionType === 'ADD_RECIPE' ? 'yoco_modifier' : '')),
+    targetOwnerId: String(source.targetOwnerId || (actionType === 'ADD_RECIPE' ? ownerId : '')),
+    sourceStockItemId: String(source.sourceStockItemId || ''),
+    replacementStockItemId: String(source.replacementStockItemId || ''),
+    quantity: Number(source.quantity || 1) || 1,
+    unit: String(source.unit || 'ea'),
+    menuItemIds: Array.isArray(source.menuItemIds) ? source.menuItemIds.map(String).filter(Boolean) : [],
+    locationIds: [],
+    applyAllMatchingProducts: source.applyAllMatchingProducts !== false,
+    active: source.active !== false,
+    sourceModifierId: String(source.sourceModifierId || item.yocoModifierId || ''),
+    sourceModifierGroupId: String(source.sourceModifierGroupId || item.yocoModifierGroupId || ''),
+    sourceModifierVariantId: String(source.sourceModifierVariantId || item.yocoModifierVariantId || ''),
+    sourceName: String(source.sourceName || item.name || '')
+  };
 }
 
 function linkedProductIdsFromValue(value = '') {

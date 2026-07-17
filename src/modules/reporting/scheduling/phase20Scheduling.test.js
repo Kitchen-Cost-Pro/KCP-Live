@@ -201,8 +201,8 @@ test('Phase 20 scheduled report packs include metadata, separate location links,
   for (const label of ['Schedule:', 'Workspace:', 'Period:', 'Generated:', 'Summary:', 'Reports:']) {
     assert.ok(workerSource.includes(label), label);
   }
-  assert.match(workerSource, /for \(let itemIndex = 0; itemIndex < items\.length; itemIndex \+= 1\)/);
-  assert.match(workerSource, /for \(const location of locations\)/);
+  assert.match(workerSource, /for \(let itemIndex = 0; itemIndex < itemPlans\.length; itemIndex \+= 1\)/);
+  assert.match(workerSource, /for \(const location of itemLocations\)/);
   assert.match(workerSource, /buildScheduledAttachments\(schedule\.format, outputs\)/);
   assert.match(workerSource, /buildCsvAttachment\(output\.payload, output\)/);
   assert.match(workerSource, /groupScheduledOutputsByReport\(outputs\)/);
@@ -230,7 +230,7 @@ test('Phase 20 cron invokes due report schedules on the Worker backend', () => {
 
 test('schedule edits are allowed through the Worker CORS preflight', () => {
   assert.match(cronSource, /Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS'/);
-  assert.match(routeSource, /scheduleMatch && request\.method === 'PUT'/);
+  assert.match(routeSource, /scheduleMatch && request\.method === [\"']PUT[\"']/);
 });
 
 test('workspace modules wait for resolved access and rerender only when effective access changes', () => {

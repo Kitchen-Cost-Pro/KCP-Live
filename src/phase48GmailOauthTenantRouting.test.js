@@ -12,8 +12,8 @@ test('Phase 48 routes workspace Gmail OAuth callbacks into the tenant Durable Ob
   assert.match(worker, /gmailWorkspaceIdFromOauthState/);
   assert.match(worker, /url\.pathname === '\/api\/gmail\/oauth\/callback'/);
   assert.match(worker, /forwardToWorkspaceDO\([\s\S]*'gmail-oauth-callback'/);
-  assert.match(legacy, /resource === 'gmail-oauth-callback'/);
-  assert.match(legacy, /auth\.uid !== 'gmail-oauth-callback'/);
+  assert.match(legacy, /resource === [\"']gmail-oauth-callback[\"']/);
+  assert.match(legacy, /auth\.uid !== [\"']gmail-oauth-callback[\"']/);
   assert.match(legacy, /return getGmailOAuthCallback\(request, env\)/);
   assert.match(routes, /FROM workspace_settings/);
 });

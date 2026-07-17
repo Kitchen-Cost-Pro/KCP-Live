@@ -1,0 +1,33 @@
+# Dependencies and build output
+node_modules/
+cloudflare-v2/node_modules/
+dist/
+coverage/
+
+# Cloudflare local/generated state
+.wrangler/
+cloudflare-v2/.wrangler/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+.dev.vars
+cloudflare-v2/.dev.vars
+
+# Generated release and audit artifacts
+*.zip
+*.patch
+*.diff
+*.log
+*.tmp
+*.bak
+*.orig
+PHASE*.md
+PHASE*.txt
+*_VALIDATION*.txt
+*_RELEASE_MANIFEST.txt
+
+# Operating-system files
+.DS_Store
+Thumbs.db

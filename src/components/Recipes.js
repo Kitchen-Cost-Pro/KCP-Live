@@ -2,56 +2,15 @@ import '../styles/recipes.css';
 import { renderLoadingPanel } from './LoadingPanel.js';
 import { matchesBarcodeQuery } from '../utils/barcodes.js';
 import { resolveRecipeIngredientUnitCost } from '../utils/stockCostResolver.js';
+import { getAccessibleLocationOptions } from '../services/locationAccess.js';
+import { averageModifierOptionValue } from '../services/modifierCostService.js';
 
 let lastFocusedRecipeModalRequest = '';
 let _uomDocumentCloseHandler = null;
 
 
 function getAccessibleSellingLocationOptions(locations = [], access = {}) {
-  const active = (locations || []).filter((location) => location?.active !== false);
-  const selling = (active.length ? active : locations).filter((location) => {
-    const type = String(location.kind || location.type || location.locationType || 'selling').trim().toLowerCase();
-    return type === 'selling' || type === 'sale' || type === 'sales' || type === '';
-  });
-  const base = selling.length ? selling : active.length ? active : locations;
-  const filtered = filterLocationsByAccess(base, access);
-  return [...(filtered.length ? filtered : base)]
-    .map((location) => ({
-      value: String(location.id || location.locationId || '').trim(),
-      label: String(location.displayName || location.name || location.locationName || location.id || '').trim()
-    }))
-    .filter((option) => option.value)
-    .sort((a, b) => a.label.localeCompare(b.label));
-}
-
-function filterLocationsByAccess(locations = [], access = {}) {
-  if (access.currentIsSuperUser === true || access.currentIsKcpSuperUser === true) return locations;
-  let filtered = locations;
-  const roleLocations = access.roleDefinition?.locations || access.currentRoleDefinition?.locations || [];
-  if (Array.isArray(roleLocations) && roleLocations.length && !roleLocations.includes('all')) {
-    const allowed = new Set(roleLocations.map(normalizeLocationKey).filter(Boolean));
-    const next = filtered.filter((location) => locationMatchesLocationKeys(location, allowed));
-    filtered = next.length ? next : filtered;
-  }
-  const userLocations = Array.isArray(access.currentUserLocations) ? access.currentUserLocations : [];
-  if (userLocations.length) {
-    const allowed = new Set(userLocations.map(normalizeLocationKey).filter(Boolean));
-    const next = filtered.filter((location) => locationMatchesLocationKeys(location, allowed));
-    filtered = next.length ? next : filtered;
-  }
-  return filtered;
-}
-
-function locationMatchesLocationKeys(location = {}, keys = new Set()) {
-  if (!keys.size) return true;
-  return [location.id, location.locationId, location.name, location.displayName, location.locationName]
-    .map(normalizeLocationKey)
-    .filter(Boolean)
-    .some((value) => keys.has(value));
-}
-
-function normalizeLocationKey(value = '') {
-  return String(value || '').normalize('NFKC').toLowerCase().replace(/[^a-z0-9]+/g, '').trim();
+  return getAccessibleLocationOptions(locations, access, { sellingOnly: true });
 }
 
 function resolveActiveLocationId(locationId = '', options = []) {
@@ -108,22 +67,32 @@ export function renderRecipes({ state, onRecipeFilterChange, onRecipeAction = {}
     categoryDropdownSearch: '',
     ingredientCategoryDropdownSearch: '',
     locationIdDropdownSearch: '',
+    modifierStockRuleOpen: false,
     ...(recipes.filters || {})
   };
   filters.recipeView = 'products';
   const locationOptions = getAccessibleSellingLocationOptions(recipes.locations || [], state.access || {});
   const activeLocationId = resolveActiveLocationId(filters.locationId, locationOptions);
   const activeLocationName = locationOptions.find((option) => option.value === activeLocationId)?.label || '';
-  const allItems = (recipes.items || [])
+  const catalogueItems = recipes.items || [];
+  const allItems = catalogueItems
     .filter((item) => !isModifierRecipeItem(item))
     .map((item) => applyRecipeLocationPrice(item, activeLocationId, locationOptions));
+  const modifierItems = catalogueItems.filter(isModifierRecipeItem);
   const items = filterRecipeItems(allItems, filters);
   const selectedIds = new Set((recipes.selectedIds || []).map(String));
   const selectedCount = selectedIds.size;
   const selectedItem = recipes.editingItem
     ? allItems.find((item) => String(item.id) === String(recipes.editingItem.id)) || applyRecipeLocationPrice(recipes.editingItem, activeLocationId, locationOptions)
     : null;
-  const displayRecipes = { ...recipes, items: allItems, activeLocationId, activeLocationName };
+  const displayRecipes = {
+    ...recipes,
+    items: allItems,
+    modifierItems,
+    allRecipeItems: [...allItems, ...modifierItems],
+    activeLocationId,
+    activeLocationName
+  };
   const draftRecipe = recipes.draftRecipe || selectedItem?.recipe || [];
   const categories = getCategories(allItems);
   const categoryOptions = [
@@ -449,6 +418,75 @@ function bindRecipeEvents(view, visibleItems, filters, onRecipeFilterChange, onR
 	    onRecipeAction.onModifierLinkChange?.([]);
 	  });
 
+  view.querySelector('[data-modifier-stock-open]')?.addEventListener('click', () => {
+    onRecipeFilterChange?.({ modifierStockRuleOpen: true, openDropdown: '' });
+  });
+  view.querySelectorAll('[data-modifier-stock-close]').forEach((button) => {
+    button.addEventListener('click', () => onRecipeFilterChange?.({ modifierStockRuleOpen: false }));
+  });
+  view.querySelector('[data-modifier-stock-done]')?.addEventListener('click', () => {
+    onRecipeFilterChange?.({ modifierStockRuleOpen: false });
+  });
+  view.querySelector('[data-modifier-stock-backdrop]')?.addEventListener('click', (event) => {
+    if (event.target === event.currentTarget) onRecipeFilterChange?.({ modifierStockRuleOpen: false });
+  });
+  view.querySelectorAll('[data-modifier-stock-action]').forEach((input) => {
+    input.addEventListener('change', () => {
+      const actionType = input.value;
+      const ownerId = view.querySelector('[data-modifier-owner-id]')?.dataset.modifierOwnerId || '';
+      const patch = { actionType, locationIds: [], quantity: 1, unit: 'ea' };
+      if (actionType === 'ADD_RECIPE') Object.assign(patch, {
+        targetOwnerType: 'yoco_modifier',
+        targetOwnerId: ownerId,
+        sourceStockItemId: '',
+        replacementStockItemId: ''
+      });
+      if (actionType === 'ADD_STOCK_ITEM') Object.assign(patch, { targetOwnerType: 'stock_item', targetOwnerId: '', sourceStockItemId: '', replacementStockItemId: '' });
+      if (actionType === 'REMOVE_INGREDIENT') Object.assign(patch, { targetOwnerType: '', targetOwnerId: '', replacementStockItemId: '' });
+      if (actionType === 'REPLACE_INGREDIENT') Object.assign(patch, { targetOwnerType: '', targetOwnerId: '' });
+      if (actionType === 'NO_STOCK_CHANGE') Object.assign(patch, { targetOwnerType: '', targetOwnerId: '', sourceStockItemId: '', replacementStockItemId: '' });
+      onRecipeAction.onModifierStockRuleChange?.(patch);
+    });
+  });
+  view.querySelectorAll('[data-modifier-stock-picker-open]').forEach((button) => {
+    button.addEventListener('click', () => onRecipeAction.onOpenModifierStockPicker?.(button.dataset.modifierStockPickerOpen || ''));
+  });
+  view.querySelectorAll('[data-modifier-stock-picker-close]').forEach((button) => {
+    button.addEventListener('click', () => onRecipeAction.onCloseModifierStockPicker?.());
+  });
+  view.querySelector('[data-modifier-stock-picker-backdrop]')?.addEventListener('click', (event) => {
+    if (event.target === event.currentTarget) onRecipeAction.onCloseModifierStockPicker?.();
+  });
+  view.querySelector('[data-modifier-stock-picker-search]')?.addEventListener('input', (event) => {
+    onRecipeAction.onModifierStockPickerSearch?.(event.currentTarget.value);
+  });
+  view.querySelectorAll('[data-modifier-stock-picker-select]').forEach((button) => {
+    button.addEventListener('click', () => onRecipeAction.onModifierStockPickerSelect?.(button.dataset.modifierStockPickerSelect || ''));
+  });
+  view.querySelector('[data-modifier-stock-quantity]')?.addEventListener('change', (event) => {
+    onRecipeAction.onModifierStockRuleChange?.({ quantity: Number(event.currentTarget.value) });
+  });
+  view.querySelector('[data-modifier-stock-unit]')?.addEventListener('change', (event) => {
+    onRecipeAction.onModifierStockRuleChange?.({ unit: event.currentTarget.value });
+  });
+  view.querySelector('[data-modifier-stock-replacement-quantity]')?.addEventListener('change', (event) => {
+    const sourceQuantity = Number(event.currentTarget.dataset.modifierStockSourceQuantity || 0);
+    const entered = Number(event.currentTarget.value);
+    onRecipeAction.onModifierStockRuleChange?.({ quantity: sourceQuantity > 0 ? entered / sourceQuantity : entered });
+  });
+  view.querySelector('[data-modifier-stock-apply-all]')?.addEventListener('change', (event) => {
+    onRecipeAction.onModifierStockRuleChange?.({
+      applyAllMatchingProducts: event.currentTarget.checked,
+      ...(event.currentTarget.checked ? { menuItemIds: [] } : {})
+    });
+  });
+  view.querySelectorAll('[data-modifier-stock-menu-item]').forEach((input) => {
+    input.addEventListener('change', () => {
+      const menuItemIds = [...view.querySelectorAll('[data-modifier-stock-menu-item]:checked')].map((entry) => entry.value);
+      onRecipeAction.onModifierStockRuleChange?.({ menuItemIds, applyAllMatchingProducts: false });
+    });
+  });
+
 	  view.querySelector('[data-recipe-source-stock-toggle]')?.addEventListener('click', () => {
 	    onRecipeFilterChange?.({
 	      openDropdown: filters.openDropdown === 'recipeSourceStockItem' ? '' : 'recipeSourceStockItem'
@@ -504,6 +542,56 @@ function bindRecipeEvents(view, visibleItems, filters, onRecipeFilterChange, onR
     onRecipeAction.onPickerApply?.();
   });
 
+  view.querySelector('[data-recipe-note-suggestions-open]')?.addEventListener('click', () => {
+    onRecipeAction.onOpenNoteSuggestions?.();
+  });
+  view.querySelectorAll('[data-recipe-note-suggestions-close]').forEach((button) => {
+    button.addEventListener('click', () => onRecipeAction.onCloseNoteSuggestions?.());
+  });
+  view.querySelector('[data-recipe-note-suggestions-backdrop]')?.addEventListener('click', (event) => {
+    if (event.target === event.currentTarget) onRecipeAction.onCloseNoteSuggestions?.();
+  });
+  view.querySelector('[data-recipe-note-refresh]')?.addEventListener('click', () => {
+    onRecipeAction.onRefreshNoteSuggestions?.();
+  });
+  view.querySelector('[data-recipe-note-include-ignored]')?.addEventListener('change', (event) => {
+    onRecipeAction.onToggleIgnoredNoteSuggestions?.(event.currentTarget.checked);
+  });
+  view.querySelectorAll('[data-note-suggestion-setup]').forEach((button) => {
+    button.addEventListener('click', () => onRecipeAction.onStartNoteRuleSetup?.(button.dataset.noteSuggestionSetup));
+  });
+  view.querySelectorAll('[data-note-suggestion-ignore]').forEach((button) => {
+    button.addEventListener('click', () => onRecipeAction.onIgnoreNoteSuggestion?.(button.dataset.noteSuggestionIgnore));
+  });
+  view.querySelectorAll('[data-note-suggestion-restore]').forEach((button) => {
+    button.addEventListener('click', () => onRecipeAction.onRestoreNoteSuggestion?.(button.dataset.noteSuggestionRestore));
+  });
+  view.querySelectorAll('[data-note-rule-cancel]').forEach((button) => {
+    button.addEventListener('click', () => onRecipeAction.onCancelNoteRuleSetup?.());
+  });
+  view.querySelectorAll('[data-note-rule-field]').forEach((field) => {
+    field.addEventListener('change', () => {
+      const key = field.dataset.noteRuleField;
+      const value = key === 'quantity' ? Number(field.value) : field.value;
+      onRecipeAction.onNoteRuleDraftChange?.({ [key]: value });
+    });
+  });
+  view.querySelectorAll('[data-note-rule-menu-item]').forEach((input) => {
+    input.addEventListener('change', () => {
+      const menuItemIds = [...view.querySelectorAll('[data-note-rule-menu-item]:checked')].map((entry) => entry.value);
+      onRecipeAction.onNoteRuleDraftChange?.({ menuItemIds });
+    });
+  });
+  view.querySelectorAll('[data-note-rule-location]').forEach((input) => {
+    input.addEventListener('change', () => {
+      const locationIds = [...view.querySelectorAll('[data-note-rule-location]:checked')].map((entry) => entry.value);
+      onRecipeAction.onNoteRuleDraftChange?.({ locationIds });
+    });
+  });
+  view.querySelector('[data-note-rule-save]')?.addEventListener('click', () => {
+    onRecipeAction.onSaveNoteRule?.();
+  });
+
   view.querySelector('[data-recipe-save]')?.addEventListener('click', () => {
     onRecipeAction.onSave?.();
   });
@@ -519,6 +607,133 @@ function bindRecipeEvents(view, visibleItems, filters, onRecipeFilterChange, onR
   view.querySelector('[data-recipe-toast-close]')?.addEventListener('click', () => {
     onRecipeAction.onDismissToast?.();
   });
+}
+
+
+export function bindModifierManagementControls(view, {
+  onCloseModifier = () => {},
+  onSaveModifier = () => {},
+  onModifierStockRuleChange = () => {},
+  onOpenModifierStockPicker = () => {},
+  onCloseModifierStockPicker = () => {},
+  onModifierStockPickerSearch = () => {},
+  onModifierStockPickerSelect = () => {},
+  onOpenNoteSuggestions = () => {},
+  onCloseNoteSuggestions = () => {},
+  onRefreshNoteSuggestions = () => {},
+  onToggleIgnoredNoteSuggestions = () => {},
+  onStartNoteRuleSetup = () => {},
+  onCancelNoteRuleSetup = () => {},
+  onNoteRuleDraftChange = () => {},
+  onSaveNoteRule = () => {},
+  onIgnoreNoteSuggestion = () => {},
+  onRestoreNoteSuggestion = () => {}
+} = {}) {
+  if (!view) return;
+  view.querySelectorAll('[data-modifier-stock-close]').forEach((button) => {
+    button.addEventListener('click', () => onCloseModifier());
+  });
+  view.querySelector('[data-modifier-stock-done]')?.addEventListener('click', () => onSaveModifier());
+  view.querySelector('[data-modifier-stock-backdrop]')?.addEventListener('click', (event) => {
+    if (event.target === event.currentTarget) onCloseModifier();
+  });
+  view.querySelectorAll('[data-modifier-stock-action]').forEach((input) => {
+    input.addEventListener('change', () => {
+      const actionType = input.value;
+      const ownerId = view.querySelector('[data-modifier-owner-id]')?.dataset.modifierOwnerId || '';
+      const patch = { actionType, locationIds: [], quantity: 1, unit: 'ea' };
+      if (actionType === 'ADD_RECIPE') Object.assign(patch, { targetOwnerType: 'yoco_modifier', targetOwnerId: ownerId, sourceStockItemId: '', replacementStockItemId: '' });
+      if (actionType === 'ADD_STOCK_ITEM') Object.assign(patch, { targetOwnerType: 'stock_item', targetOwnerId: '', sourceStockItemId: '', replacementStockItemId: '' });
+      if (actionType === 'REMOVE_INGREDIENT') Object.assign(patch, { targetOwnerType: '', targetOwnerId: '', replacementStockItemId: '' });
+      if (actionType === 'REPLACE_INGREDIENT') Object.assign(patch, { targetOwnerType: '', targetOwnerId: '' });
+      if (actionType === 'NO_STOCK_CHANGE') Object.assign(patch, { targetOwnerType: '', targetOwnerId: '', sourceStockItemId: '', replacementStockItemId: '' });
+      onModifierStockRuleChange(patch);
+    });
+  });
+  view.querySelectorAll('[data-modifier-stock-picker-open]').forEach((button) => {
+    button.addEventListener('click', () => onOpenModifierStockPicker(button.dataset.modifierStockPickerOpen || ''));
+  });
+  view.querySelectorAll('[data-modifier-stock-picker-close]').forEach((button) => {
+    button.addEventListener('click', () => onCloseModifierStockPicker());
+  });
+  view.querySelector('[data-modifier-stock-picker-backdrop]')?.addEventListener('click', (event) => {
+    if (event.target === event.currentTarget) onCloseModifierStockPicker();
+  });
+  view.querySelector('[data-modifier-stock-picker-search]')?.addEventListener('input', (event) => {
+    onModifierStockPickerSearch(event.currentTarget.value);
+  });
+  view.querySelectorAll('[data-modifier-stock-picker-select]').forEach((button) => {
+    button.addEventListener('click', () => onModifierStockPickerSelect(button.dataset.modifierStockPickerSelect || ''));
+  });
+  view.querySelector('[data-modifier-stock-quantity]')?.addEventListener('change', (event) => {
+    onModifierStockRuleChange({ quantity: Number(event.currentTarget.value) });
+  });
+  view.querySelector('[data-modifier-stock-unit]')?.addEventListener('change', (event) => {
+    onModifierStockRuleChange({ unit: event.currentTarget.value });
+  });
+  view.querySelector('[data-modifier-stock-replacement-quantity]')?.addEventListener('change', (event) => {
+    const sourceQuantity = Number(event.currentTarget.dataset.modifierStockSourceQuantity || 0);
+    const entered = Number(event.currentTarget.value);
+    onModifierStockRuleChange({ quantity: sourceQuantity > 0 ? entered / sourceQuantity : entered });
+  });
+  view.querySelector('[data-modifier-stock-apply-all]')?.addEventListener('change', (event) => {
+    onModifierStockRuleChange({
+      applyAllMatchingProducts: event.currentTarget.checked,
+      ...(event.currentTarget.checked ? { menuItemIds: [] } : {})
+    });
+  });
+  view.querySelectorAll('[data-modifier-stock-menu-item]').forEach((input) => {
+    input.addEventListener('change', () => {
+      const menuItemIds = [...view.querySelectorAll('[data-modifier-stock-menu-item]:checked')].map((entry) => entry.value);
+      onModifierStockRuleChange({ menuItemIds, applyAllMatchingProducts: false });
+    });
+  });
+
+  view.querySelectorAll('[data-recipe-note-suggestions-open]').forEach((button) => {
+    button.addEventListener('click', () => onOpenNoteSuggestions());
+  });
+  view.querySelectorAll('[data-recipe-note-suggestions-close]').forEach((button) => {
+    button.addEventListener('click', () => onCloseNoteSuggestions());
+  });
+  view.querySelector('[data-recipe-note-suggestions-backdrop]')?.addEventListener('click', (event) => {
+    if (event.target === event.currentTarget) onCloseNoteSuggestions();
+  });
+  view.querySelector('[data-recipe-note-refresh]')?.addEventListener('click', () => onRefreshNoteSuggestions());
+  view.querySelector('[data-recipe-note-include-ignored]')?.addEventListener('change', (event) => {
+    onToggleIgnoredNoteSuggestions(event.currentTarget.checked);
+  });
+  view.querySelectorAll('[data-note-suggestion-setup]').forEach((button) => {
+    button.addEventListener('click', () => onStartNoteRuleSetup(button.dataset.noteSuggestionSetup));
+  });
+  view.querySelectorAll('[data-note-suggestion-ignore]').forEach((button) => {
+    button.addEventListener('click', () => onIgnoreNoteSuggestion(button.dataset.noteSuggestionIgnore));
+  });
+  view.querySelectorAll('[data-note-suggestion-restore]').forEach((button) => {
+    button.addEventListener('click', () => onRestoreNoteSuggestion(button.dataset.noteSuggestionRestore));
+  });
+  view.querySelectorAll('[data-note-rule-cancel]').forEach((button) => {
+    button.addEventListener('click', () => onCancelNoteRuleSetup());
+  });
+  view.querySelectorAll('[data-note-rule-field]').forEach((field) => {
+    field.addEventListener('change', () => {
+      const key = field.dataset.noteRuleField;
+      const value = key === 'quantity' ? Number(field.value) : field.value;
+      onNoteRuleDraftChange({ [key]: value });
+    });
+  });
+  view.querySelectorAll('[data-note-rule-menu-item]').forEach((input) => {
+    input.addEventListener('change', () => {
+      const menuItemIds = [...view.querySelectorAll('[data-note-rule-menu-item]:checked')].map((entry) => entry.value);
+      onNoteRuleDraftChange({ menuItemIds });
+    });
+  });
+  view.querySelectorAll('[data-note-rule-location]').forEach((input) => {
+    input.addEventListener('change', () => {
+      const locationIds = [...view.querySelectorAll('[data-note-rule-location]:checked')].map((entry) => entry.value);
+      onNoteRuleDraftChange({ locationIds });
+    });
+  });
+  view.querySelector('[data-note-rule-save]')?.addEventListener('click', () => onSaveNoteRule());
 }
 
 function renderRecipeBody(recipes, items, selectedIds, recipeView = 'products') {
@@ -631,6 +846,7 @@ function renderRecipeModal(item, draftRecipe, recipes, filters) {
   const combinedBreakdown = buildCombinedModifierBreakdown(item, displayRecipe, recipes, ingredients, totalCost, recipes.activeLocationId || '');
   const isModifier = isModifierRecipeItem(item);
   const showModifierPanel = !isModifier && combinedBreakdown.hasModifierContext;
+  const modifierRuleValidation = isModifier ? validateModifierStockRule(getModifierStockRule(item), recipes, item) : '';
 
   return `
     <div class="recipesModule__modalBackdrop" role="presentation">
@@ -648,6 +864,8 @@ function renderRecipeModal(item, draftRecipe, recipes, filters) {
 
 	        ${isModifier ? renderModifierProductLinkPanel(item, recipes.items || [], filters) : ''}
 
+          ${isModifier ? renderModifierStockActionPanel(item, recipes) : ''}
+
 	        <div class="recipesModule__blueprintGrid ${showModifierPanel ? '' : 'recipesModule__blueprintGrid--single'}">
 	          ${renderBaseIngredientPanel(displayRecipe, ingredients, { linkedProductMode, linkedStockItemMode, recipeSourceStockItemName: item.recipeSourceStockItemName || item.recipeSourceStockItem?.name || '', activeLocationId: recipes.activeLocationId || '' })}
 	          ${showModifierPanel ? renderModifierCostBreakdown(combinedBreakdown) : ''}
@@ -655,6 +873,7 @@ function renderRecipeModal(item, draftRecipe, recipes, filters) {
 
         ${showModifierPanel ? renderCombinedRecipeTotals(combinedBreakdown) : ''}
 
+        ${modifierRuleValidation ? `<div class="recipesModule__inlineError" role="alert">${escapeHtml(modifierRuleValidation)}</div>` : ''}
         ${recipes.actionError ? `<div class="recipesModule__inlineError" role="alert">${escapeHtml(recipes.actionError)}</div>` : ''}
         ${renderLineRemovalConfirm(recipes.confirmLineRemoval)}
 
@@ -668,12 +887,13 @@ function renderRecipeModal(item, draftRecipe, recipes, filters) {
 	            </button>
 	          `}
           <button type="button" data-recipe-close>Cancel</button>
-          <button type="button" class="recipesModule__primary" data-recipe-save ${recipes.actionStatus === 'saving' ? 'disabled' : ''}>
+          <button type="button" class="recipesModule__primary" data-recipe-save ${recipes.actionStatus === 'saving' || modifierRuleValidation ? 'disabled' : ''}>
             ${icon('check')}
             <span>${recipes.actionStatus === 'saving' ? 'Saving' : linkedProductMode ? 'Save Link' : 'Save Recipe'}</span>
           </button>
         </footer>
       </section>
+      ${isModifier && filters.modifierStockRuleOpen ? renderModifierStockActionDrawer(item, recipes) : ''}
     </div>
   `;
 }
@@ -744,8 +964,13 @@ function renderBaseIngredientPanel(draftRecipe = [], ingredients = [], options =
 
 function buildCombinedModifierBreakdown(item = {}, draftRecipe = [], recipes = {}, ingredients = [], baseCost = 0, activeLocationId = '') {
   const attachedGroups = normalizeAttachedModifierGroups(item);
-  const allItems = recipes.items || [];
-  const modifierRows = findAttachedModifierRows(item, recipes.items || [], attachedGroups)
+  // The visible recipes table intentionally contains menu products only. Modifier
+  // options are kept separately so costing can still resolve every attached option.
+  const allItems = recipes.allRecipeItems || [
+    ...(recipes.items || []),
+    ...(recipes.modifierItems || [])
+  ];
+  const modifierRows = findAttachedModifierRows(item, allItems, attachedGroups)
     .map((modifier) => {
       const linkedProduct = findLinkedModifierProduct(modifier, allItems);
       const linkedProductRecipe = Array.isArray(linkedProduct?.recipe) ? linkedProduct.recipe : [];
@@ -781,8 +1006,18 @@ function buildCombinedModifierBreakdown(item = {}, draftRecipe = [], recipes = {
       matchedGroupKeys.has(nameKey)
     ));
   });
-  const modifierCostAverage = average(modifierRows.map((modifier) => modifier.modifierCost));
-  const modifierPriceAverage = average(modifierRows.map((modifier) => modifier.modifierPrice));
+  const totalModifierOptions = attachedGroups.reduce(
+    (total, group) => total + Math.max(0, Number(group.modifierCount || 0) || 0),
+    0
+  ) || modifierRows.length;
+  const modifierCostAverage = averageModifierOptionValue(
+    modifierRows.map((modifier) => modifier.modifierCost),
+    totalModifierOptions
+  );
+  const modifierPriceAverage = averageModifierOptionValue(
+    modifierRows.map((modifier) => modifier.modifierPrice),
+    totalModifierOptions
+  );
   const combinedCostAverage = baseCost + modifierCostAverage;
   const combinedPriceAverage = Number(item.sellingPrice || 0) + modifierPriceAverage;
   const combinedGpAverage = combinedPriceAverage > 0 ? ((combinedPriceAverage - combinedCostAverage) / combinedPriceAverage) * 100 : 0;
@@ -795,6 +1030,7 @@ function buildCombinedModifierBreakdown(item = {}, draftRecipe = [], recipes = {
     attachedGroups,
     modifierRows,
     pendingGroups,
+    totalModifierOptions,
     modifierCostAverage,
     modifierPriceAverage,
     combinedCostAverage,
@@ -1162,6 +1398,543 @@ function renderModifierProductLinkPanel(item = {}, allItems = [], filters = {}) 
   `;
 }
 
+
+function getModifierStockRule(item = {}) {
+  const source = item.stockRule && typeof item.stockRule === 'object' ? item.stockRule : {};
+  const ownerId = String(item.recipeOwnerId || item.id || '').replace(/^modifier:/, '');
+  const fallbackAction = item.recipeCount || getLinkedProductIds(item).length ? 'ADD_RECIPE' : 'NO_STOCK_CHANGE';
+  const actionType = String(source.actionType || fallbackAction).toUpperCase();
+  return {
+    ...source,
+    actionType,
+    targetOwnerType: String(source.targetOwnerType || (actionType === 'ADD_RECIPE' ? 'yoco_modifier' : actionType === 'ADD_STOCK_ITEM' ? 'stock_item' : '')),
+    targetOwnerId: String(source.targetOwnerId || (actionType === 'ADD_RECIPE' ? ownerId : '')),
+    sourceStockItemId: String(source.sourceStockItemId || ''),
+    replacementStockItemId: String(source.replacementStockItemId || ''),
+    quantity: Number(source.quantity || 1) || 1,
+    unit: String(source.unit || ''),
+    menuItemIds: Array.isArray(source.menuItemIds) ? source.menuItemIds.map(String).filter(Boolean) : [],
+    // Modifier stock actions are workspace-wide. Location-specific rules created
+    // by older builds are intentionally normalised back to all locations.
+    locationIds: [],
+    applyAllMatchingProducts: source.applyAllMatchingProducts !== false,
+    active: source.active !== false,
+    sourceModifierId: String(source.sourceModifierId || item.yocoModifierId || ''),
+    sourceModifierGroupId: String(source.sourceModifierGroupId || item.yocoModifierGroupId || ''),
+    sourceModifierVariantId: String(source.sourceModifierVariantId || item.yocoModifierVariantId || ''),
+    sourceName: String(source.sourceName || item.name || '')
+  };
+}
+
+function modifierActionLabel(actionType = '') {
+  return ({
+    ADD_RECIPE: 'Deduct extra recipe',
+    ADD_STOCK_ITEM: 'Deduct extra stock item',
+    REMOVE_INGREDIENT: 'Remove an ingredient',
+    REPLACE_INGREDIENT: 'Replace an ingredient',
+    NO_STOCK_CHANGE: 'No stock change'
+  })[String(actionType || '').toUpperCase()] || 'Configure stock action';
+}
+
+function findModifierRuleEntityName(id = '', recipes = {}) {
+  const value = String(id || '');
+  return (recipes.items || []).find((entry) => String(entry.id) === value)?.name ||
+    (recipes.ingredients || []).find((entry) => String(entry.id) === value)?.name ||
+    value || 'the selected item';
+}
+
+function buildModifierStockPreview(item = {}, rule = {}, recipes = {}) {
+  const quantity = Number(rule.quantity || 1) || 1;
+  const currentOwnerId = String(item.recipeOwnerId || item.id || '').replace(/^modifier:/, '');
+  const targetName = rule.actionType === 'ADD_RECIPE' && String(rule.targetOwnerType) === 'yoco_modifier' && String(rule.targetOwnerId) === currentOwnerId
+    ? String(item.name || 'this modifier')
+    : findModifierRuleEntityName(rule.targetOwnerId, recipes);
+  const sourceName = findModifierRuleEntityName(rule.sourceStockItemId, recipes);
+  const replacementName = findModifierRuleEntityName(rule.replacementStockItemId, recipes);
+  const scope = rule.applyAllMatchingProducts || !rule.menuItemIds?.length
+    ? 'every matching menu item'
+    : `${rule.menuItemIds.length} selected menu item${rule.menuItemIds.length === 1 ? '' : 's'}`;
+  const locationScope = ' at all locations';
+  switch (rule.actionType) {
+    case 'ADD_RECIPE':
+      return `When ${item.name || 'this modifier'} is selected, deduct ${quantity} × ${targetName} recipe for ${scope}${locationScope}.`;
+    case 'ADD_STOCK_ITEM':
+      return `When ${item.name || 'this modifier'} is selected, deduct ${quantity} ${rule.unit || ''} of ${targetName} for ${scope}${locationScope}.`;
+    case 'REMOVE_INGREDIENT':
+      return `When ${item.name || 'this modifier'} is selected, omit ${sourceName} from the final ingredient usage for ${scope}${locationScope}.`;
+    case 'REPLACE_INGREDIENT':
+      return `When ${item.name || 'this modifier'} is selected, replace ${sourceName} with ${quantity === 1 ? 'the same' : `${quantity} × the removed`} base-UOM quantity of ${replacementName} for ${scope}${locationScope}.`;
+    case 'NO_STOCK_CHANGE':
+      return `When ${item.name || 'this modifier'} is selected, no additional or replacement stock movement is created.`;
+    default:
+      return 'Choose what should happen to stock when this modifier is selected.';
+  }
+}
+
+function validateModifierStockRule(rule = {}, recipes = {}, item = {}) {
+  const actionType = String(rule.actionType || '');
+  if (!['ADD_RECIPE', 'ADD_STOCK_ITEM', 'REMOVE_INGREDIENT', 'REPLACE_INGREDIENT', 'NO_STOCK_CHANGE'].includes(actionType)) {
+    return 'Choose a valid stock action for this modifier.';
+  }
+  if ((actionType === 'ADD_RECIPE' || actionType === 'ADD_STOCK_ITEM') && !(Number(rule.quantity) > 0)) {
+    return 'Modifier quantity must be greater than zero.';
+  }
+  if (actionType === 'ADD_RECIPE' && (!rule.targetOwnerType || !rule.targetOwnerId)) {
+    return 'Select the recipe that should be deducted.';
+  }
+  if (actionType === 'ADD_STOCK_ITEM' && !rule.targetOwnerId) {
+    return 'Select the stock item that should be deducted.';
+  }
+  if (actionType === 'REMOVE_INGREDIENT' || actionType === 'REPLACE_INGREDIENT') {
+    const baseRecipeItems = getModifierBaseRecipeStockItems(item, rule, recipes);
+    if (!baseRecipeItems.length) {
+      return 'No replaceable ingredients were found in the linked base recipes. Link menu items or choose a valid menu-item scope first.';
+    }
+    if (!rule.sourceStockItemId) {
+      return 'Select the ingredient that should be removed from the base recipe.';
+    }
+    if (!baseRecipeItems.some((entry) => String(entry.id) === String(rule.sourceStockItemId))) {
+      return 'The original ingredient must come from one of the linked base recipes.';
+    }
+  }
+  if (actionType === 'REPLACE_INGREDIENT' && !rule.replacementStockItemId) {
+    return 'Select the replacement ingredient.';
+  }
+  if (actionType === 'REPLACE_INGREDIENT' && !(Number(rule.quantity) > 0)) {
+    return 'Replacement quantity must be greater than zero.';
+  }
+  if (actionType === 'REPLACE_INGREDIENT' && rule.sourceStockItemId === rule.replacementStockItemId) {
+    return 'The replacement ingredient must be different from the original ingredient.';
+  }
+  if (actionType === 'REPLACE_INGREDIENT') {
+    const source = (recipes.ingredients || []).find((entry) => String(entry.id) === String(rule.sourceStockItemId));
+    const replacement = (recipes.ingredients || []).find((entry) => String(entry.id) === String(rule.replacementStockItemId));
+    if (source && replacement && normalizeKey(source.unit) !== normalizeKey(replacement.unit)) {
+      return `Replacement UOM is incompatible. ${source.unit || 'The original item'} must be replaced by an item using the same base UOM.`;
+    }
+  }
+  if (!rule.applyAllMatchingProducts && !rule.menuItemIds?.length) {
+    return 'Select at least one menu item or apply this action to all matching products.';
+  }
+  return '';
+}
+
+function renderModifierStockActionPanel(item = {}, recipes = {}) {
+  const rule = getModifierStockRule(item);
+  const validation = validateModifierStockRule(rule, recipes, item);
+  return `
+    <section class="recipesModule__modifierStockPanel ${validation ? 'has-error' : ''}">
+      <div class="recipesModule__modifierStockPanelIcon">${icon(rule.actionType === 'NO_STOCK_CHANGE' ? 'minus' : 'layers')}</div>
+      <div>
+        <span>Stock action</span>
+        <strong>${escapeHtml(modifierActionLabel(rule.actionType))}</strong>
+        <p>${escapeHtml(buildModifierStockPreview(item, rule, recipes))}</p>
+        ${validation ? `<small>${escapeHtml(validation)}</small>` : ''}
+      </div>
+      <button type="button" data-modifier-stock-open>${icon('settings')}<span>Configure stock action</span></button>
+    </section>
+  `;
+}
+
+function getModifierBaseRecipeStockItems(item = {}, rule = {}, recipes = {}) {
+  const products = (recipes.items || []).filter((entry) => !isModifierRecipeItem(entry) && entry.active !== false);
+  const stockItems = (recipes.ingredients || []).filter((entry) => entry.active !== false);
+  const stockById = new Map(stockItems.map((entry) => [String(entry.id || ''), entry]));
+  const productById = new Map(products.map((entry) => [String(entry.id || ''), entry]));
+  const productByName = new Map(products.map((entry) => [normalizeRecipeProductName(entry.name), entry]));
+  const explicitScopeIds = Array.isArray(rule.menuItemIds) ? rule.menuItemIds.map(String).filter(Boolean) : [];
+  const linkedIds = [
+    ...(Array.isArray(item.linkedItemIds) ? item.linkedItemIds : []),
+    ...getLinkedProductIds(item)
+  ].map(String).filter(Boolean);
+  const scopeIds = explicitScopeIds.length ? explicitScopeIds : [...new Set(linkedIds)];
+  const scopedProducts = scopeIds.map((id) => productById.get(id)).filter(Boolean);
+  if (!scopedProducts.length) {
+    const linkedNames = [
+      ...(Array.isArray(item.linkedItemNames) ? item.linkedItemNames : []),
+      ...getLinkedProductNames(item)
+    ];
+    linkedNames.forEach((name) => {
+      const product = productByName.get(normalizeRecipeProductName(name));
+      if (product && !scopedProducts.includes(product)) scopedProducts.push(product);
+    });
+  }
+
+  const ingredientIdsForLines = (lines = [], trail = new Set(), result = new Set()) => {
+    for (const line of normalizeRecipeLinesForDisplay(lines)) {
+      const id = String(line.ingId || line.stockItemId || '');
+      if (!id || trail.has(id)) continue;
+      const stockItem = stockById.get(id);
+      const nestedLines = stockItem ? getEffectiveRecipeForDisplay(stockItem) : [];
+      const explicitType = normalizeRecipeIngredientTypeValue(
+        stockItem?.itemType || stockItem?.stockItemType || stockItem?.specificationType || ''
+      );
+      const engineType = explicitType.replace(/_/g, '');
+      const shouldExpandNestedRecipe = Boolean(nestedLines.length && stockItem) && (
+        ['subrecipe', 'subrecipeitem', 'prep'].includes(engineType) ||
+        stockItem.isStocked === false ||
+        Number(stockItem.isStocked) === 0
+      );
+      if (shouldExpandNestedRecipe) {
+        const nextTrail = new Set(trail);
+        nextTrail.add(id);
+        ingredientIdsForLines(nestedLines, nextTrail, result);
+      } else if (stockItem) {
+        result.add(id);
+      }
+    }
+    return result;
+  };
+
+  const productIngredientSets = scopedProducts.map((product) => ingredientIdsForLines(getEffectiveRecipeForDisplay(product)));
+  const ingredientIds = explicitScopeIds.length && productIngredientSets.length
+    ? new Set([...productIngredientSets[0]].filter((id) => productIngredientSets.every((set) => set.has(id))))
+    : new Set(productIngredientSets.flatMap((set) => [...set]));
+  return [...ingredientIds]
+    .map((id) => stockById.get(id))
+    .filter(Boolean)
+    .sort((left, right) => String(left.name || '').localeCompare(String(right.name || '')));
+}
+
+function modifierStockItemUomFactor(item = {}, requestedUnit = '') {
+  const normalize = (value) => String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, ' ');
+  const baseUnit = normalize(item.unit || item.baseUom || item.base_uom || '');
+  const requested = normalize(requestedUnit || item.unit || item.baseUom || item.base_uom || '');
+  if (!requested || requested === baseUnit) return 1;
+  const collections = [item.uoms, item.customUoms, item.custom_uoms, item.units, item.alternateUoms, item.alternate_uoms];
+  for (const collection of collections) {
+    if (!Array.isArray(collection)) continue;
+    for (const entry of collection) {
+      if (normalize(entry?.name || entry?.unit || entry?.uom || entry?.label) !== requested) continue;
+      const factor = Number(entry?.ratio ?? entry?.qtyInBase ?? entry?.qty_in_base ?? entry?.factor ?? entry?.baseQty ?? entry?.packSize);
+      return Number.isFinite(factor) && factor > 0 ? factor : 1;
+    }
+  }
+  return 1;
+}
+
+function getModifierScopedProducts(item = {}, rule = {}, recipes = {}) {
+  const products = (recipes.items || []).filter((entry) => !isModifierRecipeItem(entry) && entry.active !== false);
+  const productById = new Map(products.map((entry) => [String(entry.id || ''), entry]));
+  const productByName = new Map(products.map((entry) => [normalizeRecipeProductName(entry.name), entry]));
+  const explicitScopeIds = Array.isArray(rule.menuItemIds) ? rule.menuItemIds.map(String).filter(Boolean) : [];
+  const linkedIds = [
+    ...(Array.isArray(item.linkedItemIds) ? item.linkedItemIds : []),
+    ...getLinkedProductIds(item)
+  ].map(String).filter(Boolean);
+  const scopeIds = explicitScopeIds.length ? explicitScopeIds : [...new Set(linkedIds)];
+  const scopedProducts = scopeIds.map((id) => productById.get(id)).filter(Boolean);
+  if (!scopedProducts.length) {
+    const linkedNames = [
+      ...(Array.isArray(item.linkedItemNames) ? item.linkedItemNames : []),
+      ...getLinkedProductNames(item)
+    ];
+    linkedNames.forEach((name) => {
+      const product = productByName.get(normalizeRecipeProductName(name));
+      if (product && !scopedProducts.includes(product)) scopedProducts.push(product);
+    });
+  }
+  return scopedProducts;
+}
+
+function getModifierSourceQuantityProfile(item = {}, rule = {}, recipes = {}) {
+  const sourceId = String(rule.sourceStockItemId || '');
+  if (!sourceId) return { baseQuantity: 0, varies: false, quantities: [], unit: '' };
+  const stockItems = (recipes.ingredients || []).filter((entry) => entry.active !== false);
+  const stockById = new Map(stockItems.map((entry) => [String(entry.id || ''), entry]));
+  const sourceItem = stockById.get(sourceId);
+  const quantities = [];
+
+  const totalForProduct = (product) => {
+    let total = 0;
+    const expandLines = (lines = [], multiplier = 1, trail = new Set()) => {
+      for (const line of normalizeRecipeLinesForDisplay(lines)) {
+        const id = String(line.ingId || line.stockItemId || '');
+        if (!id || trail.has(id)) continue;
+        const stockItem = stockById.get(id);
+        const qty = Math.abs(Number(line.qty ?? line.quantity ?? 0)) || 0;
+        const baseQty = qty * modifierStockItemUomFactor(stockItem || {}, line.unit || line.uom || stockItem?.unit) * multiplier;
+        if (id === sourceId) {
+          total += baseQty;
+          continue;
+        }
+        const nestedLines = stockItem ? getEffectiveRecipeForDisplay(stockItem) : [];
+        const explicitType = normalizeRecipeIngredientTypeValue(
+          stockItem?.itemType || stockItem?.stockItemType || stockItem?.specificationType || ''
+        );
+        const engineType = explicitType.replace(/_/g, '');
+        const shouldExpandNestedRecipe = Boolean(nestedLines.length && stockItem) && (
+          ['subrecipe', 'subrecipeitem', 'prep'].includes(engineType) ||
+          stockItem.isStocked === false ||
+          Number(stockItem.isStocked) === 0
+        );
+        if (shouldExpandNestedRecipe) {
+          const nextTrail = new Set(trail);
+          nextTrail.add(id);
+          expandLines(nestedLines, baseQty || multiplier, nextTrail);
+        }
+      }
+    };
+    expandLines(getEffectiveRecipeForDisplay(product));
+    return total;
+  };
+
+  for (const product of getModifierScopedProducts(item, rule, recipes)) {
+    const quantity = totalForProduct(product);
+    if (quantity > 0) quantities.push(quantity);
+  }
+  const first = quantities[0] || 0;
+  const varies = quantities.some((quantity) => Math.abs(quantity - first) > 0.000001);
+  return {
+    baseQuantity: !varies ? first : 0,
+    varies,
+    quantities,
+    unit: String(sourceItem?.unit || sourceItem?.baseUom || sourceItem?.base_uom || 'ea')
+  };
+}
+
+function renderModifierPickerButton({ mode, label, item, placeholder }) {
+  return `
+    <label class="recipesModule__stockRulePickerField">
+      <span>${escapeHtml(label)}</span>
+      <button type="button" class="recipesModule__stockRulePickerButton ${item ? 'has-value' : ''}" data-modifier-stock-picker-open="${escapeAttribute(mode)}">
+        <span>
+          <strong>${escapeHtml(item?.name || placeholder)}</strong>
+          <small>${escapeHtml(item?.meta || (item ? 'Selected' : 'Open picker'))}</small>
+        </span>
+        ${icon('chevron')}
+      </button>
+    </label>
+  `;
+}
+
+function renderModifierStockPickerModal({ picker = {}, currentOwnerId = '', item = {}, rule = {}, products = [], stockItems = [], baseRecipeStockItems = [] } = {}) {
+  if (!picker?.open) return '';
+  const mode = String(picker.mode || '');
+  const query = String(picker.query || '').trim().toLowerCase();
+  const sourceItem = stockItems.find((entry) => String(entry.id) === String(rule.sourceStockItemId));
+  let title = 'Select stock item';
+  let candidates = [];
+  if (mode === 'recipeTarget') {
+    title = 'Select recipe';
+    candidates = [
+      { value: `yoco_modifier|${currentOwnerId}`, name: 'This modifier recipe', meta: item.name || 'Modifier recipe' },
+      ...products.filter((entry) => Number(entry.recipeCount || getEffectiveRecipeForDisplay(entry).length || 0) > 0)
+        .map((entry) => ({ value: `product|${entry.id}`, name: entry.name, meta: `${entry.category || 'General'} · menu recipe` })),
+      ...stockItems.filter((entry) => Number(entry.recipeCount || getEffectiveRecipeForDisplay(entry).length || 0) > 0)
+        .map((entry) => ({ value: `stock_item|${entry.id}`, name: entry.name, meta: `${entry.unit || 'ea'} · stock item recipe` }))
+    ];
+  } else if (mode === 'source') {
+    title = rule.actionType === 'REPLACE_INGREDIENT' ? 'Select ingredient to replace' : 'Select ingredient to remove';
+    candidates = baseRecipeStockItems.map((entry) => ({ value: String(entry.id), name: entry.name, meta: `${entry.unit || 'ea'} · base recipe ingredient` }));
+  } else if (mode === 'replacement') {
+    title = 'Select replacement ingredient';
+    candidates = stockItems
+      .filter((entry) => String(entry.id) !== String(rule.sourceStockItemId || ''))
+      .filter((entry) => !sourceItem || normalizeKey(sourceItem.unit) === normalizeKey(entry.unit))
+      .map((entry) => ({ value: String(entry.id), name: entry.name, meta: `${entry.unit || 'ea'} · replacement stock item` }));
+  } else {
+    candidates = stockItems.map((entry) => ({ value: String(entry.id), name: entry.name, meta: `${entry.unit || 'ea'} · ${entry.category || 'Stock item'}` }));
+  }
+  const visible = candidates.filter((entry) => !query || `${entry.name} ${entry.meta}`.toLowerCase().includes(query)).slice(0, 150);
+  return `
+    <div class="recipesModule__modifierPickerBackdrop" data-modifier-stock-picker-backdrop>
+      <section class="recipesModule__modifierPicker" role="dialog" aria-modal="true" aria-labelledby="modifier-stock-picker-title">
+        <header>
+          <div>
+            <p>Stock picker</p>
+            <h3 id="modifier-stock-picker-title">${escapeHtml(title)}</h3>
+          </div>
+          <button type="button" class="recipesModule__iconButton" data-modifier-stock-picker-close aria-label="Close stock picker">${icon('x')}</button>
+        </header>
+        <label class="recipesModule__modifierPickerSearch">
+          <span>Search</span>
+          <input type="search" value="${escapeAttribute(picker.query || '')}" placeholder="Search stock items..." data-modifier-stock-picker-search autofocus />
+        </label>
+        <div class="recipesModule__modifierPickerList">
+          ${visible.length ? visible.map((entry) => `
+            <button type="button" data-modifier-stock-picker-select="${escapeAttribute(entry.value)}">
+              <span>${icon('list')}</span>
+              <strong>${escapeHtml(entry.name)}</strong>
+              <small>${escapeHtml(entry.meta)}</small>
+            </button>
+          `).join('') : '<p>No matching items are available.</p>'}
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+export function renderModifierStockActionDrawer(item = {}, recipes = {}) {
+  const rule = getModifierStockRule(item);
+  const products = (recipes.items || [])
+    .filter((entry) => !isModifierRecipeItem(entry) && entry.active !== false)
+    .sort((left, right) => String(left.name || '').localeCompare(String(right.name || '')));
+  const stockItems = (recipes.ingredients || [])
+    .filter((entry) => entry.active !== false)
+    .sort((left, right) => String(left.name || '').localeCompare(String(right.name || '')));
+  const selectedMenuIds = new Set(rule.menuItemIds || []);
+  const currentOwnerId = String(item.recipeOwnerId || item.id || '').replace(/^modifier:/, '');
+  const baseRecipeStockItems = getModifierBaseRecipeStockItems(item, rule, { ...recipes, items: products, ingredients: stockItems });
+  const sourceItem = stockItems.find((entry) => String(entry.id) === String(rule.sourceStockItemId));
+  const replacementItem = stockItems.find((entry) => String(entry.id) === String(rule.replacementStockItemId));
+  const targetStockItem = stockItems.find((entry) => String(entry.id) === String(rule.targetOwnerId));
+  const targetRecipeItem = rule.targetOwnerType === 'product'
+    ? products.find((entry) => String(entry.id) === String(rule.targetOwnerId))
+    : rule.targetOwnerType === 'stock_item'
+      ? stockItems.find((entry) => String(entry.id) === String(rule.targetOwnerId))
+      : { name: 'This modifier recipe', meta: item.name || 'Modifier recipe' };
+  const validation = validateModifierStockRule(rule, recipes, item);
+  const showAdd = rule.actionType === 'ADD_RECIPE' || rule.actionType === 'ADD_STOCK_ITEM';
+  const showSource = rule.actionType === 'REMOVE_INGREDIENT' || rule.actionType === 'REPLACE_INGREDIENT';
+  const sourceProfile = getModifierSourceQuantityProfile(item, rule, { ...recipes, items: products, ingredients: stockItems });
+  const replacementRatio = Number(rule.quantity || 1) || 1;
+  const replacementInputValue = sourceProfile.baseQuantity > 0
+    ? sourceProfile.baseQuantity * replacementRatio
+    : replacementRatio;
+
+  return `
+    <div class="recipesModule__stockRuleBackdrop" data-modifier-stock-backdrop>
+      <aside class="recipesModule__stockRuleDrawer" role="dialog" aria-modal="true" aria-labelledby="modifier-stock-rule-title" data-modifier-owner-id="${escapeAttribute(currentOwnerId)}">
+        <header>
+          <div>
+            <p>Modifier Engine</p>
+            <h3 id="modifier-stock-rule-title">What should happen to stock when this is selected?</h3>
+            <span>${escapeHtml(item.name || 'Modifier')}</span>
+          </div>
+          <button type="button" class="recipesModule__iconButton" data-modifier-stock-close aria-label="Close stock action setup">${icon('x')}</button>
+        </header>
+
+        <div class="recipesModule__stockRuleBody">
+          <fieldset class="recipesModule__stockRuleActions">
+            <legend>Stock action</legend>
+            ${[
+              ['ADD_RECIPE', 'Deduct extra recipe', 'Add the ingredients from a recipe.'],
+              ['ADD_STOCK_ITEM', 'Deduct extra stock item', 'Deduct one stock item directly.'],
+              ['REMOVE_INGREDIENT', 'Remove an ingredient', 'Omit an ingredient only when it exists in the sold item recipe.'],
+              ['REPLACE_INGREDIENT', 'Replace an ingredient', 'Swap the original and control the replacement amount.'],
+              ['NO_STOCK_CHANGE', 'No stock change', 'Keep the modifier for reporting only.']
+            ].map(([value, label, help]) => `
+              <label class="${rule.actionType === value ? 'is-selected' : ''}">
+                <input type="radio" name="modifier-stock-action" value="${value}" data-modifier-stock-action ${rule.actionType === value ? 'checked' : ''} />
+                <span><strong>${label}</strong><small>${help}</small></span>
+              </label>
+            `).join('')}
+          </fieldset>
+
+          ${showAdd ? `
+            <section class="recipesModule__stockRuleSection">
+              <h4>Extra stock to deduct</h4>
+              ${rule.actionType === 'ADD_RECIPE'
+                ? renderModifierPickerButton({
+                    mode: 'recipeTarget',
+                    label: 'Recipe',
+                    item: targetRecipeItem ? { name: targetRecipeItem.name, meta: targetRecipeItem.meta || `${targetRecipeItem.category || targetRecipeItem.unit || 'Recipe'}` } : null,
+                    placeholder: 'Choose recipe'
+                  })
+                : renderModifierPickerButton({
+                    mode: 'stockTarget',
+                    label: 'Stock item',
+                    item: targetStockItem ? { name: targetStockItem.name, meta: `${targetStockItem.unit || 'ea'} · ${targetStockItem.category || 'Stock item'}` } : null,
+                    placeholder: 'Choose stock item'
+                  })}
+              <div class="recipesModule__stockRuleTwoCol">
+                <label>
+                  <span>Quantity</span>
+                  <input type="number" min="0.000001" step="any" value="${escapeAttribute(rule.quantity)}" data-modifier-stock-quantity />
+                </label>
+                ${rule.actionType === 'ADD_STOCK_ITEM' ? `
+                  <label>
+                    <span>Unit</span>
+                    <input type="text" value="${escapeAttribute(rule.unit || targetStockItem?.unit || '')}" placeholder="Uses base UOM when blank" data-modifier-stock-unit />
+                  </label>
+                ` : '<div></div>'}
+              </div>
+            </section>
+          ` : ''}
+
+          ${showSource ? `
+            <section class="recipesModule__stockRuleSection">
+              <h4>${rule.actionType === 'REPLACE_INGREDIENT' ? 'Ingredient replacement' : 'Ingredient to remove'}</h4>
+              ${renderModifierPickerButton({
+                mode: 'source',
+                label: rule.actionType === 'REPLACE_INGREDIENT' ? 'What are we replacing from the base recipe?' : 'What are we removing from the base recipe?',
+                item: sourceItem ? { name: sourceItem.name, meta: `${sourceItem.unit || 'ea'} · base recipe ingredient` } : null,
+                placeholder: baseRecipeStockItems.length ? 'Choose base-recipe ingredient' : 'No ingredients found in linked recipes'
+              })}
+              ${rule.actionType === 'REPLACE_INGREDIENT' ? `
+                ${renderModifierPickerButton({
+                  mode: 'replacement',
+                  label: 'What should replace it?',
+                  item: replacementItem ? { name: replacementItem.name, meta: `${replacementItem.unit || 'ea'} · replacement stock item` } : null,
+                  placeholder: 'Choose replacement ingredient'
+                })}
+                <label class="recipesModule__stockRuleQuantityField">
+                  <span>${sourceProfile.baseQuantity > 0 ? 'Replacement quantity' : 'Replacement quantity multiplier'}</span>
+                  <div>
+                    <input
+                      type="number"
+                      min="0.000001"
+                      step="any"
+                      value="${escapeAttribute(replacementInputValue)}"
+                      data-modifier-stock-replacement-quantity
+                      data-modifier-stock-source-quantity="${escapeAttribute(sourceProfile.baseQuantity || 0)}"
+                    />
+                    <strong>${escapeHtml(sourceProfile.baseQuantity > 0 ? sourceProfile.unit : '× removed amount')}</strong>
+                  </div>
+                  <small>${sourceProfile.baseQuantity > 0
+                    ? `The base recipe uses ${sourceProfile.baseQuantity} ${sourceProfile.unit}. The replacement defaults to the same quantity but may be increased or reduced.`
+                    : 'Linked recipes use different source quantities. Enter a multiplier, where 1 keeps the same amount, 1.5 uses 50% more, and 0.5 uses half.'}</small>
+                </label>
+                <p class="recipesModule__stockRuleHint">Only stock items with the same base UOM are offered as replacements.</p>
+              ` : '<p class="recipesModule__stockRuleHint">The action is ignored safely on a linked menu item that does not contain this ingredient. No artificial return movement is written.</p>'}
+            </section>
+          ` : ''}
+
+          ${rule.actionType !== 'NO_STOCK_CHANGE' ? `
+            <section class="recipesModule__stockRuleSection">
+              <h4>Menu-item scope</h4>
+              <label class="recipesModule__stockRuleToggle">
+                <input type="checkbox" data-modifier-stock-apply-all ${rule.applyAllMatchingProducts ? 'checked' : ''} />
+                <span><strong>Apply to all matching products</strong><small>Use this rule whenever this modifier is selected. Products without the chosen source ingredient are skipped safely.</small></span>
+              </label>
+              <div class="recipesModule__stockRuleChecklist ${rule.applyAllMatchingProducts ? 'is-disabled' : ''}">
+                ${products.slice(0, 150).map((product) => `
+                  <label>
+                    <input type="checkbox" value="${escapeAttribute(product.id)}" data-modifier-stock-menu-item ${selectedMenuIds.has(String(product.id)) ? 'checked' : ''} ${rule.applyAllMatchingProducts ? 'disabled' : ''} />
+                    <span><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.category || 'General')}</small></span>
+                  </label>
+                `).join('') || '<p>No menu items are available.</p>'}
+              </div>
+              <p class="recipesModule__stockRuleHint">This action applies to all locations automatically.</p>
+            </section>
+          ` : ''}
+
+          <section class="recipesModule__stockRulePreview ${validation ? 'has-error' : ''}">
+            <span>Plain-language preview</span>
+            <p>${escapeHtml(buildModifierStockPreview(item, rule, recipes))}</p>
+            ${validation ? `<small>${escapeHtml(validation)}</small>` : ''}
+          </section>
+        </div>
+
+        <footer>
+          <button type="button" data-modifier-stock-close>Cancel</button>
+          <button type="button" class="recipesModule__primary" data-modifier-stock-done ${validation ? 'disabled' : ''}>${icon('check')}<span>Done</span></button>
+        </footer>
+      </aside>
+      ${renderModifierStockPickerModal({
+        picker: recipes.modifierStockPicker,
+        currentOwnerId,
+        item,
+        rule,
+        products,
+        stockItems,
+        baseRecipeStockItems
+      })}
+    </div>
+  `;
+}
+
 function getLinkedProductIds(item = {}) {
   if (Array.isArray(item.linkedProductIds)) return item.linkedProductIds.map(String).filter(Boolean);
   const raw = String(item.linkedProductId || '').trim();
@@ -1197,11 +1970,6 @@ function normalizeRecipeProductName(value = '') {
     .replace(/[^a-z0-9]+/g, ' ')
     .trim()
     .replace(/\s+/g, ' ');
-}
-
-function average(values = []) {
-  const normalized = values.map(Number).filter(Number.isFinite);
-  return normalized.length ? normalized.reduce((sum, value) => sum + value, 0) / normalized.length : 0;
 }
 
 function formatGpRange(values = []) {
@@ -1650,6 +2418,276 @@ function renderInlineBulkDelete(selectedIds, actionStatus) {
   `;
 }
 
+
+export function renderNoteSuggestionsModal(noteState = {}, recipes = {}) {
+  const suggestions = Array.isArray(noteState.items) ? noteState.items : [];
+  const editing = suggestions.find((entry) => String(entry.id) === String(noteState.editingId || ''));
+  const draft = noteState.draft || null;
+  const menuItems = (recipes.items || []).filter((item) => !isModifierRecipeItem(item));
+  const ingredients = (recipes.ingredients || []).filter((item) => item?.id);
+  const locations = recipes.locations || [];
+  const visibleSuggestions = noteState.includeIgnored
+    ? suggestions
+    : suggestions.filter((entry) => entry.disposition !== 'IGNORED');
+
+  return `
+    <div class="recipesModule__modalBackdrop recipesModule__noteBackdrop" data-recipe-note-suggestions-backdrop>
+      <section class="recipesModule__modal recipesModule__noteModal" role="dialog" aria-modal="true" aria-labelledby="recipe-note-suggestions-title">
+        <header class="recipesModule__modalHeader recipesModule__noteHeader">
+          <div>
+            <p>Order intelligence</p>
+            <h2 id="recipe-note-suggestions-title">Suggestions from orders</h2>
+            <span>Notes appear after they have been seen on at least three different order lines. Nothing changes stock until you approve an exact rule.</span>
+          </div>
+          <button type="button" class="recipesModule__iconButton" data-recipe-note-suggestions-close aria-label="Close suggestions">${icon('x')}</button>
+        </header>
+
+        <div class="recipesModule__noteToolbar">
+          <label class="recipesModule__noteIgnoredToggle">
+            <input type="checkbox" data-recipe-note-include-ignored ${noteState.includeIgnored ? 'checked' : ''} />
+            <span>Show ignored notes</span>
+          </label>
+          <button type="button" class="recipesModule__secondary" data-recipe-note-refresh ${noteState.status === 'loading' || noteState.status === 'saving' ? 'disabled' : ''}>
+            ${icon('refresh')}
+            <span>${noteState.status === 'loading' ? 'Refreshing' : 'Refresh'}</span>
+          </button>
+        </div>
+
+        ${noteState.error ? renderNotice(noteState.error, 'error') : ''}
+        ${noteState.status === 'loading' && !visibleSuggestions.length
+          ? renderLoadingPanel('Loading order suggestions', 'Reviewing recurring line-item notes without changing stock.')
+          : ''}
+
+        <div class="recipesModule__noteContent ${editing && draft ? 'has-editor' : ''}">
+          <div class="recipesModule__noteList" aria-label="Recurring order notes">
+            ${visibleSuggestions.length
+              ? visibleSuggestions.map((suggestion) => renderNoteSuggestionCard(suggestion, recipes, noteState)).join('')
+              : noteState.status !== 'loading'
+                ? `<div class="recipesModule__noteEmpty">
+                    ${icon('sliders')}
+                    <strong>No recurring note suggestions yet</strong>
+                    <p>New exact phrases will appear here after they are seen at least three times.</p>
+                  </div>`
+                : ''}
+          </div>
+          ${editing && draft ? renderNoteRuleEditor(editing, draft, menuItems, ingredients, locations, noteState) : ''}
+        </div>
+
+        <footer class="recipesModule__modalFooter recipesModule__noteFooter">
+          <span>Matching is exact after safe normalization. “Almond milk” will not match “No almond milk” or “Extra almond milk”.</span>
+          <button type="button" data-recipe-note-suggestions-close>Done</button>
+        </footer>
+      </section>
+    </div>
+  `;
+}
+
+function renderNoteSuggestionCard(suggestion = {}, recipes = {}, noteState = {}) {
+  const menuNames = resolveRecipeEntityNames(suggestion.menuItemIds, recipes.items, 'menu item');
+  const locationNames = resolveRecipeEntityNames(suggestion.locationIds, recipes.locations, 'location');
+  const ignored = suggestion.disposition === 'IGNORED';
+  const approved = Boolean(suggestion.rule && suggestion.rule.status === 'APPROVED');
+  const active = String(noteState.editingId || '') === String(suggestion.id || '');
+  const actionLabel = approved ? modifierNoteActionLabel(suggestion.rule.actionType) : '';
+  return `
+    <article class="recipesModule__noteCard ${ignored ? 'is-ignored' : ''} ${approved ? 'is-approved' : ''} ${active ? 'is-active' : ''}">
+      <div class="recipesModule__noteCardTop">
+        <div>
+          <span class="recipesModule__notePhrase">${escapeHtml(suggestion.notePhrase || suggestion.normalizedText || '')}</span>
+          <small>Exact phrase: ${escapeHtml(suggestion.normalizedText || '')}</small>
+        </div>
+        <span class="recipesModule__noteStatus recipesModule__noteStatus--${ignored ? 'ignored' : approved ? 'approved' : 'suggested'}">
+          ${ignored ? 'Ignored' : approved ? 'Approved' : 'Suggestion'}
+        </span>
+      </div>
+      <dl class="recipesModule__noteFacts">
+        <div><dt>Menu items</dt><dd>${escapeHtml(menuNames.join(', '))}</dd></div>
+        <div><dt>Locations</dt><dd>${escapeHtml(locationNames.join(', '))}</dd></div>
+        <div><dt>Times seen</dt><dd>${escapeHtml(String(suggestion.timesSeen || 0))}</dd></div>
+        <div><dt>Last seen</dt><dd>${escapeHtml(formatRecipeDateTime(suggestion.lastSeen))}</dd></div>
+      </dl>
+      ${approved ? `<div class="recipesModule__noteApprovedRule">${icon('check')}<span>${escapeHtml(actionLabel)} · Rule version ${escapeHtml(String(suggestion.rule.version || 1))}</span></div>` : ''}
+      <div class="recipesModule__noteCardActions">
+        ${ignored
+          ? `<button type="button" class="recipesModule__secondary" data-note-suggestion-restore="${escapeAttribute(suggestion.notePhrase || suggestion.normalizedText || '')}">Restore</button>`
+          : `<button type="button" class="recipesModule__primary" data-note-suggestion-setup="${escapeAttribute(suggestion.id || '')}">${approved ? 'Edit setup' : 'Set up'}</button>
+             <button type="button" class="recipesModule__secondary" data-note-suggestion-ignore="${escapeAttribute(suggestion.notePhrase || suggestion.normalizedText || '')}">Ignore</button>`}
+      </div>
+    </article>
+  `;
+}
+
+function renderNoteRuleEditor(suggestion = {}, draft = {}, menuItems = [], ingredients = [], locations = [], noteState = {}) {
+  const actionType = String(draft.actionType || 'NO_STOCK_CHANGE').toUpperCase();
+  const actionOptions = [
+    ['ADD_RECIPE', 'Add recipe'],
+    ['ADD_STOCK_ITEM', 'Add stock item'],
+    ['REPLACE_INGREDIENT', 'Replace ingredient'],
+    ['REMOVE_INGREDIENT', 'Remove ingredient'],
+    ['NO_STOCK_CHANGE', 'No stock change']
+  ];
+  const needsTarget = ['ADD_RECIPE', 'ADD_STOCK_ITEM'].includes(actionType);
+  const needsSource = ['REMOVE_INGREDIENT', 'REPLACE_INGREDIENT'].includes(actionType);
+  const needsReplacement = actionType === 'REPLACE_INGREDIENT';
+  const needsQuantity = ['ADD_RECIPE', 'ADD_STOCK_ITEM'].includes(actionType);
+  const sourceIngredient = ingredients.find((item) => String(item.id) === String(draft.sourceStockItemId || ''));
+  const targetIngredient = ingredients.find((item) => String(item.id) === String(draft.targetOwnerId || ''));
+  const targetRecipe = menuItems.find((item) => String(item.id) === String(draft.targetOwnerId || ''));
+  const replacementIngredient = ingredients.find((item) => String(item.id) === String(draft.replacementStockItemId || ''));
+  const preview = actionType === 'ADD_RECIPE'
+    ? `Deduct ${Number(draft.quantity || 1)} × ${targetRecipe?.name || 'selected recipe'}`
+    : actionType === 'ADD_STOCK_ITEM'
+      ? `Deduct ${Number(draft.quantity || 1)} ${draft.unit || targetIngredient?.baseUom || ''} of ${targetIngredient?.name || 'selected stock item'}`
+      : actionType === 'REMOVE_INGREDIENT'
+        ? `Omit ${sourceIngredient?.name || 'selected ingredient'} from the resolved recipe`
+        : actionType === 'REPLACE_INGREDIENT'
+          ? `Replace ${sourceIngredient?.name || 'original ingredient'} with ${replacementIngredient?.name || 'replacement ingredient'}`
+          : 'Record the note without changing stock';
+
+  return `
+    <aside class="recipesModule__noteEditor" aria-label="Set up note rule">
+      <div class="recipesModule__noteEditorHeader">
+        <div>
+          <p>Set up exact note</p>
+          <h3>${escapeHtml(suggestion.notePhrase || suggestion.normalizedText || '')}</h3>
+        </div>
+        <button type="button" class="recipesModule__iconButton" data-note-rule-cancel aria-label="Cancel setup">${icon('x')}</button>
+      </div>
+
+      <section class="recipesModule__noteEditorSection">
+        <label>
+          <span>What should happen to stock?</span>
+          <select data-note-rule-field="actionType">
+            ${actionOptions.map(([value, label]) => `<option value="${value}" ${actionType === value ? 'selected' : ''}>${label}</option>`).join('')}
+          </select>
+        </label>
+
+        ${actionType === 'ADD_RECIPE' ? `
+          <label>
+            <span>Recipe to deduct</span>
+            <select data-note-rule-field="targetOwnerId">
+              <option value="">Select a recipe</option>
+              ${menuItems.map((item) => `<option value="${escapeAttribute(item.id)}" ${String(draft.targetOwnerId || '') === String(item.id) ? 'selected' : ''}>${escapeHtml(item.name || 'Unnamed menu item')}</option>`).join('')}
+            </select>
+          </label>` : ''}
+
+        ${actionType === 'ADD_STOCK_ITEM' ? `
+          <label>
+            <span>Stock item to deduct</span>
+            <select data-note-rule-field="targetOwnerId">
+              <option value="">Select a stock item</option>
+              ${renderIngredientOptions(ingredients, draft.targetOwnerId)}
+            </select>
+          </label>` : ''}
+
+        ${needsSource ? `
+          <label>
+            <span>Ingredient to ${actionType === 'REPLACE_INGREDIENT' ? 'replace' : 'remove'}</span>
+            <select data-note-rule-field="sourceStockItemId">
+              <option value="">Select an ingredient</option>
+              ${renderIngredientOptions(ingredients, draft.sourceStockItemId)}
+            </select>
+          </label>` : ''}
+
+        ${needsReplacement ? `
+          <label>
+            <span>Replacement ingredient</span>
+            <select data-note-rule-field="replacementStockItemId">
+              <option value="">Select a replacement</option>
+              ${renderIngredientOptions(ingredients, draft.replacementStockItemId, draft.sourceStockItemId)}
+            </select>
+          </label>` : ''}
+
+        ${needsQuantity ? `
+          <div class="recipesModule__stockRuleTwoCol">
+            <label>
+              <span>Quantity</span>
+              <input type="number" min="0.000001" step="0.001" value="${escapeAttribute(draft.quantity || 1)}" data-note-rule-field="quantity" />
+            </label>
+            <label>
+              <span>Unit</span>
+              <input type="text" value="${escapeAttribute(draft.unit || (actionType === 'ADD_STOCK_ITEM' ? targetIngredient?.baseUom || targetIngredient?.uom || '' : 'ea'))}" placeholder="ea, g, ml" data-note-rule-field="unit" />
+            </label>
+          </div>` : ''}
+      </section>
+
+      <section class="recipesModule__noteEditorSection">
+        <div class="recipesModule__noteSectionTitle">
+          <div><strong>Menu-item scope</strong><small>Leave all unchecked to apply to every matching product.</small></div>
+        </div>
+        <div class="recipesModule__stockRuleChecklist">
+          ${menuItems.length ? menuItems.map((item) => `
+            <label>
+              <input type="checkbox" value="${escapeAttribute(item.id)}" data-note-rule-menu-item ${Array.isArray(draft.menuItemIds) && draft.menuItemIds.map(String).includes(String(item.id)) ? 'checked' : ''} />
+              <span><strong>${escapeHtml(item.name || 'Unnamed menu item')}</strong><small>${escapeHtml(item.category || 'Uncategorised')}</small></span>
+            </label>`).join('') : '<p class="recipesModule__stockRuleHint">No menu items are available.</p>'}
+        </div>
+      </section>
+
+      <section class="recipesModule__noteEditorSection">
+        <div class="recipesModule__noteSectionTitle">
+          <div><strong>Location scope</strong><small>Leave all unchecked to apply at every location.</small></div>
+        </div>
+        <div class="recipesModule__stockRuleChecklist recipesModule__stockRuleChecklist--locations">
+          ${locations.length ? locations.map((location) => `
+            <label>
+              <input type="checkbox" value="${escapeAttribute(location.id || location.value || '')}" data-note-rule-location ${Array.isArray(draft.locationIds) && draft.locationIds.map(String).includes(String(location.id || location.value || '')) ? 'checked' : ''} />
+              <span><strong>${escapeHtml(location.name || location.label || 'Unnamed location')}</strong></span>
+            </label>`).join('') : '<p class="recipesModule__stockRuleHint">No locations are available.</p>'}
+        </div>
+      </section>
+
+      <section class="recipesModule__stockRulePreview">
+        <strong>When the exact note is selected</strong>
+        <p>${escapeHtml(preview)}</p>
+        <small>Rule versioning preserves the sale-time decision for future refunds.</small>
+      </section>
+
+      ${noteState.error ? `<p class="recipesModule__noteEditorError">${escapeHtml(noteState.error)}</p>` : ''}
+      <div class="recipesModule__noteEditorActions">
+        <button type="button" data-note-rule-cancel>Cancel</button>
+        <button type="button" class="recipesModule__primary" data-note-rule-save ${noteState.status === 'saving' || (needsTarget && !draft.targetOwnerId) || (needsSource && !draft.sourceStockItemId) || (needsReplacement && !draft.replacementStockItemId) ? 'disabled' : ''}>
+          ${noteState.status === 'saving' ? 'Saving' : 'Approve exact rule'}
+        </button>
+      </div>
+    </aside>
+  `;
+}
+
+function renderIngredientOptions(ingredients = [], selectedId = '', excludedId = '') {
+  return ingredients
+    .filter((item) => String(item.id) !== String(excludedId || ''))
+    .map((item) => `<option value="${escapeAttribute(item.id)}" ${String(selectedId || '') === String(item.id) ? 'selected' : ''}>${escapeHtml(item.name || item.itemName || 'Unnamed stock item')}</option>`)
+    .join('');
+}
+
+function resolveRecipeEntityNames(ids = [], entities = [], fallbackLabel = 'item') {
+  const values = (Array.isArray(ids) ? ids : []).map(String).filter(Boolean);
+  if (!values.length) return [`All ${fallbackLabel}s`];
+  const map = new Map((entities || []).map((entry) => [String(entry.id || entry.value || ''), entry.name || entry.label || entry.title || '']));
+  return values.map((id) => map.get(id) || `Unknown ${fallbackLabel}`).filter(Boolean);
+}
+
+function modifierNoteActionLabel(actionType = '') {
+  return ({
+    ADD_RECIPE: 'Add recipe',
+    ADD_STOCK_ITEM: 'Add stock item',
+    REPLACE_INGREDIENT: 'Replace ingredient',
+    REMOVE_INGREDIENT: 'Remove ingredient',
+    NO_STOCK_CHANGE: 'No stock change'
+  })[String(actionType || '').toUpperCase()] || 'Approved rule';
+}
+
+function formatRecipeDateTime(value = '') {
+  const date = new Date(value);
+  if (!value || Number.isNaN(date.getTime())) return 'Not available';
+  return new Intl.DateTimeFormat('en-ZA', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+    timeZone: 'Africa/Johannesburg'
+  }).format(date);
+}
+
 function renderDeleteDialog(recipes) {
   const confirmDelete = recipes.confirmDelete;
   if (!confirmDelete?.ids?.length) return '';
@@ -1875,10 +2913,15 @@ function icon(name) {
     arrow: '<path d="M5 12h14"/><path d="m13 6 6 6-6 6"/>',
     check: '<path d="m20 6-11 11-5-5"/>',
     camera: '<path d="M14.5 4h-5L8 6H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-3z"/><circle cx="12" cy="12.5" r="3.5"/>',
+    check: '<path d="m5 12 4 4L19 6"/>',
     chevron: '<path d="m6 9 6 6 6-6"/>',
     download: '<path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/>',
     info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
+    layers: '<path d="m12 2 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5"/><path d="m3 17 9 5 9-5"/>',
+    minus: '<path d="M5 12h14"/>',
+    settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.12 2.12-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.55V20h-3v-.09a1.7 1.7 0 0 0-1.03-1.55 1.7 1.7 0 0 0-1.88.34l-.06.06-2.12-2.12.06-.06A1.7 1.7 0 0 0 7 15a1.7 1.7 0 0 0-1.55-1.03H5v-3h.09A1.7 1.7 0 0 0 6.64 9.94 1.7 1.7 0 0 0 6.3 8.06L6.24 8l2.12-2.12.06.06a1.7 1.7 0 0 0 1.88.34A1.7 1.7 0 0 0 11.33 4.7V4h3v.09a1.7 1.7 0 0 0 1.03 1.55 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.12 2.12-.06.06A1.7 1.7 0 0 0 19 9.3a1.7 1.7 0 0 0 1.55 1.03H21v3h-.09A1.7 1.7 0 0 0 19.4 15Z"/>',
     plus: '<path d="M12 5v14"/><path d="M5 12h14"/>',
+    refresh: '<path d="M20 6v6h-6"/><path d="M4 18v-6h6"/><path d="M6.5 8a7 7 0 0 1 11.5-2l2 2"/><path d="M17.5 16a7 7 0 0 1-11.5 2l-2-2"/>',
     sliders: '<path d="M4 7h16"/><path d="M4 17h16"/><path d="M9 5v4"/><path d="M15 15v4"/>',
     trash: '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m19 6-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>',
     upload: '<path d="M12 3v12"/><path d="m7 8 5-5 5 5"/><path d="M5 21h14"/>',

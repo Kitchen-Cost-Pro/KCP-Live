@@ -97,7 +97,7 @@ export function renderSchedulingPage({ workspaceId = '', state = {}, canManage =
   let notice = '';
   let loadNotice = '';
   const schedulerReady = () => isSchedulerVersionCompatible(schedulerVersion);
-  const schedulerUpgradeMessage = 'The Scheduling Worker is older than this page. Deploy cloudflare-v2 from Phase 33.17 first, then reload once.';
+  const schedulerUpgradeMessage = 'The Scheduling Worker is older than this page. Deploy cloudflare-v2 from Phase 33.19 first, then reload once.';
 
   const feedbackMarkup = () => `
     ${!accessReady && !accessFailed ? '<div class="reportSchedulingNotice">Loading your workspace role and scheduling permissions...</div>' : ''}
@@ -363,38 +363,18 @@ export function renderSchedulingPage({ workspaceId = '', state = {}, canManage =
     form.querySelectorAll('[data-schedule-view-close]').forEach((button) => button.addEventListener('click', () => closeReportViewPanel(form)));
     form.querySelectorAll('[data-schedule-view-toggle]').forEach((toggle) => toggle.addEventListener('change', () => {
       syncViewSelection(form, toggle.dataset.reportId || '', toggle);
+      syncSavedViewSelectState(form, toggle.dataset.reportId || '', toggle.dataset.viewId || '', toggle.checked);
+      updateBundleCount(form);
+    }));
+    form.querySelectorAll('[data-schedule-item-saved-view]').forEach((select) => select.addEventListener('change', () => {
+      const reportId = select.dataset.reportId || '';
+      const viewId = select.dataset.viewId || '';
+      if (select.value) selectReportItem(form, reportId, viewId, false);
+      syncSavedViewSelectState(form, reportId, viewId, true);
       updateBundleCount(form);
     }));
 
     bindRecipientPicker(form);
-
-    form.querySelector('[name="savedViewId"]')?.addEventListener('change', (event) => {
-      const selectedId = String(event.currentTarget.value || '');
-      if (!selectedId) return;
-      const selected = savedViews.find((view) => view.id === selectedId);
-      if (!selected || !isCatalogViewAvailable(catalog, selected.reportId, selected.viewId) || !selectReportItem(form, selected.reportId, selected.viewId, true)) {
-        event.currentTarget.value = '';
-        refreshReportingSelect(event.currentTarget);
-        showModalMessage(form, 'That saved view is no longer compatible. Select a current report view; the schedule can still be saved.', 'warning');
-        updateBundleCount(form);
-        return;
-      }
-      form.querySelector('[name="dateRangeType"]').value = selected.dateRangeType || 'custom';
-      form.querySelector('[name="filtersJson"]').value = JSON.stringify(selected.filters || {});
-      const savedLocation = selected.locationId || selected.filters?.locationId || '';
-      const locationSelect = form.querySelector('[name="locationSelection"]');
-      if (locationSelect) {
-        const requestedValue = savedLocation || (values.allowAllLocations ? 'all' : values.locations[0]?.id || '');
-        const hasOption = [...locationSelect.options].some((option) => option.value === requestedValue);
-        if (hasOption) locationSelect.value = requestedValue;
-      }
-      form.querySelector('[name="customFrom"]').value = selected.filters?.from || selected.filters?.startDate || '';
-      form.querySelector('[name="customTo"]').value = selected.filters?.to || selected.filters?.endDate || '';
-      refreshReportingSelect(form.querySelector('[name="dateRangeType"]'));
-      refreshReportingSelect(form.querySelector('[name="locationSelection"]'));
-      syncDateRange();
-      updateBundleCount(form);
-    });
 
     enhanceReportingSelects(overlay);
     syncDateRange();
@@ -407,7 +387,7 @@ export function renderSchedulingPage({ workspaceId = '', state = {}, canManage =
       const button = event.currentTarget;
       button.disabled = true;
       try {
-        const payload = readScheduleForm(form, catalog, savedViews);
+        const payload = readScheduleForm(form, catalog, savedViews, values.reportItems);
         const result = await sendReportTestEmail(workspaceId, payload);
         showModalMessage(form, `Test email sent${result.filesGenerated ? ` with ${result.filesGenerated} file${result.filesGenerated === 1 ? '' : 's'}` : ''}.`, 'success');
       } catch (cause) {
@@ -422,7 +402,7 @@ export function renderSchedulingPage({ workspaceId = '', state = {}, canManage =
       const submit = form.querySelector('button[type="submit"]');
       submit.disabled = true;
       try {
-        const payload = readScheduleForm(form, catalog, savedViews);
+        const payload = readScheduleForm(form, catalog, savedViews, values.reportItems);
         const result = schedule
           ? await updateReportSchedule(workspaceId, schedule.id, payload)
           : await createReportSchedule(workspaceId, payload);
@@ -496,11 +476,50 @@ function scheduleActionIcon(action = '') {
   return icons[action] || icons.edit;
 }
 
+function renderScheduleViewChoice(entry, view, checked, savedViews = [], selectedItem = {}) {
+  const compatible = savedViews.filter((saved) => saved.isAvailable !== false && saved.reportId === entry.reportId && saved.viewId === view.value);
+  const snapshotId = String(selectedItem.savedViewSnapshotId || selectedItem.savedViewId || '');
+  const snapshotName = String(selectedItem.savedViewSnapshotName || '');
+  const currentSavedView = compatible.find((saved) => saved.id === snapshotId);
+  const missingSnapshot = snapshotId && !currentSavedView;
+  return `
+    <div class="reportScheduleViewChoice${checked ? ' is-selected' : ''}" data-schedule-view-choice data-report-id="${escapeHtml(entry.reportId)}" data-view-id="${escapeHtml(view.value)}">
+      <label class="reportScheduleViewChoice__toggle">
+        <input type="checkbox" data-schedule-view-toggle data-report-id="${escapeHtml(entry.reportId)}" data-report-group-id="${escapeHtml(entry.reportGroupId || '')}" data-view-id="${escapeHtml(view.value)}" ${checked ? 'checked' : ''} />
+        <span><strong>${escapeHtml(view.label)}</strong><small>Include this view in the ${escapeHtml(entry.title)} attachment.</small></span>
+      </label>
+      <label class="reportScheduleViewChoice__saved">
+        <span>Saved configuration</span>
+        <select data-schedule-item-saved-view data-report-id="${escapeHtml(entry.reportId)}" data-view-id="${escapeHtml(view.value)}" ${checked ? '' : 'disabled'}>
+          <option value="">Use report defaults</option>
+          ${missingSnapshot ? `<option value="__snapshot__:${escapeHtml(snapshotId)}" selected>Snapshot: ${escapeHtml(snapshotName || 'Saved view')} (source removed)</option>` : ''}
+          ${compatible.map((saved) => `<option value="${escapeHtml(saved.id)}" ${saved.id === snapshotId ? 'selected' : ''}>${escapeHtml(saved.name)}${saved.scope === 'workspace' ? ' · Workspace' : ' · Mine'}</option>`).join('')}
+        </select>
+        <small>${snapshotId ? `This schedule uses ${escapeHtml(currentSavedView?.name || snapshotName || 'the saved view')} at send time and keeps a fallback copy.` : 'Choose a saved view to apply its filters, sorting and columns.'}</small>
+      </label>
+    </div>
+  `;
+}
+
+function syncSavedViewSelectState(form, reportId, viewId, enabled) {
+  const select = [...form.querySelectorAll('[data-schedule-item-saved-view]')]
+    .find((entry) => entry.dataset.reportId === reportId && entry.dataset.viewId === viewId);
+  if (!select) return;
+  select.disabled = !enabled;
+  if (!enabled) {
+    select.value = '';
+    refreshReportingSelect(select);
+  }
+  select.closest('[data-schedule-view-choice]')?.classList.toggle('is-selected', Boolean(enabled));
+}
+
 function renderScheduleModal(values, catalog, savedViews, editing) {
   const selectedViewsByReport = new Map();
+  const selectedItemsByKey = new Map();
   for (const item of values.reportItems || []) {
     if (!selectedViewsByReport.has(item.reportId)) selectedViewsByReport.set(item.reportId, new Set());
     selectedViewsByReport.get(item.reportId).add(item.viewId);
+    selectedItemsByKey.set(`${item.reportId}::${item.viewId}`, item);
   }
   const activeReports = new Set(selectedViewsByReport.keys());
   return `
@@ -517,11 +536,11 @@ function renderScheduleModal(values, catalog, savedViews, editing) {
           <section class="reportScheduleFormSection">
             <header class="reportScheduleFormSection__header">
               <span class="reportScheduleFormSection__step">1</span>
-              <div><span>Schedule details</span><strong>Name and optional saved configuration</strong></div>
+              <div><span>Schedule details</span><strong>Name this scheduled delivery</strong></div>
             </header>
-            <div class="reportScheduleSectionGrid">
+            <div class="reportScheduleSectionGrid reportScheduleSectionGrid--single">
               <label><span>Schedule name</span><input name="name" value="${escapeHtml(values.name)}" required maxlength="120" placeholder="Weekly Management Report Pack" /></label>
-              <label><span>Start from a saved view (optional)</span><select name="savedViewId"><option value="">Do not apply a saved view</option>${savedViews.map((view) => `<option value="${escapeHtml(view.id)}" ${values.savedViewId === view.id ? 'selected' : ''}>${escapeHtml(view.name)}</option>`).join('')}</select></label>
+              <input type="hidden" name="savedViewId" value="" />
             </div>
           </section>
 
@@ -596,7 +615,7 @@ function renderScheduleModal(values, catalog, savedViews, editing) {
                         <div class="reportScheduleViewPanel__list">
                           ${entry.views.map((view) => {
                             const checked = selectedViews.has(view.value) || (!selectedViews.size && view.value === defaultView && activeReports.has(entry.reportId));
-                            return `<label><input type="checkbox" data-schedule-view-toggle data-report-id="${escapeHtml(entry.reportId)}" data-report-group-id="${escapeHtml(entry.reportGroupId || '')}" data-view-id="${escapeHtml(view.value)}" ${checked ? 'checked' : ''} /><span><strong>${escapeHtml(view.label)}</strong><small>Include this view in the ${escapeHtml(entry.title)} attachment.</small></span></label>`;
+                            return renderScheduleViewChoice(entry, view, checked, savedViews, selectedItemsByKey.get(`${entry.reportId}::${view.value}`) || {});
                           }).join('')}
                         </div>
                         <footer><span data-schedule-view-count="${escapeHtml(entry.reportId)}"></span><button type="button" class="reportModalPrimary" data-schedule-view-close>Save views</button></footer>
@@ -681,7 +700,7 @@ function renderRecipientChips(recipients = []) {
   return recipients.map((email) => `<span class="reportScheduleRecipientChip"><span>${escapeHtml(email)}</span><button type="button" data-schedule-recipient-remove="${escapeHtml(email)}" aria-label="Remove ${escapeHtml(email)}">×</button></span>`).join('');
 }
 
-function readScheduleForm(form, catalog, savedViews = []) {
+function readScheduleForm(form, catalog, savedViews = [], existingReportItems = []) {
   const data = new FormData(form);
   const frequency = String(data.get('frequency') || 'weekly');
   const reportItems = [];
@@ -703,32 +722,53 @@ function readScheduleForm(form, catalog, savedViews = []) {
       const key = `${resolved.reportId}::${resolved.viewId}`;
       if (seen.has(key)) return;
       seen.add(key);
+      const existing = existingReportItems.find((item) => item.reportId === resolved.reportId && item.viewId === resolved.viewId) || {};
       reportItems.push({
         reportGroupId: reportGroupId || resolved.reportGroupId || '',
         reportId: resolved.reportId,
         viewId: resolved.viewId,
         savedViewId: '',
-        filters: {},
-        sort: null,
-        visibleColumns: []
+        savedViewSnapshotId: String(existing.savedViewSnapshotId || ''),
+        savedViewSnapshotName: String(existing.savedViewSnapshotName || ''),
+        savedViewUpdatedAt: String(existing.savedViewUpdatedAt || ''),
+        dateRangeType: String(existing.dateRangeType || existing.filters?.dateRangeType || ''),
+        filters: existing.filters && typeof existing.filters === 'object' ? { ...existing.filters } : {},
+        sort: existing.sort && typeof existing.sort === 'object' ? { ...existing.sort } : null,
+        visibleColumns: Array.isArray(existing.visibleColumns) ? [...existing.visibleColumns] : []
       });
     });
   });
 
-  if (!reportItems.length) throw new Error('Select at least one current report and one view for this schedule.');
-
-  // Saved views are templates only. Snapshot their configuration into the selected report
-  // item and never persist a live saved-view reference on the schedule.
-  const requestedSavedViewId = String(data.get('savedViewId') || '');
-  const selectedSavedView = savedViews.find((view) => view.id === requestedSavedViewId && isCatalogViewAvailable(catalog, view.reportId, view.viewId));
-  if (selectedSavedView) {
-    const target = reportItems.find((item) => item.reportId === selectedSavedView.reportId && item.viewId === selectedSavedView.viewId);
-    if (target) {
-      target.filters = selectedSavedView.filters && typeof selectedSavedView.filters === 'object' ? { ...selectedSavedView.filters } : {};
-      target.sort = selectedSavedView.sort && typeof selectedSavedView.sort === 'object' ? { ...selectedSavedView.sort } : null;
-      target.visibleColumns = Array.isArray(selectedSavedView.visibleColumns) ? [...selectedSavedView.visibleColumns] : [];
+  for (const item of reportItems) {
+    const select = [...form.querySelectorAll('[data-schedule-item-saved-view]')]
+      .find((entry) => entry.dataset.reportId === item.reportId && entry.dataset.viewId === item.viewId);
+    if (!select) continue;
+    const selectedValue = String(select.value || '');
+    if (!selectedValue) {
+      item.savedViewId = '';
+      item.savedViewSnapshotId = '';
+      item.savedViewSnapshotName = '';
+      item.savedViewUpdatedAt = '';
+      item.dateRangeType = '';
+      item.filters = {};
+      item.sort = null;
+      item.visibleColumns = [];
+      continue;
     }
+    if (selectedValue.startsWith('__snapshot__:')) continue;
+    const selected = savedViews.find((view) => view.id === selectedValue && view.reportId === item.reportId && view.viewId === item.viewId);
+    if (!selected) continue;
+    item.savedViewId = selected.id;
+    item.savedViewSnapshotId = selected.id;
+    item.savedViewSnapshotName = selected.name || '';
+    item.savedViewUpdatedAt = selected.updatedAt || '';
+    item.dateRangeType = selected.dateRangeType || selected.filters?.dateRangeType || 'custom';
+    item.filters = selected.filters && typeof selected.filters === 'object' ? { ...selected.filters } : {};
+    item.sort = selected.sort && typeof selected.sort === 'object' ? { ...selected.sort } : null;
+    item.visibleColumns = Array.isArray(selected.visibleColumns) ? [...selected.visibleColumns] : [];
   }
+
+  if (!reportItems.length) throw new Error('Select at least one current report and one view for this schedule.');
 
   const recipients = uniqueEmails(String(data.get('recipients') || '').split(/[;,\n]/));
   if (!recipients.length) throw new Error('Add at least one recipient.');
@@ -742,6 +782,10 @@ function readScheduleForm(form, catalog, savedViews = []) {
   try { baseFilters = JSON.parse(String(data.get('filtersJson') || '{}')); } catch { baseFilters = {}; }
   delete baseFilters.locationId;
   delete baseFilters.locationName;
+  delete baseFilters.locationIds;
+  delete baseFilters.locations;
+  delete baseFilters.location_id;
+  delete baseFilters.location_ids;
   const dateRangeType = String(data.get('dateRangeType') || 'today');
   const customFrom = String(data.get('customFrom') || '');
   const customTo = String(data.get('customTo') || '');
@@ -792,7 +836,7 @@ function normalizeFormValues(values = {}, state = {}, catalog = [], availableLoc
   const locations = Array.isArray(availableLocations)
     ? mergeLocations(availableLocations)
     : extractLocations(state);
-  const reportItems = normalizeReportItems(values, catalog);
+  const reportItems = normalizeReportItems(values, catalog).map((item) => restoreSavedViewSnapshot(item, savedViews));
   const locationIds = Array.isArray(values.locationIds) ? values.locationIds.map(String).filter(Boolean) : values.locationId ? [String(values.locationId)] : [];
   const requestedMode = values.locationMode || (locationIds.length ? 'selected' : 'all');
   const selectedLocationId = locationIds.find((id) => locations.some((location) => location.id === id)) || locations[0]?.id || '';
@@ -838,7 +882,11 @@ function normalizeReportItems(values = {}, catalog = []) {
       reportGroupId: String(item?.reportGroupId || resolved.reportGroupId || ''),
       reportId: resolved.reportId,
       viewId: resolved.viewId,
-      savedViewId: '',
+      savedViewId: String(item?.savedViewId || ''),
+      savedViewSnapshotId: String(item?.savedViewSnapshotId || ''),
+      savedViewSnapshotName: String(item?.savedViewSnapshotName || ''),
+      savedViewUpdatedAt: String(item?.savedViewUpdatedAt || ''),
+      dateRangeType: String(item?.dateRangeType || item?.filters?.dateRangeType || ''),
       filters: item?.filters && typeof item.filters === 'object' ? { ...item.filters } : {},
       sort: item?.sort && typeof item.sort === 'object' ? { ...item.sort } : null,
       visibleColumns: Array.isArray(item?.visibleColumns) ? [...item.visibleColumns] : []
@@ -851,6 +899,35 @@ function normalizeReportItems(values = {}, catalog = []) {
     return true;
   });
   return normalized;
+}
+
+function restoreSavedViewSnapshot(item = {}, savedViews = []) {
+  const explicitId = String(item.savedViewSnapshotId || item.savedViewId || '');
+  const explicit = savedViews.find((view) => view.id === explicitId && view.reportId === item.reportId && view.viewId === item.viewId);
+  const matched = explicit || savedViews.find((view) => view.reportId === item.reportId
+    && view.viewId === item.viewId
+    && sameScheduleSnapshot(item, view));
+  return {
+    ...item,
+    savedViewId: '',
+    savedViewSnapshotId: matched?.id || explicitId,
+    savedViewSnapshotName: matched?.name || item.savedViewSnapshotName || '',
+    savedViewUpdatedAt: matched?.updatedAt || item.savedViewUpdatedAt || '',
+    dateRangeType: matched?.dateRangeType || matched?.filters?.dateRangeType || item.dateRangeType || item.filters?.dateRangeType || ''
+  };
+}
+
+function sameScheduleSnapshot(item = {}, savedView = {}) {
+  return String(item.dateRangeType || item.filters?.dateRangeType || '') === String(savedView.dateRangeType || savedView.filters?.dateRangeType || '')
+    && stableSnapshotJson(item.filters || {}) === stableSnapshotJson(savedView.filters || {})
+    && stableSnapshotJson(item.sort || null) === stableSnapshotJson(savedView.sort || null)
+    && stableSnapshotJson(item.visibleColumns || []) === stableSnapshotJson(savedView.visibleColumns || []);
+}
+
+function stableSnapshotJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableSnapshotJson).join(',')}]`;
+  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableSnapshotJson(value[key])}`).join(',')}}`;
+  return JSON.stringify(value ?? null);
 }
 
 function toSchedulePayload(schedule = {}, catalog = []) {
@@ -911,7 +988,7 @@ function normalizeSavedViews(views = [], catalog = []) {
 function isSchedulerVersionCompatible(version = '') {
   const [major, minor] = String(version || '').split('.').map((value) => Number(value));
   if (!Number.isFinite(major) || !Number.isFinite(minor)) return false;
-  return major > 33 || (major === 33 && minor >= 17);
+  return major > 33 || (major === 33 && minor >= 19);
 }
 
 function selectReportItem(form, reportId, viewId, replace = false) {
@@ -949,6 +1026,7 @@ function syncReportSelection(form, reportId, selected) {
     if (defaultToggle) defaultToggle.checked = true;
   }
   if (!selected) viewToggles.forEach((input) => { input.checked = false; });
+  viewToggles.forEach((input) => syncSavedViewSelectState(form, reportId, input.dataset.viewId || '', input.checked));
 
   const card = [...form.querySelectorAll('[data-schedule-report-card]')]
     .find((entry) => entry.dataset.reportId === reportId);
@@ -1003,7 +1081,10 @@ function updateBundleCount(form) {
       selectedViewsSlot.innerHTML = reportViewToggles.length
         ? reportViewToggles.map((input) => {
           const label = input.closest('label')?.querySelector('strong')?.textContent?.trim() || input.dataset.viewId || 'View';
-          return `<span>${escapeHtml(label)}</span>`;
+          const savedSelect = [...form.querySelectorAll('[data-schedule-item-saved-view]')]
+            .find((select) => select.dataset.reportId === reportId && select.dataset.viewId === input.dataset.viewId);
+          const savedLabel = savedSelect?.value ? savedSelect.options[savedSelect.selectedIndex]?.textContent?.trim() : '';
+          return `<span>${escapeHtml(savedLabel ? `${label} · ${savedLabel}` : label)}</span>`;
         }).join('')
         : '<span class="reportScheduleReportCard__noViews">No views selected</span>';
     }

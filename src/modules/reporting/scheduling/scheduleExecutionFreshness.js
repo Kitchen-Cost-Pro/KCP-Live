@@ -21,7 +21,14 @@ const RUNTIME_FILTER_KEYS = new Set([
 ]);
 
 const DATE_FILTER_KEYS = new Set(['from', 'to', 'startDate', 'endDate']);
-const LOCATION_FILTER_KEYS = new Set(['locationId', 'locationName']);
+const LOCATION_FILTER_KEYS = new Set([
+  'locationId',
+  'locationName',
+  'locationIds',
+  'locations',
+  'location_id',
+  'location_ids'
+]);
 
 export function normalizeScheduledReportFilters({
   reportId = '',

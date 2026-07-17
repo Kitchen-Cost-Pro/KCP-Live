@@ -37,6 +37,11 @@ export function normalizeSalesFinancialRow(row = {}) {
   const vatRate = suppliedVatRate > 0 ? suppliedVatRate : DEFAULT_VAT_RATE;
   const status = text(row.status) || 'Unknown';
   const isRefund = status.toLowerCase().includes('refund') || text(row.orderType || row.order_type).toLowerCase() === 'refund';
+  const sourcePaymentMethod = text(row.paymentMethod || row.payment_method);
+  const originalPaymentMethod = text(row.originalPaymentMethod || row.original_payment_method);
+  const paymentMethod = isRefund && sourcePaymentMethod.toLowerCase() === 'refund'
+    ? (originalPaymentMethod || 'Unknown')
+    : (sourcePaymentMethod || originalPaymentMethod || 'Unknown');
   const refundGrossAmount = Math.abs(safeNumber(row.refundGrossAmount ?? row.refund_gross_amount ?? row.refundAmount ?? row.refund_amount));
   const discountAmount = Math.abs(safeNumber(row.discountAmount ?? row.discount_amount));
   const tipAmount = isRefund ? 0 : Math.abs(safeNumber(row.tipAmount ?? row.tip_amount));
@@ -99,7 +104,7 @@ export function normalizeSalesFinancialRow(row = {}) {
     refundReason: text(row.refundReason || row.refund_reason),
     refundHandling: text(row.refundHandling || row.refund_handling),
     refundBehavior: text(row.refundBehavior || row.refund_behavior),
-    paymentMethod: text(row.paymentMethod || row.payment_method) || 'Unknown',
+    paymentMethod,
     status,
     isRefund,
     grossAmount,

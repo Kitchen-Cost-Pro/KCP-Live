@@ -34,6 +34,6 @@ test('Phase 33.16 adds Yoco report source indexes and requires the matching Work
   assert.match(tenantMigrations, /idx_yoco_order_lines_workspace_order_line/);
   assert.match(tenantMigrations, /_kcp_yoco_order_dedupe/);
   assert.match(tenantMigrations, /CREATE UNIQUE INDEX IF NOT EXISTS ux_yoco_orders_workspace_business_key/);
-  assert.match(schedulingRoutes, /schedulerVersion: '33\.17'/);
-  assert.match(schedulingPage, /minor >= 17/);
+  assert.match(schedulingRoutes, /schedulerVersion: '33\.19'/);
+  assert.match(schedulingPage, /minor >= 19/);
 });

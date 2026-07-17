@@ -3,7 +3,11 @@ import { FacadeDatabase } from './d1-facade';
 import { TENANT_MIGRATIONS } from './tenant-migrations';
 import type { Env } from './types';
 import { dispatchWorkspaceRoute } from './legacy/index';
-import { retryPendingYocoRefundWebhooks } from './legacy/yoco-service';
+import { dispatchYocoV2WorkspaceRoute } from './modules/yoco-engine-v2/route-dispatch';
+import {
+  YOCO_V2_RUNTIME_SCHEMA_REPAIR,
+  YOCO_V2_RUNTIME_SCHEMA_REPAIR_ID,
+} from './modules/yoco-engine-v2/schema-repair';
 import type { Env as LegacyEnv, AuthContext as LegacyAuth } from './legacy/types';
 
 /**
@@ -49,59 +53,51 @@ export class WorkspaceDO extends DurableObject<Env> {
         );
       });
     }
+
+    // Repair schema drift independently from the indexed migration counter. Several historical
+    // releases reused migration positions while the Yoco V2 engine was being separated from the
+    // old integration. A tenant could therefore report the latest version while still missing a
+    // V2 table or yoco_connections column, causing /yoco/connect to fail with HTTP 500.
+    //
+    // Record the repair separately so the full idempotent script is paid only once per tenant,
+    // rather than on every Durable Object cold start. A failed repair never writes its marker and
+    // will be retried safely on the next request.
+    sql.exec(
+      `CREATE TABLE IF NOT EXISTS _kcp_runtime_repairs (
+         repair_id TEXT PRIMARY KEY,
+         applied_at TEXT NOT NULL
+       )`
+    );
+    const repairApplied = sql.exec(
+      `SELECT repair_id FROM _kcp_runtime_repairs WHERE repair_id = ?1`,
+      YOCO_V2_RUNTIME_SCHEMA_REPAIR_ID,
+    ).toArray()[0];
+    if (!repairApplied) {
+      storage.transactionSync(() => {
+        this.db.execScript(YOCO_V2_RUNTIME_SCHEMA_REPAIR);
+        sql.exec(
+          `INSERT OR REPLACE INTO _kcp_runtime_repairs (repair_id, applied_at)
+           VALUES (?1, datetime('now'))`,
+          YOCO_V2_RUNTIME_SCHEMA_REPAIR_ID,
+        );
+      });
+    }
   }
 
   private legacyEnv(): LegacyEnv {
     return {
       ...this.env,
       DB: this.db,
-      CENTRAL_DB: this.env.CENTRAL_DB
+      CENTRAL_DB: this.env.CENTRAL_DB,
+      YOCO_V2_WAIT_UNTIL: (promise: Promise<unknown>) => this.state.waitUntil(promise)
     } as unknown as LegacyEnv;
-  }
-
-  private async pendingRefundWebhookCount(workspaceId: string) {
-    if (!workspaceId) return 0;
-    const row = await this.db.prepare(
-      `SELECT COUNT(*) AS pending
-         FROM yoco_webhook_events event
-        WHERE event.workspace_id = ?1
-          AND lower(replace(event.event_type, '_', '.')) IN ('payment.refunded', 'order.updated', 'refund.succeeded', 'refund.successful')
-          AND (
-            event.status IN ('attention', 'failed')
-            OR (
-              event.status = 'processing'
-              AND datetime(COALESCE(event.processed_at, event.created_at)) <= datetime('now', '-5 minutes')
-            )
-            OR (
-              event.status = 'processed'
-              AND lower(replace(event.event_type, '_', '.')) IN ('payment.refunded', 'refund.succeeded', 'refund.successful')
-              AND COALESCE(event.yoco_order_id, '') <> ''
-              AND NOT EXISTS (
-                SELECT 1
-                  FROM yoco_orders refund_order
-                 WHERE refund_order.workspace_id = event.workspace_id
-                   AND refund_order.order_type = 'refund'
-                   AND refund_order.parent_yoco_order_id = event.yoco_order_id
-              )
-            )
-          )`
-    ).bind(workspaceId).first<{ pending?: number }>();
-    return Number(row?.pending || 0) || 0;
-  }
-
-  private async scheduleRefundRetry(workspaceId: string, delayMs = 15_000) {
-    if (!workspaceId || !(await this.pendingRefundWebhookCount(workspaceId))) return;
-    await this.state.storage.put('_kcp_workspace_id', workspaceId);
-    const target = Date.now() + Math.max(5_000, delayMs);
-    const existing = await this.state.storage.getAlarm();
-    if (existing === null || existing > target) await this.state.storage.setAlarm(target);
   }
 
   async fetch(request: Request): Promise<Response> {
     const workspaceId = request.headers.get('x-kcp-workspace') || '';
     const resource = request.headers.get('x-kcp-resource') || new URL(request.url).pathname;
 
-    let fwd: { uid?: string; email?: string; name?: string } = {};
+    let fwd: { uid?: string; email?: string; name?: string; systemRole?: 'admin' | 'queue'; adminRole?: string; permissions?: string[] } = {};
     try {
       fwd = JSON.parse(request.headers.get('x-kcp-auth') || '{}');
     } catch {
@@ -110,40 +106,20 @@ export class WorkspaceDO extends DurableObject<Env> {
     const auth: LegacyAuth = {
       uid: String(fwd.uid || ''),
       email: String(fwd.email || ''),
-      token: { sub: String(fwd.uid || ''), email: String(fwd.email || ''), name: String(fwd.name || '') }
+      token: { sub: String(fwd.uid || ''), email: String(fwd.email || ''), name: String(fwd.name || '') },
+      systemRole: fwd.systemRole,
+      adminRole: fwd.adminRole,
+      permissions: Array.isArray(fwd.permissions) ? fwd.permissions : []
     };
 
-    // The ported handlers see `env.DB` = this workspace's SQLite facade and `env.CENTRAL_DB` = the
-    // shared central D1 (for the few central reads: assertWorkspaceAccess, allowed-locations, etc.).
-    try {
-      return await dispatchWorkspaceRoute(request, this.legacyEnv(), auth, workspaceId, resource);
-    } finally {
-      // A webhook handler can throw after safely persisting the event as failed. Always
-      // schedule the internal retry from persisted state so a transient Yoco/API error
-      // cannot strand a live refund until the next manual full resync.
-      if (resource === 'yoco-webhook') {
-        await this.scheduleRefundRetry(workspaceId).catch(() => undefined);
-      }
-    }
-  }
+    // V2 routes are isolated from the legacy dispatcher. They use the same tenant database but
+    // cannot reach legacy sale/refund stock or reporting writers.
+    const tenantEnv = this.legacyEnv();
+    const v2Response = await dispatchYocoV2WorkspaceRoute(request, tenantEnv, auth, workspaceId, resource);
+    if (v2Response) return v2Response;
 
-  async alarm(): Promise<void> {
-    const workspaceId = String(await this.state.storage.get<string>('_kcp_workspace_id') || '');
-    if (!workspaceId) return;
-    const previousAttempt = Number(await this.state.storage.get<number>('_kcp_refund_retry_attempt') || 0);
-    try {
-      await retryPendingYocoRefundWebhooks(this.legacyEnv(), workspaceId, { limit: 50 });
-    } catch {
-      // Pending state is retained and the bounded backoff below schedules another try.
-    }
-    const pending = await this.pendingRefundWebhookCount(workspaceId);
-    if (!pending) {
-      await this.state.storage.delete('_kcp_refund_retry_attempt');
-      return;
-    }
-    const nextAttempt = Math.min(previousAttempt + 1, 6);
-    await this.state.storage.put('_kcp_refund_retry_attempt', nextAttempt);
-    const delayMs = Math.min(15_000 * (2 ** nextAttempt), 5 * 60_000);
-    await this.state.storage.setAlarm(Date.now() + delayMs);
+    // Non-Yoco workspace routes still use the shared tenant dispatcher. Yoco webhook, queue,
+    // reconciliation, sale, and refund effects are handled exclusively by the V2 dispatcher above.
+    return dispatchWorkspaceRoute(request, tenantEnv, auth, workspaceId, resource);
   }
 }

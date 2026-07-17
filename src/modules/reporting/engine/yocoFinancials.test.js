@@ -18,10 +18,10 @@ test('normalized scalar amounts are major units regardless of value, while expli
 
 test('Yoco ingestion never guesses currency units from amount magnitude', () => {
   for (const relativePath of [
-    'cloudflare-v2/src/legacy/yoco-sales.ts',
-    'cloudflare-v2/src/legacy/yoco-service.ts',
+    'cloudflare-v2/src/modules/yoco-engine-v2/sale-resolver.ts',
+    'cloudflare-v2/src/modules/yoco-engine-v2/refund-resolver.ts',
+    'cloudflare-v2/src/modules/yoco-engine-v2/integration-service.ts',
     'cloudflare-v2/src/legacy/routes.ts',
-    'cloudflare-v2/src/legacy/chat-routes.ts',
     'cloudflare-v2/src/legacy/reporting-routes.ts'
   ]) {
     const source = fs.readFileSync(path.join(process.cwd(), relativePath), 'utf8');

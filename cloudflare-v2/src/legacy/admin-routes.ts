@@ -1,7 +1,7 @@
 import type { AuthContext, Env, DbLike, DbStatementLike } from './types';
 import { error, json, readJson } from './http';
 import { requireAuth } from './auth';
-import { connectYoco, disconnectYoco, getYocoApiKey, getYocoConnection, resetYocoWebhook, syncYocoCatalogue, syncYocoSales } from './yoco-service';
+import { connectYoco, disconnectYoco, getYocoApiKey, getYocoConnection, resetYocoWebhook, syncYocoCatalogue } from '../modules/yoco-engine-v2/integration-service';
 import { sendEmail, type EmailDeliveryConfig } from './email';
 import { encryptTextWithSecret, decryptTextWithSecret } from './crypto';
 import { KCP_WORKER_RELEASE, KCP_WORKER_RELEASE_DATE, KCP_REFUND_PIPELINE_VERSION } from '../release';
@@ -1986,23 +1986,6 @@ export async function postAdminYocoSyncCatalogue(request: Request, env: Env, wor
     updated: (result as any)?.updated
   });
   return json(request, env, { ok: true, ...result });
-}
-
-export async function postAdminYocoSyncSales(request: Request, env: Env, workspaceId: string) {
-  const adminSession = await requireAdmin(request, env);
-  const payload: Record<string, unknown> = await readJson<Record<string, unknown>>(request).catch(() => ({} as Record<string, unknown>));
-  const sinceDays = Number(payload.sinceDays || 2);
-  const clampedDays = Number.isFinite(sinceDays) && sinceDays > 0
-    ? Math.min(Math.max(sinceDays, 1), 31)
-    : 2;
-  const sinceIso = new Date(Date.now() - clampedDays * 24 * 60 * 60 * 1000).toISOString();
-  const result = await syncYocoSales(env, workspaceId, { sinceIso });
-  await writeAdminAuditEvent(env, adminAuditActor(adminSession), 'yoco.sync_sales', workspaceId, {
-    sinceDays: clampedDays,
-    ordersFetched: (result as any)?.ordersFetched,
-    stockMovements: (result as any)?.stockMovements
-  });
-  return json(request, env, { ok: true, sinceDays: clampedDays, sinceIso, ...result });
 }
 
 export async function postAdminYocoResetWebhook(request: Request, env: Env, workspaceId: string) {

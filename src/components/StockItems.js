@@ -4,51 +4,13 @@ import { matchesBarcodeQuery, parseBarcodeValues } from '../utils/barcodes.js';
 import { getLocationStock } from '../utils/stockBalances.js';
 import { resolveLocationUnitCost } from '../utils/stockCostResolver.js';
 import { resolveStockItemSku } from '../utils/stockSku.js';
+import { getAccessibleLocationOptions } from '../services/locationAccess.js';
 
 const defaultUoms = ['ea', 'kg', 'g', 'l', 'ml', 'pack', 'case', 'bottle', 'bag', 'box', 'tray', 'portion', 'batch'];
 
 function getAccessibleStockLocationOptions(locations = [], access = {}) {
-  const active = (locations || []).filter((location) => location?.active !== false);
-  const base = active.length ? active : locations;
-  const filtered = filterLocationsByAccess(base, access);
-  const options = [...(filtered.length ? filtered : base)]
-    .map((location) => ({
-      value: String(location.id || location.locationId || '').trim(),
-      label: String(location.displayName || location.name || location.locationName || location.id || '').trim()
-    }))
-    .filter((option) => option.value)
-    .sort((a, b) => a.label.localeCompare(b.label));
-  return options.length ? options : [{ value: '', label: 'All Locations (Total)' }];
-}
-
-function filterLocationsByAccess(locations = [], access = {}) {
-  if (access.currentIsSuperUser === true || access.currentIsKcpSuperUser === true) return locations;
-  let filtered = locations;
-  const roleLocations = access.roleDefinition?.locations || access.currentRoleDefinition?.locations || [];
-  if (Array.isArray(roleLocations) && roleLocations.length && !roleLocations.includes('all')) {
-    const allowed = new Set(roleLocations.map(normalizeLocationKey).filter(Boolean));
-    const next = filtered.filter((location) => locationMatchesLocationKeys(location, allowed));
-    filtered = next.length ? next : filtered;
-  }
-  const userLocations = Array.isArray(access.currentUserLocations) ? access.currentUserLocations : [];
-  if (userLocations.length) {
-    const allowed = new Set(userLocations.map(normalizeLocationKey).filter(Boolean));
-    const next = filtered.filter((location) => locationMatchesLocationKeys(location, allowed));
-    filtered = next.length ? next : filtered;
-  }
-  return filtered;
-}
-
-function locationMatchesLocationKeys(location = {}, keys = new Set()) {
-  if (!keys.size) return true;
-  return [location.id, location.locationId, location.name, location.displayName, location.locationName]
-    .map(normalizeLocationKey)
-    .filter(Boolean)
-    .some((value) => keys.has(value));
-}
-
-function normalizeLocationKey(value = '') {
-  return String(value || '').normalize('NFKC').toLowerCase().replace(/[^a-z0-9]+/g, '').trim();
+  const options = getAccessibleLocationOptions(locations, access);
+  return options.length ? options : [];
 }
 
 function resolveActiveLocationId(locationId = '', options = []) {

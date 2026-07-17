@@ -70,8 +70,8 @@ test('schedule UI selects reports and views while the runner keeps location outp
   assert.match(schedulingSource, /name="locationSelection"/);
   assert.match(schedulingSource, /Choose All Locations to generate a separate output for every active location/);
   assert.match(schedulingSource, /values\.locations\.map\(\(location\) => `<option/);
-  assert.match(workerSource, /const outputCount = items\.length \* locations\.length/);
-  assert.match(workerSource, /for \(const location of locations\)/);
+  assert.match(workerSource, /const outputCount = itemPlans\.reduce/);
+  assert.match(workerSource, /for \(const location of itemLocations\)/);
   assert.match(workerSource, /buildScheduledAttachments\(schedule\.format, outputs\)/);
   assert.match(workerSource, /groupScheduledOutputsByReport\(outputs\)/);
 });

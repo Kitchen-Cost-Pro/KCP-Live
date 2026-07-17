@@ -7,12 +7,14 @@ const schedulingPageSource = fs.readFileSync(new URL('./SchedulingPage.js', impo
 const roleServiceSource = fs.readFileSync(new URL('../../../services/roleService.js', import.meta.url), 'utf8');
 const mainSource = fs.readFileSync(new URL('../../../main.js', import.meta.url), 'utf8');
 
-test('Phase 33.10 treats saved views as templates and never persists live view references', () => {
-  assert.match(schedulingPageSource, /Saved views are templates only/);
-  assert.match(schedulingPageSource, /savedViewId: ''/);
-  assert.match(schedulingPageSource, /normalizeSavedViews/);
-  assert.match(schedulingPageSource, /toSchedulePayload\(schedule, catalog\)/);
-  assert.match(schedulingPageSource, /updateReportSchedule\(workspaceId, schedule\.id, toSchedulePayload\(schedule, catalog\)\)/);
+test('saved views are materialized into durable per-report snapshots', () => {
+  assert.match(schedulingPageSource, /savedViewSnapshotId/);
+  assert.match(schedulingPageSource, /savedViewSnapshotName/);
+  assert.match(schedulingPageSource, /restoreSavedViewSnapshot/);
+  assert.match(schedulingPageSource, /readScheduleForm\(form, catalog, savedViews, values\.reportItems\)/);
+  assert.match(workerSource, /materializeScheduleItems/);
+  assert.match(workerSource, /savedViewSnapshotId: saved\.id/);
+  assert.match(workerSource, /savedViewSnapshotName: saved\.name/);
   assert.doesNotMatch(workerSource, /saved_view_id/);
   assert.match(workerSource, /reportItems: validation\.items/);
 });
@@ -21,7 +23,7 @@ test('Phase 33.13 resolves obsolete report views without persisting repair refer
   assert.match(workerSource, /function repairScheduleItem/);
   assert.match(workerSource, /resolveScheduleReportSelection/);
   assert.doesNotMatch(workerSource, /repairStoredScheduleReferences/);
-  assert.match(workerSource, /schedulerVersion: '33\.17'/);
+  assert.match(workerSource, /schedulerVersion: '33\.19'/);
   assert.match(workerSource, /targets a report that is no longer available; the schedule will use its stored report settings/);
 });
 
@@ -35,10 +37,10 @@ test('Phase 33.10 prevents timestamp-only access refreshes from remounting Sched
 
 
 test('Phase 33.13 detects an outdated Worker before allowing schedule mutations', () => {
-  assert.match(workerSource, /schedulerVersion: '33\.17'/);
+  assert.match(workerSource, /schedulerVersion: '33\.19'/);
   assert.match(schedulingPageSource, /isSchedulerVersionCompatible/);
   assert.match(schedulingPageSource, /The Scheduling Worker is older than this page/);
-  assert.match(schedulingPageSource, /major === 33 && minor >= 17/);
+  assert.match(schedulingPageSource, /major === 33 && minor >= 19/);
   assert.match(schedulingPageSource, /!schedulerReady\(\)/);
 });
 

@@ -36,7 +36,7 @@ import {
   savePersonalSettings,
   saveWorkspaceSettings
 } from './services/settingsService.js';
-import { ACTION_PERMISSION_MAP, canManagePermissionSets, getAccessRenderRevision, hasPermission, hasSectionAccess, normalizeRoleName, resolveRoleDefinition, toRoleLabel } from './services/roleService.js';
+import { ACTION_PERMISSION_MAP, canManagePermissionSets, ensureExplicitDataPermissionSchema, getAccessRenderRevision, hasPermission, hasSectionAccess, normalizeRoleName, resolveRoleDefinition, toRoleLabel } from './services/roleService.js';
 import { buildSupplierPurchaseOrderPdfFile as buildSupplierPurchaseOrderPdfDocument, buildManufacturingBuilderXlsx, downloadFileBlob, downloadStyledRecipeTemplateXlsx, downloadStyledStockTemplateXlsx, parseDataFile } from './services/dataService.js';
 import { KCP_PDF_THEME } from './utils/pdfTheme.js';
 import {
@@ -632,9 +632,45 @@ function stopSystemBroadcastRefresh() {
 // screen. A changed version emits a passive event; users consume fresh data through explicit
 // Refresh actions or normal navigation, so forms, drawers, filters, and scroll never reset.
 const DATA_VERSION_POLL_INTERVAL_MS = 120000; // 2 min on normal modules
-const STOCK_DATA_VERSION_POLL_INTERVAL_MS = 45000; // quick but cheap stock-tab refresh for POS webhooks
+const STOCK_DATA_VERSION_POLL_INTERVAL_MS = 15000; // near-live stock-tab refresh for POS/Yoco webhooks
+let stockLiveRefreshInstalled = false;
+
+// When the data-version poll detects a change (a Yoco/POS webhook bumped stock_movements), silently
+// re-fetch stock while the Stock Items tab is open. Uses applyRealtimeSnapshot so the update is
+// deferred while the user is editing and never remounts the page (no "refresh" flicker).
+async function refreshStockFromDataVersion(workspaceId) {
+  if (appState.route.active !== 'ingredients') return;
+  if (!workspaceId || appState.workspace?.id !== workspaceId) return;
+  try {
+    clearApiCache();
+    const { fetchStock } = await import('./services/stockService.js');
+    const stock = await fetchStock(workspaceId);
+    if (appState.route.active !== 'ingredients' || appState.workspace?.id !== workspaceId) return;
+    applyRealtimeSnapshot('stock', () => {
+      appState.stock = {
+        ...appState.stock,
+        status: 'ready',
+        items: stock.items || appState.stock.items || [],
+        locations: stock.locations || appState.stock.locations || [],
+        categories: stock.categories || appState.stock.categories || [],
+        uoms: stock.uoms || appState.stock.uoms || [],
+        updatedAt: stock.updatedAt || new Date().toISOString(),
+        error: ''
+      };
+    });
+  } catch { /* silent — a failed live refresh must never disrupt the app */ }
+}
+
+function installStockLiveRefresh() {
+  if (stockLiveRefreshInstalled) return;
+  stockLiveRefreshInstalled = true;
+  window.addEventListener('kcp:data-version-changed', (event) => {
+    refreshStockFromDataVersion(event?.detail?.workspaceId || appState.workspace?.id);
+  });
+}
 
 function startDataVersionPoll() {
+  installStockLiveRefresh();
   // Re-establish the baseline on (re)start so a workspace switch doesn't fire a spurious refetch.
   lastSeenDataVersion = null;
   const pollOnce = async () => {
@@ -1341,16 +1377,33 @@ async function refreshActiveTabFromApi() {
 
   try {
     if (appState.route.active === 'products') {
-      const { fetchMenuItems, fetchMenuModifiers } = await import('./services/menuService.js');
-      const [refreshedItems, refreshedModifiers] = await Promise.all([
+      const [{ fetchMenuItems, fetchMenuModifiers }, { fetchStock }, { fetchModifierNoteSuggestions }] = await Promise.all([
+        import('./services/menuService.js'),
+        import('./services/stockService.js'),
+        import('./services/recipeService.js')
+      ]);
+      const [refreshedItems, refreshedModifiers, stockSnapshot, noteSnapshot] = await Promise.all([
         fetchMenuItems(workspaceId, { cacheBust: true }),
-        fetchMenuModifiers(workspaceId, { cacheBust: true })
+        fetchMenuModifiers(workspaceId, { cacheBust: true }),
+        fetchStock(workspaceId),
+        fetchModifierNoteSuggestions(workspaceId, {
+          includeIgnored: appState.menu.noteSuggestions?.includeIgnored,
+          cacheBust: true
+        }).catch(() => ({ suggestions: appState.menu.noteSuggestions?.items || [] }))
       ]);
       appState.menu = {
         ...appState.menu,
         status: 'ready',
         items: refreshedItems,
         modifierItems: refreshedModifiers,
+        ingredients: stockSnapshot.items || appState.menu.ingredients || [],
+        locations: stockSnapshot.locations || appState.menu.locations || [],
+        noteSuggestions: {
+          ...(appState.menu.noteSuggestions || {}),
+          status: 'ready',
+          items: noteSnapshot.suggestions || [],
+          error: ''
+        },
         source: 'Live catalogue',
         updatedAt: new Date().toISOString(),
         error: ''
@@ -1562,7 +1615,7 @@ async function startMenuSubscription(workspaceId) {
     ) return;
 
     unsubscribeMenu = subscribeMenuCatalogue(workspaceId, {
-      onSnapshot: ({ status, items, modifierItems, locations, posIntegration, source, updatedAt, error }) => {
+      onSnapshot: ({ status, items, modifierItems, locations, ingredients, noteSuggestions, posIntegration, source, updatedAt, error }) => {
         if (
           subscriptionToken !== menuSubscriptionToken ||
           appState.route.active !== 'products' ||
@@ -1588,6 +1641,13 @@ async function startMenuSubscription(workspaceId) {
             items,
             modifierItems: modifierItems || [],
             locations: nextLocations,
+            ingredients: ingredients || appState.menu.ingredients || [],
+            noteSuggestions: {
+              ...(appState.menu.noteSuggestions || {}),
+              status: 'ready',
+              items: noteSuggestions || [],
+              error: ''
+            },
             posIntegration: posIntegration || { active: false, provider: '', label: '' },
             source,
             updatedAt,
@@ -1654,7 +1714,7 @@ async function startRecipeSubscription(workspaceId) {
     ) return;
 
     unsubscribeRecipes = subscribeRecipeWorkspace(workspaceId, {
-      onSnapshot: ({ status, items, ingredients, locations, source, updatedAt, loaded }) => {
+      onSnapshot: ({ status, items, ingredients, locations, noteSuggestions, source, updatedAt, loaded }) => {
         if (
           subscriptionToken !== recipeSubscriptionToken ||
           appState.route.active !== 'recipes' ||
@@ -1689,6 +1749,12 @@ async function startRecipeSubscription(workspaceId) {
 	          loaded,
 	          editingItem,
 	          draftRecipe,
+            noteSuggestions: {
+              ...(appState.recipes.noteSuggestions || {}),
+              status: 'ready',
+              items: noteSuggestions || [],
+              error: ''
+            },
             modalFocusRequest: pendingOpenItem ? `${String(pendingOpenItem.id || pendingOpenItemName || pendingOpenItemId)}:${Date.now()}` : appState.recipes.modalFocusRequest,
 	          pendingOpenItemId: pendingOpenItem ? '' : pendingOpenItemId,
 	          pendingOpenItemName: pendingOpenItem ? '' : pendingOpenItemName,
@@ -2679,6 +2745,426 @@ function updateMenuFilters(nextFilters) {
   renderApp();
 }
 
+
+function openMenuModifierEditor(modifierId = '', options = {}) {
+  const modifier = (appState.menu.modifierItems || []).find((entry) => String(entry.id) === String(modifierId));
+  if (!modifier) {
+    showMenuToast('Modifier could not be found. Refresh the catalogue and try again.', 'error');
+    return;
+  }
+  const editingModifier = structuredCloneSafe(modifier);
+  editingModifier.stockRule = {
+    ...(editingModifier.stockRule || {}),
+    locationIds: []
+  };
+  if (options?.actionType) {
+    editingModifier.stockRule = {
+      ...(editingModifier.stockRule || {}),
+      actionType: String(options.actionType).toUpperCase()
+    };
+  }
+  appState.menu = {
+    ...appState.menu,
+    editingModifier,
+    modifierStockRuleOpen: true,
+    modifierStockPicker: null,
+    viewingModifierLinks: null,
+    modifierLinksOpen: false,
+    filters: {
+      ...appState.menu.filters,
+      openDropdown: ''
+    },
+    actionError: ''
+  };
+  renderApp();
+}
+
+function openMenuModifierLinks(modifierId = '') {
+  const modifier = (appState.menu.modifierItems || []).find((entry) => String(entry.id) === String(modifierId));
+  if (!modifier) {
+    showMenuToast('Modifier links could not be found. Refresh the catalogue and try again.', 'error');
+    return;
+  }
+  appState.menu = {
+    ...appState.menu,
+    viewingModifierLinks: structuredCloneSafe(modifier),
+    modifierLinksOpen: true,
+    editingModifier: null,
+    modifierStockRuleOpen: false,
+    modifierStockPicker: null,
+    filters: {
+      ...appState.menu.filters,
+      openDropdown: ''
+    },
+    actionError: ''
+  };
+  renderApp();
+}
+
+function closeMenuModifierLinks() {
+  appState.menu = {
+    ...appState.menu,
+    viewingModifierLinks: null,
+    modifierLinksOpen: false
+  };
+  renderApp();
+}
+
+function closeMenuModifierEditor() {
+  appState.menu = {
+    ...appState.menu,
+    editingModifier: null,
+    modifierStockRuleOpen: false,
+    modifierStockPicker: null,
+    viewingModifierLinks: null,
+    modifierLinksOpen: false,
+    actionStatus: '',
+    actionError: ''
+  };
+  renderApp();
+}
+
+function updateMenuModifierStockRule(patch = {}) {
+  const current = appState.menu.editingModifier;
+  if (!current) return;
+  appState.menu = {
+    ...appState.menu,
+    editingModifier: {
+      ...current,
+      stockRule: {
+        ...(current.stockRule || {}),
+        ...patch,
+        locationIds: []
+      }
+    },
+    actionError: ''
+  };
+  renderApp();
+}
+
+function openMenuModifierStockPicker(mode = '') {
+  if (!appState.menu.editingModifier) return;
+  appState.menu = {
+    ...appState.menu,
+    modifierStockPicker: { open: true, mode: String(mode || ''), query: '' }
+  };
+  renderApp();
+}
+
+function closeMenuModifierStockPicker() {
+  appState.menu = { ...appState.menu, modifierStockPicker: null };
+  renderApp();
+}
+
+function searchMenuModifierStockPicker(query = '') {
+  appState.menu = {
+    ...appState.menu,
+    modifierStockPicker: {
+      ...(appState.menu.modifierStockPicker || {}),
+      open: true,
+      query: String(query || '')
+    }
+  };
+  renderApp();
+}
+
+function selectMenuModifierStockPicker(value = '') {
+  const mode = String(appState.menu.modifierStockPicker?.mode || '');
+  const raw = String(value || '');
+  if (!mode || !raw) return;
+  if (mode === 'recipeTarget') {
+    const separator = raw.indexOf('|');
+    updateMenuModifierStockRule({
+      targetOwnerType: separator >= 0 ? raw.slice(0, separator) : '',
+      targetOwnerId: separator >= 0 ? raw.slice(separator + 1) : raw
+    });
+  } else if (mode === 'stockTarget') {
+    const selected = (appState.menu.ingredients || []).find((entry) => String(entry.id) === raw);
+    updateMenuModifierStockRule({ targetOwnerType: 'stock_item', targetOwnerId: raw, unit: String(selected?.unit || 'ea') });
+  } else if (mode === 'source') {
+    updateMenuModifierStockRule({ sourceStockItemId: raw, replacementStockItemId: '', quantity: 1 });
+  } else if (mode === 'replacement') {
+    updateMenuModifierStockRule({ replacementStockItemId: raw });
+  }
+  appState.menu = { ...appState.menu, modifierStockPicker: null };
+  renderApp();
+}
+
+async function saveMenuModifierRule() {
+  const modifier = appState.menu.editingModifier;
+  if (!modifier) return;
+  appState.menu = {
+    ...appState.menu,
+    actionStatus: 'saving-modifier',
+    actionError: ''
+  };
+  renderApp();
+  try {
+    const { updateRecipe } = await import('./services/recipeService.js');
+    await updateRecipe(appState.workspace?.id, modifier, modifier.recipe || []);
+    const { fetchMenuModifiers } = await import('./services/menuService.js');
+    const modifierItems = await fetchMenuModifiers(appState.workspace?.id, { cacheBust: true });
+    appState.menu = {
+      ...appState.menu,
+      modifierItems,
+      editingModifier: null,
+      modifierStockRuleOpen: false,
+      modifierStockPicker: null,
+      actionStatus: '',
+      actionError: '',
+      updatedAt: new Date().toISOString()
+    };
+    showMenuToast('Modifier stock action saved.', 'success');
+  } catch (error) {
+    appState.menu = {
+      ...appState.menu,
+      actionStatus: '',
+      actionError: error.message || 'Could not save the modifier stock action.'
+    };
+    showMenuToast(error.message || 'Could not save the modifier stock action.', 'error');
+  }
+  renderApp();
+}
+
+async function refreshMenuNoteSuggestions(options = {}) {
+  const includeIgnored = options.includeIgnored ?? appState.menu.noteSuggestions?.includeIgnored ?? false;
+  appState.menu = {
+    ...appState.menu,
+    noteSuggestions: {
+      ...(appState.menu.noteSuggestions || {}),
+      status: 'loading',
+      includeIgnored,
+      error: ''
+    }
+  };
+  renderApp();
+  try {
+    const { fetchModifierNoteSuggestions } = await import('./services/recipeService.js');
+    const response = await fetchModifierNoteSuggestions(appState.workspace?.id, {
+      includeIgnored,
+      cacheBust: true
+    });
+    appState.menu = {
+      ...appState.menu,
+      noteSuggestions: {
+        ...(appState.menu.noteSuggestions || {}),
+        status: 'ready',
+        includeIgnored,
+        items: response.suggestions || [],
+        error: ''
+      }
+    };
+  } catch (error) {
+    appState.menu = {
+      ...appState.menu,
+      noteSuggestions: {
+        ...(appState.menu.noteSuggestions || {}),
+        status: 'error',
+        includeIgnored,
+        error: error.message || 'Could not load suggestions from orders.'
+      }
+    };
+  }
+  renderApp();
+}
+
+function openMenuNoteSuggestions() {
+  appState.menu = {
+    ...appState.menu,
+    filters: { ...appState.menu.filters, openDropdown: '' },
+    noteSuggestions: {
+      ...(appState.menu.noteSuggestions || {}),
+      open: true,
+      error: ''
+    }
+  };
+  renderApp();
+  if (!['ready', 'loading'].includes(appState.menu.noteSuggestions?.status)) {
+    refreshMenuNoteSuggestions();
+  }
+}
+
+function closeMenuNoteSuggestions() {
+  appState.menu = {
+    ...appState.menu,
+    noteSuggestions: {
+      ...(appState.menu.noteSuggestions || {}),
+      open: false,
+      editingId: '',
+      draft: null,
+      error: ''
+    }
+  };
+  renderApp();
+}
+
+function startMenuNoteRuleSetup(suggestionId = '') {
+  const suggestion = (appState.menu.noteSuggestions?.items || [])
+    .find((entry) => String(entry.id) === String(suggestionId));
+  if (!suggestion) return;
+  const existing = suggestion.rule || {};
+  const actionType = String(existing.actionType || 'NO_STOCK_CHANGE').toUpperCase();
+  appState.menu = {
+    ...appState.menu,
+    noteSuggestions: {
+      ...(appState.menu.noteSuggestions || {}),
+      editingId: suggestion.id,
+      error: '',
+      draft: {
+        noteText: suggestion.notePhrase || suggestion.normalizedText || '',
+        normalizedText: suggestion.normalizedText || '',
+        actionType,
+        targetOwnerType: String(existing.targetOwnerType || (actionType === 'ADD_RECIPE' ? 'product' : actionType === 'ADD_STOCK_ITEM' ? 'stock_item' : '')),
+        targetOwnerId: String(existing.targetOwnerId || ''),
+        sourceStockItemId: String(existing.sourceStockItemId || ''),
+        replacementStockItemId: String(existing.replacementStockItemId || ''),
+        quantity: Number(existing.quantity || 1) || 1,
+        unit: String(existing.unit || ''),
+        menuItemIds: Array.isArray(existing.menuItemIds) && existing.menuItemIds.length
+          ? existing.menuItemIds.map(String)
+          : (suggestion.menuItemIds || []).map(String),
+        locationIds: Array.isArray(existing.locationIds) && existing.locationIds.length
+          ? existing.locationIds.map(String)
+          : (suggestion.locationIds || []).map(String)
+      }
+    }
+  };
+  renderApp();
+}
+
+function cancelMenuNoteRuleSetup() {
+  appState.menu = {
+    ...appState.menu,
+    noteSuggestions: {
+      ...(appState.menu.noteSuggestions || {}),
+      editingId: '',
+      draft: null,
+      error: ''
+    }
+  };
+  renderApp();
+}
+
+function updateMenuNoteRuleDraft(patch = {}) {
+  const current = appState.menu.noteSuggestions?.draft;
+  if (!current) return;
+  const next = { ...current, ...patch };
+  if (patch.actionType) {
+    const actionType = String(patch.actionType).toUpperCase();
+    next.actionType = actionType;
+    next.targetOwnerType = actionType === 'ADD_RECIPE'
+      ? 'product'
+      : actionType === 'ADD_STOCK_ITEM'
+        ? 'stock_item'
+        : '';
+    next.targetOwnerId = '';
+    next.sourceStockItemId = '';
+    next.replacementStockItemId = '';
+  }
+  appState.menu = {
+    ...appState.menu,
+    noteSuggestions: {
+      ...(appState.menu.noteSuggestions || {}),
+      draft: next,
+      error: ''
+    }
+  };
+  renderApp();
+}
+
+async function saveMenuNoteRule() {
+  const noteState = appState.menu.noteSuggestions || {};
+  const draft = noteState.draft;
+  if (!draft?.noteText) return;
+  const actionType = String(draft.actionType || '').toUpperCase();
+  const targetRequired = ['ADD_RECIPE', 'ADD_STOCK_ITEM'].includes(actionType);
+  const sourceRequired = ['REMOVE_INGREDIENT', 'REPLACE_INGREDIENT'].includes(actionType);
+  const replacementRequired = actionType === 'REPLACE_INGREDIENT';
+  if (!actionType || (targetRequired && !draft.targetOwnerId) || (sourceRequired && !draft.sourceStockItemId) || (replacementRequired && !draft.replacementStockItemId)) {
+    appState.menu = {
+      ...appState.menu,
+      noteSuggestions: { ...noteState, error: 'Complete the stock action before saving.' }
+    };
+    renderApp();
+    return;
+  }
+  appState.menu = {
+    ...appState.menu,
+    noteSuggestions: { ...noteState, status: 'saving', error: '' }
+  };
+  renderApp();
+  try {
+    const { saveModifierNoteRule } = await import('./services/recipeService.js');
+    await saveModifierNoteRule(appState.workspace?.id, draft.noteText, {
+      actionType,
+      targetOwnerType: draft.targetOwnerType || '',
+      targetOwnerId: draft.targetOwnerId || '',
+      sourceStockItemId: draft.sourceStockItemId || '',
+      replacementStockItemId: draft.replacementStockItemId || '',
+      quantity: Math.max(0.000001, Number(draft.quantity || 1) || 1),
+      unit: draft.unit || '',
+      menuItemIds: Array.isArray(draft.menuItemIds) ? draft.menuItemIds : [],
+      locationIds: Array.isArray(draft.locationIds) ? draft.locationIds : [],
+      applyAllMatchingProducts: !Array.isArray(draft.menuItemIds) || draft.menuItemIds.length === 0,
+      active: true
+    });
+    appState.menu = {
+      ...appState.menu,
+      noteSuggestions: {
+        ...(appState.menu.noteSuggestions || {}),
+        editingId: '',
+        draft: null,
+        status: 'ready',
+        error: ''
+      }
+    };
+    await refreshMenuNoteSuggestions();
+    showMenuToast('Note rule approved. Exact matching notes can now affect stock.', 'success');
+  } catch (error) {
+    appState.menu = {
+      ...appState.menu,
+      noteSuggestions: {
+        ...(appState.menu.noteSuggestions || {}),
+        status: 'error',
+        error: error.message || 'Could not save the note rule.'
+      }
+    };
+    renderApp();
+  }
+}
+
+async function setMenuNoteSuggestionDisposition(noteText = '', disposition = 'IGNORED') {
+  const noteState = appState.menu.noteSuggestions || {};
+  appState.menu = {
+    ...appState.menu,
+    noteSuggestions: { ...noteState, status: 'saving', error: '' }
+  };
+  renderApp();
+  try {
+    const service = await import('./services/recipeService.js');
+    if (disposition === 'SUGGESTED') {
+      await service.restoreModifierNoteSuggestion(appState.workspace?.id, noteText);
+    } else {
+      await service.ignoreModifierNoteSuggestion(appState.workspace?.id, noteText);
+    }
+    await refreshMenuNoteSuggestions();
+  } catch (error) {
+    appState.menu = {
+      ...appState.menu,
+      noteSuggestions: {
+        ...(appState.menu.noteSuggestions || {}),
+        status: 'error',
+        error: error.message || 'Could not update the note suggestion.'
+      }
+    };
+    renderApp();
+  }
+}
+
+function toggleMenuIgnoredNoteSuggestions(includeIgnored = false) {
+  refreshMenuNoteSuggestions({ includeIgnored: Boolean(includeIgnored) });
+}
+
 async function scanMenuBarcode() {
   try {
     const { openBarcodeScanner } = await import('./services/barcodeScanner.js');
@@ -3372,6 +3858,249 @@ function updateRecipeFilters(nextFilters) {
   renderApp();
 }
 
+async function refreshRecipeNoteSuggestions(options = {}) {
+  const includeIgnored = options.includeIgnored ?? appState.recipes.noteSuggestions?.includeIgnored ?? false;
+  appState.recipes = {
+    ...appState.recipes,
+    noteSuggestions: {
+      ...(appState.recipes.noteSuggestions || {}),
+      status: 'loading',
+      includeIgnored,
+      error: ''
+    }
+  };
+  renderApp();
+  try {
+    const { fetchModifierNoteSuggestions } = await import('./services/recipeService.js');
+    const response = await fetchModifierNoteSuggestions(appState.workspace?.id, {
+      includeIgnored,
+      cacheBust: true
+    });
+    appState.recipes = {
+      ...appState.recipes,
+      noteSuggestions: {
+        ...(appState.recipes.noteSuggestions || {}),
+        status: 'ready',
+        includeIgnored,
+        items: response.suggestions || [],
+        error: ''
+      }
+    };
+  } catch (error) {
+    appState.recipes = {
+      ...appState.recipes,
+      noteSuggestions: {
+        ...(appState.recipes.noteSuggestions || {}),
+        status: 'error',
+        includeIgnored,
+        error: error.message || 'Could not load suggestions from orders.'
+      }
+    };
+  }
+  renderApp();
+}
+
+function openRecipeNoteSuggestions() {
+  appState.recipes = {
+    ...appState.recipes,
+    filters: { ...appState.recipes.filters, openDropdown: '' },
+    noteSuggestions: {
+      ...(appState.recipes.noteSuggestions || {}),
+      open: true,
+      error: ''
+    }
+  };
+  renderApp();
+  if (!['ready', 'loading'].includes(appState.recipes.noteSuggestions?.status)) {
+    refreshRecipeNoteSuggestions();
+  }
+}
+
+function closeRecipeNoteSuggestions() {
+  appState.recipes = {
+    ...appState.recipes,
+    noteSuggestions: {
+      ...(appState.recipes.noteSuggestions || {}),
+      open: false,
+      editingId: '',
+      draft: null,
+      error: ''
+    }
+  };
+  renderApp();
+}
+
+function startRecipeNoteRuleSetup(suggestionId = '') {
+  const suggestion = (appState.recipes.noteSuggestions?.items || [])
+    .find((entry) => String(entry.id) === String(suggestionId));
+  if (!suggestion) return;
+  const existing = suggestion.rule || {};
+  const actionType = String(existing.actionType || 'NO_STOCK_CHANGE').toUpperCase();
+  appState.recipes = {
+    ...appState.recipes,
+    noteSuggestions: {
+      ...(appState.recipes.noteSuggestions || {}),
+      editingId: suggestion.id,
+      error: '',
+      draft: {
+        noteText: suggestion.notePhrase || suggestion.normalizedText || '',
+        normalizedText: suggestion.normalizedText || '',
+        actionType,
+        targetOwnerType: String(existing.targetOwnerType || (actionType === 'ADD_RECIPE' ? 'product' : actionType === 'ADD_STOCK_ITEM' ? 'stock_item' : '')),
+        targetOwnerId: String(existing.targetOwnerId || ''),
+        sourceStockItemId: String(existing.sourceStockItemId || ''),
+        replacementStockItemId: String(existing.replacementStockItemId || ''),
+        quantity: Number(existing.quantity || 1) || 1,
+        unit: String(existing.unit || ''),
+        menuItemIds: Array.isArray(existing.menuItemIds) && existing.menuItemIds.length
+          ? existing.menuItemIds.map(String)
+          : (suggestion.menuItemIds || []).map(String),
+        locationIds: Array.isArray(existing.locationIds) && existing.locationIds.length
+          ? existing.locationIds.map(String)
+          : (suggestion.locationIds || []).map(String)
+      }
+    }
+  };
+  renderApp();
+}
+
+function cancelRecipeNoteRuleSetup() {
+  appState.recipes = {
+    ...appState.recipes,
+    noteSuggestions: {
+      ...(appState.recipes.noteSuggestions || {}),
+      editingId: '',
+      draft: null,
+      error: ''
+    }
+  };
+  renderApp();
+}
+
+function updateRecipeNoteRuleDraft(patch = {}) {
+  const current = appState.recipes.noteSuggestions?.draft;
+  if (!current) return;
+  const next = { ...current, ...patch };
+  if (patch.actionType) {
+    const actionType = String(patch.actionType).toUpperCase();
+    next.actionType = actionType;
+    next.targetOwnerType = actionType === 'ADD_RECIPE'
+      ? 'product'
+      : actionType === 'ADD_STOCK_ITEM'
+        ? 'stock_item'
+        : '';
+    next.targetOwnerId = '';
+    next.sourceStockItemId = '';
+    next.replacementStockItemId = '';
+  }
+  appState.recipes = {
+    ...appState.recipes,
+    noteSuggestions: {
+      ...(appState.recipes.noteSuggestions || {}),
+      draft: next,
+      error: ''
+    }
+  };
+  renderApp();
+}
+
+async function saveRecipeNoteRule() {
+  const noteState = appState.recipes.noteSuggestions || {};
+  const draft = noteState.draft;
+  if (!draft?.noteText) return;
+  const actionType = String(draft.actionType || '').toUpperCase();
+  const targetRequired = ['ADD_RECIPE', 'ADD_STOCK_ITEM'].includes(actionType);
+  const sourceRequired = ['REMOVE_INGREDIENT', 'REPLACE_INGREDIENT'].includes(actionType);
+  const replacementRequired = actionType === 'REPLACE_INGREDIENT';
+  if (!actionType || (targetRequired && !draft.targetOwnerId) || (sourceRequired && !draft.sourceStockItemId) || (replacementRequired && !draft.replacementStockItemId)) {
+    appState.recipes = {
+      ...appState.recipes,
+      noteSuggestions: {
+        ...noteState,
+        error: 'Complete the stock action before saving.'
+      }
+    };
+    renderApp();
+    return;
+  }
+
+  appState.recipes = {
+    ...appState.recipes,
+    noteSuggestions: { ...noteState, status: 'saving', error: '' }
+  };
+  renderApp();
+  try {
+    const { saveModifierNoteRule } = await import('./services/recipeService.js');
+    await saveModifierNoteRule(appState.workspace?.id, draft.noteText, {
+      actionType,
+      targetOwnerType: draft.targetOwnerType || '',
+      targetOwnerId: draft.targetOwnerId || '',
+      sourceStockItemId: draft.sourceStockItemId || '',
+      replacementStockItemId: draft.replacementStockItemId || '',
+      quantity: Math.max(0.000001, Number(draft.quantity || 1) || 1),
+      unit: draft.unit || '',
+      menuItemIds: Array.isArray(draft.menuItemIds) ? draft.menuItemIds : [],
+      locationIds: Array.isArray(draft.locationIds) ? draft.locationIds : [],
+      applyAllMatchingProducts: !Array.isArray(draft.menuItemIds) || draft.menuItemIds.length === 0,
+      active: true
+    });
+    appState.recipes = {
+      ...appState.recipes,
+      noteSuggestions: {
+        ...(appState.recipes.noteSuggestions || {}),
+        editingId: '',
+        draft: null,
+        status: 'ready',
+        error: ''
+      }
+    };
+    await refreshRecipeNoteSuggestions();
+    showRecipeToast('Note rule approved. Exact matching notes can now affect stock.', 'success');
+  } catch (error) {
+    appState.recipes = {
+      ...appState.recipes,
+      noteSuggestions: {
+        ...(appState.recipes.noteSuggestions || {}),
+        status: 'error',
+        error: error.message || 'Could not save the note rule.'
+      }
+    };
+    renderApp();
+  }
+}
+
+async function setRecipeNoteSuggestionDisposition(noteText = '', disposition = 'IGNORED') {
+  const noteState = appState.recipes.noteSuggestions || {};
+  appState.recipes = {
+    ...appState.recipes,
+    noteSuggestions: { ...noteState, status: 'saving', error: '' }
+  };
+  renderApp();
+  try {
+    const service = await import('./services/recipeService.js');
+    if (disposition === 'SUGGESTED') {
+      await service.restoreModifierNoteSuggestion(appState.workspace?.id, noteText);
+    } else {
+      await service.ignoreModifierNoteSuggestion(appState.workspace?.id, noteText);
+    }
+    await refreshRecipeNoteSuggestions();
+  } catch (error) {
+    appState.recipes = {
+      ...appState.recipes,
+      noteSuggestions: {
+        ...(appState.recipes.noteSuggestions || {}),
+        status: 'error',
+        error: error.message || 'Could not update the note suggestion.'
+      }
+    };
+    renderApp();
+  }
+}
+
+function toggleRecipeIgnoredNoteSuggestions(includeIgnored = false) {
+  refreshRecipeNoteSuggestions({ includeIgnored: Boolean(includeIgnored) });
+}
+
 async function scanRecipeIngredientBarcode(target = 'ingredient') {
   const isRecipeSearch = target === 'recipe';
 
@@ -3540,6 +4269,7 @@ function openRecipeEditor(itemId) {
     pickerStep: 'select',
     pickerSelectedIds: [],
     pickerQuantities: {},
+    modifierStockPicker: null,
     confirmLineRemoval: null,
     filters: {
       ...appState.recipes.filters,
@@ -3547,6 +4277,7 @@ function openRecipeEditor(itemId) {
       ingredientCategory: '',
       ingredientType: '',
       ingredientCategoryDropdownSearch: '',
+      modifierStockRuleOpen: false,
       openDropdown: ''
     },
     pendingFocus: null,
@@ -3583,6 +4314,7 @@ function openRecipeSetupFromMenu(itemId) {
       pickerStep: 'select',
       pickerSelectedIds: [],
       pickerQuantities: {},
+      modifierStockPicker: null,
       confirmLineRemoval: null,
       pendingOpenItemId: '',
       pendingOpenItemName: '',
@@ -3616,11 +4348,17 @@ function closeRecipeEditor() {
     pickerStep: 'select',
     pickerSelectedIds: [],
     pickerQuantities: {},
+    modifierStockPicker: null,
     confirmLineRemoval: null,
     pendingFocus: null,
     modalFocusRequest: '',
     actionStatus: '',
-    actionError: ''
+    actionError: '',
+    filters: {
+      ...appState.recipes.filters,
+      modifierStockRuleOpen: false,
+      openDropdown: ''
+    }
   };
   renderApp();
 }
@@ -4009,6 +4747,102 @@ function updateRecipeModifierProductLink(productIds = []) {
     actionError: ''
   };
 	  renderApp();
+}
+
+
+function updateRecipeModifierStockRule(patch = {}) {
+  const item = appState.recipes.editingItem;
+  if (!item || item.recipeOwnerType !== 'yoco_modifier') return;
+  const ownerId = String(item.recipeOwnerId || item.id || '').replace(/^modifier:/, '');
+  const fallbackAction = item.recipeCount || linkedProductIdsFromRecipeItem(item).length ? 'ADD_RECIPE' : 'NO_STOCK_CHANGE';
+  const current = item.stockRule && typeof item.stockRule === 'object' ? item.stockRule : {};
+  const actionType = String(patch.actionType || current.actionType || fallbackAction).toUpperCase();
+  const next = {
+    ...current,
+    actionType,
+    targetOwnerType: String(current.targetOwnerType || (actionType === 'ADD_RECIPE' ? 'yoco_modifier' : actionType === 'ADD_STOCK_ITEM' ? 'stock_item' : '')),
+    targetOwnerId: String(current.targetOwnerId || (actionType === 'ADD_RECIPE' ? ownerId : '')),
+    sourceStockItemId: String(current.sourceStockItemId || ''),
+    replacementStockItemId: String(current.replacementStockItemId || ''),
+    quantity: Number(current.quantity || 1) || 1,
+    unit: String(current.unit || ''),
+    menuItemIds: Array.isArray(current.menuItemIds) ? current.menuItemIds.map(String).filter(Boolean) : [],
+    locationIds: [],
+    applyAllMatchingProducts: current.applyAllMatchingProducts !== false,
+    active: current.active !== false,
+    sourceModifierId: String(current.sourceModifierId || item.yocoModifierId || ''),
+    sourceModifierGroupId: String(current.sourceModifierGroupId || item.yocoModifierGroupId || ''),
+    sourceModifierVariantId: String(current.sourceModifierVariantId || item.yocoModifierVariantId || ''),
+    sourceName: String(current.sourceName || item.name || ''),
+    ...patch
+  };
+
+  next.locationIds = [];
+
+  if (actionType === 'ADD_RECIPE') {
+    next.targetOwnerType ||= 'yoco_modifier';
+    next.targetOwnerId ||= ownerId;
+  }
+  if (actionType === 'ADD_STOCK_ITEM') next.targetOwnerType = 'stock_item';
+  if (next.applyAllMatchingProducts) next.menuItemIds = [];
+
+  appState.recipes = {
+    ...appState.recipes,
+    editingItem: {
+      ...item,
+      stockRule: next
+    },
+    actionError: ''
+  };
+  renderApp();
+}
+
+function openRecipeModifierStockPicker(mode = '') {
+  if (!appState.recipes.editingItem) return;
+  appState.recipes = {
+    ...appState.recipes,
+    modifierStockPicker: { open: true, mode: String(mode || ''), query: '' }
+  };
+  renderApp();
+}
+
+function closeRecipeModifierStockPicker() {
+  appState.recipes = { ...appState.recipes, modifierStockPicker: null };
+  renderApp();
+}
+
+function searchRecipeModifierStockPicker(query = '') {
+  appState.recipes = {
+    ...appState.recipes,
+    modifierStockPicker: {
+      ...(appState.recipes.modifierStockPicker || {}),
+      open: true,
+      query: String(query || '')
+    }
+  };
+  renderApp();
+}
+
+function selectRecipeModifierStockPicker(value = '') {
+  const mode = String(appState.recipes.modifierStockPicker?.mode || '');
+  const raw = String(value || '');
+  if (!mode || !raw) return;
+  if (mode === 'recipeTarget') {
+    const separator = raw.indexOf('|');
+    updateRecipeModifierStockRule({
+      targetOwnerType: separator >= 0 ? raw.slice(0, separator) : '',
+      targetOwnerId: separator >= 0 ? raw.slice(separator + 1) : raw
+    });
+  } else if (mode === 'stockTarget') {
+    const selected = (appState.recipes.ingredients || []).find((entry) => String(entry.id) === raw);
+    updateRecipeModifierStockRule({ targetOwnerType: 'stock_item', targetOwnerId: raw, unit: String(selected?.unit || 'ea') });
+  } else if (mode === 'source') {
+    updateRecipeModifierStockRule({ sourceStockItemId: raw, replacementStockItemId: '', quantity: 1 });
+  } else if (mode === 'replacement') {
+    updateRecipeModifierStockRule({ replacementStockItemId: raw });
+  }
+  appState.recipes = { ...appState.recipes, modifierStockPicker: null };
+  renderApp();
 }
 
 function updateRecipeSourceStockItem(stockItemId = '') {
@@ -16773,8 +17607,8 @@ async function saveRoleManagementEditor() {
     await saveWorkspaceRole(appState.workspace.id, {
       name: roleName,
       label,
-      permissions: editor.permissions || [],
-      locations: editor.locations?.length ? editor.locations : ['all']
+      permissions: ensureExplicitDataPermissionSchema(editor.permissions || []),
+      locations: Array.isArray(editor.locations) ? editor.locations : ['all']
     });
     appState.roleManagement = {
       ...appState.roleManagement,
@@ -17418,6 +18252,26 @@ function renderApp() {
       onCategoryRenameCancel: cancelMenuCategoryRename,
       onCategoryDelete: deleteMenuCategory,
       onOpenRecipe: openRecipeSetupFromMenu,
+      onConfigureModifier: openMenuModifierEditor,
+      onOpenModifierLinks: openMenuModifierLinks,
+      onCloseModifierLinks: closeMenuModifierLinks,
+      onCloseModifier: closeMenuModifierEditor,
+      onSaveModifier: saveMenuModifierRule,
+      onModifierStockRuleChange: updateMenuModifierStockRule,
+      onOpenModifierStockPicker: openMenuModifierStockPicker,
+      onCloseModifierStockPicker: closeMenuModifierStockPicker,
+      onModifierStockPickerSearch: searchMenuModifierStockPicker,
+      onModifierStockPickerSelect: selectMenuModifierStockPicker,
+      onOpenNoteSuggestions: openMenuNoteSuggestions,
+      onCloseNoteSuggestions: closeMenuNoteSuggestions,
+      onRefreshNoteSuggestions: refreshMenuNoteSuggestions,
+      onStartNoteRuleSetup: startMenuNoteRuleSetup,
+      onCancelNoteRuleSetup: cancelMenuNoteRuleSetup,
+      onNoteRuleDraftChange: updateMenuNoteRuleDraft,
+      onSaveNoteRule: saveMenuNoteRule,
+      onIgnoreNoteSuggestion: (noteText) => setMenuNoteSuggestionDisposition(noteText, 'IGNORED'),
+      onRestoreNoteSuggestion: (noteText) => setMenuNoteSuggestionDisposition(noteText, 'SUGGESTED'),
+      onToggleIgnoredNoteSuggestions: toggleMenuIgnoredNoteSuggestions,
 	      onPreserveFocus: preserveFieldFocus,
 	      onConfirmDelete: withPermission('menu', ACTION_PERMISSION_MAP.deleteRecords, confirmMenuDelete, 'You do not have permission to delete menu items.'),
 	      onCancelDelete: cancelMenuDelete,
@@ -17452,6 +18306,21 @@ function renderApp() {
 	      onPickerApply: applyRecipePickerSelection,
 		      onModifierLinkChange: updateRecipeModifierProductLink,
 		      onModifierLinkToggle: toggleRecipeModifierProductLink,
+          onModifierStockRuleChange: updateRecipeModifierStockRule,
+          onOpenModifierStockPicker: openRecipeModifierStockPicker,
+          onCloseModifierStockPicker: closeRecipeModifierStockPicker,
+          onModifierStockPickerSearch: searchRecipeModifierStockPicker,
+          onModifierStockPickerSelect: selectRecipeModifierStockPicker,
+	      onOpenNoteSuggestions: openRecipeNoteSuggestions,
+	      onCloseNoteSuggestions: closeRecipeNoteSuggestions,
+	      onRefreshNoteSuggestions: refreshRecipeNoteSuggestions,
+	      onStartNoteRuleSetup: startRecipeNoteRuleSetup,
+	      onCancelNoteRuleSetup: cancelRecipeNoteRuleSetup,
+	      onNoteRuleDraftChange: updateRecipeNoteRuleDraft,
+	      onSaveNoteRule: saveRecipeNoteRule,
+	      onIgnoreNoteSuggestion: (noteText) => setRecipeNoteSuggestionDisposition(noteText, 'IGNORED'),
+	      onRestoreNoteSuggestion: (noteText) => setRecipeNoteSuggestionDisposition(noteText, 'SUGGESTED'),
+	      onToggleIgnoredNoteSuggestions: toggleRecipeIgnoredNoteSuggestions,
 		      onRecipeSourceStockItemChange: updateRecipeSourceStockItem,
 		      onScanBarcode: scanRecipeIngredientBarcode,
 	      onSave: saveCurrentRecipe,
@@ -18641,6 +19510,20 @@ function createMenuState(status, filters = {}) {
     items: [],
     modifierItems: [],
     locations: [],
+    ingredients: [],
+    editingModifier: null,
+    modifierStockRuleOpen: false,
+    viewingModifierLinks: null,
+    modifierLinksOpen: false,
+    noteSuggestions: {
+      status: 'idle',
+      items: [],
+      open: false,
+      includeIgnored: false,
+      editingId: '',
+      draft: null,
+      error: ''
+    },
     posIntegration: { active: false, provider: '', label: '' },
     source: '',
     updatedAt: '',
@@ -18702,6 +19585,15 @@ function createRecipeState(status, filters = {}) {
     actionStatus: '',
     actionError: '',
     toast: null,
+    noteSuggestions: {
+      status: 'idle',
+      items: [],
+      open: false,
+      includeIgnored: false,
+      editingId: '',
+      draft: null,
+      error: ''
+    },
     filters: {
       query: '',
       category: '',
@@ -19606,16 +20498,14 @@ function getLocationsAllowedForCurrentRole(locations = []) {
   let permFiltered = list;
   if (roleLocations.length && !roleLocations.includes('all')) {
     const permKeys = new Set(roleLocations.map((entry) => normalizeLocationKey(entry)).filter(Boolean));
-    const res = list.filter((location) => isLocationAllowedByKeys(location, permKeys));
-    permFiltered = res.length ? res : list;
+    permFiltered = list.filter((location) => isLocationAllowedByKeys(location, permKeys));
   }
 
   // User-based filter (physically assigned locations) — takes priority and is MORE restrictive
   const userLocations = appState.access?.currentUserLocations || [];
   if (!userLocations.length) return permFiltered;
   const userKeys = new Set(userLocations.map((entry) => normalizeLocationKey(entry)).filter(Boolean));
-  const userFiltered = permFiltered.filter((location) => isLocationAllowedByKeys(location, userKeys));
-  return userFiltered.length ? userFiltered : permFiltered;
+  return permFiltered.filter((location) => isLocationAllowedByKeys(location, userKeys));
 }
 
 function getDefaultSellingLocationId(locations = []) {

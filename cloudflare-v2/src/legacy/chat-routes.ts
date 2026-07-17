@@ -1,10 +1,6 @@
 import { Env } from './types';
 import { AuthContext } from './types';
 import { error, json } from './http';
-import { getYocoApiKey } from './yoco-service';
-import { listOrders, listRefunds } from './yoco-client';
-// @ts-ignore Shared unit-aware Yoco Money conversion for assistant sales/refund summaries.
-import { yocoMoneyToMajor } from '../../../src/modules/reporting/engine/yocoFinancials.js';
 const text = (v: unknown): string => String(v ?? '').trim();
 const numberValue = (v: unknown, fallback: number): number => { const n = Number(v); return Number.isFinite(n) ? n : fallback; };
 
@@ -25,7 +21,7 @@ const SYSTEM_PROMPT = `You are KCP Assistant — an AI helper built into Kitchen
 - get_days_remaining → how many days of stock are left for an ingredient based on usage
 - get_grv_anomalies → flag GRV entries where cost is suspiciously high or low vs history
 
-**Yoco data (sales, orders, revenue)** — use this tool for anything about sales performance, revenue, orders, or turnover:
+**Canonical Yoco V2 reporting data (sales, orders, revenue)** — use this tool for anything about sales performance, revenue, orders, or turnover:
 - get_monthly_sales → actual completed orders from Yoco POS for a given month
 - get_refunds → refunds/reversals from Yoco for a given month
 
@@ -39,7 +35,7 @@ The Dashboard gives a live overview of your workspace: low stock alerts, recent 
 - **What it is**: Your full Yoco POS menu — every item you sell, synced from Yoco.
 - **Add a product**: Products sync automatically from Yoco. To manually add, go to Menu Catalogue → "+ Add Product" → fill in name, category, selling price, and optional SKU/barcode.
 - **Edit a product**: Click the product row → edit name, price, category, or modifiers.
-- **Modifiers**: Product modifiers (e.g. "Add Cheese") are synced from Yoco modifier groups. Option modifiers (sizes etc.) are filtered out — KCP only works with product-level modifiers that affect cost.
+- **Modifiers**: Product- and option-level modifier choices are synced from the complete Yoco modifier-group catalogue. Free-text note fields are observed separately, and only customer-approved exact note rules can affect stock.
 - **GP%**: Gross Profit % shows automatically once a recipe is linked. GP% = (Selling Price − Recipe Cost) ÷ Selling Price × 100.
 
 ### Recipes
@@ -277,7 +273,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'get_refunds',
-      description: 'Get refunds from Yoco for a given month. Use this for any question about refunds, returns, or reversals.',
+      description: 'Get refunds recorded by the KCP canonical Yoco V2 reporting engine for a given month. Use this for any question about refunds, returns, or reversals.',
       parameters: {
         type: 'object',
         properties: {
@@ -293,7 +289,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'get_monthly_sales',
-      description: 'Get live sales totals and order counts from Yoco for the current or a recent month. Use this for any question about revenue, sales totals, orders, or turnover.',
+      description: 'Get sales totals and order counts recorded by the KCP canonical Yoco V2 reporting engine for the current or a recent month. Use this for any question about revenue, sales totals, orders, or turnover.',
       parameters: {
         type: 'object',
         properties: {
@@ -573,79 +569,77 @@ async function executeTool(
       case 'get_refunds': {
         const monthArg = text(args.month || '');
         const now = new Date();
-        const year = monthArg ? parseInt(monthArg.slice(0, 4)) : now.getUTCFullYear();
-        const month = monthArg ? parseInt(monthArg.slice(5, 7)) : now.getUTCMonth() + 1;
+        const year = monthArg ? parseInt(monthArg.slice(0, 4), 10) : now.getUTCFullYear();
+        const month = monthArg ? parseInt(monthArg.slice(5, 7), 10) : now.getUTCMonth() + 1;
         const fromDate = `${year}-${String(month).padStart(2, '0')}-01`;
         const toDate = month === 12 ? `${year + 1}-01-01` : `${year}-${String(month + 1).padStart(2, '0')}-01`;
-        let apiKey: string;
-        try { apiKey = await getYocoApiKey(env, workspaceId); }
-        catch { return 'No Yoco connection found. Connect Yoco in Integrations first.'; }
-        const refunds = await listRefunds(env, apiKey, {
-          status: ['approved'],
-          updated_at__gte: `${fromDate}T00:00:00Z`,
-          updated_at__lte: `${toDate}T00:00:00Z`
-        }) as Array<Record<string, unknown>>;
-        if (!refunds.length) return `No refunds found for ${year}-${String(month).padStart(2, '0')}.`;
-        const toMajor = (v: unknown): number => {
-          const amount = yocoMoneyToMajor(v, { scalarUnit: 'major', absolute: false });
-          return Number.isFinite(amount) ? amount : 0;
-        };
-        const getAmt = (o: Record<string, unknown>) => toMajor((o.amounts as Record<string,unknown>)?.net_amount || o.total_price || o.amount || 0);
-        const total = refunds.reduce((s, r) => s + getAmt(r), 0);
-        const rows = refunds.map(r => ({
-          date: String(r.updated_at || r.created_at || '').slice(0, 10),
-          amount: `R${getAmt(r).toFixed(2)}`,
-          order_id: String(r.order_id || r.orderId || r.id || '')
-        }));
-        return JSON.stringify({ month: `${year}-${String(month).padStart(2, '0')}`, total_refunded: `R${total.toFixed(2)}`, count: refunds.length, refunds: rows });
+        const result = await env.DB.prepare(`
+          SELECT provider_refund_id, parent_yoco_order_id, occurred_at,
+                 ABS(COALESCE(gross_total, total, 0)) AS gross_amount,
+                 ABS(COALESCE(vat_total, 0)) AS vat_amount,
+                 ABS(COALESCE(net_total, total, 0)) AS net_amount
+            FROM yoco_orders
+           WHERE workspace_id = ?1
+             AND order_type = 'refund'
+             AND occurred_at >= ?2
+             AND occurred_at < ?3
+           ORDER BY occurred_at DESC
+        `).bind(workspaceId, `${fromDate}T00:00:00`, `${toDate}T00:00:00`).all<Record<string, unknown>>();
+        const refunds = result.results || [];
+        if (!refunds.length) return `No recorded refunds found for ${year}-${String(month).padStart(2, '0')}.`;
+        const total = refunds.reduce((sum, row) => sum + numberValue(row.gross_amount, 0), 0);
+        return JSON.stringify({
+          source: 'KCP canonical Yoco V2 reporting records',
+          month: `${year}-${String(month).padStart(2, '0')}`,
+          total_refunded: `R${total.toFixed(2)}`,
+          count: refunds.length,
+          refunds: refunds.map((row) => ({
+            date: String(row.occurred_at || '').slice(0, 10),
+            amount: `R${numberValue(row.gross_amount, 0).toFixed(2)}`,
+            vat: `R${numberValue(row.vat_amount, 0).toFixed(2)}`,
+            net: `R${numberValue(row.net_amount, 0).toFixed(2)}`,
+            order_id: String(row.parent_yoco_order_id || ''),
+            refund_id: String(row.provider_refund_id || ''),
+          })),
+        });
       }
 
       case 'get_monthly_sales': {
         const monthArg = text(args.month || '');
         const now = new Date();
-        const year = monthArg ? parseInt(monthArg.slice(0, 4)) : now.getUTCFullYear();
-        const month = monthArg ? parseInt(monthArg.slice(5, 7)) : now.getUTCMonth() + 1;
+        const year = monthArg ? parseInt(monthArg.slice(0, 4), 10) : now.getUTCFullYear();
+        const month = monthArg ? parseInt(monthArg.slice(5, 7), 10) : now.getUTCMonth() + 1;
         const fromDate = `${year}-${String(month).padStart(2, '0')}-01`;
-        const toDate = month === 12
-          ? `${year + 1}-01-01`
-          : `${year}-${String(month + 1).padStart(2, '0')}-01`;
-        let apiKey: string;
-        try {
-          apiKey = await getYocoApiKey(env, workspaceId);
-        } catch {
-          return 'No Yoco connection found for this workspace. Connect Yoco in the Integrations tab first.';
-        }
-        const orders = await listOrders(env, apiKey, {
-          status: ['completed'],
-          updated_at__gte: `${fromDate}T00:00:00Z`,
-          updated_at__lte: `${toDate}T00:00:00Z`
-        }) as Array<Record<string, unknown>>;
-        if (!orders.length) return `No completed Yoco orders found for ${year}-${String(month).padStart(2, '0')}.`;
-        const toMajor = (v: unknown): number => {
-          const amount = yocoMoneyToMajor(v, { scalarUnit: 'major', absolute: false });
-          return Number.isFinite(amount) ? amount : 0;
-        };
-        const getOrderTotal = (o: Record<string, unknown>): number => {
-          const amounts = o.amounts as Record<string, unknown> | undefined;
-          return toMajor(amounts?.net_amount || o.total_price || o.total || o.amount || 0);
-        };
-        const totalRevenue = orders.reduce((sum, o) => sum + getOrderTotal(o), 0);
+        const toDate = month === 12 ? `${year + 1}-01-01` : `${year}-${String(month + 1).padStart(2, '0')}-01`;
+        const result = await env.DB.prepare(`
+          SELECT occurred_at, COALESCE(gross_total, total, 0) AS gross_amount,
+                 COALESCE(vat_total, 0) AS vat_amount,
+                 COALESCE(net_total, total, 0) AS net_amount
+            FROM yoco_orders
+           WHERE workspace_id = ?1
+             AND order_type = 'sale'
+             AND lower(COALESCE(status, 'completed')) IN ('completed', 'paid', 'succeeded')
+             AND occurred_at >= ?2
+             AND occurred_at < ?3
+           ORDER BY occurred_at
+        `).bind(workspaceId, `${fromDate}T00:00:00`, `${toDate}T00:00:00`).all<Record<string, unknown>>();
+        const orders = result.results || [];
+        if (!orders.length) return `No recorded completed sales found for ${year}-${String(month).padStart(2, '0')}.`;
+        const totalRevenue = orders.reduce((sum, row) => sum + numberValue(row.gross_amount, 0), 0);
         const orderCount = orders.length;
-        const avgOrder = totalRevenue / orderCount;
-        // Group by day
         const byDay: Record<string, number> = {};
-        for (const o of orders) {
-          const day = String(o.updated_at || o.created_at || '').slice(0, 10);
-          if (day) byDay[day] = (byDay[day] || 0) + getOrderTotal(o);
+        for (const row of orders) {
+          const day = String(row.occurred_at || '').slice(0, 10);
+          if (day) byDay[day] = (byDay[day] || 0) + numberValue(row.gross_amount, 0);
         }
-        const dailyRows = Object.entries(byDay).sort(([a], [b]) => a.localeCompare(b))
-          .map(([day, rev]) => ({ date: day, revenue: `R${rev.toFixed(2)}` }));
         return JSON.stringify({
+          source: 'KCP canonical Yoco V2 reporting records',
           month: `${year}-${String(month).padStart(2, '0')}`,
           total_revenue: `R${totalRevenue.toFixed(2)}`,
           order_count: orderCount,
-          avg_order_value: `R${avgOrder.toFixed(2)}`,
-          daily_breakdown: dailyRows
+          avg_order_value: `R${(totalRevenue / orderCount).toFixed(2)}`,
+          daily_breakdown: Object.entries(byDay).sort(([a], [b]) => a.localeCompare(b))
+            .map(([day, revenue]) => ({ date: day, revenue: `R${revenue.toFixed(2)}` })),
         });
       }
 
