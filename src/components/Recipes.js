@@ -2187,7 +2187,14 @@ function renderRecipeLine(line, index, ingredients, options = {}) {
   }
 
   const uomOptions = getRecipeLineUomOptions(ingredient);
-  const selectedUnit = String(line.unit || ingredient.unit || 'ea').trim();
+  const baseUnit = String(ingredient.unit || 'ea').trim() || 'ea';
+  const lineUnit = String(line.unit || line.uom || '').trim();
+  // A recipe line's unit is forced to 'ea' upstream when no explicit UOM was chosen; only trust it
+  // when it matches a real UOM option for this ingredient, otherwise show the ingredient's base UOM.
+  const matchedOption = uomOptions.find(
+    (opt) => opt.value.toLowerCase() === lineUnit.toLowerCase()
+  );
+  const selectedUnit = matchedOption ? matchedOption.value : baseUnit;
   const uomRatio = getIngredientUomRatio(ingredient, selectedUnit);
   const hasCustomUoms = uomOptions.length > 1;
 
