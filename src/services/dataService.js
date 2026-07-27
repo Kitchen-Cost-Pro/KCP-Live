@@ -1,5 +1,3 @@
-import { drawKcpPdfTopAccent, KCP_PDF_THEME, kcpPdfTableTheme } from '../utils/pdfTheme.js';
-
 const EXCEL_EXTENSION = /\.(xlsx|xls)$/i;
 
 export async function parseDataFile(file, options = {}) {
@@ -101,98 +99,6 @@ export async function downloadAoaXlsx(filename, rows = [], sheetName = 'Export')
   XLSX.writeFile(workbook, ensureExtension(filename, 'xlsx'));
 }
 
-
-
-export async function downloadStyledStockTemplateXlsx(filename, {
-  columns = [],
-  rows = [],
-  columnWidths = [],
-  maxRows = 250
-} = {}) {
-  const ExcelJSModule = await import('exceljs');
-  const ExcelJS = ExcelJSModule.default || ExcelJSModule;
-  const workbook = new ExcelJS.Workbook();
-  workbook.creator = 'Kitchen Cost Pro';
-  workbook.created = new Date();
-  workbook.calcProperties.fullCalcOnLoad = true;
-
-  const safeColumns = Array.isArray(columns) ? columns : [];
-  const safeRows = Array.isArray(rows) ? rows : [];
-  const main = workbook.addWorksheet('Stock_Import', {
-    views: [{ state: 'frozen', ySplit: 1 }]
-  });
-  main.columns = safeColumns.map((key, index) => ({
-    header: key,
-    key,
-    width: Number(columnWidths[index] || 14) || 14
-  }));
-  main.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: Math.max(safeColumns.length, 1) } };
-
-  const header = main.getRow(1);
-  header.height = 24;
-  header.font = { bold: true, color: { argb: 'FFFFFFFF' } };
-  header.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF315B85' } };
-  header.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
-  header.eachCell((cell) => {
-    cell.border = {
-      top: { style: 'thin', color: { argb: 'FF54769A' } },
-      left: { style: 'thin', color: { argb: 'FF54769A' } },
-      bottom: { style: 'thin', color: { argb: 'FF54769A' } },
-      right: { style: 'thin', color: { argb: 'FF54769A' } }
-    };
-  });
-
-  safeRows.forEach((row) => main.addRow(Object.fromEntries(safeColumns.map((key) => [key, row?.[key] ?? '']))));
-  const requiredRows = Math.max(Number(maxRows || 250), safeRows.length + 1);
-  while (main.rowCount < requiredRows + 1) main.addRow({});
-
-  for (let rowNumber = 2; rowNumber <= requiredRows + 1; rowNumber += 1) {
-    const row = main.getRow(rowNumber);
-    row.height = 21;
-    row.eachCell({ includeEmpty: true }, (cell) => {
-      cell.alignment = { vertical: 'middle', wrapText: false };
-      cell.border = {
-        bottom: { style: 'hair', color: { argb: 'FFD7E0EA' } }
-      };
-    });
-  }
-
-  const helper = workbook.addWorksheet('UOM_Options', { state: 'veryHidden' });
-  const baseIndex = safeColumns.indexOf('Base_UOM') + 1;
-  const customIndexes = [1, 2, 3].map((slot) => safeColumns.indexOf(`UOM_${slot}_Name`) + 1);
-  const defaultIndex = safeColumns.indexOf('Default_Ordering_UOM') + 1;
-
-  if (baseIndex > 0 && defaultIndex > 0) {
-    const sourceIndexes = [baseIndex, ...customIndexes.filter((index) => index > 0)];
-    for (let rowNumber = 2; rowNumber <= requiredRows + 1; rowNumber += 1) {
-      sourceIndexes.forEach((sourceIndex, optionIndex) => {
-        helper.getCell(rowNumber, optionIndex + 1).value = {
-          formula: `'Stock_Import'!${main.getColumn(sourceIndex).letter}${rowNumber}`
-        };
-      });
-      const lastOptionColumn = helper.getColumn(sourceIndexes.length).letter;
-      main.getCell(rowNumber, defaultIndex).dataValidation = {
-        type: 'list',
-        allowBlank: true,
-        showErrorMessage: true,
-        errorStyle: 'stop',
-        errorTitle: 'Choose an item UOM',
-        error: 'Select only the Base UOM or one of the Custom UOMs entered on this same row.',
-        showInputMessage: true,
-        promptTitle: 'Default ordering UOM',
-        prompt: 'This dropdown contains only the Base UOM and Custom UOMs configured for this item.',
-        formulae: [`'UOM_Options'!$A$${rowNumber}:$${lastOptionColumn}$${rowNumber}`]
-      };
-    }
-  }
-
-  const buffer = await workbook.xlsx.writeBuffer();
-  downloadBlob(
-    ensureExtension(filename, 'xlsx'),
-    buffer,
-    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-  );
-}
 export async function downloadWorkbookXlsx(filename, sheets = []) {
   const XLSX = await import('xlsx');
   const workbook = XLSX.utils.book_new();
@@ -654,67 +560,6 @@ function uniqueSheetName(existingNames = [], baseName = 'Sheet') {
   return sanitizeSheetName(`${safeBase.slice(0, 27)} ${index}`);
 }
 
-
-function pdfTableLayoutOptions(columnCount = 0, options = {}) {
-  const count = Number(columnCount || 0) || 0;
-  const dense = count > 10;
-  const veryDense = count > 14;
-  return {
-    showHead: 'everyPage',
-    tableWidth: 'auto',
-    rowPageBreak: 'avoid',
-    horizontalPageBreak: count > 7,
-    horizontalPageBreakRepeat: count > 3 ? 0 : undefined,
-    horizontalPageBreakBehaviour: 'afterAllRows',
-    styles: {
-      font: 'helvetica',
-      fontSize: veryDense ? 6.2 : dense ? 6.8 : 8,
-      cellPadding: veryDense ? 3 : dense ? 4 : 5,
-      valign: 'middle',
-      overflow: 'linebreak',
-      minCellHeight: veryDense ? 15 : 18,
-      ...(options.styles || {})
-    }
-  };
-}
-
-function pdfCellValue(value) {
-  if (value === null || value === undefined) return '';
-  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
-  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
-  if (value instanceof Date) return value.toISOString();
-  if (Array.isArray(value)) return value.map(pdfCellValue).filter(Boolean).join(', ');
-  if (typeof value === 'object') {
-    try {
-      return JSON.stringify(value);
-    } catch {
-      return '';
-    }
-  }
-  return String(value);
-}
-
-function normalizePdfBodyRows(rows = [], headers = []) {
-  const safeHeaders = Array.isArray(headers) ? headers : [];
-  return (Array.isArray(rows) ? rows : []).map((row) => {
-    if (Array.isArray(row)) return row.map(pdfCellValue);
-    return safeHeaders.map((header) => pdfCellValue(row?.[header]));
-  });
-}
-
-function buildPdfColumnStyles(headers = []) {
-  return (Array.isArray(headers) ? headers : []).reduce((styles, header, index) => {
-    const label = String(header || '').toLowerCase();
-    if (/qty|count|cost|price|amount|total|value|vat|variance|stock|par|threshold|percentage|yield|batch/.test(label)) {
-      styles[index] = { halign: 'right' };
-    }
-    if (/name|description|notes|address/.test(label)) {
-      styles[index] = { ...(styles[index] || {}), cellWidth: 'wrap' };
-    }
-    return styles;
-  }, {});
-}
-
 export async function downloadPdf(filename, {
   title = 'KCP Export',
   subtitle = '',
@@ -723,8 +568,7 @@ export async function downloadPdf(filename, {
   summaryRows = [],
   orientation = 'landscape',
   branding = {},
-  tableOptions = {},
-  detailTables = []
+  tableOptions = {}
 } = {}) {
   const [{ jsPDF }, autoTableModule] = await Promise.all([
     import('jspdf'),
@@ -733,8 +577,8 @@ export async function downloadPdf(filename, {
   const autoTable = autoTableModule.default || autoTableModule.autoTable;
   const normalizedRows = Array.isArray(rows) ? rows : [];
   const headers = columns || getHeaders(normalizedRows);
-  const body = normalizePdfBodyRows(normalizedRows, headers);
-  const doc = new jsPDF({ orientation: headers.length > 7 ? 'landscape' : orientation, unit: 'pt', format: 'a4' });
+  const body = normalizedRows.map((row) => headers.map((header) => row?.[header] ?? ''));
+  const doc = new jsPDF({ orientation, unit: 'pt', format: 'a4' });
 
   const header = await renderPdfHeader(doc, { title, subtitle, branding });
   const summary = normalizePdfSummaryRows(summaryRows);
@@ -749,80 +593,41 @@ export async function downloadPdf(filename, {
       const x = leftColumn ? 40 : 60 + columnWidth;
       const y = summaryStartY + Math.floor(index / 2) * 14;
       doc.setFont('helvetica', 'bold');
-      doc.setTextColor(...KCP_PDF_THEME.muted);
+      doc.setTextColor(91, 111, 137);
       doc.text(`${row.label}:`, x, y);
       doc.setFont('helvetica', 'normal');
-      doc.setTextColor(...KCP_PDF_THEME.ink);
+      doc.setTextColor(17, 24, 39);
       doc.text(String(row.value ?? ''), x + 72, y, { maxWidth: columnWidth - 76 });
     });
     tableStartY = summaryStartY + Math.ceil(Math.min(summary.length, 14) / 2) * 14 + 22;
   }
-  doc.setDrawColor(...KCP_PDF_THEME.accent);
+  doc.setDrawColor(37, 99, 235);
   doc.setLineWidth(1);
   doc.line(40, tableStartY - 14, doc.internal.pageSize.getWidth() - 40, tableStartY - 14);
 
-  const layout = pdfTableLayoutOptions(headers.length, tableOptions);
-  const tableTheme = kcpPdfTableTheme(tableOptions);
   autoTable(doc, {
-    ...layout,
-    ...tableOptions,
     head: [headers],
     body,
     startY: tableStartY,
     theme: 'grid',
-    styles: { ...layout.styles, ...tableTheme.styles },
-    headStyles: tableTheme.headStyles,
-    bodyStyles: tableTheme.bodyStyles,
-    alternateRowStyles: tableTheme.alternateRowStyles,
-    columnStyles: { ...buildPdfColumnStyles(headers), ...(tableOptions.columnStyles || {}) },
-    margin: { left: 40, right: 40, ...(tableOptions.margin || {}) }
+    styles: {
+      font: 'helvetica',
+      fontSize: 8,
+      cellPadding: 5,
+      valign: 'middle',
+      overflow: 'linebreak'
+    },
+    headStyles: {
+      fillColor: [37, 99, 235],
+      textColor: 255,
+      fontStyle: 'bold'
+    },
+    alternateRowStyles: { fillColor: [245, 247, 250] },
+    margin: { left: 40, right: 40 },
+    ...tableOptions
   });
-
-  drawPdfDetailTables(doc, autoTable, detailTables, { margin: 40 });
 
   doc.save(ensureExtension(filename, 'pdf'));
-}
-
-
-function drawPdfDetailTables(doc, autoTable, detailTables = [], { margin = 40 } = {}) {
-  const tables = (Array.isArray(detailTables) ? detailTables : [])
-    .map((table) => ({
-      title: String(table?.title || table?.name || 'Detail').trim(),
-      headers: Array.isArray(table?.headers) ? table.headers : (Array.isArray(table?.columns) ? table.columns : []),
-      rows: Array.isArray(table?.rows) ? table.rows : []
-    }))
-    .filter((table) => table.headers.length && table.rows.length);
-  if (!tables.length) return;
-
-  let cursorY = Number(doc.lastAutoTable?.finalY || 80) + 22;
-  const pageHeight = doc.internal.pageSize.getHeight();
-  tables.forEach((table) => {
-    if (cursorY > pageHeight - 110) {
-      doc.addPage();
-      cursorY = margin;
-    }
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(9);
-    doc.setTextColor(...KCP_PDF_THEME.accentDark);
-    doc.text(table.title.toUpperCase(), margin, cursorY);
-    cursorY += 10;
-    const layout = pdfTableLayoutOptions(table.headers.length, {});
-    const tableTheme = kcpPdfTableTheme();
-    autoTable(doc, {
-      ...layout,
-      head: [table.headers],
-      body: normalizePdfBodyRows(table.rows, table.headers),
-      startY: cursorY,
-      theme: 'grid',
-      styles: { ...layout.styles, ...tableTheme.styles },
-      headStyles: tableTheme.headStyles,
-      bodyStyles: tableTheme.bodyStyles,
-      alternateRowStyles: tableTheme.alternateRowStyles,
-      columnStyles: buildPdfColumnStyles(table.headers),
-      margin: { left: margin, right: margin }
-    });
-    cursorY = Number(doc.lastAutoTable?.finalY || cursorY) + 20;
-  });
 }
 
 function normalizePdfSummaryRows(rows = []) {
@@ -848,36 +653,38 @@ export async function downloadAoaPdf(filename, {
     import('jspdf-autotable')
   ]);
   const autoTable = autoTableModule.default || autoTableModule.autoTable;
+  const doc = new jsPDF({ orientation, unit: 'pt', format: 'a4' });
   const safeRows = Array.isArray(rows) ? rows : [];
   const head = [safeRows[headerRowIndex] || []];
-  const doc = new jsPDF({ orientation: (head[0]?.length || 0) > 7 ? 'landscape' : orientation, unit: 'pt', format: 'a4' });
   const body = safeRows
     .filter((_, index) => index !== headerRowIndex)
     .map((row) => (Array.isArray(row) ? row : [row]));
-  const { ruleColor, ...autoTableOptions } = tableOptions || {};
-  const resolvedRuleColor = Array.isArray(ruleColor) && ruleColor.length >= 3 ? ruleColor : KCP_PDF_THEME.accent;
 
   const header = await renderPdfHeader(doc, { title, subtitle, branding });
-  doc.setDrawColor(resolvedRuleColor[0], resolvedRuleColor[1], resolvedRuleColor[2]);
+  doc.setDrawColor(37, 99, 235);
   doc.setLineWidth(1);
   doc.line(40, header.ruleY, doc.internal.pageSize.getWidth() - 40, header.ruleY);
 
-  const headerCount = head[0]?.length || 0;
-  const layout = pdfTableLayoutOptions(headerCount, autoTableOptions);
-  const tableTheme = kcpPdfTableTheme(autoTableOptions);
   autoTable(doc, {
-    ...layout,
-    ...autoTableOptions,
     head,
-    body: body.map((row) => Array.isArray(row) ? row.map(pdfCellValue) : [pdfCellValue(row)]),
+    body,
     startY: header.tableStartY,
     theme: 'grid',
-    styles: { ...layout.styles, ...tableTheme.styles },
-    headStyles: tableTheme.headStyles,
-    bodyStyles: tableTheme.bodyStyles,
-    alternateRowStyles: tableTheme.alternateRowStyles,
-    columnStyles: { ...buildPdfColumnStyles(head[0] || []), ...(autoTableOptions.columnStyles || {}) },
-    margin: { left: 40, right: 40, ...(autoTableOptions.margin || {}) }
+    styles: {
+      font: 'helvetica',
+      fontSize: 8,
+      cellPadding: 5,
+      valign: 'middle',
+      overflow: 'linebreak'
+    },
+    headStyles: {
+      fillColor: [37, 99, 235],
+      textColor: 255,
+      fontStyle: 'bold'
+    },
+    alternateRowStyles: { fillColor: [245, 247, 250] },
+    margin: { left: 40, right: 40 },
+    ...tableOptions
   });
 
   doc.save(ensureExtension(filename, 'pdf'));
@@ -897,36 +704,38 @@ export async function buildAoaPdfFile(filename, {
     import('jspdf-autotable')
   ]);
   const autoTable = autoTableModule.default || autoTableModule.autoTable;
+  const doc = new jsPDF({ orientation, unit: 'pt', format: 'a4' });
   const safeRows = Array.isArray(rows) ? rows : [];
   const head = [safeRows[headerRowIndex] || []];
-  const doc = new jsPDF({ orientation: (head[0]?.length || 0) > 7 ? 'landscape' : orientation, unit: 'pt', format: 'a4' });
   const body = safeRows
     .filter((_, index) => index !== headerRowIndex)
     .map((row) => (Array.isArray(row) ? row : [row]));
-  const { ruleColor, ...autoTableOptions } = tableOptions || {};
-  const resolvedRuleColor = Array.isArray(ruleColor) && ruleColor.length >= 3 ? ruleColor : KCP_PDF_THEME.accent;
 
   const header = await renderPdfHeader(doc, { title, subtitle, branding });
-  doc.setDrawColor(resolvedRuleColor[0], resolvedRuleColor[1], resolvedRuleColor[2]);
+  doc.setDrawColor(37, 99, 235);
   doc.setLineWidth(1);
   doc.line(40, header.ruleY, doc.internal.pageSize.getWidth() - 40, header.ruleY);
 
-  const headerCount = head[0]?.length || 0;
-  const layout = pdfTableLayoutOptions(headerCount, autoTableOptions);
-  const tableTheme = kcpPdfTableTheme(autoTableOptions);
   autoTable(doc, {
-    ...layout,
-    ...autoTableOptions,
     head,
-    body: body.map((row) => Array.isArray(row) ? row.map(pdfCellValue) : [pdfCellValue(row)]),
+    body,
     startY: header.tableStartY,
     theme: 'grid',
-    styles: { ...layout.styles, ...tableTheme.styles },
-    headStyles: tableTheme.headStyles,
-    bodyStyles: tableTheme.bodyStyles,
-    alternateRowStyles: tableTheme.alternateRowStyles,
-    columnStyles: { ...buildPdfColumnStyles(head[0] || []), ...(autoTableOptions.columnStyles || {}) },
-    margin: { left: 40, right: 40, ...(autoTableOptions.margin || {}) }
+    styles: {
+      font: 'helvetica',
+      fontSize: 8,
+      cellPadding: 5,
+      valign: 'middle',
+      overflow: 'linebreak'
+    },
+    headStyles: {
+      fillColor: [37, 99, 235],
+      textColor: 255,
+      fontStyle: 'bold'
+    },
+    alternateRowStyles: { fillColor: [245, 247, 250] },
+    margin: { left: 40, right: 40 },
+    ...tableOptions
   });
 
   const fileName = ensureExtension(filename, 'pdf');
@@ -954,7 +763,7 @@ export async function buildStructuredPdfFile(filename, {
   const header = await renderPdfHeader(doc, { title, subtitle, branding });
   let cursorY = header.ruleY + 18;
 
-  doc.setDrawColor(...KCP_PDF_THEME.accent);
+  doc.setDrawColor(37, 99, 235);
   doc.setLineWidth(1);
   doc.line(margin, header.ruleY, pageWidth - margin, header.ruleY);
 
@@ -986,29 +795,30 @@ export async function buildStructuredPdfFile(filename, {
     if (table.title) {
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(9);
-      doc.setTextColor(...KCP_PDF_THEME.accentDark);
+      doc.setTextColor(37, 99, 235);
       doc.text(String(table.title).toUpperCase(), margin, cursorY);
       cursorY += 10;
     }
-    const tableTheme = kcpPdfTableTheme(table.tableOptions || {});
     autoTable(doc, {
       head: [headers],
       body,
       startY: cursorY,
       theme: 'grid',
-      ...(table.tableOptions || {}),
       styles: {
         font: 'helvetica',
         fontSize: 8,
         cellPadding: 6,
         valign: 'middle',
-        overflow: 'linebreak',
-        ...tableTheme.styles
+        overflow: 'linebreak'
       },
-      headStyles: tableTheme.headStyles,
-      bodyStyles: tableTheme.bodyStyles,
-      alternateRowStyles: tableTheme.alternateRowStyles,
+      headStyles: {
+        fillColor: [17, 24, 39],
+        textColor: 255,
+        fontStyle: 'bold'
+      },
+      alternateRowStyles: { fillColor: [245, 247, 250] },
       margin: { left: margin, right: margin },
+      ...table.tableOptions
     });
     cursorY = (doc.lastAutoTable?.finalY || cursorY) + 18;
   });
@@ -1021,16 +831,16 @@ export async function buildStructuredPdfFile(filename, {
       doc.addPage();
       cursorY = margin;
     }
-    doc.setFillColor(...KCP_PDF_THEME.surfaceStrong);
-    doc.setDrawColor(...KCP_PDF_THEME.borderStrong);
+    doc.setFillColor(239, 246, 255);
+    doc.setDrawColor(191, 219, 254);
     doc.roundedRect(margin, cursorY, pageWidth - margin * 2, blockHeight, 8, 8, 'FD');
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(8);
-    doc.setTextColor(...KCP_PDF_THEME.accentDark);
+    doc.setTextColor(37, 99, 235);
     doc.text('INSTRUCTIONS', margin + 12, cursorY + 18);
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(8);
-    doc.setTextColor(...KCP_PDF_THEME.ink);
+    doc.setTextColor(17, 24, 39);
     doc.text(lines, margin + 12, cursorY + 34);
   }
 
@@ -1078,12 +888,11 @@ export async function buildSupplierPurchaseOrderPdfFile(filename, {
   const doc = new jsPDF({ orientation: 'portrait', unit: 'pt', format: 'a4', precision: 12 });
   const pageWidth = doc.internal.pageSize.getWidth();
   const margin = 48;
-  const blue = KCP_PDF_THEME.accent;
-  const ink = KCP_PDF_THEME.navy;
-  const muted = KCP_PDF_THEME.muted;
-  const border = KCP_PDF_THEME.border;
+  const blue = [59, 130, 246];
+  const ink = [17, 24, 39];
+  const muted = [100, 116, 139];
+  const border = [226, 232, 240];
   const logo = await resolvePdfLogo(branding.logoDataUrl);
-  drawKcpPdfTopAccent(doc);
 
   let businessX = margin;
   if (logo?.dataUrl) {
@@ -1117,7 +926,7 @@ export async function buildSupplierPurchaseOrderPdfFile(filename, {
   const businessInfoY = 66 + businessNameLines.length * 23 + 10;
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(9);
-  doc.setTextColor(...KCP_PDF_THEME.text);
+  doc.setTextColor(51, 65, 85);
   businessLines.forEach((line, index) => {
     doc.text(String(line), businessX, businessInfoY + index * 13, { maxWidth: Math.max(220, pageWidth - 300 - businessX) });
   });
@@ -1190,11 +999,13 @@ export async function buildSupplierPurchaseOrderPdfFile(filename, {
     tableStartY = margin;
   }
   autoTable(doc, {
-    head: [['PRODUCT NAME', 'UOM / CUSTOM UOM', 'QTY']],
+    head: [['ITEM DESCRIPTION', 'UNIT', 'PACK SIZE', 'QTY\nREQUIRED', 'SUPPLIER\nNOTES']],
     body: (Array.isArray(items) ? items : []).map((item) => [
       item.description || '',
       item.unit || '',
-      item.quantity || ''
+      item.packSize || '',
+      item.quantity || '',
+      item.notes || 'Confirm availability'
     ]),
     startY: tableStartY,
     theme: 'grid',
@@ -1202,24 +1013,25 @@ export async function buildSupplierPurchaseOrderPdfFile(filename, {
       font: 'helvetica',
       fontSize: 9,
       cellPadding: { top: 12, right: 8, bottom: 12, left: 8 },
-      textColor: KCP_PDF_THEME.text,
+      textColor: [30, 41, 59],
       valign: 'middle',
       lineColor: border,
       lineWidth: 0.8
     },
     headStyles: {
-      fillColor: KCP_PDF_THEME.accentDark,
-      textColor: KCP_PDF_THEME.white,
+      fillColor: ink,
+      textColor: 255,
       fontStyle: 'bold',
       fontSize: 8.5,
       minCellHeight: 42
     },
-    bodyStyles: { fillColor: KCP_PDF_THEME.white },
-    alternateRowStyles: { fillColor: KCP_PDF_THEME.surfaceAlt },
+    alternateRowStyles: { fillColor: [248, 250, 252] },
     columnStyles: {
-      0: { cellWidth: pageWidth - margin * 2 - 210 },
-      1: { cellWidth: 130 },
-      2: { cellWidth: 80, halign: 'center' }
+      0: { cellWidth: 205 },
+      1: { cellWidth: 64 },
+      2: { cellWidth: 80 },
+      3: { cellWidth: 90 },
+      4: { cellWidth: pageWidth - margin * 2 - 439 }
     },
     margin: { left: margin, right: margin }
   });
@@ -1227,15 +1039,15 @@ export async function buildSupplierPurchaseOrderPdfFile(filename, {
   let blockY = (doc.lastAutoTable?.finalY || tableStartY + 80) + 22;
   const blockWidth = 294;
   const blockX = (pageWidth - blockWidth) / 2;
-  const instructionText = instruction || 'Please confirm receipt of this purchase order. Any unavailable items, substitutions, UOM changes, or quantity changes must be confirmed before delivery. Supply should match the listed product, UOM, and quantity required.';
+  const instructionText = instruction || 'Please confirm receipt of this purchase order. Any unavailable items, substitutions, pack-size changes, or quantity changes must be confirmed before delivery. Supply should match the listed unit, pack size, and quantity required.';
   const instructionLines = doc.splitTextToSize(instructionText, blockWidth - 34);
   const blockHeight = Math.max(118, instructionLines.length * 13 + 56);
   if (blockY + blockHeight > pageHeight - 48) {
     doc.addPage();
     blockY = 48;
   }
-  doc.setFillColor(...KCP_PDF_THEME.surfaceAlt);
-  doc.setDrawColor(...KCP_PDF_THEME.surfaceAlt);
+  doc.setFillColor(241, 245, 249);
+  doc.setDrawColor(241, 245, 249);
   doc.rect(blockX, blockY, blockWidth, blockHeight, 'FD');
   doc.setDrawColor(...blue);
   doc.setLineWidth(4);
@@ -1246,7 +1058,7 @@ export async function buildSupplierPurchaseOrderPdfFile(filename, {
   doc.text('SUPPLIER CONFIRMATION REQUIRED', blockX + 18, blockY + 26);
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(9);
-  doc.setTextColor(...KCP_PDF_THEME.text);
+  doc.setTextColor(51, 65, 85);
   doc.text(instructionLines, blockX + 18, blockY + 60);
 
   doc.setDrawColor(...border);
@@ -1260,7 +1072,7 @@ export async function buildSupplierPurchaseOrderPdfFile(filename, {
 function drawSupplierPoSection(doc, { x, y, width = 230, title = '', rows = [] } = {}) {
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(9);
-  doc.setTextColor(...KCP_PDF_THEME.muted);
+  doc.setTextColor(100, 116, 139);
   doc.text(String(title || '').toUpperCase(), x, y, { maxWidth: width });
   let lineY = y + 24;
   (Array.isArray(rows) ? rows : []).forEach((row) => {
@@ -1268,7 +1080,7 @@ function drawSupplierPoSection(doc, { x, y, width = 230, title = '', rows = [] }
     if (!text) return;
     doc.setFont('helvetica', row.bold ? 'bold' : 'normal');
     doc.setFontSize(row.bold ? 9.5 : 8.5);
-    doc.setTextColor(...KCP_PDF_THEME.ink);
+    doc.setTextColor(17, 24, 39);
     const lineHeight = row.bold ? 12 : 11;
     const lines = doc.splitTextToSize(text, width);
     doc.text(lines, x, lineY, { maxWidth: width, lineHeightFactor: 1.15 });
@@ -1278,12 +1090,12 @@ function drawSupplierPoSection(doc, { x, y, width = 230, title = '', rows = [] }
 }
 
 function drawPdfInfoCard(doc, { x, y, width, title = '', rows = [] } = {}) {
-  doc.setFillColor(...KCP_PDF_THEME.surfaceAlt);
-  doc.setDrawColor(...KCP_PDF_THEME.border);
+  doc.setFillColor(248, 250, 252);
+  doc.setDrawColor(226, 232, 240);
   doc.roundedRect(x, y, width, 96, 8, 8, 'FD');
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(8);
-  doc.setTextColor(...KCP_PDF_THEME.accentDark);
+  doc.setTextColor(37, 99, 235);
   doc.text(String(title || '').toUpperCase(), x + 10, y + 16, { maxWidth: width - 20 });
 
   let lineY = y + 32;
@@ -1294,10 +1106,10 @@ function drawPdfInfoCard(doc, { x, y, width, title = '', rows = [] } = {}) {
     if (!String(value ?? '').trim()) return;
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(7);
-    doc.setTextColor(...KCP_PDF_THEME.muted);
+    doc.setTextColor(91, 111, 137);
     doc.text(`${label}:`, x + 10, lineY, { maxWidth: 72 });
     doc.setFont('helvetica', 'normal');
-    doc.setTextColor(...KCP_PDF_THEME.ink);
+    doc.setTextColor(17, 24, 39);
     doc.text(String(value ?? ''), x + 84, lineY, { maxWidth: width - 94 });
     lineY += 12;
   });
@@ -1307,7 +1119,6 @@ async function renderPdfHeader(doc, { title = 'KCP Export', subtitle = '', brand
   const pageWidth = doc.internal.pageSize.getWidth();
   const logo = await resolvePdfLogo(branding.logoDataUrl);
   let textRight = pageWidth - 40;
-  drawKcpPdfTopAccent(doc);
 
   if (logo?.dataUrl) {
     const maxWidth = 94;
@@ -1328,16 +1139,16 @@ async function renderPdfHeader(doc, { title = 'KCP Export', subtitle = '', brand
   const textWidth = Math.max(220, textRight - 40);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(18);
-  doc.setTextColor(...KCP_PDF_THEME.navy);
+  doc.setTextColor(17, 24, 39);
   doc.text(String(title || 'KCP Export'), 40, 46, { maxWidth: textWidth });
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(9);
-  doc.setTextColor(...KCP_PDF_THEME.text);
+  doc.setTextColor(91, 111, 137);
   if (subtitle) doc.text(String(subtitle), 40, 64, { maxWidth: textWidth });
   if (branding.companyName) {
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(8);
-    doc.setTextColor(...KCP_PDF_THEME.muted);
+    doc.setTextColor(91, 111, 137);
     doc.text(String(branding.companyName), 40, subtitle ? 78 : 64, { maxWidth: textWidth });
   }
 

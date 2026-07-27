@@ -33,7 +33,7 @@ function normalizeFrequency(value: unknown) {
   if (['weekly', 'week', '1_week', '1_weeks'].includes(raw)) return '1_week';
   if (['2_week', '2_weeks', 'fortnightly'].includes(raw)) return '2_week';
   if (['monthly', 'month', '1_month', '1_months'].includes(raw)) return '1_month';
-  return '1_day';
+  return 'off';
 }
 
 function intervalMs(frequency: string) {
@@ -75,12 +75,10 @@ function timePartsInZone(date: Date, timeZone: string) {
 function isSendWindow(date: Date, dispatchTime: string, timeZone: string) {
   const [hourText, minuteText] = dispatchTime.split(':');
   const local = timePartsInZone(date, timeZone);
-  const targetMinutes = Number(hourText) * 60 + Number(minuteText || 0);
-  const localMinutes = local.hour * 60 + local.minute;
-  const directDifference = Math.abs(localMinutes - targetMinutes);
-  // The cron runs every 15 minutes. Use a circular minute-of-day comparison so times such as
-  // 08:55 are still picked up by the 09:00 run and 23:55 is picked up at midnight.
-  return Math.min(directDifference, 1440 - directDifference) < 15;
+  // Match hour+minute (not hour-only) so a custom dispatch time only opens a window around
+  // its own configured minute, with a tolerance matching the cron's 15-minute cadence.
+  if (local.hour !== Number(hourText)) return false;
+  return Math.abs(local.minute - Number(minuteText || 0)) < 15;
 }
 
 // The most recent instant `dispatchTime` (in `timeZone`) occurred at/before `now`, stepped back
@@ -237,11 +235,10 @@ async function writeWorkspaceSettingsResult(env: Env, workspaceId: string, rawJs
     ...updates
   };
   await env.DB.prepare(
-    `INSERT INTO workspace_settings (workspace_id, raw_json, updated_at)
-     VALUES (?1, ?2, ?3)
-     ON CONFLICT(workspace_id) DO UPDATE SET
-       raw_json = excluded.raw_json,
-       updated_at = excluded.updated_at`
+    `UPDATE workspace_settings
+        SET raw_json = ?2,
+            updated_at = ?3
+      WHERE workspace_id = ?1`
   ).bind(workspaceId, JSON.stringify(raw), nowIso()).run();
 }
 
@@ -271,18 +268,13 @@ async function recordRun(env: Env, values: {
   ).run();
 }
 
-async function getLowStockRows(env: Env, workspaceId: string, locationScope: string | string[] = '') {
-  // Per-location low-stock rows, restricted to the caller's resolved location scope.
-  const locationIds = Array.from(new Set((Array.isArray(locationScope) ? locationScope : [locationScope])
-    .map((value) => clean(value))
-    .filter(Boolean)));
-  const binds: unknown[] = [workspaceId];
-  const locationClause = locationIds.length
-    ? ` AND sb.location_id IN (${locationIds.map((id) => {
-        binds.push(id);
-        return `?${binds.length}`;
-      }).join(', ')})`
-    : '';
+async function getLowStockRows(env: Env, workspaceId: string) {
+  // Per-LOCATION low-stock rows: a location is low when its own on-hand for an item
+  // is at/below the item threshold. Previously this GROUP BY si.id collapsed every
+  // location into one row (with names concatenated and a 'Main Store' fallback), so
+  // the email never reflected which location was actually short. INNER JOIN on
+  // stock_balances mirrors the on-screen per-location report, which only surfaces an
+  // item at a location where it actually holds a balance.
   const rows = await env.DB.prepare(
     `SELECT
         si.id AS itemId,
@@ -301,12 +293,11 @@ async function getLowStockRows(env: Env, workspaceId: string, locationScope: str
       WHERE si.workspace_id = ?1
         AND si.active = 1
         AND si.threshold_qty > 0
-        ${locationClause}
       GROUP BY si.id, sb.location_id
      HAVING currentStock <= threshold
       ORDER BY locationName ASC, deficitValue DESC, si.name ASC
       LIMIT 500`
-  ).bind(...binds).all<Record<string, any>>();
+  ).bind(workspaceId).all<Record<string, any>>();
   return rows.results || [];
 }
 
@@ -377,8 +368,14 @@ async function loadWorkspaceLowStockContext(env: Env, workspaceId: string) {
 async function sendWorkspaceLowStockSummary(env: Env, workspace: Record<string, any>, now: Date) {
   const workspaceId = clean(workspace.workspaceId);
   const rawSettings = safeJsonParse<Record<string, any>>(workspace.rawJson, {});
-  const frequency = '1_day';
+  if (workspace.enabled !== null && workspace.enabled !== undefined && Number(workspace.enabled) === 0) {
+    return { workspaceId, status: 'disabled' };
+  }
+  const explicitFrequency = rawSettings.lowStockEmailFrequency || workspace.settingsPeriod || workspace.period;
+  const frequency = normalizeFrequency(explicitFrequency);
   const checkedAt = now.toISOString();
+  if (frequency === 'off') return { workspaceId, status: 'disabled' };
+
   const timeZone = clean(rawSettings.lowStockEmailTimeZone || rawSettings.timeZone || workspace.emailTimezone || workspace.timezone || 'Africa/Johannesburg');
   const dispatchTime = normalizeDispatchTime(rawSettings.lowStockEmailDispatchTime || workspace.settingsTime || workspace.dispatchTime);
   const inWindow = isSendWindow(now, dispatchTime, timeZone);
@@ -411,7 +408,7 @@ async function sendWorkspaceLowStockSummary(env: Env, workspace: Record<string, 
     return { workspaceId, status: 'no_low_stock', recipients: recipients.length };
   }
 
-  const emailConfig = await getEmailDeliveryConfig({ ...env, DB: env.CENTRAL_DB } as Env);
+  const emailConfig = await getEmailDeliveryConfig(env);
   const workspaceName = clean(rawSettings.siteName || workspace.name || workspaceId);
   const subject = `Low Stock Alert — ${workspaceName} (${rows.length} item${rows.length !== 1 ? 's' : ''})`;
   const text = buildSummaryText(workspaceName, frequency, rows, checkedAt);
@@ -467,7 +464,7 @@ export async function sendWorkspaceLowStockNow(env: Env, workspaceId: string) {
   if (!recipients.length) return { workspaceId, status: 'no_recipients', recipients: 0, lowStockCount: rows.length };
   if (!rows.length) return { workspaceId, status: 'no_low_stock', recipients: recipients.length, lowStockCount: 0 };
 
-  const emailConfig = await getEmailDeliveryConfig({ ...env, DB: env.CENTRAL_DB } as Env);
+  const emailConfig = await getEmailDeliveryConfig(env);
   const subject = `Low Stock Alert — ${workspaceName} (${rows.length} item${rows.length !== 1 ? 's' : ''})`;
   const text = buildSummaryText(workspaceName, 'manual', rows, now);
   const html = buildSummaryHtml(workspaceName, 'manual', rows, now);
@@ -484,44 +481,4 @@ export async function sendWorkspaceLowStockNow(env: Env, workspaceId: string) {
   });
 
   return { workspaceId, status: delivery.sent ? 'sent' : 'email-error', recipients: recipients.length, lowStockCount: rows.length };
-}
-
-
-export async function sendWorkspaceLowStockToUser(
-  env: Env,
-  workspaceId: string,
-  recipient: string,
-  locationScope: string | string[] = '',
-) {
-  const email = clean(recipient).toLowerCase();
-  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    throw new Error('Your signed-in account does not have a valid email address.');
-  }
-  const workspace = await loadWorkspaceLowStockContext(env, workspaceId);
-  if (!workspace) throw new Error('Workspace not found.');
-  const rawSettings = safeJsonParse<Record<string, any>>(workspace.rawJson, {});
-  const rows = await getLowStockRows(env, workspaceId, locationScope);
-  const generatedAt = nowIso();
-  const workspaceName = clean(rawSettings.siteName || workspace.name || workspaceId);
-  if (!rows.length) {
-    return { workspaceId, status: 'no_low_stock', recipients: 0, lowStockCount: 0 };
-  }
-  const distinctLocations = Array.from(new Set(rows.map((row) => clean(row.locationName)).filter(Boolean)));
-  const locationLabel = distinctLocations.length === 1 ? distinctLocations[0] : '';
-  const subject = `Stock Notifications — ${workspaceName}${locationLabel ? ` · ${locationLabel}` : ''} (${rows.length})`;
-  const emailConfig = await getEmailDeliveryConfig({ ...env, DB: env.CENTRAL_DB } as Env);
-  const text = buildSummaryText(workspaceName, 'manual', rows, generatedAt);
-  const html = buildSummaryHtml(workspaceName, 'manual', rows, generatedAt);
-  const delivery = await sendEmail(env, emailConfig, { to: email, subject, text, html });
-  await recordRun(env, {
-    workspaceId,
-    scheduledFor: generatedAt,
-    sentAt: delivery.sent ? generatedAt : undefined,
-    status: delivery.sent ? 'sent' : 'email-error',
-    recipientCount: 1,
-    itemCount: rows.length,
-    errorMessage: delivery.sent ? undefined : clean((delivery as any).reason || 'Email delivery failed.'),
-  });
-  if (!delivery.sent) throw new Error(clean((delivery as any).reason || 'Email delivery failed.'));
-  return { workspaceId, status: 'sent', recipients: 1, lowStockCount: rows.length, recipient: email };
 }

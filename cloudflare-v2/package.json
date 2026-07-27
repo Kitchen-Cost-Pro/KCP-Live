@@ -1,40 +1,17 @@
 {
-  "name": "kcp-cloudflare-api",
-  "version": "1.0.0",
+  "name": "kcp-cloudflare-v2",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node ./node_modules/wrangler/bin/wrangler.js dev",
-    "deploy": "node ./node_modules/wrangler/bin/wrangler.js deploy",
-    "typecheck": "node ./node_modules/typescript/bin/tsc --noEmit",
-    "deploy:dry": "node ./node_modules/wrangler/bin/wrangler.js deploy --dry-run",
-    "check:deploy": "npm run typecheck && npm run deploy:dry",
-    "turnstile:secrets": "node ./node_modules/wrangler/bin/wrangler.js secret list --format json",
-    "test:yoco-v2": "node ./node_modules/tsx/dist/cli.mjs --test tests/yoco-engine-v2-final.test.ts tests/yoco-engine-v2-refund-reconciliation.test.ts tests/yoco-v2-webhook-signature.test.ts tests/yoco-v2-live-sale-action-lookup.test.ts tests/yoco-v2-error-classification.test.ts tests/yoco-v2-partial-sale-effects.test.ts tests/d1-facade-migration-splitter.test.ts tests/yoco-v2-admin-route-path.test.ts tests/yoco-v2-schema-repair.test.ts tests/yoco-v2-ownership-connect-migration.test.ts tests/modifier-engine-core-actions.test.ts tests/modifier-reporting-v2-ledger.test.ts",
-    "test": "npm run test:yoco-v2",
-    "audit:yoco-v2-admin-dependencies": "node scripts/audit-yoco-v2-admin-dependencies.mjs",
-    "audit:yoco-v2-final": "node scripts/audit-yoco-v2-final.mjs"
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test:recipe-persistence": "esbuild src/legacy/routes.ts --bundle --platform=node --format=esm --alias:cloudflare:sockets=./tests/cloudflare-sockets-shim.mjs --outfile=tests/.recipe-routes.bundle.mjs && node tests/recipe-persistence.integration.mjs"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "5.20260710.1",
-    "tsx": "^4.23.1",
+    "@cloudflare/workers-types": "^4.20260523.0",
     "typescript": "^5.8.3",
-    "wrangler": "4.110.0"
-  },
-  "dependencies": {
-    "jspdf": "^4.2.1",
-    "jspdf-autotable": "^5.0.7",
-    "xlsx": "npm:@e965/xlsx@^0.20.3"
-  },
-  "description": "Kitchen Cost Pro Cloudflare Worker API",
-  "engines": {
-    "node": ">=22 <25",
-    "npm": ">=10"
-  },
-  "allowScripts": {
-    "esbuild@0.28.1": true,
-    "fsevents@2.3.3": true,
-    "sharp@0.34.5": true,
-    "workerd@1.20260708.1": true
+    "wrangler": "^4.17.0"
   }
 }

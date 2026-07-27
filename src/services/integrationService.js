@@ -1,4 +1,4 @@
-import { callCloudflareWorkspaceRoute } from './cloudflareApi.js';
+import { callCloudflareRoute, callCloudflareWorkspaceRoute } from './cloudflareApi.js';
 
 export function subscribeYocoIntegration(workspaceId, callback) {
   let cancelled = false;
@@ -33,16 +33,21 @@ export async function connectYocoIntegration(workspaceId, apiKey) {
   }
 }
 
-export async function syncYocoCatalogue(workspaceId, options = {}) {
-  return callCloudflareYocoRoute(workspaceId, 'sync-catalogue', {
-    resetWebhook: options.resetWebhook === true
-  });
+export async function syncYocoCatalogue(workspaceId) {
+  return callCloudflareYocoRoute(workspaceId, 'sync-catalogue');
 }
 
-export async function syncYocoSales(workspaceId, options = {}) {
-  return callCloudflareYocoRoute(workspaceId, 'sync-sales', {
-    resetWebhook: options.resetWebhook === true
-  });
+export async function syncYocoSales(workspaceId) {
+  try {
+    return await callCloudflareYocoRoute(workspaceId, 'sync-sales');
+  } catch (error) {
+    if (!/\(404\)/.test(String(error?.message || ''))) throw error;
+    const health = await callCloudflareRoute('health', { timeoutMs: 10000 }).catch(() => ({}));
+    const release = String(health.workerRelease || 'an older release').trim();
+    throw new Error(
+      `Yoco Sales Sync is not available on the deployed API (${release}). Deploy the cloudflare-v2 Worker from this build.`
+    );
+  }
 }
 
 export async function disconnectYocoIntegration(workspaceId) {

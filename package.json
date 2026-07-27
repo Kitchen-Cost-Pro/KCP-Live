@@ -1,22 +1,13 @@
 {
-  "name": "kcp-live",
-  "version": "1.0.0",
+  "name": "kcp-live-converted",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node ./node_modules/vite/bin/vite.js --host localhost",
-    "dev:worker": "npm --prefix cloudflare-v2 run dev",
+    "dev": "vite --host localhost",
     "test": "node --test \"src/**/*.test.js\"",
-    "build": "node ./node_modules/vite/bin/vite.js build && node scripts/copy-admin-route.mjs",
-    "preview": "node ./node_modules/vite/bin/vite.js preview --host 127.0.0.1",
-    "typecheck:worker": "npm --prefix cloudflare-v2 run typecheck",
-    "deploy:worker": "npm --prefix cloudflare-v2 run deploy",
-    "check:hardening": "npm test && npm run build && npm --prefix cloudflare-v2 test && npm --prefix cloudflare-v2 run check:deploy",
-    "verify:worker-release": "node scripts/verify-worker-release.mjs",
-    "verify:yoco-v2-release": "npm run audit:yoco-v2-final",
-    "deploy:local:clean": "sh scripts/clean-install-deploy-local.sh",
-    "audit:yoco-v2-final": "node scripts/verify-final-yoco-v2-release.mjs",
-    "audit:yoco-v2-runtime-readiness": "node scripts/verify-yoco-v2-runtime-readiness.mjs"
+    "build": "vite build && node scripts/copy-admin-route.mjs",
+    "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
     "chart.js": "^4.5.1",
@@ -24,17 +15,9 @@
     "html5-qrcode": "^2.3.8",
     "jspdf": "^4.2.1",
     "jspdf-autotable": "^5.0.7",
-    "xlsx": "npm:@e965/xlsx@^0.20.3"
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
-    "vite": "^6.4.3"
-  },
-  "description": "Kitchen Cost Pro Cloudflare production application",
-  "engines": {
-    "node": ">=22 <25",
-    "npm": ">=10"
-  },
-  "allowScripts": {
-    "esbuild@0.25.12": true
+    "vite": "^6.3.2"
   }
 }

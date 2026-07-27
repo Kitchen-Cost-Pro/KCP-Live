@@ -819,10 +819,3 @@
     display: grid;
   }
 }
-
-
-/* Phase 47: locked Yoco connection ownership. */
-.yocoActionLock { display:flex; align-items:center; gap:.75rem; min-height:3.4rem; padding:.7rem .85rem; border:1px dashed var(--border-strong); border-radius:.8rem; color:var(--text-muted); background:color-mix(in srgb, var(--surface-elevated) 94%, var(--accent-blue)); }
-.yocoActionLock > span:last-child { display:grid; gap:.1rem; }
-.yocoActionLock strong { color:var(--text-main); font-size:.75rem; }
-.yocoActionLock small { font-size:.65rem; line-height:1.35; }

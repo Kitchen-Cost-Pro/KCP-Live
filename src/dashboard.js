@@ -1,1230 +1,1926 @@
 import styles from './styles/dashboard.module.css';
-import {
-  loadDashboardReportingModel,
-  reconcileDashboardLocationNames
-} from './dashboardData.js';
-import { fetchWorkspaceLocationOptions } from './services/locationService.js';
-import { mergeCanonicalLocations } from './utils/locationDisplayName.js';
-import { positionDashboardSelectMenu } from './utils/dashboardDropdown.js';
-import {
-  loadLowStockNotificationSettings,
-  saveLowStockNotificationSettings
-} from './services/notificationService.js';
+import './styles/yds-tokens.css';
+import { calculateDashboardMetrics, getTradeDateKey } from './services/database.js';
+import { shiftMonthKey, startOfMonthKey, todayLocal } from './utils/date.js';
+import { buildCalendarModel, formatDisplayDate } from './utils/date.js';
 
-const DASHBOARD_CACHE_TTL = 60_000;
-const dashboardCache = new Map();
-const SERIES = [
-  { key: 'cos', label: 'Cost of Sales', color: '#00e5a0' },
-  { key: 'adjustments', label: 'Adjustments', color: '#f5a623' },
-  { key: 'wastage', label: 'Wastage', color: '#ff4455' },
-  { key: 'mfgWastage', label: 'Manufacture Wastage', color: '#7b61ff' }
-];
-const SUPPLIER_COLORS = ['#00e5a0', '#f5a623', '#7b61ff', '#00b3ff', '#ff4455'];
-const RANGE_PRESETS = [
-  ['today', 'Today'],
-  ['this_week', 'This Week'],
-  ['two_weeks', '2 Weeks'],
-  ['month', 'This month'],
-  ['3m', 'Last 3 months'],
-  ['6m', 'Last 6 months'],
-  ['12m', 'Last 12 months'],
-  ['ytd', 'Year to date'],
-  ['custom', 'Custom range']
-];
-
-export function renderDashboard({ state = {}, onNavigate, onStockFilterChange, onThemeToggle } = {}) {
-  const workspaceId = String(state.workspace?.id || '');
-  const workspaceName = state.workspace?.siteName || state.source?.settings?.siteName || 'Workspace';
-  const initialRange = getPresetRange('today');
+export function renderDashboard({
+  state,
+  onThemeToggle,
+  onDashboardRangeChange,
+  onDashboardSiteChange,
+  onDashboardLocationChange,
+  onDashboardRefresh,
+  onDashboardChartTab,
+  onNavigate
+}) {
   const view = document.createElement('section');
-  view.className = styles.shell;
-  view.setAttribute('aria-label', 'Main dashboard');
-  view.dataset.dashboardWorkspace = workspaceId;
+  view.className = `${styles.dashboardShell} ydsDashboard`;
 
-  const ui = {
-    search: '',
-    category: 'All',
-    sortCol: 'status',
-    sortDir: 'desc',
-    activeSeries: new Set(SERIES.map((series) => series.key)),
-    visibleRows: 75,
-    model: null,
-    loading: true,
-    error: '',
-    requestId: 0,
-    locationId: '',
-    locationOptions: [],
-    inventoryLocationId: '',
-    openSelect: '',
-    rangePreset: 'today',
-    from: initialRange.from,
-    to: initialRange.to,
-    calendarOpen: false,
-    calendarCursor: startOfCalendarMonth(initialRange.from),
-    pendingRangeStart: '',
-    notificationsOpen: false,
-    notificationSettingsOpen: false,
-    notificationSettingsStatus: 'idle',
-    notificationSettingsMessage: '',
-    notificationDispatchTime: '08:00',
-    notificationRecipientIds: new Set(),
-    notificationWorkspaceUsers: []
+  const activeWorkspace = state.workspace || {};
+  const selectedSite = getSelectedDashboardSite(state);
+  const siteName = selectedSite?.name || state.dashboard?.siteName || state.source?.settings?.siteName || activeWorkspace.siteName || 'Workspace';
+
+  view.innerHTML = `
+    <header class="${styles.header}">
+      <div>
+        <p class="${styles.eyebrow}">Kitchen Cost Pro</p>
+        <h1>Dashboard</h1>
+        <p class="${styles.subtitle}">${escapeHtml(siteName)} · Live workspace data</p>
+      </div>
+      <div class="${styles.headerActions}">
+        ${renderHeaderUtilities(state)}
+      </div>
+    </header>
+
+    ${state.workspaceError ? renderWorkspaceError(state.workspaceError) : renderDashboardGrid(state)}
+  `;
+
+  const rangeDraft = { ...getRangeInputDates(parseDashboardRange(state.dashboardRange || '7'), state.source?.settings) };
+  let rangeCalendar = null;
+  const rangeCalendarRoot = document.createElement('div');
+  rangeCalendarRoot.dataset.dashboardCalendarRoot = 'true';
+  view.append(rangeCalendarRoot);
+
+  const renderRangeCalendar = () => {
+    if (!rangeCalendar) {
+      rangeCalendarRoot.innerHTML = '';
+      return;
+    }
+
+    rangeCalendarRoot.innerHTML = renderRangeCalendarOverlay(rangeDraft, rangeCalendar);
+
+    rangeCalendarRoot.querySelectorAll('[data-dashboard-calendar-close]').forEach((button) => {
+      button.addEventListener('click', () => {
+        rangeCalendar = null;
+        renderRangeCalendar();
+      });
+    });
+
+    rangeCalendarRoot.querySelectorAll('[data-dashboard-calendar-nav]').forEach((button) => {
+      button.addEventListener('click', () => {
+        rangeCalendar = {
+          ...rangeCalendar,
+          cursor: shiftMonthKey(rangeCalendar.cursor || rangeDraft.startDate || todayLocal(), Number(button.dataset.dashboardCalendarNav || 0))
+        };
+        renderRangeCalendar();
+      });
+    });
+
+    rangeCalendarRoot.querySelectorAll('[data-dashboard-calendar-edge]').forEach((button) => {
+      button.addEventListener('click', () => {
+        rangeCalendar = {
+          ...rangeCalendar,
+          activeEdge: button.dataset.dashboardCalendarEdge || 'start'
+        };
+        renderRangeCalendar();
+      });
+    });
+
+    rangeCalendarRoot.querySelectorAll('[data-dashboard-calendar-day]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const date = button.dataset.dashboardCalendarDay || todayLocal();
+        if (rangeCalendar.activeEdge === 'end') {
+          rangeDraft.endDate = date;
+          if (rangeDraft.startDate && date < rangeDraft.startDate) {
+            rangeDraft.endDate = rangeDraft.startDate;
+            rangeDraft.startDate = date;
+          }
+          rangeCalendar = { ...rangeCalendar, activeEdge: 'start' };
+        } else {
+          rangeDraft.startDate = date;
+          rangeDraft.endDate = date;
+          rangeCalendar = { ...rangeCalendar, activeEdge: 'end' };
+        }
+        renderRangeCalendar();
+      });
+    });
+
+    rangeCalendarRoot.querySelectorAll('[data-dashboard-calendar-preset]').forEach((button) => {
+      button.addEventListener('click', () => {
+        onDashboardRangeChange?.(button.dataset.dashboardCalendarPreset || '7');
+        rangeCalendar = null;
+        renderRangeCalendar();
+      });
+    });
+
+    rangeCalendarRoot.querySelector('[data-dashboard-calendar-today]')?.addEventListener('click', () => {
+      const date = todayLocal();
+      if (rangeCalendar.activeEdge === 'end') {
+        rangeDraft.endDate = date;
+        if (rangeDraft.startDate && date < rangeDraft.startDate) {
+          rangeDraft.endDate = rangeDraft.startDate;
+          rangeDraft.startDate = date;
+        }
+        rangeCalendar = { ...rangeCalendar, activeEdge: 'start' };
+      } else {
+        rangeDraft.startDate = date;
+        rangeDraft.endDate = date;
+        rangeCalendar = { ...rangeCalendar, activeEdge: 'end' };
+      }
+      renderRangeCalendar();
+    });
+
+    rangeCalendarRoot.querySelector('[data-dashboard-calendar-apply]')?.addEventListener('click', () => {
+      if (rangeDraft.startDate && rangeDraft.endDate) {
+        onDashboardRangeChange?.(`custom:${rangeDraft.startDate}:${rangeDraft.endDate}`);
+      }
+      rangeCalendar = null;
+      renderRangeCalendar();
+    });
+
+    rangeCalendarRoot.querySelector('[data-dashboard-calendar-overlay]')?.addEventListener('click', (event) => {
+      if (event.target !== event.currentTarget) return;
+      rangeCalendar = null;
+      renderRangeCalendar();
+    });
   };
 
-  renderLoading(view, workspaceName);
-  const initialCacheKey = getDashboardCacheKey(workspaceId, ui);
-  const cached = dashboardCache.get(initialCacheKey);
-  if (cached?.model && Date.now() - cached.loadedAt < DASHBOARD_CACHE_TTL) {
-    ui.model = cached.model;
-    ui.locationOptions = mergeLocationOptions(ui.locationOptions, cached.model.locations);
-    syncInventoryLocation(ui, cached.model);
-    ui.loading = false;
-    renderModel(view, ui, { workspaceName, onNavigate, onStockFilterChange, onThemeToggle, workspaceId });
-  } else {
-    loadModel(false);
-  }
+  view.querySelector('[data-theme-toggle]')?.addEventListener('click', () => onThemeToggle?.());
+  view.querySelector('[data-dashboard-refresh]')?.addEventListener('click', () => onDashboardRefresh?.());
 
-  async function loadModel(force = false) {
-    const requestId = ++ui.requestId;
-    ui.loading = true;
-    ui.error = '';
-    if (!ui.model) renderLoading(view, workspaceName);
-    else setRefreshing(view, true);
+  // Site / location selector rendered as a fixed-position modal so it is never clipped
+  // by the shell's `overflow: hidden` (the old inline dropdown was being cut off).
+  let selectorPicker = null;
+  const selectorRoot = document.createElement('div');
+  selectorRoot.dataset.dashboardSelectorRoot = 'true';
+  view.append(selectorRoot);
 
-    try {
-      const model = await getDashboardModel(workspaceId, ui, force);
-      if (!document.contains(view) || view.dataset.dashboardWorkspace !== workspaceId || requestId !== ui.requestId) return;
-      ui.model = model;
-      ui.locationOptions = mergeLocationOptions(ui.locationOptions, model.locations);
-      syncInventoryLocation(ui, model);
-      ui.loading = false;
-      ui.visibleRows = 75;
-      renderModel(view, ui, { workspaceName, onNavigate, onStockFilterChange, onThemeToggle, workspaceId });
-    } catch (error) {
-      if (!document.contains(view) || requestId !== ui.requestId) return;
-      ui.loading = false;
-      ui.error = error?.message || 'The dashboard could not load.';
-      renderError(view, ui.error, () => loadModel(true));
+  const renderSelector = () => {
+    if (!selectorPicker) {
+      selectorRoot.innerHTML = '';
+      return;
     }
-  }
-
-  async function getDashboardModel(workspaceKey, dashboardUi, force) {
-    const key = getDashboardCacheKey(workspaceKey, dashboardUi);
-    if (force) dashboardCache.delete(key);
-    const entry = dashboardCache.get(key);
-    if (entry?.promise) return entry.promise;
-    if (entry?.model && Date.now() - entry.loadedAt < DASHBOARD_CACHE_TTL) return entry.model;
-
-    const stateLocations = getKnownStateLocations(state);
-    const promise = Promise.all([
-      loadDashboardReportingModel({
-        workspaceId: workspaceKey,
-        filters: {
-          from: dashboardUi.from,
-          to: dashboardUi.to,
-          locationId: dashboardUi.locationId
-        },
-        services: { reporting: {} }
-      }),
-      fetchWorkspaceLocationOptions(workspaceKey).catch(() => stateLocations)
-    ])
-      .then(([model, fetchedLocations]) => {
-        const canonicalLocations = mergeCanonicalLocations(stateLocations, fetchedLocations);
-        const resolvedModel = reconcileDashboardLocationNames(model, canonicalLocations);
-        dashboardCache.set(key, { model: resolvedModel, loadedAt: Date.now(), promise: null });
-        return resolvedModel;
-      })
-      .catch((error) => {
-        dashboardCache.delete(key);
-        throw error;
+    selectorRoot.innerHTML = renderSelectorModal(selectorPicker, state);
+    selectorRoot.querySelector('[data-dashboard-selector-overlay]')?.addEventListener('click', (event) => {
+      if (event.target === event.currentTarget) {
+        selectorPicker = null;
+        renderSelector();
+      }
+    });
+    selectorRoot.querySelector('[data-dashboard-selector-close]')?.addEventListener('click', () => {
+      selectorPicker = null;
+      renderSelector();
+    });
+    selectorRoot.querySelectorAll('[data-dashboard-selector-option]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const value = btn.dataset.dashboardSelectorOption || '';
+        if (selectorPicker.type === 'site') onDashboardSiteChange?.(value);
+        else onDashboardLocationChange?.(value);
+        selectorPicker = null;
+        renderSelector();
       });
-    dashboardCache.set(key, { promise, model: entry?.model || null, loadedAt: entry?.loadedAt || 0 });
-    return promise;
-  }
+    });
+  };
 
-  view.__dashboardRefresh = () => loadModel(true);
-  view.__dashboardApplyFilters = () => loadModel(false);
+  view.querySelector('[data-dashboard-site-trigger]')?.addEventListener('click', () => {
+    selectorPicker = { type: 'site' };
+    renderSelector();
+  });
+  view.querySelector('[data-dashboard-location-trigger]')?.addEventListener('click', () => {
+    selectorPicker = { type: 'location' };
+    renderSelector();
+  });
+
+  view.querySelector('[data-dashboard-calendar-open]')?.addEventListener('click', () => {
+    rangeCalendar = {
+      cursor: startOfMonthKey(rangeDraft.startDate || todayLocal()),
+      activeEdge: 'start'
+    };
+    renderRangeCalendar();
+  });
+  view.querySelectorAll('[data-dashboard-target]').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      onNavigate?.(event.currentTarget.dataset.dashboardTarget);
+    });
+  });
+
+  view.querySelectorAll('[data-dashboard-chart-tab]').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      onDashboardChartTab?.(event.currentTarget.dataset.dashboardChartTab || 'costOfSales');
+    });
+  });
+
+  // Initialise the Movement chart (Chart.js canvas) after this dashboard node is mounted.
+  requestAnimationFrame(() => { initMovementChart().catch(() => {}); });
+
   return view;
 }
 
-function getKnownStateLocations(state = {}) {
-  return mergeCanonicalLocations(
-    state.locations?.items,
-    state.stock?.locations,
-    state.stockTake?.locations,
-    state.transfers?.locations,
-    state.purchaseOrders?.locations,
-    state.grv?.locations,
-    state.creditNotes?.locations,
-    state.adjustments?.locations,
-    state.manufacturing?.locations
-  );
+// The dashboard is rebuilt wholesale on every render, so the Chart.js instance is tracked
+// module-side and destroyed before each re-create (prevents orphaned instances / leaks).
+let movementChart = null;
+let movementChartLib = null;
+
+async function loadChartLib() {
+  if (movementChartLib) return movementChartLib;
+  const mod = await import('chart.js');
+  const { Chart, LineController, LineElement, PointElement, LinearScale, CategoryScale, Filler, Tooltip } = mod;
+  Chart.register(LineController, LineElement, PointElement, LinearScale, CategoryScale, Filler, Tooltip);
+  movementChartLib = Chart;
+  return Chart;
 }
 
-function getDashboardCacheKey(workspaceId, ui = {}) {
-  return [workspaceId, ui.from || '', ui.to || '', ui.locationId || 'all'].join('::');
-}
+async function initMovementChart() {
+  // Tear down any prior instance first (fresh node every render).
+  if (movementChart) { try { movementChart.destroy(); } catch { /* noop */ } movementChart = null; }
+  const canvas = document.querySelector('[data-movement-chart]');
+  if (!canvas || !document.body.contains(canvas)) return;
 
-function mergeLocationOptions(existing = [], incoming = []) {
-  const options = new Map();
-  [...existing, ...incoming].forEach((location) => {
-    const id = String(location?.id || '').trim();
-    if (!id) return;
-    const name = String(location?.name || id).trim() || id;
-    if (!options.has(id) || options.get(id).name === id) options.set(id, { id, name });
+  let points = [];
+  try { points = JSON.parse(canvas.getAttribute('data-series') || '[]'); } catch { points = []; }
+  const tone = canvas.getAttribute('data-tone') || 'blue';
+  const format = canvas.getAttribute('data-format') || 'number';
+
+  const Chart = await loadChartLib();
+  // A newer render may have replaced the canvas while the lib was loading.
+  if (!Chart || !document.body.contains(canvas)) return;
+
+  const cs = getComputedStyle(document.documentElement);
+  const accent = resolveToneColor(cs, tone);
+  const textColor = (cs.getPropertyValue('--text-soft') || '').trim() || '#94a3b8';
+  const gridColor = 'rgba(148, 163, 184, 0.16)';
+
+  const ctx = canvas.getContext('2d');
+  const gradient = ctx.createLinearGradient(0, 0, 0, canvas.clientHeight || 240);
+  gradient.addColorStop(0, hexToRgba(accent, 0.28));
+  gradient.addColorStop(1, hexToRgba(accent, 0.02));
+
+  movementChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: points.map((point) => point.label),
+      datasets: [{
+        data: points.map((point) => Number(point.value) || 0),
+        borderColor: accent,
+        borderWidth: 2.5,
+        fill: true,
+        backgroundColor: gradient,
+        // monotone interpolation is smooth but never overshoots below the baseline (the old bug)
+        cubicInterpolationMode: 'monotone',
+        tension: 0.35,
+        pointRadius: points.length > 40 ? 0 : 3,
+        pointHoverRadius: 6,
+        pointBackgroundColor: accent,
+        pointBorderColor: '#ffffff',
+        pointBorderWidth: 1.5
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 500, easing: 'easeOutQuart' },
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          displayColors: false,
+          backgroundColor: 'rgba(2, 6, 23, 0.92)',
+          padding: 10,
+          titleColor: '#e2e8f0',
+          bodyColor: '#ffffff',
+          callbacks: { label: (item) => formatCompactChartValue(item.parsed.y, format) }
+        }
+      },
+      scales: {
+        x: {
+          grid: { display: false },
+          border: { display: false },
+          ticks: { color: textColor, maxTicksLimit: 6, autoSkip: true, maxRotation: 0, font: { size: 11, weight: '700' } }
+        },
+        y: {
+          grid: { color: gridColor },
+          border: { display: false },
+          ticks: { color: textColor, maxTicksLimit: 4, font: { size: 11, weight: '700' }, callback: (val) => formatCompactChartValue(val, format) }
+        }
+      }
+    }
   });
-  return [...options.values()].sort((left, right) => left.name.localeCompare(right.name, 'en', { sensitivity: 'base' }));
 }
 
-function getInventoryLocationOptions(model = {}) {
-  const source = Array.isArray(model.inventoryLocations) && model.inventoryLocations.length
-    ? model.inventoryLocations
-    : (model.inventoryItems || []).map((item) => ({ id: item.locationId, name: item.locationName }));
-  return mergeLocationOptions([], source);
-}
-
-function syncInventoryLocation(ui, model = {}) {
-  const options = getInventoryLocationOptions(model);
-  if (ui.locationId && options.some((location) => location.id === ui.locationId)) {
-    ui.inventoryLocationId = ui.locationId;
-    return;
-  }
-  if (options.some((location) => location.id === ui.inventoryLocationId)) return;
-  ui.inventoryLocationId = options[0]?.id || '';
-}
-
-function getScopedInventoryItems(ui) {
-  const items = Array.isArray(ui.model?.inventoryItems) ? ui.model.inventoryItems : [];
-  if (!ui.inventoryLocationId) return items;
-  return items.filter((item) => String(item.locationId || '') === ui.inventoryLocationId);
-}
-
-function getScopedInventoryAlerts(ui) {
-  const items = getScopedInventoryItems(ui);
-  const critical = items.filter((item) => item.status === 'critical');
-  const low = items.filter((item) => item.status === 'low');
-  return {
-    criticalCount: critical.length,
-    lowCount: low.length,
-    criticalNames: critical.slice(0, 3).map((item) => item.name),
-    locationName: getInventoryLocationOptions(ui.model).find((location) => location.id === ui.inventoryLocationId)?.name || ''
+function resolveToneColor(cs, tone) {
+  const map = {
+    indigo: '--accent-indigo',
+    blue: '--accent-blue',
+    amber: '--accent-amber',
+    emerald: '--accent-emerald',
+    red: '--accent-red',
+    orange: '--accent-orange'
   };
+  const value = (cs.getPropertyValue(map[tone] || '--accent-blue') || '').trim();
+  return value || (cs.getPropertyValue('--accent-blue') || '').trim() || '#0099e0';
 }
 
-function getNotificationInventoryItems(ui) {
-  const items = Array.isArray(ui.model?.inventoryItems) ? ui.model.inventoryItems : [];
-  if (!ui.locationId) return items;
-  return items.filter((item) => String(item.locationId || '') === ui.locationId);
-}
-
-function getNotificationInventoryAlerts(ui) {
-  const items = getNotificationInventoryItems(ui);
-  const critical = items.filter((item) => item.status === 'critical');
-  const low = items.filter((item) => item.status === 'low');
-  return {
-    criticalCount: critical.length,
-    lowCount: low.length,
-    criticalNames: critical.slice(0, 3).map((item) => item.name),
-    locationName: ui.locationId
-      ? ui.locationOptions.find((location) => location.id === ui.locationId)?.name || 'Selected location'
-      : 'All permitted locations'
-  };
-}
-
-function startOfCalendarMonth(value = '') {
-  const match = String(value || '').match(/^(\d{4})-(\d{2})/);
-  const now = new Date();
-  return match
-    ? new Date(Number(match[1]), Number(match[2]) - 1, 1)
-    : new Date(now.getFullYear(), now.getMonth(), 1);
-}
-
-function getPresetRange(preset = 'today', now = new Date()) {
-  const anchor = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  let from = new Date(anchor);
-  if (preset === 'this_week') {
-    const mondayOffset = (anchor.getDay() + 6) % 7;
-    from = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() - mondayOffset);
+function hexToRgba(color, alpha) {
+  const hex = String(color).trim().replace('#', '');
+  if (/^[0-9a-fA-F]{6}$/.test(hex)) {
+    return `rgba(${parseInt(hex.slice(0, 2), 16)}, ${parseInt(hex.slice(2, 4), 16)}, ${parseInt(hex.slice(4, 6), 16)}, ${alpha})`;
   }
-  if (preset === 'two_weeks') from = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() - 13);
-  if (preset === 'month') from = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
-  if (preset === '3m') from = new Date(anchor.getFullYear(), anchor.getMonth() - 2, 1);
-  if (preset === '6m') from = new Date(anchor.getFullYear(), anchor.getMonth() - 5, 1);
-  if (preset === '12m') from = new Date(anchor.getFullYear(), anchor.getMonth() - 11, 1);
-  if (preset === 'ytd') from = new Date(anchor.getFullYear(), 0, 1);
-  return { from: formatDateInput(from), to: formatDateInput(anchor) };
-}
-
-function formatDateInput(date) {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-}
-
-function todayKey() {
-  return formatDateInput(new Date());
-}
-
-function normalizeDateKey(value = '') {
-  const match = String(value || '').trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!match) return '';
-  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
-  if (date.getFullYear() !== Number(match[1]) || date.getMonth() !== Number(match[2]) - 1 || date.getDate() !== Number(match[3])) return '';
-  return formatDateInput(date);
-}
-
-function renderLoading(view, workspaceName) {
-  view.innerHTML = `
-    <div class="${styles.loadingWrap}" role="status" aria-live="polite">
-      <div class="${styles.loadingHeader}">
-        <div class="${styles.loadingBrand}"></div>
-        <div><span></span><span></span></div>
-      </div>
-      <div class="${styles.loadingGrid}">${Array.from({ length: 4 }, () => `<div></div>`).join('')}</div>
-      <div class="${styles.loadingPanels}"><div></div><div></div></div>
-      <div class="${styles.loadingTable}"></div>
-      <p>Loading ${escapeHtml(workspaceName)} reporting data…</p>
-    </div>
-  `;
-}
-
-function renderError(view, message, onRetry) {
-  view.innerHTML = `
-    <div class="${styles.errorState}" role="alert">
-      ${icon('alert', 24)}
-      <p>Dashboard unavailable</p>
-      <span>${escapeHtml(message)}</span>
-      <button type="button" data-dashboard-retry>${icon('refresh', 14)} Retry</button>
-    </div>
-  `;
-  view.querySelector('[data-dashboard-retry]')?.addEventListener('click', onRetry);
-}
-
-function renderDashboardSelect({ kind, label, value, options = [], open = false, displayValue = '', calendarHtml = '' } = {}) {
-  const selected = options.find(([optionValue]) => optionValue === value);
-  const selectedLabel = displayValue || selected?.[1] || options[0]?.[1] || 'Select';
-  return `
-    <div class="${styles.customField}" data-dashboard-custom-select="${escapeAttribute(kind)}">
-      <span class="${styles.customFieldLabel}">${escapeHtml(label)}</span>
-      <button type="button" class="${styles.customSelectButton}" aria-haspopup="listbox" aria-expanded="${open}" data-dashboard-select-button="${escapeAttribute(kind)}">
-        <span>${escapeHtml(selectedLabel)}</span>
-        ${icon('chevronDown', 14)}
-      </button>
-      <div class="${styles.customSelectMenu} ${open ? styles.customSelectMenuOpen : ''}" role="listbox" aria-label="${escapeAttribute(label)}" ${open ? '' : 'hidden'} data-dashboard-select-menu="${escapeAttribute(kind)}">
-        ${options.map(([optionValue, optionLabel]) => `
-          <button type="button" role="option" aria-selected="${optionValue === value}" class="${styles.customSelectOption} ${optionValue === value ? styles.customSelectOptionSelected : ''}" data-dashboard-select-option="${escapeAttribute(kind)}" data-value="${escapeAttribute(optionValue)}">
-            <span>${escapeHtml(optionLabel)}</span>
-            ${optionValue === value ? icon('check', 13) : ''}
-          </button>
-        `).join('')}
-      </div>
-      ${calendarHtml}
-    </div>
-  `;
-}
-
-function getRangePresetLabel(preset = '6m') {
-  return RANGE_PRESETS.find(([value]) => value === preset)?.[1] || 'Date range';
-}
-
-function renderDateRangeCalendar(ui) {
-  if (ui.rangePreset !== 'custom' || !ui.calendarOpen) return '';
-  const cursor = ui.calendarCursor instanceof Date && Number.isFinite(ui.calendarCursor.getTime())
-    ? ui.calendarCursor
-    : startOfCalendarMonth(ui.from);
-  const year = cursor.getFullYear();
-  const month = cursor.getMonth();
-  const firstDay = new Date(year, month, 1);
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
-  const leading = firstDay.getDay();
-  const selectedStart = ui.pendingRangeStart || ui.from;
-  const selectedEnd = ui.pendingRangeStart ? '' : ui.to;
-  const cells = [];
-  for (let index = 0; index < leading; index += 1) cells.push(`<span class="${styles.calendarDayEmpty}"></span>`);
-  for (let day = 1; day <= daysInMonth; day += 1) {
-    const value = formatDateInput(new Date(year, month, day));
-    const isStart = value === selectedStart;
-    const isEnd = value === selectedEnd;
-    const isInRange = Boolean(selectedStart && selectedEnd && value > selectedStart && value < selectedEnd);
-    const isToday = value === todayKey();
-    const isFuture = value > todayKey();
-    cells.push(`
-      <button type="button" class="${styles.calendarDay} ${isStart || isEnd ? styles.calendarDaySelected : ''} ${isInRange ? styles.calendarDayInRange : ''} ${isToday ? styles.calendarDayToday : ''}" data-dashboard-calendar-date="${escapeAttribute(value)}" ${isFuture ? 'disabled' : ''} aria-label="${escapeAttribute(new Date(year, month, day).toLocaleDateString('en-ZA', { day: 'numeric', month: 'long', year: 'numeric' }))}">${day}</button>
-    `);
+  if (/^[0-9a-fA-F]{3}$/.test(hex)) {
+    return `rgba(${parseInt(hex[0] + hex[0], 16)}, ${parseInt(hex[1] + hex[1], 16)}, ${parseInt(hex[2] + hex[2], 16)}, ${alpha})`;
   }
-  const monthLabel = cursor.toLocaleDateString('en-ZA', { month: 'long', year: 'numeric' });
-  const instruction = ui.pendingRangeStart ? 'Select an end date' : 'Select a start date, then an end date';
+  return String(color).trim(); // rgb()/hsl()/named — use as-is
+}
+
+function renderDashboardGrid(state) {
+  const summary = getEffectiveDashboardSummary(state);
+  const isLiveReady = hasDashboardLiveSummary(state);
+  const insights = buildDashboardInsights(state, summary);
+  const deltas = state.dashboard?.metrics?.deltas || {};
+
   return `
-    <div class="${styles.dateCalendar}" role="dialog" aria-label="Choose a custom dashboard date range" data-dashboard-date-calendar>
-      <div class="${styles.calendarHeader}">
-        <button type="button" data-dashboard-calendar-shift="-1" aria-label="Previous month">${icon('chevronLeft', 15)}</button>
-        <div><strong>${escapeHtml(monthLabel)}</strong><span>${escapeHtml(instruction)}</span></div>
-        <button type="button" data-dashboard-calendar-shift="1" aria-label="Next month">${icon('chevronRight', 15)}</button>
-      </div>
-      <div class="${styles.calendarWeekdays}" aria-hidden="true"><span>Sun</span><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span></div>
-      <div class="${styles.calendarGrid}">${cells.join('')}</div>
-      <div class="${styles.calendarFooter}">
-        <span>${ui.pendingRangeStart ? `${formatShortDate(ui.pendingRangeStart)} → Select end` : `${formatShortDate(ui.from)} → ${formatShortDate(ui.to)}`}</span>
-        <button type="button" data-dashboard-calendar-cancel>Cancel</button>
-      </div>
-    </div>
-  `;
-}
+    <div class="${styles.dashboardContent} ${styles.ydsContent}">
+      ${renderPendingExternalTransferBanner(insights)}
 
-function formatShortDate(value = '') {
-  const match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!match) return '—';
-  return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3])).toLocaleDateString('en-ZA', { day: 'numeric', month: 'short', year: 'numeric' });
-}
-
-function renderModel(view, ui, context) {
-  const model = ui.model;
-  syncInventoryLocation(ui, model);
-  const inventoryAlerts = getNotificationInventoryAlerts(ui);
-  const criticalCount = inventoryAlerts.criticalCount;
-  const attentionCount = inventoryAlerts.criticalCount + inventoryAlerts.lowCount;
-  const alertNames = inventoryAlerts.criticalNames.join(', ');
-  const currentTheme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
-  const selectedLocation = ui.locationOptions.find((location) => location.id === ui.locationId);
-
-  view.innerHTML = `
-    <div class="${styles.frame}">
-      <header class="${styles.topbar}">
-        <div class="${styles.brandBlock}">
-          <div class="${styles.brandIcon}">${icon('package', 14)}</div>
-          <div>
-            <h1>STOCKROOM</h1>
-            <p>${escapeHtml(context.workspaceName)} · ${escapeHtml(model.dateLabel)}</p>
-          </div>
-        </div>
-        <div class="${styles.topbarActions}">
-          <button type="button" class="${styles.refreshButton}" aria-label="Refresh dashboard" title="Refresh dashboard" data-dashboard-refresh>${icon('refresh', 14)}<span>Refresh</span></button>
-          <div class="${styles.notificationWrap}" data-dashboard-notification-wrap>
-            <button type="button" class="${styles.iconButton} ${ui.notificationsOpen ? styles.iconButtonActive : ''}" aria-label="Open stock notifications" title="Stock notifications" aria-expanded="${ui.notificationsOpen}" aria-controls="dashboard-stock-notifications" data-dashboard-alert-button>
-              ${icon('bell', 15)}
-              ${attentionCount ? `<span class="${styles.notificationCount}">${attentionCount > 99 ? '99+' : attentionCount}</span>` : ''}
-            </button>
-            <div id="dashboard-stock-notifications" class="${styles.notificationMenu}" data-dashboard-notification-menu ${ui.notificationsOpen ? '' : 'hidden'}></div>
-          </div>
-          <button type="button" class="${styles.iconButton}" aria-label="Switch to ${currentTheme === 'dark' ? 'light' : 'dark'} mode" title="Switch to ${currentTheme === 'dark' ? 'light' : 'dark'} mode" data-dashboard-theme-toggle>${icon(currentTheme === 'dark' ? 'sun' : 'moon', 15)}</button>
-          <button type="button" class="${styles.iconButton}" aria-label="Open business settings" title="Open business settings" data-dashboard-settings>${icon('settings', 15)}</button>
-        </div>
-      </header>
-
-      <section class="${styles.filterBar}" aria-label="Dashboard filters">
-        <div class="${styles.filterControls}">
-          ${renderDashboardSelect({
-            kind: 'location',
-            label: 'Location',
-            value: ui.locationId,
-            options: [['', 'All locations'], ...ui.locationOptions.map((location) => [location.id, location.name])],
-            open: ui.openSelect === 'location'
-          })}
-          ${renderDashboardSelect({
-            kind: 'range',
-            label: 'Date range',
-            value: ui.rangePreset,
-            options: RANGE_PRESETS,
-            open: ui.openSelect === 'range',
-            displayValue: ui.rangePreset === 'custom' ? `Custom · ${model.trendRangeLabel}` : getRangePresetLabel(ui.rangePreset),
-            calendarHtml: renderDateRangeCalendar(ui)
-          })}
-        </div>
-        <div class="${styles.filterSummary}">
-          ${icon('filter', 13)}
-          <span>${escapeHtml(selectedLocation?.name || 'All locations')} · ${escapeHtml(model.trendRangeLabel)}</span>
-        </div>
+      <section class="${styles.ydsKpiRow}" aria-label="Key metrics">
+        ${renderKpiCard({ label: 'Stock on Hand', value: metricDisplay(summary, 'totalStockValue', 'currency'), icon: 'cube', tone: 'blue', deltaPct: deltas.stockValue, sparkKey: 'stockValue', sparkFormat: 'currency', state, target: 'stock' })}
+        ${renderKpiCard({ label: 'Cost of Sales', value: metricDisplay(summary, 'costOfSales', 'currency'), icon: 'receipt', tone: 'indigo', deltaPct: deltas.costOfSales, deltaInverse: true, sparkKey: 'costOfSales', sparkFormat: 'currency', state })}
+        ${renderKpiCard({ label: 'Low Stock Alerts', value: isLiveReady ? metricDisplay(summary, 'lowStockCount', 'number') : '…', icon: 'bell', tone: 'amber', status: isLiveReady ? (insights.lowStockCount > 0 ? 'Attention' : 'Healthy') : 'Syncing', statusTone: isLiveReady ? (insights.lowStockCount > 0 ? 'attention' : 'good') : 'neutral', target: 'low-stock-alerts' })}
+        ${renderKpiCard({ label: 'Suppliers Active', value: isLiveReady ? String(insights.activeSuppliers) : '…', icon: 'team', tone: 'emerald', status: isLiveReady ? 'Healthy' : 'Syncing', statusTone: isLiveReady ? 'good' : 'neutral', target: 'suppliers' })}
       </section>
 
-      <main class="${styles.body}" data-dashboard-body>
-        <section class="${styles.kpiGrid}" aria-label="Dashboard key performance indicators">
-          ${kpiCard({ label: 'Total Stock Value', value: money(model.metrics.totalStockValue), delta: model.metrics.totalStockValueDelta, iconName: 'package', accent: '#00e5a0' })}
-          ${kpiCard({ label: 'Cost of Sales', value: money(model.metrics.costOfSales), sub: model.currentPeriodLabel, delta: model.metrics.costOfSalesDelta, iconName: 'money', accent: '#f5a623', invert: true })}
-          ${kpiCard({ label: 'Wastage', value: money(model.metrics.wastage), sub: model.metrics.wastagePercentOfCos === null ? model.currentPeriodLabel : `${decimal(model.metrics.wastagePercentOfCos)}% of COS · ${model.currentPeriodLabel}`, delta: model.metrics.wastageDelta, iconName: 'trendDown', accent: '#ff4455', invert: true })}
-          ${kpiCard({ label: 'Gross Margin', value: model.metrics.grossMargin === null ? '—' : `${decimal(model.metrics.grossMargin)}%`, sub: model.metrics.netSales ? `Net sales ${compactMoney(model.metrics.netSales)}` : 'No sales recorded', delta: model.metrics.grossMarginDelta, iconName: 'activity', accent: '#7b61ff', deltaIsPoints: true })}
-        </section>
-
-        <section class="${styles.alertBar} ${criticalCount ? styles.alertBarCritical : styles.alertBarHealthy}" data-dashboard-alert>
-          ${icon(criticalCount ? 'alert' : 'check', 14)}
-          <p>${criticalCount
-            ? `<strong>${criticalCount} item${criticalCount === 1 ? '' : 's'}</strong> critically low and require immediate attention.${alertNames ? ` <span>${escapeHtml(alertNames)}.</span>` : ''}`
-            : `<strong>Stock control is clear.</strong> <span>No critical stock items were returned by the reporting engine.</span>`}
-          </p>
-          ${criticalCount ? '<button type="button" data-dashboard-review-stock>Review stock</button>' : ''}
-        </section>
-
-        <section class="${styles.chartGrid}">
-          <article class="${styles.panel} ${styles.trendPanel}">
-            <div class="${styles.panelHeader}">
-              <div>
-                <h2>${escapeHtml(model.trendTitle)}</h2>
-                <p>${escapeHtml(model.trendRangeLabel)}</p>
-              </div>
-              <div class="${styles.seriesToggles}" data-dashboard-series-toggles></div>
-            </div>
-            <div class="${styles.chartStage}" data-dashboard-trend-chart></div>
-          </article>
-
-          <article class="${styles.panel} ${styles.supplierPanel}">
-            <div class="${styles.panelHeader}">
-              <div>
-                <h2>Supplier ${model.supplierMode === 'purchase' ? 'Spend' : 'Reorder Value'}</h2>
-                <p>${model.supplierMode === 'purchase' ? `% of purchase value · ${escapeHtml(model.currentPeriodLabel)}` : '% of estimated reorder value'}</p>
-              </div>
-            </div>
-            <div data-dashboard-supplier-chart></div>
-          </article>
-        </section>
-
-        <section class="${styles.inventoryPanel}" data-dashboard-inventory-panel>
-          <div class="${styles.inventoryHeader}">
-            <div>
-              <h2>Inventory — Stock Levels</h2>
-              <p data-dashboard-row-count></p>
-            </div>
-            <div class="${styles.inventoryFilters}">
-              <div class="${styles.locationPills}" data-dashboard-inventory-locations aria-label="Inventory location"></div>
-              <div class="${styles.categoryStrip}" data-dashboard-categories aria-label="Inventory category"></div>
-            </div>
+      <section class="${styles.ydsMainGrid}">
+        ${renderMovementChartPanel(state)}
+        <article class="${styles.ydsPanel} ${styles.snapshotPanel}">
+          <div class="${styles.panelHeader}"><h2>Operational Snapshot</h2></div>
+          <div class="${styles.snapshotGrid}">
+            ${renderSnapshotCard('POs Open', isLiveReady ? insights.openPurchaseOrders : '…', 'receipt', 'blue')}
+            ${renderSnapshotCard('GRVs Pending', isLiveReady ? insights.grvsPending : '…', 'receipt', 'amber')}
+            ${renderSnapshotCard('Stock Takes Due', isLiveReady ? insights.stockTakesDue : '…', 'variance', 'indigo')}
+            ${renderSnapshotCard('Recipes Active', isLiveReady ? insights.recipesUpdated : '…', 'cube', 'emerald')}
           </div>
-          <div class="${styles.tableWrap}" data-dashboard-table-wrap></div>
-          <div class="${styles.tableFooter}" data-dashboard-table-footer></div>
-        </section>
+        </article>
+      </section>
 
-        ${model.truncated ? `<p class="${styles.dataNote}">${icon('info', 12)} Large datasets were capped for dashboard performance. Open Reporting for the complete ledger.</p>` : ''}
-      </main>
-    </div>
-  `;
+      <section class="${styles.ydsMainGrid}">
+        <article class="${styles.ydsPanel}">
+          <div class="${styles.panelHeader}"><h2>Operational Values</h2></div>
+          <div class="${styles.operationalValueGrid}">
+            ${renderOperationalValue('Opening Stock', metricDisplay(summary, 'openingStock', 'currency'), 'cube', 'blue')}
+            ${renderOperationalValue('Closing Stock', metricDisplay(summary, 'closingStock', 'currency'), 'cube', 'emerald')}
+            ${renderOperationalValue('Cost of Sales', metricDisplay(summary, 'costOfSales', 'currency'), 'receipt', 'red')}
+            ${renderOperationalValue('Count Variances', metricDisplay(summary, 'countVariance', 'currency'), 'variance', 'indigo')}
+            ${renderOperationalValue('Manual Adjustments', metricDisplay(summary, 'manualAdjustments', 'currency'), 'sliders', 'orange')}
+            ${renderOperationalValue('Wastage', metricDisplay(summary, 'wastage', 'currency'), 'trash', 'red')}
+            ${renderOperationalValue('Manufacturing Wastage', metricDisplay(summary, 'manufacturingWastage', 'currency'), 'trash', 'red')}
+          </div>
+        </article>
 
-  bindDashboardEvents(view, ui, context);
-  renderInventoryAlert(view, ui, context);
-  renderTrendChart(view, ui);
-  renderSupplierChart(view, model);
-  renderInventory(view, ui, context);
-}
+        <article class="${styles.ydsPanel} ${styles.recentPanel}">
+          <div class="${styles.panelHeader}">
+            <h2>Recent Activity</h2>
+          </div>
+          ${isLiveReady ? renderRecentActivity(insights.recentActivity) : renderDashboardPendingState()}
+        </article>
+      </section>
 
-function bindDashboardEvents(view, ui, context) {
-  view.__dashboardAbortController?.abort();
-  const controller = new AbortController();
-  view.__dashboardAbortController = controller;
-  const { signal } = controller;
-
-  const closeMenus = (except = '') => {
-    view.querySelectorAll('[data-dashboard-select-menu]').forEach((menu) => {
-      const kind = menu.dataset.dashboardSelectMenu || '';
-      const keepOpen = Boolean(except && kind === except);
-      menu.hidden = !keepOpen;
-      menu.classList.toggle(styles.customSelectMenuOpen, keepOpen);
-      view.querySelector(`[data-dashboard-select-button="${kind}"]`)?.setAttribute('aria-expanded', String(keepOpen));
-    });
-    ui.openSelect = except;
-    if (except) positionDashboardSelectMenu(view, except);
-  };
-
-  view.querySelectorAll('[data-dashboard-select-button]').forEach((button) => {
-    button.addEventListener('click', (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      const kind = button.dataset.dashboardSelectButton || '';
-      const menu = view.querySelector(`[data-dashboard-select-menu="${kind}"]`);
-      const shouldOpen = Boolean(menu?.hidden);
-      closeMenus(shouldOpen ? kind : '');
-    }, { signal });
-  });
-
-  view.querySelectorAll('[data-dashboard-select-option]').forEach((option) => {
-    option.addEventListener('click', (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      const kind = option.dataset.dashboardSelectOption || '';
-      const value = String(option.dataset.value || '');
-      closeMenus('');
-      if (kind === 'location') {
-        if (ui.locationId === value) return;
-        ui.locationId = value;
-        ui.inventoryLocationId = value || ui.inventoryLocationId;
-        ui.category = 'All';
-        ui.visibleRows = 75;
-        ui.calendarOpen = false;
-        ui.pendingRangeStart = '';
-        hideChartTooltip(view);
-        view.__dashboardApplyFilters?.();
-        return;
-      }
-      if (kind !== 'range') return;
-      ui.rangePreset = value || 'today';
-      ui.pendingRangeStart = '';
-      if (ui.rangePreset === 'custom') {
-        ui.calendarOpen = true;
-        ui.calendarCursor = startOfCalendarMonth(ui.from || ui.to);
-        renderModel(view, ui, context);
-        return;
-      }
-      const range = getPresetRange(ui.rangePreset);
-      ui.from = range.from;
-      ui.to = range.to;
-      ui.calendarOpen = false;
-      hideChartTooltip(view);
-      view.__dashboardApplyFilters?.();
-    }, { signal });
-  });
-
-  view.querySelectorAll('[data-dashboard-calendar-shift]').forEach((button) => {
-    button.addEventListener('click', (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      const shift = number(button.dataset.dashboardCalendarShift);
-      const cursor = ui.calendarCursor instanceof Date ? ui.calendarCursor : startOfCalendarMonth(ui.from);
-      ui.calendarCursor = new Date(cursor.getFullYear(), cursor.getMonth() + shift, 1);
-      renderModel(view, ui, context);
-    }, { signal });
-  });
-
-  view.querySelectorAll('[data-dashboard-calendar-date]').forEach((button) => {
-    button.addEventListener('click', (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      const value = normalizeDateKey(button.dataset.dashboardCalendarDate);
-      if (!value || value > todayKey()) return;
-      if (!ui.pendingRangeStart) {
-        ui.pendingRangeStart = value;
-        ui.calendarCursor = startOfCalendarMonth(value);
-        renderModel(view, ui, context);
-        return;
-      }
-      const [from, to] = value < ui.pendingRangeStart
-        ? [value, ui.pendingRangeStart]
-        : [ui.pendingRangeStart, value];
-      ui.from = from;
-      ui.to = to;
-      ui.pendingRangeStart = '';
-      ui.calendarOpen = false;
-      ui.rangePreset = 'custom';
-      hideChartTooltip(view);
-      view.__dashboardApplyFilters?.();
-    }, { signal });
-  });
-
-  view.querySelector('[data-dashboard-calendar-cancel]')?.addEventListener('click', (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    ui.pendingRangeStart = '';
-    ui.calendarOpen = false;
-    renderModel(view, ui, context);
-  }, { signal });
-
-  view.querySelector('[data-dashboard-refresh]')?.addEventListener('click', () => view.__dashboardRefresh?.(), { signal });
-  view.querySelector('[data-dashboard-theme-toggle]')?.addEventListener('click', (event) => {
-    context.onThemeToggle?.();
-    const button = event.currentTarget;
-    const theme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
-    const nextTheme = theme === 'dark' ? 'light' : 'dark';
-    button.innerHTML = icon(theme === 'dark' ? 'sun' : 'moon', 15);
-    button.setAttribute('aria-label', `Switch to ${nextTheme} mode`);
-    button.setAttribute('title', `Switch to ${nextTheme} mode`);
-  }, { signal });
-  view.querySelector('[data-dashboard-settings]')?.addEventListener('click', () => context.onNavigate?.('settings-business'), { signal });
-  view.querySelector('[data-dashboard-alert-button]')?.addEventListener('click', (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    closeMenus('');
-    ui.calendarOpen = false;
-    ui.pendingRangeStart = '';
-    ui.notificationsOpen = !ui.notificationsOpen;
-    renderNotificationCenter(view, ui, context);
-  }, { signal });
-  view.querySelector('[data-dashboard-review-stock]')?.addEventListener('click', () => {
-    const panel = view.querySelector('[data-dashboard-inventory-panel]');
-    panel?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    ui.category = 'All';
-    ui.sortCol = 'status';
-    ui.sortDir = 'desc';
-    renderInventory(view, ui, context);
-  }, { signal });
-  view.querySelector('[data-dashboard-body]')?.addEventListener('scroll', () => hideChartTooltip(view), { passive: true, signal });
-  window.addEventListener('resize', () => {
-    if (ui.openSelect) positionDashboardSelectMenu(view, ui.openSelect);
-  }, { passive: true, signal });
-
-  document.addEventListener('pointerdown', (event) => {
-    if (!document.contains(view)) {
-      controller.abort();
-      return;
-    }
-    if (event.target.closest('[data-dashboard-custom-select]')) return;
-    if (event.target.closest('[data-dashboard-notification-wrap]')) return;
-    closeMenus('');
-    if (ui.notificationsOpen) {
-      ui.notificationsOpen = false;
-      renderNotificationCenter(view, ui, context);
-    }
-    if (ui.calendarOpen) {
-      ui.calendarOpen = false;
-      ui.pendingRangeStart = '';
-      view.querySelector('[data-dashboard-date-calendar]')?.remove();
-    }
-  }, { signal });
-  document.addEventListener('keydown', (event) => {
-    if (event.key !== 'Escape') return;
-    closeMenus('');
-    if (ui.notificationsOpen) {
-      ui.notificationsOpen = false;
-      renderNotificationCenter(view, ui, context);
-    }
-    if (ui.calendarOpen) {
-      ui.calendarOpen = false;
-      ui.pendingRangeStart = '';
-      view.querySelector('[data-dashboard-date-calendar]')?.remove();
-    }
-  }, { signal });
-}
-
-function renderInventoryAlert(view, ui, context) {
-  const root = view.querySelector('[data-dashboard-alert]');
-  if (!root) return;
-  const alerts = getScopedInventoryAlerts(ui);
-  const criticalCount = alerts.criticalCount;
-  const names = alerts.criticalNames.join(', ');
-  const locationText = alerts.locationName ? ` at ${alerts.locationName}` : '';
-  root.classList.toggle(styles.alertBarCritical, criticalCount > 0);
-  root.classList.toggle(styles.alertBarHealthy, criticalCount === 0);
-  root.innerHTML = `
-    ${icon(criticalCount ? 'alert' : 'check', 14)}
-    <p>${criticalCount
-      ? `<strong>${criticalCount} item${criticalCount === 1 ? '' : 's'}</strong> critically low${escapeHtml(locationText)} and require immediate attention.${names ? ` <span>${escapeHtml(names)}.</span>` : ''}`
-      : `<strong>Stock control is clear${escapeHtml(locationText)}.</strong> <span>No critical stock items were returned for this location.</span>`}
-    </p>
-    ${criticalCount ? '<button type="button" data-dashboard-review-stock>Review stock</button>' : ''}
-  `;
-  root.querySelector('[data-dashboard-review-stock]')?.addEventListener('click', () => {
-    reviewDashboardStock(view, ui, context, { criticalOnly: true });
-  });
-  renderNotificationCenter(view, ui, context);
-}
-
-function renderNotificationCenter(view, ui, context) {
-  const wrap = view.querySelector('[data-dashboard-notification-wrap]');
-  const bell = view.querySelector('[data-dashboard-alert-button]');
-  const menu = view.querySelector('[data-dashboard-notification-menu]');
-  if (!wrap || !bell || !menu) return;
-
-  const scopedItems = getNotificationInventoryItems(ui);
-  const criticalItems = scopedItems.filter((item) => item.status === 'critical');
-  const lowItems = scopedItems.filter((item) => item.status === 'low');
-  const attentionItems = [...criticalItems, ...lowItems].slice(0, 8);
-  const count = criticalItems.length + lowItems.length;
-  const locationName = getNotificationInventoryAlerts(ui).locationName;
-
-  bell.classList.toggle(styles.iconButtonActive, ui.notificationsOpen);
-  bell.setAttribute('aria-expanded', String(ui.notificationsOpen));
-  bell.setAttribute('aria-label', count ? `Open ${count} stock notification${count === 1 ? '' : 's'}` : 'Open stock notifications');
-  bell.innerHTML = `${icon('bell', 15)}${count ? `<span class="${styles.notificationCount}">${count > 99 ? '99+' : count}</span>` : ''}`;
-  menu.hidden = !ui.notificationsOpen;
-  if (!ui.notificationsOpen) return;
-
-  menu.innerHTML = `
-    <div class="${styles.notificationHeader}">
-      <div>
-        <strong>${ui.notificationSettingsOpen ? 'Low-stock email settings' : 'Stock notifications'}</strong>
-        <span>${ui.notificationSettingsOpen ? 'Daily workspace alert' : escapeHtml(locationName)}</span>
-      </div>
-      <div class="${styles.notificationHeaderActions}">
-        <button type="button" class="${styles.notificationClose} ${ui.notificationSettingsOpen ? styles.notificationSettingsActive : ''}" aria-label="${ui.notificationSettingsOpen ? 'Back to stock notifications' : 'Configure low-stock email'}" title="${ui.notificationSettingsOpen ? 'Back to notifications' : 'Email settings'}" data-dashboard-notification-settings>${icon(ui.notificationSettingsOpen ? 'arrowLeft' : 'settings', 14)}</button>
-        <button type="button" class="${styles.notificationClose}" aria-label="Close stock notifications" data-dashboard-notification-close>${icon('x', 14)}</button>
-      </div>
-    </div>
-    ${ui.notificationSettingsOpen ? renderLowStockNotificationSettings(ui) : renderStockNotificationList({ count, criticalItems, lowItems, attentionItems })}
-  `;
-
-  menu.querySelector('[data-dashboard-notification-close]')?.addEventListener('click', (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    ui.notificationsOpen = false;
-    ui.notificationSettingsOpen = false;
-    renderNotificationCenter(view, ui, context);
-    bell.focus();
-  });
-
-  menu.querySelector('[data-dashboard-notification-settings]')?.addEventListener('click', async (event) => {
-    event.preventDefault();
-    event.stopPropagation();
-    ui.notificationSettingsOpen = !ui.notificationSettingsOpen;
-    renderNotificationCenter(view, ui, context);
-    if (ui.notificationSettingsOpen && ui.notificationSettingsStatus === 'idle') {
-      await loadDashboardNotificationSettings(view, ui, context);
-    }
-  });
-
-  menu.querySelector('[data-dashboard-notification-settings-save]')?.addEventListener('click', async () => {
-    if (ui.notificationSettingsStatus === 'saving') return;
-    const dispatchTime = String(menu.querySelector('[data-dashboard-notification-time]')?.value || '08:00');
-    const recipientMemberIds = [...menu.querySelectorAll('[data-dashboard-notification-recipient]:checked')]
-      .map((input) => String(input.value || ''))
-      .filter(Boolean);
-    ui.notificationDispatchTime = dispatchTime;
-    ui.notificationRecipientIds = new Set(recipientMemberIds);
-    ui.notificationSettingsStatus = 'saving';
-    ui.notificationSettingsMessage = '';
-    renderNotificationCenter(view, ui, context);
-    try {
-      const result = await saveLowStockNotificationSettings(context.workspaceId, { dispatchTime, recipientMemberIds });
-      applyLowStockNotificationSettings(ui, result);
-      ui.notificationSettingsStatus = 'saved';
-      ui.notificationSettingsMessage = 'Daily low-stock email settings saved.';
-    } catch (cause) {
-      ui.notificationSettingsStatus = 'error';
-      ui.notificationSettingsMessage = cause?.message || 'Low-stock email settings could not be saved.';
-    }
-    renderNotificationCenter(view, ui, context);
-  });
-
-  menu.querySelector('[data-dashboard-notification-review]')?.addEventListener('click', () => {
-    ui.notificationsOpen = false;
-    renderNotificationCenter(view, ui, context);
-    reviewDashboardStock(view, ui, context);
-  });
-  menu.querySelector('[data-dashboard-notification-open-stock]')?.addEventListener('click', () => {
-    ui.notificationsOpen = false;
-    context.onStockFilterChange?.({ query: '' });
-    context.onNavigate?.('ingredients');
-  });
-  menu.querySelectorAll('[data-dashboard-notification-item]').forEach((button) => {
-    button.addEventListener('click', () => {
-      const itemName = String(button.dataset.itemName || '');
-      ui.notificationsOpen = false;
-      context.onStockFilterChange?.({ query: itemName });
-      context.onNavigate?.('ingredients');
-    });
-  });
-}
-
-function renderStockNotificationList({ count, criticalItems, lowItems, attentionItems }) {
-  if (!count) {
-    return `
-      <div class="${styles.notificationEmpty}">
-        ${icon('check', 20)}
-        <strong>All clear</strong>
-        <span>No critical or low-stock items at this location.</span>
-      </div>
-      <div class="${styles.notificationActions}">
-        <button type="button" data-dashboard-notification-review>Review on dashboard</button>
-        <button type="button" data-dashboard-notification-open-stock>Open Stock Items ${icon('arrowRight', 12)}</button>
-      </div>`;
-  }
-  return `
-    <div class="${styles.notificationSummary}">
-      <span class="${styles.notificationSummaryCritical}">${criticalItems.length} critical</span>
-      <span class="${styles.notificationSummaryLow}">${lowItems.length} low stock</span>
-    </div>
-    <div class="${styles.notificationList}">
-      ${attentionItems.map((item) => notificationItem(item)).join('')}
-    </div>
-    ${count > attentionItems.length ? `<p class="${styles.notificationMore}">+${count - attentionItems.length} more item${count - attentionItems.length === 1 ? '' : 's'}</p>` : ''}
-    <div class="${styles.notificationActions}">
-      <button type="button" data-dashboard-notification-review>Review on dashboard</button>
-      <button type="button" data-dashboard-notification-open-stock>Open Stock Items ${icon('arrowRight', 12)}</button>
-    </div>`;
-}
-
-function renderLowStockNotificationSettings(ui) {
-  if (ui.notificationSettingsStatus === 'loading') {
-    return `<div class="${styles.notificationSettingsState}">${icon('refresh', 16)}<span>Loading workspace users…</span></div>`;
-  }
-  const users = Array.isArray(ui.notificationWorkspaceUsers) ? ui.notificationWorkspaceUsers : [];
-  return `
-    <div class="${styles.notificationSettingsPanel}">
-      <div class="${styles.notificationSettingsIntro}">
-        ${icon('mail', 16)}
-        <div><strong>Daily low-stock alert</strong><span>KCP checks low-stock thresholds every day and emails the selected workspace users.</span></div>
-      </div>
-      <label class="${styles.notificationTimeField}">
-        <span>Send time</span>
-        <input type="time" value="${escapeAttribute(ui.notificationDispatchTime || '08:00')}" data-dashboard-notification-time />
-        <small>Africa/Johannesburg time</small>
-      </label>
-      <div class="${styles.notificationRecipientSection}">
-        <div class="${styles.notificationRecipientHeader}"><span>Email list</span><small>${ui.notificationRecipientIds.size} selected</small></div>
-        <div class="${styles.notificationRecipientList}">
-          ${users.length ? users.map((user) => `
-            <label class="${styles.notificationRecipient}">
-              <input type="checkbox" value="${escapeAttribute(user.id)}" data-dashboard-notification-recipient ${ui.notificationRecipientIds.has(String(user.id)) ? 'checked' : ''} />
-              <span><strong>${escapeHtml(user.name || user.email)}</strong><small>${escapeHtml(user.email)}</small></span>
-            </label>`).join('') : '<p class="' + styles.notificationSettingsEmpty + '">No active workspace users are available.</p>'}
-        </div>
-      </div>
-      ${ui.notificationSettingsMessage ? `<p class="${styles.notificationEmailStatus} ${ui.notificationSettingsStatus === 'error' ? styles.notificationEmailStatusError : ''}">${escapeHtml(ui.notificationSettingsMessage)}</p>` : ''}
-      <div class="${styles.notificationSettingsActions}">
-        <button type="button" data-dashboard-notification-settings-save ${ui.notificationSettingsStatus === 'saving' ? 'disabled' : ''}>${ui.notificationSettingsStatus === 'saving' ? `${icon('refresh', 12)} Saving…` : 'Save email settings'}</button>
-      </div>
-    </div>`;
-}
-
-async function loadDashboardNotificationSettings(view, ui, context) {
-  ui.notificationSettingsStatus = 'loading';
-  ui.notificationSettingsMessage = '';
-  renderNotificationCenter(view, ui, context);
-  try {
-    const result = await loadLowStockNotificationSettings(context.workspaceId);
-    applyLowStockNotificationSettings(ui, result);
-    ui.notificationSettingsStatus = 'ready';
-  } catch (cause) {
-    ui.notificationSettingsStatus = 'error';
-    ui.notificationSettingsMessage = cause?.message || 'Low-stock email settings could not be loaded.';
-  }
-  renderNotificationCenter(view, ui, context);
-}
-
-function applyLowStockNotificationSettings(ui, result = {}) {
-  const settings = result.settings || result;
-  ui.notificationDispatchTime = String(settings.dispatchTime || '08:00');
-  ui.notificationWorkspaceUsers = Array.isArray(settings.users) ? settings.users : [];
-  const selected = Array.isArray(settings.recipientMemberIds)
-    ? settings.recipientMemberIds
-    : ui.notificationWorkspaceUsers.filter((user) => user.selected).map((user) => user.id);
-  ui.notificationRecipientIds = new Set(selected.map(String));
-}
-
-function notificationItem(item = {}) {
-  const status = statusPresentation(item.status);
-  const stockText = `${quantity(item.qty)} / ${quantity(item.reorder)} ${item.baseUom || ''}`.trim();
-  return `
-    <button type="button" class="${styles.notificationItem}" data-dashboard-notification-item data-item-name="${escapeAttribute(item.name)}">
-      <span class="${styles.notificationItemIcon}" style="--notification-tone:${status.color}">${icon(item.status === 'critical' ? 'alert' : 'trendDown', 13)}</span>
-      <span class="${styles.notificationItemCopy}">
-        <strong>${escapeHtml(item.name)}</strong>
-        <small>${escapeHtml(stockText)}${item.supplier ? ` · ${escapeHtml(item.supplier)}` : ''}</small>
-      </span>
-      <span class="${styles.notificationItemStatus}" style="--notification-tone:${status.color}">${escapeHtml(status.label)}</span>
-    </button>
-  `;
-}
-
-function reviewDashboardStock(view, ui, context, { criticalOnly = false } = {}) {
-  const panel = view.querySelector('[data-dashboard-inventory-panel]');
-  ui.search = '';
-  ui.category = 'All';
-  ui.sortCol = 'status';
-  ui.sortDir = 'desc';
-  ui.visibleRows = 75;
-  renderInventory(view, ui, context);
-  panel?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  if (criticalOnly) panel?.setAttribute('data-dashboard-reviewing', 'critical');
-}
-
-function renderTrendChart(view, ui) {
-  const toggleRoot = view.querySelector('[data-dashboard-series-toggles]');
-  const chartRoot = view.querySelector('[data-dashboard-trend-chart]');
-  if (!toggleRoot || !chartRoot) return;
-
-  toggleRoot.innerHTML = SERIES.map((series) => {
-    const active = ui.activeSeries.has(series.key);
-    return `<button type="button" class="${styles.seriesToggle} ${active ? styles.seriesToggleActive : ''}" style="--series-color:${series.color}" data-series-key="${series.key}" aria-pressed="${active}"><span></span>${escapeHtml(series.label)}</button>`;
-  }).join('');
-  toggleRoot.querySelectorAll('[data-series-key]').forEach((button) => {
-    button.addEventListener('click', () => {
-      const key = button.dataset.seriesKey;
-      if (ui.activeSeries.has(key)) {
-        if (ui.activeSeries.size === 1) return;
-        ui.activeSeries.delete(key);
-      } else {
-        ui.activeSeries.add(key);
-      }
-      renderTrendChart(view, ui);
-    });
-  });
-
-  const width = 800;
-  const height = 240;
-  const pad = { top: 18, right: 18, bottom: 34, left: 66 };
-  const chartWidth = width - pad.left - pad.right;
-  const chartHeight = height - pad.top - pad.bottom;
-  const activeSeries = SERIES.filter((series) => ui.activeSeries.has(series.key));
-  const values = ui.model.trend.flatMap((month) => activeSeries.map((series) => number(month[series.key])));
-  const rawMax = Math.max(...values, 0);
-  const maxY = niceMax(rawMax || 1);
-  const xAt = (index) => pad.left + (ui.model.trend.length === 1 ? chartWidth / 2 : (index / (ui.model.trend.length - 1)) * chartWidth);
-  const yAt = (value) => pad.top + chartHeight - (number(value) / maxY) * chartHeight;
-
-  const grids = Array.from({ length: 5 }, (_, index) => {
-    const value = maxY - (index * maxY / 4);
-    const y = pad.top + index * chartHeight / 4;
-    return `<line x1="${pad.left}" y1="${y}" x2="${width - pad.right}" y2="${y}" class="${styles.gridLine}"/><text x="${pad.left - 10}" y="${y + 4}" text-anchor="end" class="${styles.axisText}">${escapeHtml(axisMoney(value))}</text>`;
-  }).join('');
-
-  const paths = activeSeries.map((series) => {
-    const points = ui.model.trend.map((month, index) => `${xAt(index)},${yAt(month[series.key])}`).join(' ');
-    const dots = ui.model.trend.map((month, index) => `<circle cx="${xAt(index)}" cy="${yAt(month[series.key])}" r="3.2" fill="${series.color}" class="${styles.chartDot}"/>`).join('');
-    return `<polyline points="${points}" fill="none" stroke="${series.color}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="${styles.chartLine}"/>${dots}`;
-  }).join('');
-
-  const xLabels = ui.model.trend.map((month, index) => `<text x="${xAt(index)}" y="${height - 10}" text-anchor="middle" class="${styles.axisText}">${escapeHtml(month.label)}</text>`).join('');
-  const hoverWidth = chartWidth / Math.max(ui.model.trend.length, 1);
-  const hitZones = ui.model.trend.map((month, index) => `<rect x="${xAt(index) - hoverWidth / 2}" y="${pad.top}" width="${hoverWidth}" height="${chartHeight}" fill="transparent" data-trend-index="${index}" tabindex="0" aria-label="${escapeAttribute(month.label)} trend values"/>`).join('');
-
-  chartRoot.innerHTML = `
-    <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Cost and stock movement trend for ${escapeAttribute(ui.model.trendRangeLabel)}">
-      ${grids}${paths}${xLabels}${hitZones}
-    </svg>
-    <div class="${styles.chartTooltip}" data-dashboard-chart-tooltip hidden></div>
-    ${rawMax <= 0 ? `<div class="${styles.chartEmpty}">No movement values recorded for this period.</div>` : ''}
-  `;
-
-  const tooltip = chartRoot.querySelector('[data-dashboard-chart-tooltip]');
-  const show = (target, event) => {
-    const index = number(target.dataset.trendIndex);
-    const month = ui.model.trend[index];
-    if (!month || !tooltip) return;
-    tooltip.innerHTML = `<strong>${escapeHtml(month.label)}</strong>${activeSeries.map((series) => `<span style="color:${series.color}">${escapeHtml(series.label)} <b>${money(month[series.key])}</b></span>`).join('')}`;
-    tooltip.hidden = false;
-    const bounds = chartRoot.getBoundingClientRect();
-    const clientX = event?.clientX || bounds.left + (xAt(index) / width) * bounds.width;
-    const left = Math.min(Math.max(clientX - bounds.left + 10, 8), Math.max(bounds.width - 180, 8));
-    tooltip.style.left = `${left}px`;
-    tooltip.style.top = '18px';
-  };
-  chartRoot.querySelectorAll('[data-trend-index]').forEach((target) => {
-    target.addEventListener('pointerenter', (event) => show(target, event));
-    target.addEventListener('pointermove', (event) => show(target, event));
-    target.addEventListener('focus', (event) => show(target, event));
-    target.addEventListener('blur', () => hideChartTooltip(view));
-  });
-  chartRoot.addEventListener('pointerleave', () => hideChartTooltip(view));
-  chartRoot.addEventListener('pointercancel', () => hideChartTooltip(view));
-}
-
-function renderSupplierChart(view, model) {
-  const root = view.querySelector('[data-dashboard-supplier-chart]');
-  if (!root) return;
-  if (!model.suppliers.length) {
-    root.innerHTML = `<div class="${styles.supplierEmpty}">${icon('pie', 26)}<strong>No supplier values yet</strong><span>Supplier spend will appear after purchase movements are recorded.</span></div>`;
-    return;
-  }
-
-  let cursor = 0;
-  const stops = model.suppliers.map((supplier, index) => {
-    const start = cursor;
-    cursor += supplier.percent;
-    return `${SUPPLIER_COLORS[index]} ${start}% ${cursor}%`;
-  }).join(', ');
-  const total = model.suppliers.reduce((sum, supplier) => sum + supplier.value, 0);
-  root.innerHTML = `
-    <div class="${styles.supplierChartWrap}">
-      <div class="${styles.donut}" style="background:conic-gradient(${stops})">
-        <div><strong>${compactMoney(total)}</strong><span>${model.supplierMode === 'purchase' ? 'Purchases' : 'Reorder'}</span></div>
-      </div>
-      <div class="${styles.supplierLegend}">
-        ${model.suppliers.map((supplier, index) => `<div><span style="background:${SUPPLIER_COLORS[index]}"></span><p title="${escapeAttribute(supplier.name)}">${escapeHtml(supplier.name)}</p><strong>${decimal(supplier.percent)}%</strong></div>`).join('')}
-      </div>
+      <section class="${styles.ydsFullRow}">
+        <article class="${styles.ydsPanel} ${styles.lowStockPanel}">
+          <div class="${styles.panelHeader}">
+            <h2>Low Stock Alerts</h2>
+            <button type="button" data-dashboard-target="low-stock-alerts">View all</button>
+          </div>
+          ${isLiveReady ? renderLowStockTable(insights.lowStockRows) : renderDashboardPendingState()}
+        </article>
+      </section>
     </div>
   `;
 }
 
-function renderInventory(view, ui, context) {
-  const model = ui.model;
-  const locationsRoot = view.querySelector('[data-dashboard-inventory-locations]');
-  const categoriesRoot = view.querySelector('[data-dashboard-categories]');
-  const tableRoot = view.querySelector('[data-dashboard-table-wrap]');
-  const countRoot = view.querySelector('[data-dashboard-row-count]');
-  const footerRoot = view.querySelector('[data-dashboard-table-footer]');
-  if (!locationsRoot || !categoriesRoot || !tableRoot || !countRoot || !footerRoot) return;
-
-  const inventoryLocations = getInventoryLocationOptions(model);
-  syncInventoryLocation(ui, model);
-  locationsRoot.innerHTML = inventoryLocations.map((location) => `
-    <button type="button" class="${styles.locationPill} ${ui.inventoryLocationId === location.id ? styles.locationPillActive : ''}" data-inventory-location="${escapeAttribute(location.id)}" aria-pressed="${ui.inventoryLocationId === location.id}">${escapeHtml(location.name)}</button>
-  `).join('');
-  locationsRoot.querySelectorAll('[data-inventory-location]').forEach((button) => {
-    button.addEventListener('click', () => {
-      const locationId = String(button.dataset.inventoryLocation || '');
-      if (!locationId || locationId === ui.inventoryLocationId) return;
-      ui.inventoryLocationId = locationId;
-      ui.category = 'All';
-      ui.visibleRows = 75;
-      renderInventory(view, ui, context);
-      renderInventoryAlert(view, ui, context);
-    });
-  });
-
-  const scopedItems = getScopedInventoryItems(ui);
-  const selectedInventoryLocation = inventoryLocations.find((location) => location.id === ui.inventoryLocationId);
-  const categories = ['All', ...new Set(scopedItems.map((item) => item.category).filter(Boolean))];
-  if (!categories.includes(ui.category)) ui.category = 'All';
-  categoriesRoot.innerHTML = categories.map((category) => `<button type="button" class="${styles.categoryButton} ${ui.category === category ? styles.categoryButtonActive : ''}" data-category="${escapeAttribute(category)}">${escapeHtml(category)}</button>`).join('');
-  categoriesRoot.querySelectorAll('[data-category]').forEach((button) => {
-    button.addEventListener('click', () => {
-      ui.category = button.dataset.category || 'All';
-      ui.visibleRows = 75;
-      renderInventory(view, ui, context);
-    });
-  });
-
-  const needle = ui.search.toLowerCase().trim();
-  const filtered = scopedItems
-    .filter((item) => ui.category === 'All' || item.category === ui.category)
-    .filter((item) => !needle || [item.name, item.sku, item.category, item.supplier, item.locationName, ...item.locations].join(' ').toLowerCase().includes(needle))
-    .sort((left, right) => compareInventory(left, right, ui.sortCol, ui.sortDir));
-  const visible = filtered.slice(0, ui.visibleRows);
-  countRoot.textContent = `${filtered.length.toLocaleString('en-ZA')} item${filtered.length === 1 ? '' : 's'} shown${selectedInventoryLocation ? ` · ${selectedInventoryLocation.name}` : ''}`;
-
-  if (!visible.length) {
-    tableRoot.innerHTML = `<div class="${styles.tableEmpty}">${icon('search', 20)}<strong>No stock items match this location</strong><span>Change the location or category filter.</span></div>`;
-    footerRoot.innerHTML = `<button type="button" data-dashboard-open-stock>Open Stock Items</button>`;
-  } else {
-    const columns = [
-      ['sku', 'SKU'], ['name', 'Item Name'], ['category', 'Category'], ['qty', 'Qty'], ['unitCost', 'Unit Cost'], ['totalValue', 'Total Value'], ['status', 'Status'], ['supplier', 'Supplier']
-    ];
-    tableRoot.innerHTML = `
-      <table class="${styles.inventoryTable}">
-        <thead><tr>${columns.map(([key, label]) => `<th><button type="button" data-sort="${key}">${escapeHtml(label)} ${sortIcon(ui, key)}</button></th>`).join('')}</tr></thead>
-        <tbody>${visible.map((item) => inventoryRow(item)).join('')}</tbody>
-      </table>
-    `;
-    tableRoot.querySelectorAll('[data-sort]').forEach((button) => {
-      button.addEventListener('click', () => {
-        const key = button.dataset.sort || 'name';
-        if (ui.sortCol === key) ui.sortDir = ui.sortDir === 'asc' ? 'desc' : 'asc';
-        else { ui.sortCol = key; ui.sortDir = 'asc'; }
-        renderInventory(view, ui, context);
-      });
-    });
-    tableRoot.querySelectorAll('[data-stock-item]').forEach((row) => {
-      row.addEventListener('click', () => openStockItem(row.dataset.itemName || '', context));
-      row.addEventListener('keydown', (event) => {
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault();
-          openStockItem(row.dataset.itemName || '', context);
-        }
-      });
-    });
-
-    footerRoot.innerHTML = `
-      <span>Showing ${visible.length.toLocaleString('en-ZA')} of ${filtered.length.toLocaleString('en-ZA')}</span>
-      <div>
-        ${visible.length < filtered.length ? '<button type="button" data-dashboard-load-more>Load more</button>' : ''}
-        <button type="button" data-dashboard-open-stock>Open Stock Items ${icon('arrowRight', 12)}</button>
+function renderKpiCard({ label, value, icon, tone, deltaPct, deltaInverse = false, sparkKey, sparkFormat = 'currency', state, status, statusTone, target }) {
+  // KPI cards show only the delta badge in the footer; the inline SVG sparkline was removed
+  // (it cluttered the layout / clashed with the Movement chart). The Chart.js Movement chart is separate.
+  const foot = sparkKey
+    ? `${renderDeltaBadge(deltaPct, deltaInverse)}`
+    : (status ? statusBadge(status, statusTone) : '');
+  return `
+    <article class="${styles.ydsKpiCard} ${styles[`stat_${tone}`] || ''}" ${target ? `data-dashboard-target="${escapeAttribute(target)}"` : ''}>
+      <div class="${styles.ydsKpiHead}">
+        <span class="${styles.ydsKpiLabel}">${escapeHtml(label)}</span>
+        <span class="${styles.ydsKpiIcon}">${tileIcon(icon)}</span>
       </div>
-    `;
-    footerRoot.querySelector('[data-dashboard-load-more]')?.addEventListener('click', () => {
-      ui.visibleRows += 75;
-      renderInventory(view, ui, context);
-    });
-  }
-  footerRoot.querySelector('[data-dashboard-open-stock]')?.addEventListener('click', () => context.onNavigate?.('ingredients'));
-}
-
-function inventoryRow(item) {
-  const status = statusPresentation(item.status);
-  const qtyClass = item.status === 'critical' ? styles.qtyCritical : item.status === 'low' ? styles.qtyLow : '';
-  return `
-    <tr tabindex="0" role="button" data-stock-item data-item-name="${escapeAttribute(item.name)}" title="Open ${escapeAttribute(item.name)} in Stock Items">
-      <td>${escapeHtml(item.sku || '—')}</td>
-      <td><strong>${escapeHtml(item.name)}</strong>${item.locationName ? `<span>${escapeHtml(item.locationName)}</span>` : ''}</td>
-      <td>${escapeHtml(item.category)}</td>
-      <td class="${qtyClass}">${quantity(item.qty)} <span>/ ${quantity(item.reorder)} ${escapeHtml(item.baseUom)}</span></td>
-      <td>${money(item.unitCost)}</td>
-      <td>${money(item.totalValue)}</td>
-      <td><span class="${styles.statusBadge}" style="--status-color:${status.color}">${status.label}</span></td>
-      <td>${escapeHtml(item.supplier || 'Not assigned')}</td>
-    </tr>
-  `;
-}
-
-function openStockItem(name, context) {
-  context.onStockFilterChange?.({ query: name });
-  context.onNavigate?.('ingredients');
-}
-
-function kpiCard({ label, value, sub = '', delta = null, iconName, accent, invert = false, deltaIsPoints = false }) {
-  const hasDelta = Number.isFinite(delta);
-  const positiveDirection = hasDelta && delta >= 0;
-  const favourable = hasDelta ? (invert ? !positiveDirection : positiveDirection) : null;
-  const deltaText = hasDelta
-    ? `${Math.abs(delta).toFixed(1)}${deltaIsPoints ? ' pts' : '%'} vs prior period`
-    : 'No prior-period comparison';
-  return `
-    <article class="${styles.kpiCard}" style="--kpi-accent:${accent}">
-      <div><span>${escapeHtml(label)}</span>${icon(iconName, 17)}</div>
-      <p><strong>${escapeHtml(value)}</strong>${sub ? `<span>${escapeHtml(sub)}</span>` : ''}</p>
-      <footer class="${hasDelta ? (favourable ? styles.deltaGood : styles.deltaBad) : styles.deltaNeutral}">
-        ${hasDelta ? icon(positiveDirection ? 'arrowUp' : 'arrowDown', 12) : icon('minus', 12)} ${escapeHtml(deltaText)}
-      </footer>
+      <strong class="${styles.ydsKpiValue}">${escapeHtml(String(value))}</strong>
+      <div class="${styles.ydsKpiFoot}">${foot}</div>
     </article>
   `;
 }
 
-function compareInventory(left, right, col, dir) {
-  let a = left[col];
-  let b = right[col];
-  if (col === 'status') {
-    a = statusRank(left.status);
-    b = statusRank(right.status);
+function renderDeltaBadge(deltaPct, inverse = false) {
+  const value = Number(deltaPct);
+  if (deltaPct === null || deltaPct === undefined || !Number.isFinite(value)) {
+    return `<span class="${styles.ydsDelta} ${styles.ydsDeltaFlat}">—</span>`;
   }
-  const result = typeof a === 'number' && typeof b === 'number'
-    ? a - b
-    : String(a ?? '').localeCompare(String(b ?? ''), 'en', { numeric: true, sensitivity: 'base' });
-  return dir === 'asc' ? result : -result;
+  const up = value >= 0;
+  // For metrics where "up is bad" (e.g. cost of sales), invert the good/bad tone.
+  const good = inverse ? !up : up;
+  const toneClass = good ? styles.ydsDeltaUp : styles.ydsDeltaDown;
+  return `<span class="${styles.ydsDelta} ${toneClass}">${up ? '▲' : '▼'} ${Math.abs(value).toFixed(1)}%</span>`;
 }
 
-function sortIcon(ui, key) {
-  if (ui.sortCol !== key) return `<span class="${styles.sortMuted}">↕</span>`;
-  return ui.sortDir === 'asc' ? '↑' : '↓';
+function renderMovementChartPanel(state) {
+  const tabs = [
+    { key: 'costOfSales', label: 'Cost of Sales', tone: 'blue', format: 'currency' },
+    { key: 'stockValue', label: 'Stock Value', tone: 'emerald', format: 'currency' },
+    { key: 'wastage', label: 'Wastage', tone: 'red', format: 'currency' },
+    { key: 'manufacturingWastage', label: 'Manufacturing Wastage', tone: 'orange', format: 'currency' }
+  ];
+  const active = tabs.find((tab) => tab.key === (state.dashboardChartTab || 'costOfSales')) || tabs[0];
+  return `
+    <article class="${styles.ydsPanel} ${styles.ydsChartPanel}">
+      <div class="${styles.ydsChartHead}">
+        <h2>Movement</h2>
+        <div class="${styles.ydsChartTabs}" role="tablist">
+          ${tabs.map((tab) => `
+            <button type="button" role="tab" aria-selected="${tab.key === active.key}"
+              class="${styles.ydsChartTab} ${tab.key === active.key ? styles.ydsChartTabActive : ''}"
+              data-dashboard-chart-tab="${escapeAttribute(tab.key)}">${escapeHtml(tab.label)}</button>
+          `).join('')}
+        </div>
+      </div>
+      <div class="${styles.ydsChartBody}">
+        ${renderDashboardChart(state, active.key, { tone: active.tone, format: active.format })}
+      </div>
+    </article>
+  `;
 }
 
-function statusPresentation(status) {
-  if (status === 'critical') return { label: 'CRITICAL', color: '#ff4455' };
-  if (status === 'low') return { label: 'LOW STOCK', color: '#f5a623' };
-  return { label: 'IN STOCK', color: '#00e5a0' };
+function renderPendingExternalTransferBanner(insights = {}) {
+  const count = Number(insights.pendingExternalTransfers || 0) || 0;
+  if (!count) return '';
+  const first = toArray(insights.pendingExternalTransferRows)[0] || {};
+  return `
+    <section class="${styles.pendingTransferBanner}" aria-label="Pending external transfer alert">
+      <div class="${styles.pendingTransferLabel}">
+        <span aria-hidden="true"></span>
+        Transfer Alert
+      </div>
+      <div class="${styles.pendingTransferMarquee}">
+        <strong>${count} external transfer${count === 1 ? '' : 's'} awaiting receipt</strong>
+        <span>${escapeHtml(first.fromSiteName || 'A linked site')} sent stock${first.lineCount ? ` · ${first.lineCount} item${first.lineCount === 1 ? '' : 's'}` : ''}. Count and accept it before it enters on-hand stock.</span>
+      </div>
+      <button type="button" data-dashboard-target="transfers">Review Transfers</button>
+    </section>
+  `;
 }
 
-function statusRank(status) {
-  return status === 'critical' ? 3 : status === 'low' ? 2 : 1;
+function hasDashboardLiveSummary(state) {
+  const summary = state.dashboard?.metrics?.summary;
+  return Boolean(summary && Object.keys(summary).length);
 }
 
-function hideChartTooltip(view) {
-  const tooltip = view.querySelector('[data-dashboard-chart-tooltip]');
-  if (tooltip) tooltip.hidden = true;
+function renderTopStatCard({ label, value, icon, tone, status, statusTone, target }) {
+  return `
+    <article class="${styles.topStatCard} ${styles[`stat_${tone}`]}" ${target ? `data-dashboard-target="${escapeAttribute(target)}"` : ''}>
+      <div class="${styles.topStatIcon}" aria-hidden="true">${tileIcon(icon)}</div>
+      <p>${escapeHtml(label)}</p>
+      <strong>${escapeHtml(value)}</strong>
+      ${statusBadge(status, statusTone)}
+    </article>
+  `;
 }
 
-function setRefreshing(view, refreshing) {
-  const button = view.querySelector('[data-dashboard-refresh]');
-  if (!button) return;
-  button.disabled = refreshing;
-  button.classList.toggle(styles.refreshing, refreshing);
+function renderOperationalValue(label, value, icon, tone) {
+  return `
+    <div class="${styles.operationalValue} ${styles[`stat_${tone}`]}">
+      <span aria-hidden="true">${tileIcon(icon)}</span>
+      <p>${escapeHtml(label)}</p>
+      <strong>${escapeHtml(value)}</strong>
+    </div>
+  `;
 }
 
-function niceMax(value) {
-  const exponent = Math.floor(Math.log10(value));
-  const fraction = value / (10 ** exponent);
-  const niceFraction = fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 5 ? 5 : 10;
-  return niceFraction * (10 ** exponent);
+function renderDashboardPendingState() {
+  return `
+    <div class="${styles.emptyPanelState}">
+      <strong>Waiting for live summary</strong>
+      <span>Kitchen Cost Pro is loading the current dashboard state.</span>
+    </div>
+  `;
 }
 
-function axisMoney(value) {
-  if (Math.abs(value) >= 1_000_000) return `R${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}m`;
-  if (Math.abs(value) >= 1_000) return `R${(value / 1_000).toFixed(value >= 100_000 ? 0 : 1)}k`;
-  return `R${Math.round(value)}`;
+function renderPriorityAction(title, detail, icon, tone, action, target) {
+  return `
+    <button type="button" class="${styles.priorityAction} ${styles[`stat_${tone}`]}" data-dashboard-target="${escapeAttribute(target)}">
+      <span class="${styles.priorityIcon}" aria-hidden="true">${tileIcon(icon)}</span>
+      <span class="${styles.priorityText}">
+        <strong>${escapeHtml(title)}</strong>
+        <em>${escapeHtml(detail)}</em>
+      </span>
+      <span class="${styles.priorityButton}">${escapeHtml(action)}</span>
+    </button>
+  `;
 }
 
-function money(value) {
-  return new Intl.NumberFormat('en-ZA', { style: 'currency', currency: 'ZAR', maximumFractionDigits: 0 }).format(number(value));
+function renderLowStockTable(rows = []) {
+  if (!rows.length) {
+    return `
+      <div class="${styles.emptyPanelState}">
+        <strong>No low stock items</strong>
+        <span>Everything is currently above threshold.</span>
+      </div>
+    `;
+  }
+
+  const alertGlyph = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.7 18-8-14a2 2 0 0 0-3.4 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>';
+  const fmtQty = (n) => (Number.isInteger(n) ? String(n) : String(Number(Number(n).toFixed(2))));
+  return `
+    <div class="${styles.ydsLowStock}">
+      <div class="${styles.ydsLowStockHead}">
+        <span>Item</span>
+        <span>Stock Level</span>
+        <span>Severity</span>
+        <span>Action</span>
+      </div>
+      ${rows.slice(0, 6).map((row) => {
+        // Tolerate both server rows (locationName/currentStock/severity) and client rows.
+        const location = row.location || row.locationName || 'All locations';
+        const current = Number(row.currentStock ?? row.stock ?? 0) || 0;
+        const par = Number(row.threshold ?? row.par ?? row.parLevel ?? 0) || 0;
+        const unit = String(row.unit || '').trim();
+        const severityLabel = row.severity || row.severityLabel || 'Low';
+        const tone = row.severityTone || String(severityLabel).toLowerCase();
+        const sevClass = ['critical', 'medium', 'low'].includes(tone) ? tone : 'low';
+        const pct = par > 0 ? Math.max(4, Math.min(100, Math.round((current / par) * 100))) : 100;
+        return `
+        <div class="${styles.ydsLowStockRow}">
+          <div class="${styles.ydsLowStockItem}">
+            <strong>${escapeHtml(row.name || row.item || 'Unnamed item')}</strong>
+            <span>${escapeHtml(location)}</span>
+          </div>
+          <div class="${styles.ydsLowStockLevel}">
+            <div class="${styles.ydsLowStockLevelTop}">
+              <span>${escapeHtml(fmtQty(current))}${unit ? ` ${escapeHtml(unit)}` : ''}</span>
+              <span>par ${escapeHtml(fmtQty(par))}</span>
+            </div>
+            <div class="${styles.ydsLowStockBar}"><div class="${styles.ydsLowStockBarFill} ${styles[`ydsSev_${sevClass}`]}" style="width:${pct}%"></div></div>
+          </div>
+          <div>
+            <span class="${styles.ydsSevPill} ${styles[`ydsSev_${sevClass}`]}">${alertGlyph}${escapeHtml(severityLabel)}</span>
+          </div>
+          <div class="${styles.ydsLowStockAction}">
+            <button type="button" data-dashboard-target="low-stock-alerts">Reorder</button>
+          </div>
+        </div>
+      `;
+      }).join('')}
+    </div>
+  `;
 }
 
-function compactMoney(value) {
-  const amount = number(value);
-  if (Math.abs(amount) >= 1_000_000) return `R${(amount / 1_000_000).toFixed(1)}m`;
-  if (Math.abs(amount) >= 1_000) return `R${(amount / 1_000).toFixed(1)}k`;
-  return money(amount);
+function renderRecentActivity(entries = []) {
+  if (!entries.length) {
+    return `
+      <div class="${styles.emptyPanelState}">
+        <strong>No recent activity</strong>
+        <span>New sales, GRVs, adjustments, and stock takes will appear here.</span>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="${styles.activityList}">
+      ${entries.slice(0, 5).map((entry) => `
+        <div class="${styles.activityRow}">
+          <span class="${styles.activityIcon} ${styles[`stat_${entry.tone}`]}" aria-hidden="true">${tileIcon(entry.icon)}</span>
+          <time>${escapeHtml(entry.time)}</time>
+          <strong>${escapeHtml(entry.title)}</strong>
+          <em>${escapeHtml(entry.detail)}</em>
+        </div>
+      `).join('')}
+    </div>
+  `;
 }
 
-function quantity(value) {
-  return number(value).toLocaleString('en-ZA', { maximumFractionDigits: 3 });
+function renderSnapshotCard(label, value, icon, tone) {
+  return `
+    <button type="button" class="${styles.snapshotCard} ${styles[`stat_${tone}`]}" data-dashboard-target="${snapshotTarget(label)}">
+      <span aria-hidden="true">${tileIcon(icon)}</span>
+      <strong>${escapeHtml(value)}</strong>
+      <em>${escapeHtml(label)}</em>
+    </button>
+  `;
 }
 
-function decimal(value) {
-  return number(value).toLocaleString('en-ZA', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+function statusBadge(label, tone) {
+  return `<span class="${styles.statusBadge} ${styles[`badge_${tone}`]}"><i></i>${escapeHtml(label)}</span>`;
 }
 
-function number(value) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
+function buildDashboardInsights(state, summary) {
+  const liveInsights = state.dashboard?.insights;
+  if (liveInsights && Object.keys(liveInsights).length) {
+    return {
+      lowStockRows: toArray(liveInsights.lowStockRows),
+      lowStockCount: Number(liveInsights.lowStockCount ?? summary.lowStockCount?.raw ?? 0) || 0,
+      openPurchaseOrders: Number(liveInsights.openPurchaseOrders || 0) || 0,
+      activeSuppliers: Number(liveInsights.activeSuppliers || 0) || 0,
+      grvsPending: Number(liveInsights.grvsPending || 0) || 0,
+      stockTakesDue: Number(liveInsights.stockTakesDue || 0) || 0,
+      recipesUpdated: Number(liveInsights.recipesUpdated || 0) || 0,
+      pendingExternalTransfers: Number(liveInsights.pendingExternalTransfers || 0) || 0,
+      pendingExternalTransferRows: toArray(liveInsights.pendingExternalTransferRows),
+      recentActivity: normalizeDashboardActivityRows(liveInsights.recentActivity)
+    };
+  }
+
+  const source = state.source || {};
+  const lowStockRows = buildLowStockRows(source);
+  const purchaseOrders = toArray(source.purchaseOrders);
+  const suppliers = toArray(source.suppliers);
+  const products = Object.values(source.products || {});
+  const stockTakes = toArray(source.stockTakes);
+  const stockTakeTemplates = toArray(source.stockTakeTemplates);
+  const openPurchaseOrders = purchaseOrders.filter(isOpenPurchaseOrder).length;
+
+  return {
+    lowStockRows,
+    lowStockCount: Number(summary.lowStockCount?.raw ?? lowStockRows.length) || 0,
+    openPurchaseOrders,
+    activeSuppliers: suppliers.filter((supplier) => !isArchived(supplier)).length,
+    grvsPending: purchaseOrders.filter(isPendingGrvPurchaseOrder).length,
+    stockTakesDue: stockTakeTemplates.length || stockTakes.filter(isOpenStockTake).length,
+    recipesUpdated: products.filter((product) => toArray(product.recipe).length > 0).length,
+    pendingExternalTransfers: 0,
+    pendingExternalTransferRows: [],
+    recentActivity: buildRecentActivity(source)
+  };
+}
+
+function normalizeDashboardActivityRows(rows = []) {
+  return toArray(rows)
+    .map((row) => {
+      const type = String(row.type || row.activityType || '').toLowerCase();
+      const stamp = getActivityStamp(row);
+      const defaults = activityDefaults(type);
+      return {
+        ...row,
+        stamp,
+        time: row.time || formatActivityTime(stamp),
+        title: row.title || defaults.title,
+        detail: row.detail || row.location || row.locationName || row.itemName || row.supplierName || row.reference || 'Workspace activity',
+        icon: row.icon || defaults.icon,
+        tone: row.tone || defaults.tone
+      };
+    })
+    .filter((entry) => entry.stamp > 0 || entry.title)
+    .sort((left, right) => Number(right.stamp || 0) - Number(left.stamp || 0))
+    .slice(0, 8);
+}
+
+function activityDefaults(type = '') {
+  if (type.includes('sale')) return { title: 'Sale Synced', icon: 'receipt', tone: 'emerald' };
+  if (type.includes('grv')) return { title: 'GRV Received', icon: 'receipt', tone: 'amber' };
+  if (type.includes('adjust')) return { title: 'Manual Adjustment Added', icon: 'sliders', tone: 'orange' };
+  if (type.includes('stocktake') || type.includes('stock-take')) return { title: 'Stock Count Completed', icon: 'variance', tone: 'blue' };
+  if (type.includes('transfer')) return { title: 'Transfer Posted', icon: 'cube', tone: 'indigo' };
+  if (type.includes('manufact')) return { title: 'Manufacturing Posted', icon: 'cube', tone: 'emerald' };
+  if (type.includes('purchase')) return { title: 'Purchase Order Updated', icon: 'receipt', tone: 'blue' };
+  return { title: 'Workspace Activity', icon: 'receipt', tone: 'blue' };
+}
+
+function metricDisplay(summary, key, type) {
+  const metric = summary?.[key];
+  if (!metric) return '...';
+  if (metric.value) return metric.value;
+  return formatDashboardMetric(0, type);
+}
+
+function buildLowStockRows(source = {}) {
+  const locations = toArray(source.locations);
+  return toArray(source.ingredients)
+    .filter((item) => !isArchived(item))
+    .map((item) => {
+      const threshold = Number(item.lowStockThreshold || item.threshold || 5) || 5;
+      const stock = Number(item.stock || 0) || 0;
+      const severity = getLowStockSeverity(stock, threshold);
+      return {
+        id: item.id,
+        name: item.name || item.itemName || 'Unnamed item',
+        location: resolveLowStockLocation(item, locations),
+        stock,
+        threshold,
+        severity: severity.label,
+        severityTone: severity.tone
+      };
+    })
+    .filter((item) => item.stock < item.threshold)
+    .sort((a, b) => a.stock - b.stock || a.name.localeCompare(b.name));
+}
+
+function resolveLowStockLocation(item = {}, locations = []) {
+  const balances = item.balances && typeof item.balances === 'object' ? item.balances : null;
+  if (balances) {
+    const lowest = Object.entries(balances)
+      .map(([locationId, qty]) => ({ locationId, qty: Number(qty || 0) }))
+      .sort((a, b) => a.qty - b.qty)[0];
+    if (lowest?.locationId) return getLocationName(locations, lowest.locationId);
+  }
+  return getLocationName(locations, item.locationId || item.location || item.storeLocationId || '');
+}
+
+function getLowStockSeverity(stock, threshold) {
+  if (stock <= 0 || stock <= threshold * 0.25) return { label: 'Critical', tone: 'critical' };
+  if (stock <= threshold * 0.6) return { label: 'Medium', tone: 'medium' };
+  return { label: 'Low', tone: 'low' };
+}
+
+function buildRecentActivity(source = {}) {
+  const entries = [
+    ...toArray(source.logs_stocktakes).map((entry) => activityEntry(entry, 'Stock Count Completed', 'variance', 'blue')),
+    ...toArray(source.logs_grv).map((entry) => activityEntry(entry, 'GRV Received', 'receipt', 'amber')),
+    ...toArray(source.logs_adj).map((entry) => activityEntry(entry, 'Manual Adjustment Added', 'sliders', 'orange')),
+    ...toArray(source.logs_sales).map((entry) => activityEntry(entry, 'Sale Synced', 'receipt', 'emerald')),
+    ...toArray(source.logs_transfers).map((entry) => activityEntry(entry, 'Transfer Posted', 'cube', 'indigo'))
+  ];
+
+  return entries
+    .filter((entry) => entry.stamp > 0)
+    .sort((a, b) => b.stamp - a.stamp)
+    .slice(0, 8);
+}
+
+function activityEntry(entry = {}, fallbackTitle, icon, tone) {
+  const stamp = getActivityStamp(entry);
+  return {
+    stamp,
+    time: formatActivityTime(stamp),
+    title: entry.title || entry.action || entry.type || fallbackTitle,
+    detail: entry.locationName || entry.supplierName || entry.itemName || entry.note || entry.reference || 'Workspace activity',
+    icon,
+    tone
+  };
+}
+
+function getActivityStamp(entry = {}) {
+  return getTimestamp(entry.timestamp || entry.createdAt || entry.updatedAt || entry.date || entry.tradeDate);
+}
+
+function formatActivityTime(stamp) {
+  if (!stamp) return '--:--';
+  const now = new Date();
+  const date = new Date(stamp);
+  const isToday = now.toDateString() === date.toDateString();
+  if (isToday) {
+    return new Intl.DateTimeFormat('en-ZA', { hour: '2-digit', minute: '2-digit', hour12: false }).format(date);
+  }
+  return new Intl.DateTimeFormat('en-ZA', { day: '2-digit', month: 'short' }).format(date);
+}
+
+function isOpenPurchaseOrder(order = {}) {
+  const status = String(order.status || order.state || '').trim().toLowerCase();
+  return !['closed', 'complete', 'completed', 'cancelled', 'canceled', 'received', 'deleted', 'archived'].includes(status);
+}
+
+function isPendingGrvPurchaseOrder(order = {}) {
+  const status = String(order.status || order.state || '').trim().toLowerCase();
+  return isOpenPurchaseOrder(order) && !['draft'].includes(status);
+}
+
+function isOpenStockTake(entry = {}) {
+  const status = String(entry.status || entry.state || '').trim().toLowerCase();
+  return !['posted', 'closed', 'complete', 'completed', 'cancelled', 'canceled', 'deleted', 'archived'].includes(status);
+}
+
+function isArchived(item = {}) {
+  const status = String(item.status || item.state || '').trim().toLowerCase();
+  return Boolean(item.archived || item.deleted || item.isDeleted || ['deleted', 'archived', 'inactive'].includes(status));
+}
+
+function snapshotTarget(label = '') {
+  if (/po/i.test(label)) return 'purchase-orders';
+  if (/grv/i.test(label)) return 'grv';
+  if (/stock/i.test(label)) return 'stock-count';
+  return 'recipes';
+}
+
+function getLocationName(locations = [], locationId = '') {
+  if (!locationId) return 'Main Kitchen';
+  return locations.find((location) => String(location.id) === String(locationId))?.name ||
+    locations.find((location) => String(location.name).toLowerCase() === String(locationId).toLowerCase())?.name ||
+    locationId ||
+    'Main Kitchen';
+}
+
+function toArray(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.filter(Boolean);
+  if (typeof value === 'object') {
+    return Object.entries(value).map(([id, entry]) => (
+      entry && typeof entry === 'object' ? { id: entry.id || id, ...entry } : { id, value: entry }
+    ));
+  }
+  return [];
+}
+
+function getTimestamp(value) {
+  if (!value) return 0;
+  if (typeof value === 'number') return value < 10000000000 ? value * 1000 : value;
+  if (typeof value === 'object' && typeof value.seconds === 'number') return value.seconds * 1000;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function renderHeaderUtilities(state) {
+  const connection = getLiveDataStatus(state);
+  const isDark = state.theme === 'dark';
+  const receivingClass = connection.isReceiving ? styles.status_receiving : '';
+  const tradeDateKey = state.dashboard.metrics?.today || getTradeDateKey(new Date(), state.source?.settings);
+
+  return `
+      <div class="${styles.utilityCluster}">
+      ${renderSiteControl(state)}
+      ${renderLocationControl(state)}
+      ${renderRangeControl(state.dashboardRange || '7')}
+      <button class="${styles.themeToggle}" type="button" data-dashboard-refresh aria-label="Refresh dashboard data">
+        ${tileIcon('refresh')}
+        <span>Refresh</span>
+      </button>
+      <div class="${styles.statusPill} ${styles[`status_${connection.status}`]} ${receivingClass}" title="${escapeHtml(connection.meta)}">
+        <span class="${styles.statusPulse}" aria-hidden="true"></span>
+        <span>
+          <strong>Sync Status</strong>
+          <em>${escapeHtml(connection.label)}</em>
+        </span>
+      </div>
+      <div class="${styles.clockPill}">
+        <span>Trade Date</span>
+        <strong data-trade-date>${escapeHtml(formatTradeDateKey(tradeDateKey))}</strong>
+        <em data-live-clock>${escapeHtml(formatTradeTime(new Date()))}</em>
+      </div>
+      <div class="${styles.profilePill}">
+        <span>${escapeHtml(getInitials(state.user?.displayName || state.user?.email || 'KCP'))}</span>
+        <strong>${escapeHtml(getDisplayName(state.user))}</strong>
+        <em>${escapeHtml(state.access?.role || state.workspace?.role || 'Manager')}</em>
+      </div>
+      <div class="${styles.workspacePill}">
+        ${tileIcon('wallet')}
+        <span>
+          <em>Workspace</em>
+          <strong>${escapeHtml(state.workspace?.siteName || 'Main Kitchen')}</strong>
+        </span>
+      </div>
+      <button class="${styles.themeToggle}" type="button" data-theme-toggle aria-label="Toggle dark and light mode">
+        ${themeIcon(isDark)}
+        <span>${isDark ? 'Light' : 'Dark'}</span>
+      </button>
+    </div>
+  `;
+}
+
+function renderSiteControl(state) {
+  const sites = getDashboardSites(state);
+  if (!sites.length) return '';
+  const selectedId = String(state.dashboardSiteId || '');
+  const selectedLabel = sites.find((s) => String(s.id) === selectedId)?.name || 'All Sites';
+  return `
+    <div class="${styles.siteControl}">
+      <span>Site</span>
+      <button type="button" class="${styles.dropdownTrigger}" data-dashboard-site-trigger aria-haspopup="dialog">
+        <strong>${escapeHtml(selectedLabel)}</strong>
+        <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true"><path d="M2 3.5L5 6.5L8 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+  `;
+}
+
+function getDashboardLocationOptions(state) {
+  return (state.source?.locations || [])
+    .filter((l) => l.kind !== 'storage' && l.active !== false)
+    .sort((a, b) => String(a.displayName || a.name || '').localeCompare(String(b.displayName || b.name || '')));
+}
+
+function renderLocationControl(state) {
+  const locations = getDashboardLocationOptions(state);
+  if (!locations.length) return '';
+  const selectedId = String(state.dashboardLocationId || '');
+  const found = locations.find((l) => String(l.id) === selectedId);
+  const selectedLabel = found ? (found.displayName || found.name || 'Location') : 'All Locations';
+  return `
+    <div class="${styles.siteControl}">
+      <span>Location</span>
+      <button type="button" class="${styles.dropdownTrigger}" data-dashboard-location-trigger aria-haspopup="dialog">
+        <strong>${escapeHtml(selectedLabel)}</strong>
+        <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true"><path d="M2 3.5L5 6.5L8 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+  `;
+}
+
+function renderSelectorModal(picker, state) {
+  const isSite = picker.type === 'site';
+  const title = isSite ? 'Select Site' : 'Select Location';
+  const subtitle = isSite
+    ? 'Filter the dashboard to a specific site.'
+    : 'Filter the dashboard to a specific selling location.';
+  const selectedId = String((isSite ? state.dashboardSiteId : state.dashboardLocationId) || '');
+  const options = isSite
+    ? [{ id: '', name: 'All Sites' }, ...getDashboardSites(state).map((s) => ({ id: String(s.id || ''), name: s.name || s.id }))]
+    : [{ id: '', name: 'All Locations' }, ...getDashboardLocationOptions(state).map((l) => ({ id: String(l.id || ''), name: l.displayName || l.name || l.id }))];
+  const pin = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0z"/><circle cx="12" cy="10" r="3"/></svg>';
+  const check = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>';
+  return `
+    <div class="${styles.selectorOverlay}" data-dashboard-selector-overlay>
+      <section class="${styles.selectorModal}" role="dialog" aria-modal="true" aria-label="${escapeAttribute(title)}">
+        <header class="${styles.selectorHead}">
+          <div>
+            <p>${escapeHtml(isSite ? 'Site' : 'Location')}</p>
+            <h3>${escapeHtml(title)}</h3>
+            <span>${escapeHtml(subtitle)}</span>
+          </div>
+          <button type="button" class="${styles.selectorClose}" data-dashboard-selector-close aria-label="Close">✕</button>
+        </header>
+        <div class="${styles.selectorList}">
+          ${options.map((option) => {
+            const active = String(option.id) === selectedId;
+            return `
+              <button type="button" class="${styles.selectorOption} ${active ? styles.selectorOptionActive : ''}" data-dashboard-selector-option="${escapeAttribute(option.id)}">
+                <span class="${styles.selectorOptionIcon}">${pin}</span>
+                <span class="${styles.selectorOptionName}">${escapeHtml(option.name)}</span>
+                ${active ? `<span class="${styles.selectorOptionCheck}">${check}</span>` : ''}
+              </button>
+            `;
+          }).join('')}
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function getDashboardSites(state) {
+  return toArray(state.source?.sites)
+    .filter((site) => site && site.active !== false)
+    .sort((left, right) => String(left.name || '').localeCompare(String(right.name || '')));
+}
+
+function getSelectedDashboardSite(state) {
+  const siteId = String(state.dashboardSiteId || '');
+  if (!siteId) return null;
+  return getDashboardSites(state).find((site) => String(site.id) === siteId) || null;
+}
+
+function getLiveDataStatus(state) {
+  const connection = state.dashboard.connection || {};
+  const loadedCount = connection.loadedCount ?? Object.values(state.dashboard.loaded || {}).filter(Boolean).length;
+  const sourceCount = connection.sourceCount ?? Object.keys(state.dashboard.loaded || {}).length;
+  const hasErrors = Object.keys(state.dashboard.errors || {}).length > 0;
+  const lastUpdated = Date.parse(connection.lastUpdated || '');
+  const isReceiving = Number.isFinite(lastUpdated) && Date.now() - lastUpdated < 3500;
+
+  if (hasErrors || connection.status === 'error') {
+    return {
+      status: 'error',
+      label: 'Attention',
+      isReceiving: false,
+      meta: `${loadedCount} / ${sourceCount || 0} live sources loaded`
+    };
+  }
+
+  if (state.dashboard.isReady || connection.status === 'live') {
+    return {
+      status: 'live',
+      label: 'Live',
+      isReceiving,
+      meta: `${loadedCount} / ${sourceCount || 0} live sources loaded`
+    };
+  }
+
+  return {
+    status: 'syncing',
+    label: 'Syncing',
+    isReceiving,
+    meta: `${loadedCount} / ${sourceCount || 0} live sources loaded`
+  };
+}
+
+function getDisplayName(user = {}) {
+  if (user.displayName) return user.displayName;
+  const email = String(user.email || 'Workspace User');
+  return email.includes('@') ? email.split('@')[0] : email;
+}
+
+function getInitials(value = '') {
+  const text = String(value || '').trim();
+  const parts = text.includes('@') ? [text[0], text.split('@')[0]?.[1]] : text.split(/\s+/).slice(0, 2).map((part) => part[0]);
+  return parts.filter(Boolean).join('').slice(0, 2).toUpperCase() || 'KC';
+}
+
+/**
+ * @datasource Live stock items and movement snapshots
+ * @logic Resolves stock valuation for the selected trade day/range; custom range chart starts at opening and then tracks daily closing value.
+ */
+function StockValueTile(data, state) {
+  return StoryTile({
+    ...data,
+    title: 'Stock On Hand Value',
+    label: 'Portfolio Valuation',
+    tone: 'indigo',
+    semantic: 'info',
+    area: 'stock',
+    size: 'hero',
+    icon: 'wallet',
+    loadingValue: 'R 0,00',
+    description: 'Stock value at the selected range end, calculated from trade-day opening, purchases, movements, and closing stock.',
+    body: renderDashboardChart(state, 'stockValue', { tone: 'indigo', format: 'currency', hero: true })
+  });
+}
+
+/**
+ * @datasource Live products and recipe links
+ * @logic Counts menu records and compares against items created/imported/updated in the last 24 hours.
+ */
+function CatalogueCountTile(data, state) {
+  const newCount = state.dashboard.metrics?.context?.menuItems?.newLast24h || 0;
+  return StoryTile({
+    ...data,
+    title: 'Catalogue Count',
+    label: 'Menu Items',
+    tone: 'blue',
+    semantic: 'info',
+    area: 'catalogue',
+    icon: 'menu',
+    loadingValue: '0',
+    description: 'Count of menu catalogue records available for recipe costing and sales mapping.',
+    footer: newCount > 0
+      ? `<p class="${styles.contextIndicator} ${styles.trend_positive}">▲ ${newCount} new</p>`
+      : `<p class="${styles.contextIndicator} ${styles.trend_neutral}">• no new items</p>`
+  });
+}
+
+/**
+ * @datasource Live stock items
+ * @logic Counts ingredients where normalized total stock is below `lowStockThreshold`, defaulting to 5.
+ */
+function LowStockTile(data) {
+  return StoryTile({
+    ...data,
+    title: 'Low Stock Alerts',
+    label: 'Reorder Watch',
+    tone: 'amber',
+    semantic: 'warning',
+    area: 'lowStock',
+    icon: 'bell',
+    loadingValue: '0',
+    description: 'Inventory items where current stock is below the configured low-stock threshold.',
+    footer: `<button class="${styles.tileCta}" type="button" data-dashboard-target="ingredients">View alerts →</button>`
+  });
+}
+
+/**
+ * @datasource Live products and stock items
+ * @logic Calculates recipe cost from ingredient unit costs, then averages GP% across products with selling prices.
+ */
+function TheoreticalGpTile(data, state) {
+  return StoryTile({
+    ...data,
+    title: 'Theoretical GP%',
+    label: 'Recipe Profitability',
+    tone: 'emerald',
+    semantic: 'positive',
+    area: 'gp',
+    size: 'wide',
+    icon: 'profit',
+    loadingValue: '0.0%',
+    description: 'Average theoretical gross profit percentage from live selling prices and recipe costs.',
+    body: renderDashboardChart(state, 'averageGp', { tone: 'emerald', format: 'percent', compact: true })
+  });
+}
+
+/**
+ * @datasource Live GRV and credit note logs
+ * @logic Uses today's GRV total minus today's credit note total.
+ */
+function PurchasesTile(data) {
+  return StoryTile({
+    ...data,
+    title: 'Purchases Ex VAT',
+    label: 'GRV less Credit Notes',
+    tone: 'amber',
+    semantic: 'warning',
+    area: 'purchases',
+    icon: 'receipt',
+    loadingValue: 'R 0,00',
+    description: 'Today’s received purchases excluding VAT, net of supplier credit notes.'
+  });
+}
+
+/**
+ * @datasource Live stock, GRV, credit note, adjustment, count, manufacturing, and snapshot rows
+ * @logic Previous trade-day closing stock value, reconstructed from live stock and movement logs when no exact snapshot exists.
+ */
+function OpeningStockTile(data) {
+  return StoryTile({
+    ...data,
+    title: 'Opening Stock',
+    label: 'Daily Anchor',
+    tone: 'slate',
+    semantic: 'info',
+    area: 'opening',
+    icon: 'lock',
+    loadingValue: 'R 0,00',
+    description: 'Opening stock value from the previous trade day close, using live stock and movement history when no exact snapshot exists.'
+  });
+}
+
+/**
+ * @datasource Live snapshot and stock rows
+ * @logic Uses the selected trade-day closing snapshot when available, otherwise derives the closing value from current stock and subsequent movements.
+ */
+function ClosingStockTile(data) {
+  return StoryTile({
+    ...data,
+    title: 'Closing Stock',
+    label: 'Current Valuation',
+    tone: 'emerald',
+    semantic: 'positive',
+    area: 'closing',
+    icon: 'cube',
+    loadingValue: 'R 0,00',
+    description: 'Closing stock value based on the selected day snapshot, with next-session and live valuation fallbacks.'
+  });
+}
+
+/**
+ * @datasource Live dashboard metric sources for opening stock, purchases, and closing stock
+ * @logic Calculates `opening stock + purchases - closing stock`; chart compares daily COS over the selected period.
+ */
+function CostOfSalesTile(data, state) {
+  return StoryTile({
+    ...data,
+    title: 'Cost Of Sales',
+    label: 'Actual Ex VAT',
+    tone: 'emerald',
+    semantic: 'positive',
+    area: 'cost',
+    size: 'hero',
+    icon: 'chart',
+    loadingValue: 'R 0,00',
+    description: 'Actual cost of sales calculated as opening stock plus purchases minus closing stock.',
+    body: renderDashboardChart(state, 'costOfSales', { tone: 'emerald', format: 'currency' })
+  });
+}
+
+/**
+ * @datasource Live stock take rows
+ * @logic Sums today's stocktake line variances as `variance * cost`.
+ */
+function CountVarianceTile(data) {
+  return StoryTile({
+    ...data,
+    title: 'Count Variances',
+    label: 'Stocktake Impact',
+    tone: 'blue',
+    semantic: 'info',
+    area: 'variance',
+    icon: 'variance',
+    loadingValue: 'R 0,00',
+    description: 'Financial impact of today’s stocktake variances using item unit costs.',
+    footer: ratioText(data)
+  });
+}
+
+/**
+ * @datasource Live adjustment rows
+ * @logic Sums today's non-wastage adjustment `impactEx` values.
+ */
+function ManualAdjustmentTile(data) {
+  return StoryTile({
+    ...data,
+    title: 'Manual Adjustments',
+    label: 'Controlled Corrections',
+    tone: 'orange',
+    semantic: 'warning',
+    area: 'adjustments',
+    icon: 'sliders',
+    loadingValue: 'R 0,00',
+    description: 'Today’s non-wastage manual stock adjustments and correction impact.',
+    footer: ratioText(data)
+  });
+}
+
+/**
+ * @datasource Live adjustment and manufacturing rows
+ * @logic Adds wastage removals to manufacturing yield loss for the current trading day.
+ */
+function WastageTile(data) {
+  return StoryTile({
+    ...data,
+    title: 'Wastages',
+    label: 'Loss Tracking',
+    tone: 'red',
+    semantic: 'loss',
+    area: 'wastage',
+    icon: 'trash',
+    loadingValue: 'R 0,00',
+    description: 'Today’s wastage removals plus manufacturing yield loss.',
+    footer: `
+      ${ratioText(data)}
+      <p class="${styles.comparisonText}">${escapeHtml(data.metric?.trend?.comparisonText || '0.00% vs yesterday')}</p>
+    `
+  });
+}
+
+function StoryTile({
+  status,
+  error,
+  title,
+  label,
+  value,
+  metric,
+  tone,
+  semantic,
+  area,
+  size = '',
+  icon,
+  loadingValue = '0',
+  description,
+  controls = '',
+  body = '',
+  footer = ''
+}) {
+  const className = classNames(
+    styles.tile,
+    styles[`tone_${tone}`],
+    styles[`semantic_${semantic}`],
+    styles[`area_${area}`],
+    size === 'hero' && styles.hero,
+    size === 'wide' && styles.wide
+  );
+
+  if (status === 'error') {
+    return `
+      <article class="${className}">
+        ${renderInfo(description, title)}
+        ${renderTileHead(label, title, icon, controls)}
+        <div class="${styles.errorState}">${escapeHtml(error || 'Could not load this metric.')}</div>
+      </article>
+    `;
+  }
+
+  if (status === 'loading') {
+    return `
+      <article class="${className}">
+        ${renderInfo(description, title)}
+        ${renderTileHead(label, title, icon, controls)}
+        <div class="${styles.metricValue}">${escapeHtml(loadingValue)}</div>
+        <p class="${styles.trendLabel} ${styles.trend_neutral}">
+          <span>• 0.00%</span>
+          <em>waiting for live summary</em>
+        </p>
+      </article>
+    `;
+  }
+
+  return `
+    <article class="${className}">
+      ${renderInfo(description, title)}
+      ${renderTileHead(label, title, icon, controls)}
+      <div class="${styles.metricValue}">${escapeHtml(value || '0')}</div>
+      ${TrendLabel(metric)}
+      ${body}
+      ${footer ? `<div class="${styles.tileFooter}">${footer}</div>` : ''}
+    </article>
+  `;
+}
+
+function renderTileHead(label, title, iconName, controls = '') {
+  return `
+    <div class="${styles.tileHead}">
+      <div>
+        <p class="${styles.tileLabel}">${escapeHtml(label)}</p>
+        <h2>${escapeHtml(title)}</h2>
+      </div>
+      <div class="${styles.tileHeadRight}">
+        ${controls}
+        <span class="${styles.iconGlow}" aria-hidden="true">${tileIcon(iconName)}</span>
+      </div>
+    </div>
+  `;
+}
+
+function TrendLabel(metric) {
+  const trend = metric?.trend;
+  if (!trend) return '';
+  return `
+    <p class="${styles.trendLabel} ${styles[`trend_${trend.tone}`] || styles.trend_neutral}">
+      <span>${escapeHtml(trend.label || '• 0.00%')}</span>
+      <em>${escapeHtml(trend.contextLabel || 'vs yesterday')}</em>
+    </p>
+  `;
+}
+
+function ratioText(data) {
+  if (data.ratio === null || data.ratio === undefined) return '';
+  return `<p class="${styles.ratio}">${Number(data.ratio || 0).toFixed(2)}% of stock value</p>`;
+}
+
+function tileData(state, summary, key, dependencies) {
+  const metric = summary[key];
+  const errors = dependencies
+    .map((dep) => state.dashboard.errors?.[dep])
+    .filter(Boolean);
+  const isLoading = Boolean(state.dashboard.rangeLoading) ||
+    dependencies.some((dep) => state.dashboard.loaded?.[dep] === false || state.dashboard.loaded?.[dep] === undefined);
+
+  if (errors.length) {
+    return {
+      status: 'error',
+      error: errors[0]?.message || String(errors[0])
+    };
+  }
+
+  if (!metric) return { status: 'loading' };
+  if (isLoading && !state.dashboard.metrics) return { status: 'loading' };
+
+  return {
+    status: 'ready',
+    metric,
+    value: metric.value,
+    raw: metric.raw,
+    ratio: metric.ratio
+  };
+}
+
+function getEffectiveDashboardSummary(state) {
+  return state.dashboard.metrics?.summary || {};
+}
+
+function buildRangeDashboardSummary(source, startDate, endDate) {
+  const dates = enumerateDates(startDate, endDate).slice(0, 92);
+  if (!dates.length) return {};
+
+  const dailySummaries = dates.map((date) => calculateDashboardMetrics(source, date).summary || {});
+  const firstSummary = dailySummaries[0] || {};
+  const lastSummary = dailySummaries[dailySummaries.length - 1] || {};
+  const aggregateKeys = ['purchases', 'costOfSales', 'countVariance', 'manualAdjustments', 'wastage', 'manufacturingWastage'];
+  const summary = {
+    stockValue: cloneMetric(lastSummary.closingStock || lastSummary.stockValue),
+    totalStockValue: cloneMetric(lastSummary.totalStockValue || lastSummary.closingStock || lastSummary.stockValue),
+    productCount: cloneMetric(lastSummary.productCount),
+    lowStockCount: cloneMetric(lastSummary.lowStockCount),
+    averageGp: cloneMetric(lastSummary.averageGp),
+    gpPercentage: cloneMetric(lastSummary.gpPercentage || lastSummary.averageGp),
+    openingStock: cloneMetric(firstSummary.openingStock),
+    closingStock: cloneMetric(lastSummary.closingStock)
+  };
+
+  aggregateKeys.forEach((key) => {
+    const type = firstSummary[key]?.type || lastSummary[key]?.type || 'currency';
+    const raw = dailySummaries.reduce((sum, daySummary) => {
+      const metric = daySummary?.[key];
+      return sum + Number(metric?.raw || 0);
+    }, 0);
+    const ratioBase = Number(summary.stockValue?.raw || lastSummary.stockValue?.raw || 0);
+    summary[key] = createMetric(raw, type, ratioBase && ['countVariance', 'manualAdjustments', 'wastage'].includes(key)
+      ? (raw / ratioBase) * 100
+      : null);
+  });
+
+  const openingRaw = Number(summary.openingStock?.raw || 0);
+  const purchasesRaw = Number(summary.purchases?.raw || 0);
+  const closingRaw = Number(summary.closingStock?.raw || 0);
+  summary.costOfSales = createMetric(openingRaw + purchasesRaw - closingRaw, 'currency');
+
+  return summary;
+}
+
+function enrichRangeSummary(current, previous, fallbackSummary) {
+  const summary = {};
+
+  Object.entries(current || {}).forEach(([key, metric]) => {
+    if (!metric) return;
+    const previousMetric = previous?.[key] || fallbackSummary?.[key] || metric;
+    const currentRaw = Number(metric.raw || 0);
+    const previousRaw = Number(previousMetric.raw || 0);
+    const delta = currentRaw - previousRaw;
+    const deltaPercent = previousRaw === 0
+      ? (currentRaw === 0 ? 0 : 100)
+      : (delta / Math.abs(previousRaw)) * 100;
+    summary[key] = {
+      ...metric,
+      trend: {
+        ...(fallbackSummary?.[key]?.trend || {}),
+        delta,
+        deltaPercent,
+        direction: delta > 0 ? 'up' : delta < 0 ? 'down' : 'flat',
+        label: formatDashboardTrend(metric.type, delta, deltaPercent),
+        comparisonText: `${Math.abs(deltaPercent).toFixed(2)}% vs prior range`,
+        contextLabel: 'vs prior range'
+      }
+    };
+  });
+
+  summary.totalStockValue = summary.totalStockValue || summary.stockValue;
+  summary.gpPercentage = summary.gpPercentage || summary.averageGp;
+  return summary;
+}
+
+function cloneMetric(metric) {
+  if (!metric) return null;
+  return { ...metric };
+}
+
+function createMetric(raw, type, ratio = null) {
+  return {
+    raw,
+    type,
+    value: formatDashboardMetric(raw, type),
+    ratio
+  };
+}
+
+function formatDashboardMetric(value, type) {
+  const numeric = Number(value || 0);
+  if (type === 'currency') {
+    return new Intl.NumberFormat('en-ZA', { style: 'currency', currency: 'ZAR' }).format(numeric);
+  }
+  if (type === 'percent') return `${numeric.toFixed(1)}%`;
+  return new Intl.NumberFormat('en-ZA').format(numeric);
+}
+
+function formatDashboardTrend(type, delta, deltaPercent) {
+  const arrow = delta > 0 ? '▲' : delta < 0 ? '▼' : '•';
+  if (type === 'percent') return `${arrow} ${Math.abs(delta).toFixed(1)} pp`;
+  return `${arrow} ${Math.abs(deltaPercent).toFixed(2)}%`;
+}
+
+function renderInfo(description, title) {
+  if (!description) return '';
+
+  return `
+    <span class="${styles.infoWrap}" tabindex="0" aria-label="${escapeHtml(`${title}: ${description}`)}">
+      <span class="${styles.infoIcon}" aria-hidden="true">i</span>
+      <span class="${styles.tooltip}" role="tooltip">${escapeHtml(description)}</span>
+    </span>
+  `;
+}
+
+function renderRangeControl(activeRange) {
+  const range = parseDashboardRange(activeRange);
+  return `
+    <div class="${styles.rangeControl}" data-dashboard-range-control>
+      <button type="button" class="${styles.rangeButton}" data-dashboard-calendar-open aria-label="Select dashboard date range">
+        <span>${escapeHtml(range.label)}</span>
+        ${iconSvg('<path d="m6 9 6 6 6-6"/>')}
+      </button>
+    </div>
+  `;
+}
+
+function renderRangeCalendarOverlay(rangeDraft, calendarState) {
+  const calendar = buildCalendarModel(calendarState.cursor || rangeDraft.startDate || todayLocal(), calendarState.activeEdge === 'end' ? rangeDraft.endDate : rangeDraft.startDate);
+  const startDate = rangeDraft.startDate || todayLocal();
+  const endDate = rangeDraft.endDate || startDate;
+
+  return `
+    <div class="${styles.rangeOverlay}" data-dashboard-calendar-overlay>
+      <div class="${styles.rangeOverlayCard}" role="dialog" aria-modal="true">
+        <div class="${styles.rangeOverlayHeader}">
+          <div>
+            <h3>Select Dashboard Range</h3>
+            <p>${escapeHtml(`${formatDisplayDate(startDate)} -> ${formatDisplayDate(endDate)}`)}</p>
+          </div>
+          <button type="button" class="${styles.rangeOverlayClose}" data-dashboard-calendar-close aria-label="Close range selector">
+            ${iconSvg('<path d="M18 6 6 18"/><path d="m6 6 12 12"/>')}
+          </button>
+        </div>
+
+        <div class="${styles.rangePresetRow}">
+          <button type="button" data-dashboard-calendar-preset="today">Today</button>
+          <button type="button" data-dashboard-calendar-preset="7">Last 7 Days</button>
+          <button type="button" data-dashboard-calendar-preset="30">Last 30 Days</button>
+        </div>
+
+        <div class="${styles.rangeLegend}">
+          <span class="${styles.rangeLegendSwatch}" aria-hidden="true"></span>
+          <span>Selected range</span>
+        </div>
+
+        <div class="${styles.rangeCalendarNav}">
+          <div class="${styles.rangeCalendarNavGroup}">
+            <button type="button" data-dashboard-calendar-nav="-12" aria-label="Previous year">${iconSvg('<path d="m17 18-6-6 6-6"/><path d="m11 18-6-6 6-6"/>')}</button>
+            <button type="button" data-dashboard-calendar-nav="-1" aria-label="Previous month">${iconSvg('<path d="m15 18-6-6 6-6"/>')}</button>
+          </div>
+          <strong>${escapeHtml(calendar.label)}</strong>
+          <div class="${styles.rangeCalendarNavGroup}">
+            <button type="button" data-dashboard-calendar-nav="1" aria-label="Next month">${iconSvg('<path d="m9 18 6-6-6-6"/>')}</button>
+            <button type="button" data-dashboard-calendar-nav="12" aria-label="Next year">${iconSvg('<path d="m7 18 6-6-6-6"/><path d="m13 18 6-6-6-6"/>')}</button>
+          </div>
+        </div>
+
+        <div class="${styles.rangeCalendarGrid}">
+          ${calendar.weekdays.map((weekday) => `<span class="${styles.rangeCalendarWeekday}">${weekday}</span>`).join('')}
+          ${calendar.days.map((day) => {
+            const isStart = day.date === startDate;
+            const isEnd = day.date === endDate;
+            const isInRange = day.date >= startDate && day.date <= endDate;
+            const classes = [
+              styles.rangeCalendarDay,
+              !day.isCurrentMonth ? styles.rangeCalendarDayOutside : '',
+              day.isToday ? styles.rangeCalendarDayToday : '',
+              isInRange ? styles.rangeCalendarDayInRange : '',
+              isStart ? styles.rangeCalendarDayStart : '',
+              isEnd ? styles.rangeCalendarDayEnd : ''
+            ].filter(Boolean).join(' ');
+            return `
+              <button type="button" class="${classes}" data-dashboard-calendar-day="${escapeAttribute(day.date)}">
+                ${day.day}
+              </button>
+            `;
+          }).join('')}
+        </div>
+
+        <div class="${styles.rangeEdgeRow} ${styles.rangeEdgeRowBottom}">
+          <button type="button" class="${calendarState.activeEdge === 'start' ? styles.rangeEdgeActive : ''}" data-dashboard-calendar-edge="start">
+            <span>From</span>
+            <strong>${escapeHtml(formatRangePickerDate(startDate))}</strong>
+          </button>
+          <div class="${styles.rangeEdgeConnector}" aria-hidden="true"></div>
+          <button type="button" class="${calendarState.activeEdge === 'end' ? styles.rangeEdgeActive : ''}" data-dashboard-calendar-edge="end">
+            <span>To</span>
+            <strong>${escapeHtml(formatRangePickerDate(endDate))}</strong>
+          </button>
+        </div>
+
+        <div class="${styles.rangeOverlayFooter}">
+          <button type="button" class="${styles.rangeFooterSecondary}" data-dashboard-calendar-today>Today</button>
+          <button type="button" class="${styles.rangeFooterPrimary}" data-dashboard-calendar-apply>Apply Range</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderDashboardChart(state, metricKey, options = {}) {
+  if (!state) return '';
+  const range = parseDashboardRange(state.dashboardRange || '7');
+  const trends = state.dashboard.metrics?.trends || {};
+  const series = getDashboardSeries(state, trends, metricKey, range);
+
+  // Compact KPI sparklines stay as the lightweight inline SVG (tiny + static — no glitch there).
+  if (options.compact) {
+    return `<div class="${styles.sparkFrame}">${renderInlineTrendSvg(series, { ...options, metricKey })}</div>`;
+  }
+
+  // Full Movement chart renders on a Chart.js canvas (crisp, animated, DPI-correct). The series +
+  // tone + format ride on data-attributes; the canvas is initialised after mount (initMovementChart).
+  const points = (series || [])
+    .filter((point) => Number.isFinite(Number(point.value)))
+    .map((point) => ({ label: String(point.label ?? point.date ?? ''), value: Number(point.value) }));
+  return `<div class="${styles.chartFrame}">
+    <canvas
+      data-movement-chart
+      data-tone="${escapeAttribute(options.tone || 'blue')}"
+      data-format="${escapeAttribute(options.format || 'number')}"
+      data-series="${escapeAttribute(JSON.stringify(points))}"
+    ></canvas>
+  </div>`;
+}
+
+function renderInlineTrendSvg(series = [], options = {}) {
+  const points = series.filter((point) => Number.isFinite(Number(point.value)));
+  const id = `dashGradient-${escapeAttribute(options.metricKey || 'metric')}-${escapeAttribute(options.tone || 'blue')}`;
+  const width = 640;
+  const height = options.compact ? 168 : 260;
+  const padX = options.compact ? 22 : options.hero ? 42 : 50;
+  const padRight = options.compact ? 14 : options.hero ? 10 : 22;
+  const padTop = options.compact ? 14 : options.hero ? 12 : 24;
+  const padBottom = options.compact ? 20 : options.hero ? 38 : 46;
+  const chartHeight = height - padTop - padBottom;
+  const chartWidth = width - padX - padRight;
+  const color = getToneColorVar(options.tone);
+
+  if (!points.length) {
+    const y = padTop + chartHeight * 0.55;
+    return `
+      <svg class="${styles.inlineChart}" viewBox="0 0 ${width} ${height}" aria-hidden="true">
+        <path d="M ${padX} ${y} H ${width - padRight}" stroke="${color}" stroke-width="4" stroke-dasharray="9 12" opacity="0.45" fill="none"/>
+      </svg>
+    `;
+  }
+
+  const values = points.map((point) => Number(point.value || 0));
+  let min = Math.min(...values);
+  let max = Math.max(...values);
+  if (min === max) {
+    const padding = Math.max(1, Math.abs(max) * 0.08);
+    min -= padding;
+    max += padding;
+  }
+  const rangePadding = (max - min) * 0.12;
+  min -= rangePadding;
+  max += rangePadding;
+
+  const coords = points.map((point, index) => {
+    const x = padX + (points.length === 1 ? chartWidth / 2 : (index / (points.length - 1)) * chartWidth);
+    const y = padTop + chartHeight - ((Number(point.value || 0) - min) / (max - min)) * chartHeight;
+    return { x, y, ...point };
+  });
+  const linePath = buildSmoothPath(coords);
+  const areaPath = `${linePath} L ${coords[coords.length - 1].x.toFixed(2)} ${height - padBottom} L ${coords[0].x.toFixed(2)} ${height - padBottom} Z`;
+  const labelIndexes = getChartLabelIndexes(coords.length, options.compact ? 0 : 4);
+  const gridTicks = options.compact ? [] : [1, 0.5, 0].map((ratio) => ({
+    y: padTop + chartHeight * (1 - ratio),
+    value: min + (max - min) * ratio
+  }));
+  const lastPoint = coords[coords.length - 1];
+  const firstPoint = coords[0];
+  const directionTone = Number(lastPoint.value || 0) >= Number(firstPoint.value || 0)
+    ? styles.chartTrendPositive
+    : styles.chartTrendNegative;
+
+  return `
+    <svg class="${styles.inlineChart}" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeAttribute(options.format || 'dashboard')} trend">
+      <defs>
+        <linearGradient id="${id}" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0%" stop-color="${color}" stop-opacity="0.34"/>
+          <stop offset="58%" stop-color="${color}" stop-opacity="0.13"/>
+          <stop offset="100%" stop-color="${color}" stop-opacity="0.02"/>
+        </linearGradient>
+        <filter id="${id}-glow" x="-20%" y="-40%" width="140%" height="180%">
+          <feGaussianBlur stdDeviation="5" result="blur"/>
+          <feMerge>
+            <feMergeNode in="blur"/>
+            <feMergeNode in="SourceGraphic"/>
+          </feMerge>
+        </filter>
+      </defs>
+      ${gridTicks.map((tick) => `
+        <path class="${styles.inlineChartGrid}" d="M ${padX} ${tick.y.toFixed(2)} H ${width - padRight}" />
+        <text class="${styles.inlineChartAxis}" x="8" y="${(tick.y + 4).toFixed(2)}">${escapeHtml(formatCompactChartValue(tick.value, options.format))}</text>
+      `).join('')}
+      <path d="${areaPath}" fill="url(#${id})"/>
+      <path class="${styles.inlineChartGlow}" d="${linePath}" fill="none" stroke="${color}" stroke-width="${options.compact ? 6 : 7}" stroke-linecap="round" stroke-linejoin="round" filter="url(#${id}-glow)"/>
+      <path class="${styles.inlineChartLine}" d="${linePath}" fill="none" stroke="${color}" stroke-width="${options.compact ? 4 : 4.6}" stroke-linecap="round" stroke-linejoin="round"/>
+      ${options.compact ? '' : coords.map((point) => {
+        const pointLabel = String(point.label || '');
+        const pointValue = formatCompactChartValue(point.value, options.format);
+        const tipText = (pointLabel ? `${pointLabel} • ` : '') + pointValue;
+        return `<g>
+          <title>${escapeHtml(tipText)}</title>
+          <circle class="${styles.inlineChartHit}" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="14" fill="transparent" data-chart-point data-chart-label="${escapeAttribute(pointLabel)}" data-chart-value="${escapeAttribute(pointValue)}"/>
+          <circle class="${styles.inlineChartPoint}" cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="4" stroke="${color}"/>
+        </g>`;
+      }).join('')}
+      ${options.compact ? '' : `
+        <g class="${styles.inlineChartBadge} ${directionTone}" transform="translate(${Math.min(width - 142, Math.max(padX, lastPoint.x - 72)).toFixed(2)} ${Math.max(12, lastPoint.y - 34).toFixed(2)})">
+          <rect width="128" height="25" rx="12.5"/>
+          <text x="64" y="17" text-anchor="middle">${escapeHtml(formatCompactChartValue(lastPoint.value, options.format))}</text>
+        </g>
+      `}
+      ${labelIndexes.map((index) => {
+        const point = coords[index];
+        return `<text class="${styles.inlineChartDate}" x="${point.x.toFixed(2)}" y="${height - 15}" text-anchor="${index === 0 ? 'start' : index === coords.length - 1 ? 'end' : 'middle'}">${escapeHtml(point.label || '')}</text>`;
+      }).join('')}
+    </svg>
+  `;
+}
+
+function buildSmoothPath(coords = []) {
+  if (!coords.length) return '';
+  if (coords.length === 1) return `M ${coords[0].x.toFixed(2)} ${coords[0].y.toFixed(2)}`;
+
+  return coords.reduce((path, point, index) => {
+    if (index === 0) return `M ${point.x.toFixed(2)} ${point.y.toFixed(2)}`;
+    const previous = coords[index - 1];
+    const next = coords[index + 1] || point;
+    const controlDistance = (point.x - previous.x) * 0.36;
+    const c1x = previous.x + controlDistance;
+    const c1y = previous.y + (point.y - (coords[index - 2]?.y ?? previous.y)) * 0.10;
+    const c2x = point.x - controlDistance;
+    const c2y = point.y - (next.y - previous.y) * 0.10;
+    return `${path} C ${c1x.toFixed(2)} ${c1y.toFixed(2)}, ${c2x.toFixed(2)} ${c2y.toFixed(2)}, ${point.x.toFixed(2)} ${point.y.toFixed(2)}`;
+  }, '');
+}
+
+function getDashboardSeries(state, trends, metricKey, range) {
+  const byMetric = trends?.[metricKey];
+  if (!byMetric || typeof byMetric !== 'object') return [];
+  if (range.mode !== 'custom' && Array.isArray(byMetric[range.value])) return byMetric[range.value];
+  const fallbackKey = estimateRangeDayCount(range) > 7 ? '30' : '7';
+  if (Array.isArray(byMetric[fallbackKey])) return byMetric[fallbackKey];
+  // The tile service stores the series under whatever range was fetched; fall back to
+  // the first available series so the chart always renders the current range.
+  const firstAvailable = Object.values(byMetric).find((value) => Array.isArray(value) && value.length);
+  return firstAvailable || [];
+}
+
+function estimateRangeDayCount(range) {
+  if (!range?.startDate || !range?.endDate) return Number(range?.days || 7) || 7;
+  return enumerateDates(range.startDate, range.endDate).length || 7;
+}
+
+function buildCustomDashboardSeries(source, startDate, endDate, metricKey) {
+  const dates = enumerateDates(startDate, endDate).slice(0, 92);
+  return dates.map((date) => {
+    const summary = calculateDashboardMetrics(source, date).summary || {};
+    const metric = metricKey === 'stockValue'
+      ? (date === dates[0] ? summary.openingStock : summary.closingStock)
+      : summary[metricKey];
+    return {
+      date,
+      label: formatSeriesDateLabel(date, dates.length),
+      value: Number(metric?.raw || 0)
+    };
+  });
+}
+
+function parseDashboardRange(value) {
+  const text = String(value || 'today');
+  if (text === 'today') {
+    const d = todayLocal();
+    return { mode: 'today', value: 'today', startDate: d, endDate: d, days: 1, label: 'Today' };
+  }
+
+  const customMatch = text.match(/^custom:(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2})$/);
+  if (customMatch) {
+    const startDate = customMatch[1] <= customMatch[2] ? customMatch[1] : customMatch[2];
+    const endDate = customMatch[1] <= customMatch[2] ? customMatch[2] : customMatch[1];
+    return {
+      mode: 'custom',
+      value: text,
+      startDate,
+      endDate,
+      label: `${formatShortDate(startDate)} - ${formatShortDate(endDate)}`
+    };
+  }
+
+  const valueKey = text === '30' ? '30' : '7';
+  return {
+    mode: 'preset',
+    value: valueKey,
+    days: Number(valueKey),
+    label: valueKey === '30' ? 'Last 30 Days' : 'Last 7 Days'
+  };
+}
+
+function getRangeInputDates(range, settings = {}) {
+  if (range.mode === 'custom' || range.mode === 'today') {
+    return {
+      startDate: range.startDate,
+      endDate: range.endDate
+    };
+  }
+
+  const today = getTradeDateKey(new Date(), settings);
+  return {
+    startDate: addDays(today, -(Number(range.days || 7) - 1)),
+    endDate: today
+  };
+}
+
+function enumerateDates(startDate, endDate) {
+  const dates = [];
+  let cursor = startDate <= endDate ? startDate : endDate;
+  const last = startDate <= endDate ? endDate : startDate;
+
+  while (cursor <= last) {
+    dates.push(cursor);
+    cursor = addDays(cursor, 1);
+  }
+
+  return dates;
+}
+
+function addDays(dateKey, offset) {
+  const date = new Date(`${dateKey}T12:00:00`);
+  date.setDate(date.getDate() + offset);
+  return toIsoDate(date);
+}
+
+function toIsoDate(date) {
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 10);
+}
+
+function formatSeriesDateLabel(dateKey, length) {
+  const date = new Date(`${dateKey}T12:00:00`);
+  return new Intl.DateTimeFormat('en-ZA', {
+    day: '2-digit',
+    month: length > 35 ? 'numeric' : 'short'
+  }).format(date);
+}
+
+function formatShortDate(dateKey) {
+  const date = new Date(`${dateKey}T12:00:00`);
+  return new Intl.DateTimeFormat('en-ZA', {
+    day: '2-digit',
+    month: 'short'
+  }).format(date);
+}
+
+function formatRangePickerDate(dateKey) {
+  const date = new Date(`${dateKey}T12:00:00`);
+  return new Intl.DateTimeFormat('en-ZA', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric'
+  }).format(date);
+}
+
+function getToneColorVar(tone) {
+  const map = {
+    indigo: 'var(--accent-indigo)',
+    blue: 'var(--accent-blue)',
+    amber: 'var(--accent-amber)',
+    emerald: 'var(--accent-emerald)',
+    red: 'var(--accent-red)',
+    orange: 'var(--accent-orange)'
+  };
+  return map[tone] || 'var(--accent-blue)';
+}
+
+function getChartLabelIndexes(length, desired) {
+  if (!desired || length <= 0) return [];
+  if (length <= desired) return Array.from({ length }, (_, index) => index);
+  const indexes = new Set([0, length - 1]);
+  const step = (length - 1) / (desired - 1);
+  for (let index = 1; index < desired - 1; index += 1) {
+    indexes.add(Math.round(index * step));
+  }
+  return [...indexes].sort((a, b) => a - b);
+}
+
+function formatCompactChartValue(value, format) {
+  const numeric = Number(value || 0);
+  if (format === 'percent') return `${numeric.toFixed(Math.abs(numeric) < 10 ? 1 : 0)}%`;
+  if (format === 'currency') {
+    const absolute = Math.abs(numeric);
+    const sign = numeric < 0 ? '-' : '';
+    if (absolute >= 1000000) return `${sign}R ${(absolute / 1000000).toFixed(1)}M`;
+    if (absolute >= 1000) return `${sign}R ${(absolute / 1000).toFixed(absolute >= 10000 ? 0 : 1)}K`;
+    return `${sign}R ${Math.round(absolute)}`;
+  }
+  return new Intl.NumberFormat('en-ZA', { maximumFractionDigits: 1 }).format(numeric);
+}
+
+function renderWorkspaceError(message) {
+  return `
+    <div class="${styles.workspaceError}">
+      <h2>No Workspace Available</h2>
+      <p>${escapeHtml(message)}</p>
+    </div>
+  `;
+}
+
+function themeIcon(isDark) {
+  const path = isDark
+    ? '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="M4.93 4.93l1.41 1.41"/><path d="M17.66 17.66l1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="M4.93 19.07l1.41-1.41"/><path d="M17.66 6.34l1.41-1.41"/>'
+    : '<path d="M21 12.8A8.5 8.5 0 1 1 11.2 3a6.5 6.5 0 0 0 9.8 9.8z"/>';
+
+  return iconSvg(path);
+}
+
+function tileIcon(name) {
+  const icons = {
+    bell: '<path d="M15 17h5l-1.4-1.4A2 2 0 0 1 18 14.2V11a6 6 0 0 0-12 0v3.2a2 2 0 0 1-.6 1.4L4 17h5"/><path d="M10 21h4"/><path d="M12 3V2"/>',
+    chart: '<path d="M4 19V5"/><path d="M4 19h16"/><path d="m7 15 4-4 3 3 5-7"/>',
+    cube: '<path d="m12 3 8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12 4 7.5"/><path d="M12 12v9"/><path d="m12 12 8-4.5"/>',
+    lock: '<rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
+    menu: '<path d="M6 11h12"/><path d="M8 6h8a4 4 0 0 1 4 4H4a4 4 0 0 1 4-4z"/><path d="M5 15h14l-1 5H6z"/>',
+    profit: '<path d="M4 17 10 9l4 4 6-8"/><path d="M14 5h6v6"/>',
+    receipt: '<path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6"/><path d="M9 12h6"/><path d="M9 16h4"/>',
+    refresh: '<path d="M21 12a9 9 0 0 1-15.5 6.2"/><path d="M3 12A9 9 0 0 1 18.5 5.8"/><path d="M18 2v4h-4"/><path d="M6 22v-4h4"/>',
+    sliders: '<path d="M4 7h10"/><path d="M18 7h2"/><circle cx="16" cy="7" r="2"/><path d="M4 17h2"/><path d="M10 17h10"/><circle cx="8" cy="17" r="2"/>',
+    team: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+    trash: '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m19 6-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>',
+    variance: '<path d="M4 19V5"/><path d="M4 19h16"/><path d="m8 15 3-3 3 2 4-6"/><path d="M14 8h4v4"/>',
+    wallet: '<path d="M5 7h14a2 2 0 0 1 2 2v9H5a2 2 0 0 1-2-2V5a2 2 0 0 0 2 2z"/><path d="M16 13h.01"/>'
+  };
+
+  return iconSvg(icons[name] || icons.chart);
+}
+
+function iconSvg(paths) {
+  return `
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      ${paths}
+    </svg>
+  `;
+}
+
+function formatTradeDate(date) {
+  return new Intl.DateTimeFormat('en-ZA', {
+    weekday: 'short',
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric'
+  }).format(date);
+}
+
+function formatTradeDateKey(dateKey) {
+  const date = new Date(`${dateKey}T12:00:00`);
+  return formatTradeDate(date);
+}
+
+function formatTradeTime(date) {
+  return new Intl.DateTimeFormat('en-ZA', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  }).format(date);
+}
+
+function classNames(...values) {
+  return values.filter(Boolean).join(' ');
 }
 
 function escapeHtml(value = '') {
@@ -1238,34 +1934,4 @@ function escapeHtml(value = '') {
 
 function escapeAttribute(value = '') {
   return escapeHtml(value).replaceAll('`', '&#096;');
-}
-
-function icon(name, size = 16) {
-  const paths = {
-    package: '<path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/>',
-    search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
-    filter: '<path d="M4 5h16"/><path d="M7 12h10"/><path d="M10 19h4"/>',
-    refresh: '<path d="M20 6v6h-6"/><path d="M4 18v-6h6"/><path d="M18.5 9a7 7 0 0 0-11.8-2.6L4 9"/><path d="M5.5 15a7 7 0 0 0 11.8 2.6L20 15"/>',
-    bell: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/>',
-    mail: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/>',
-    sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
-    moon: '<path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z"/>',
-    settings: '<path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.55V21h-4v-.08A1.7 1.7 0 0 0 9 19.37a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.63 15 1.7 1.7 0 0 0 3.08 14H3v-4h.08A1.7 1.7 0 0 0 4.63 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.63 1.7 1.7 0 0 0 10 3.08V3h4v.08A1.7 1.7 0 0 0 15 4.63a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.37 9 1.7 1.7 0 0 0 20.92 10H21v4h-.08A1.7 1.7 0 0 0 19.4 15Z"/>',
-    money: '<circle cx="12" cy="12" r="9"/><path d="M16 8h-6a2 2 0 0 0 0 4h4a2 2 0 0 1 0 4H8"/><path d="M12 6v12"/>',
-    trendDown: '<path d="m3 7 6 6 4-4 8 8"/><path d="M21 10v7h-7"/>',
-    activity: '<path d="M3 12h4l2-7 4 14 2-7h6"/>',
-    alert: '<path d="M10.3 3.9 2.8 17a2 2 0 0 0 1.7 3h15a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
-    check: '<circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/>',
-    arrowUp: '<path d="M7 17 17 7"/><path d="M7 7h10v10"/>',
-    arrowDown: '<path d="m7 7 10 10"/><path d="M17 7v10H7"/>',
-    minus: '<path d="M5 12h14"/>',
-    pie: '<path d="M21 12a9 9 0 1 1-9-9v9Z"/><path d="M12 3a9 9 0 0 1 9 9h-9Z"/>',
-    arrowRight: '<path d="M5 12h14"/><path d="m13 6 6 6-6 6"/>',
-    chevronDown: '<path d="m6 9 6 6 6-6"/>',
-    chevronLeft: '<path d="m15 18-6-6 6-6"/>',
-    chevronRight: '<path d="m9 18 6-6-6-6"/>',
-    info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/>',
-    x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>'
-  };
-  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.info}</svg>`;
 }

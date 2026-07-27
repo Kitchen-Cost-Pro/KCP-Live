@@ -1,7 +1,7 @@
 import '../styles/customRoles.css';
 import '../styles/fieldHelp.css';
 import { bindFieldHelpTooltips, renderFieldHelpLabel } from './fieldHelp.js';
-import { ACTION_PERMISSION_MAP, DEFAULT_ROLES, SECTION_DATA_PERMISSION_MAP, SECTION_PERMISSION_MAP, canManagePermissionSets, toRoleLabel } from '../services/roleService.js';
+import { ACTION_PERMISSION_MAP, DEFAULT_ROLES, SECTION_PERMISSION_MAP, canManagePermissionSets, toRoleLabel } from '../services/roleService.js';
 
 export function renderCustomRoles({ state, onRoleManagementAction = {} } = {}) {
   const access = state.access || {};
@@ -180,20 +180,7 @@ function renderRoleEditor(role, locations) {
                       ${group.description ? `<p>${escapeHtml(group.description)}</p>` : ''}
                     </header>
                     <div class="customRolesPermissionGroupList">
-                      ${(group.sections || []).map((section) => `
-                        <div class="customRolesPermissionSection">
-                          <strong>${escapeHtml(section.label)}</strong>
-                          <div class="customRolesPermissionSection__options">
-                            ${(section.permissions || []).map((permission) => `
-                              <label>
-                                <input type="checkbox" data-role-permission="${escapeAttribute(permission.permissionId)}" ${role.permissions?.includes(permission.permissionId) ? 'checked' : ''} />
-                                <span>${escapeHtml(permission.label)}</span>
-                              </label>
-                            `).join('')}
-                          </div>
-                        </div>
-                      `).join('')}
-                      ${(group.permissions || []).map((permission) => `
+                      ${group.permissions.map((permission) => `
                         <label>
                           <input type="checkbox" data-role-permission="${escapeAttribute(permission.permissionId)}" ${role.permissions?.includes(permission.permissionId) ? 'checked' : ''} />
                           <span>${escapeHtml(permission.label)}</span>
@@ -296,66 +283,59 @@ function isStorageLocation(location = {}) {
 }
 
 function buildPermissionGroups() {
-  const section = (sectionId, label = toPermissionLabel(sectionId)) => {
-    const permissions = [
-      { permissionId: SECTION_PERMISSION_MAP[sectionId], label: 'Open section' }
-    ];
-    const dataPermissions = SECTION_DATA_PERMISSION_MAP[sectionId] || {};
-    if (dataPermissions.import) permissions.push({ permissionId: dataPermissions.import, label: 'Import data' });
-    if (dataPermissions.export) permissions.push({ permissionId: dataPermissions.export, label: 'Export data' });
-    return { label, permissions: permissions.filter((entry) => entry.permissionId) };
-  };
+  const bySection = (sectionId) => ({
+    permissionId: SECTION_PERMISSION_MAP[sectionId],
+    label: toPermissionLabel(sectionId)
+  });
 
   return [
     {
       label: 'Core Overview',
       description: 'Top-level operational visibility.',
-      sections: [section('dashboard')]
+      permissions: [
+        bySection('dashboard')
+      ]
     },
     {
       label: 'Product & Recipe Management',
-      description: 'Catalogue and recipe access with separate import and export controls.',
-      sections: [section('products'), section('recipes')]
+      description: 'Catalogue and recipe maintenance.',
+      permissions: [
+        bySection('products'),
+        bySection('recipes')
+      ]
     },
     {
       label: 'Inventory Operations',
       description: 'Daily stock control, receiving, counting, movement, and manufacturing.',
-      sections: [
-        section('ingredients'),
-        section('suppliers'),
-        section('purchase-orders'),
-        section('grv'),
-        section('credit-note'),
-        section('adjustments'),
-        section('transfers'),
-        section('stock-count'),
-        section('locations'),
-        section('mfg-products')
-      ],
       permissions: [
-        { permissionId: ACTION_PERMISSION_MAP.externalTransfers, label: 'External Transfers' }
+        bySection('ingredients'),
+        bySection('suppliers'),
+        bySection('purchase-orders'),
+        bySection('grv'),
+        bySection('credit-note'),
+        bySection('adjustments'),
+        bySection('transfers'),
+        { permissionId: ACTION_PERMISSION_MAP.externalTransfers, label: 'External Transfers' },
+        bySection('stock-count'),
+        bySection('locations'),
+        bySection('mfg-products')
       ]
     },
     {
       label: 'Reporting & Analysis',
-      description: 'Reporting access, exports, saved views, and scheduled delivery.',
-      sections: [section('reporting')],
+      description: 'Analytics and uploaded operational reporting.',
       permissions: [
-        { permissionId: ACTION_PERMISSION_MAP.saveWorkspaceReportViews, label: 'Save Workspace Report Views' },
-        { permissionId: ACTION_PERMISSION_MAP.scheduleReports, label: 'Schedule Reports' },
-        { permissionId: ACTION_PERMISSION_MAP.emailReports, label: 'Email Reports' },
-        { permissionId: ACTION_PERMISSION_MAP.manageReportSchedules, label: 'Manage All Report Schedules' },
-        { permissionId: ACTION_PERMISSION_MAP.deleteReportSchedules, label: 'Delete Report Schedules' }
+        bySection('sales-sync')
       ]
     },
     {
       label: 'Administration',
       description: 'Workspace setup, connected systems, users, and role control.',
-      sections: [
-        section('integrations'),
-        section('user-management'),
-        section('custom-roles'),
-        section('settings')
+      permissions: [
+        bySection('integrations'),
+        bySection('user-management'),
+        bySection('custom-roles'),
+        bySection('settings')
       ]
     },
     {
@@ -435,7 +415,7 @@ function toPermissionLabel(sectionId) {
     'stock-count': 'Stock Take',
     locations: 'Locations',
     'mfg-products': 'Manufacturing',
-    reporting: 'Reporting',
+    'sales-sync': 'Sales Sync',
     integrations: 'Integrations',
     'user-management': 'User Management',
     'custom-roles': 'Roles & Permissions',

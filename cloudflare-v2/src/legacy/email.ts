@@ -1,7 +1,5 @@
 import { connect } from 'cloudflare:sockets';
 import type { Env } from './types';
-// @ts-ignore Shared binary-safe attachment encoder used by Worker email providers and Node tests.
-import { emailAttachmentBytes, encodeEmailAttachmentBase64 } from '../../../src/modules/reporting/scheduling/emailAttachmentEncoding.js';
 
 export interface EmailDeliveryConfig {
   provider: string;
@@ -17,21 +15,12 @@ export interface EmailDeliveryConfig {
   gmailTokenRefresher?: (env: Env) => Promise<string>;
 }
 
-export type EmailAttachmentContent = string | Uint8Array | ArrayBuffer;
-
-export interface EmailAttachment {
-  filename: string;
-  content: EmailAttachmentContent;
-  contentType?: string;
-}
-
 export interface EmailPayload {
   to: string | string[];
   subject: string;
   text: string;
   html?: string;
   from?: string;
-  attachments?: EmailAttachment[];
 }
 
 function clean(value: unknown, fallback = '') {
@@ -44,10 +33,10 @@ function emailList(value: string | string[]) {
     .filter(Boolean);
 }
 
-export { emailAttachmentBytes, encodeEmailAttachmentBase64 };
-
-function base64(value: EmailAttachmentContent) {
-  return encodeEmailAttachmentBase64(value);
+function base64(value: string) {
+  let binary = '';
+  new TextEncoder().encode(value).forEach((byte) => { binary += String.fromCharCode(byte); });
+  return btoa(binary);
 }
 
 function encodeHeader(value: string) {
@@ -67,64 +56,42 @@ function smtpAddress(value = '') {
 function buildPlainMessage(config: EmailDeliveryConfig, payload: EmailPayload) {
   const from = clean(payload.from || config.from);
   const to = emailList(payload.to).join(', ');
-  const alternativeBoundary = `kcp_alt_${Math.random().toString(36).slice(2)}`;
-  const mixedBoundary = `kcp_mix_${Math.random().toString(36).slice(2)}`;
-  const attachments = payload.attachments || [];
-  const headers = [
+  const boundary = `kcp_${Math.random().toString(36).slice(2)}`;
+
+  if (payload.html) {
+    return [
+      `From: ${from}`,
+      `To: ${to}`,
+      `Subject: ${encodeHeader(payload.subject)}`,
+      'MIME-Version: 1.0',
+      `Content-Type: multipart/alternative; boundary="${boundary}"`,
+      '',
+      `--${boundary}`,
+      'Content-Type: text/plain; charset=UTF-8',
+      'Content-Transfer-Encoding: 8bit',
+      '',
+      dotStuff(payload.text),
+      '',
+      `--${boundary}`,
+      'Content-Type: text/html; charset=UTF-8',
+      'Content-Transfer-Encoding: 8bit',
+      '',
+      payload.html,
+      '',
+      `--${boundary}--`
+    ].join('\r\n');
+  }
+
+  return [
     `From: ${from}`,
     `To: ${to}`,
     `Subject: ${encodeHeader(payload.subject)}`,
-    'MIME-Version: 1.0'
-  ];
-  const bodyParts = payload.html
-    ? [
-        `Content-Type: multipart/alternative; boundary="${alternativeBoundary}"`,
-        '',
-        `--${alternativeBoundary}`,
-        'Content-Type: text/plain; charset=UTF-8',
-        'Content-Transfer-Encoding: 8bit',
-        '',
-        payload.text,
-        '',
-        `--${alternativeBoundary}`,
-        'Content-Type: text/html; charset=UTF-8',
-        'Content-Transfer-Encoding: 8bit',
-        '',
-        payload.html,
-        '',
-        `--${alternativeBoundary}--`
-      ]
-    : [
-        'Content-Type: text/plain; charset=UTF-8',
-        'Content-Transfer-Encoding: 8bit',
-        '',
-        payload.text
-      ];
-
-  if (!attachments.length) return [...headers, ...bodyParts].join('\r\n');
-
-  const mixed = [
-    ...headers,
-    `Content-Type: multipart/mixed; boundary="${mixedBoundary}"`,
+    'MIME-Version: 1.0',
+    'Content-Type: text/plain; charset=UTF-8',
+    'Content-Transfer-Encoding: 8bit',
     '',
-    `--${mixedBoundary}`,
-    ...bodyParts
-  ];
-  for (const attachment of attachments) {
-    const encoded = base64(attachment.content).match(/.{1,76}/g)?.join('\r\n') || '';
-    const filename = clean(attachment.filename || 'attachment.txt').replace(/["\r\n]/g, '_');
-    mixed.push(
-      '',
-      `--${mixedBoundary}`,
-      `Content-Type: ${clean(attachment.contentType || 'application/octet-stream')}; name="${filename}"`,
-      'Content-Transfer-Encoding: base64',
-      `Content-Disposition: attachment; filename="${filename}"`,
-      '',
-      encoded
-    );
-  }
-  mixed.push('', `--${mixedBoundary}--`);
-  return mixed.join('\r\n');
+    payload.text
+  ].join('\r\n');
 }
 
 export async function sendEmail(env: Env, config: EmailDeliveryConfig, payload: EmailPayload) {
@@ -146,7 +113,13 @@ async function sendViaGmailOAuth(env: Env, config: EmailDeliveryConfig, payload:
   const recipients = emailList(payload.to);
   if (!recipients.length) return { sent: false, status: 'email-error', reason: 'No recipients.' };
 
-  const mime = buildPlainMessage({ ...config, from: fromName ? `${fromName} <${fromEmail}>` : fromEmail }, { ...payload, to: recipients });
+  const mime = buildGmailMimeMessage({
+    from: fromName ? `${fromName} <${fromEmail}>` : fromEmail,
+    to: recipients.join(', '),
+    subject: clean(payload.subject),
+    text: clean(payload.text),
+    html: payload.html,
+  });
 
   const response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
     method: 'POST',
@@ -159,7 +132,34 @@ async function sendViaGmailOAuth(env: Env, config: EmailDeliveryConfig, payload:
 }
 
 function base64UrlEncode(bytes: Uint8Array): string {
-  return encodeEmailAttachmentBase64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function buildGmailMimeMessage(opts: { from: string; to: string; subject: string; text: string; html?: string }) {
+  const boundary = `boundary_${Math.random().toString(36).slice(2)}`;
+  const headers = [
+    `From: ${opts.from}`,
+    `To: ${opts.to}`,
+    `Subject: ${opts.subject}`,
+    'MIME-Version: 1.0',
+  ];
+  if (opts.html) {
+    headers.push(`Content-Type: multipart/alternative; boundary="${boundary}"`);
+    return [
+      ...headers, '',
+      `--${boundary}`,
+      'Content-Type: text/plain; charset=UTF-8', '',
+      opts.text, '',
+      `--${boundary}`,
+      'Content-Type: text/html; charset=UTF-8', '',
+      opts.html, '',
+      `--${boundary}--`,
+    ].join('\r\n');
+  }
+  headers.push('Content-Type: text/plain; charset=UTF-8');
+  return [...headers, '', opts.text].join('\r\n');
 }
 
 async function sendViaResend(_env: Env, config: EmailDeliveryConfig, payload: EmailPayload) {
@@ -185,13 +185,7 @@ async function sendViaResend(_env: Env, config: EmailDeliveryConfig, payload: Em
       to,
       subject: payload.subject,
       text: payload.text,
-      ...(payload.html ? { html: payload.html } : {}),
-      ...(payload.attachments?.length ? {
-        attachments: payload.attachments.map((attachment) => ({
-          filename: attachment.filename,
-          content: base64(attachment.content)
-        }))
-      } : {})
+      ...(payload.html ? { html: payload.html } : {})
     })
   });
 

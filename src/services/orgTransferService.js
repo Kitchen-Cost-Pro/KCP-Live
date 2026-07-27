@@ -26,20 +26,9 @@ export async function postInternalTransfer(workspaceId, payload = {}) {
 export async function postExternalTransfer(payload = {}) {
   const workspaceId = String(payload.from_site_id || payload.fromSiteId || payload.workspaceId || '').trim();
   if (!workspaceId) throw new Error('Source workspace is required for external transfers.');
-  const normalizedPayload = {
-    ...payload,
-    from_site_id: workspaceId,
-    from_site_name: cleanTransferLabel(payload.from_site_name || payload.fromSiteName),
-    to_site_id: String(payload.to_site_id || payload.toSiteId || '').trim(),
-    to_site_name: cleanTransferLabel(payload.to_site_name || payload.toSiteName),
-    from_location_id: String(payload.from_location_id || payload.fromLocationId || '').trim(),
-    from_location_name: cleanTransferLabel(payload.from_location_name || payload.fromLocationName),
-    to_location_id: String(payload.to_location_id || payload.toLocationId || '').trim(),
-    to_location_name: cleanTransferLabel(payload.to_location_name || payload.toLocationName)
-  };
   return callCloudflareWorkspaceRoute(workspaceId, 'transfers/external', {
     method: 'POST',
-    payload: normalizedPayload
+    payload
   });
 }
 
@@ -62,8 +51,8 @@ export async function rejectExternalTransfer(workspaceId, transferId, action = '
   });
 }
 
-export async function getCorporateOverview(corpId = '') {
-  return callCloudflareWorkspaceRoute('corporate', 'corporate/overview', {
+export async function getCorporateReport(corpId = '') {
+  return callCloudflareWorkspaceRoute('corporate', 'reports/corporate', {
     method: 'GET',
     query: { corp_id: corpId }
   });
@@ -135,9 +124,4 @@ function toStringList(value) {
   if (Array.isArray(value)) return value.map((entry) => String(entry || '').trim()).filter(Boolean);
   if (typeof value === 'object') return Object.values(value).map((entry) => String(entry || '').trim()).filter(Boolean);
   return String(value).split(/[,;\n]/).map((entry) => entry.trim()).filter(Boolean);
-}
-
-
-function cleanTransferLabel(value = '') {
-  return String(value || '').trim().slice(0, 160);
 }

@@ -1,8 +1,5 @@
 import '../styles/menu.css';
 import { renderLoadingPanel } from './LoadingPanel.js';
-import { getAccessibleLocationOptions } from '../services/locationAccess.js';
-import { resolveModifierLinkedItems } from '../services/modifierLinkedItems.js';
-import { bindModifierManagementControls, renderModifierStockActionDrawer, renderNoteSuggestionsModal } from './Recipes.js';
 
 const statusOptions = [
   { value: '', label: 'All Statuses' },
@@ -11,97 +8,11 @@ const statusOptions = [
 ];
 
 const modifierStatusOptions = [
-  { value: '', label: 'All Modifiers' },
-  { value: 'product', label: 'Product Modifiers' },
-  { value: 'option', label: 'Option Modifiers' },
-  { value: 'note', label: 'Note Modifiers' },
-  { value: 'configured', label: 'Configured' },
-  { value: 'unconfigured', label: 'Not Configured' }
+  { value: '', label: 'All Statuses' },
+  { value: 'linked', label: 'Linked' },
+  { value: 'manual', label: 'Manual Recipe' },
+  { value: 'unlinked', label: 'Unlinked' }
 ];
-
-function getAccessibleSellingLocationOptions(locations = [], access = {}) {
-  return getAccessibleLocationOptions(locations, access, { sellingOnly: true });
-}
-
-function resolveActiveLocationId(locationId = '', options = []) {
-  const value = String(locationId || '').trim();
-  if (value && options.some((option) => option.value === value)) return value;
-  return String(options[0]?.value || '');
-}
-
-function applyMenuLocationPrice(item = {}, locationId = '', locationOptions = []) {
-  const entry = locationId ? item.locationPrices?.[locationId] : null;
-  const locationPrice = Number(entry?.sellingPrice ?? entry?.price ?? item.sellingPrice ?? 0) || 0;
-  const locationName = locationOptions.find((option) => option.value === locationId)?.label || '';
-  return {
-    ...item,
-    globalSellingPrice: Number(item.sellingPrice || 0) || 0,
-    sellingPrice: locationPrice,
-    activeLocationId: locationId,
-    activeLocationName: locationName,
-    locationPriceSource: entry ? 'location' : 'global'
-  };
-}
-
-
-function decorateMenuItemsWithModifierLinks(items = [], modifiers = []) {
-  const linkIndex = buildModifierProductLinkIndex(modifiers);
-  return (items || []).map((item) => ({
-    ...item,
-    linkedToModifier: isMenuItemLinkedToModifier(item, linkIndex)
-  }));
-}
-
-function buildModifierProductLinkIndex(modifiers = []) {
-  const ids = new Set();
-  const names = new Set();
-  (modifiers || []).forEach((modifier = {}) => {
-    [
-      ...(Array.isArray(modifier.linkedProductIds) ? modifier.linkedProductIds : []),
-      modifier.linkedProductId,
-      modifier.yocoModifierProductId,
-      modifier.yocoModifierVariantId,
-      modifier.recipeSourceProductId
-    ].map(normalizeLinkToken).filter(Boolean).forEach((value) => ids.add(value));
-    [
-      ...(Array.isArray(modifier.linkedProductNames) ? modifier.linkedProductNames : []),
-      modifier.linkedProductName,
-      modifier.autoLinkedProductName,
-      modifier.yocoModifierProductName
-    ].map(normalizeLinkToken).filter(Boolean).forEach((value) => names.add(value));
-  });
-  return { ids, names };
-}
-
-function isMenuItemLinkedToModifier(item = {}, linkIndex = { ids: new Set(), names: new Set() }) {
-  const idCandidates = [
-    item.id,
-    item.productId,
-    item.yocoItemId,
-    item.yocoVariantId,
-    item.variantId,
-    item.recipeOwnerId,
-    item.sku,
-    item.customSku
-  ].map(normalizeLinkToken).filter(Boolean);
-  if (idCandidates.some((candidate) => linkIndex.ids.has(candidate))) return true;
-  const nameCandidates = [
-    item.name,
-    item.productName,
-    item.yocoItemName,
-    item.yocoModifierProductName
-  ].map(normalizeLinkToken).filter(Boolean);
-  return nameCandidates.some((candidate) => linkIndex.names.has(candidate));
-}
-
-function normalizeLinkToken(value = '') {
-  return String(value || '')
-    .trim()
-    .toLowerCase()
-    .replace(/^product:/, '')
-    .replace(/^modifier:/, '')
-    .replace(/\s+/g, ' ');
-}
 
 export function renderMenuCatalogue({ state, onFilterChange, onMenuAction = {} } = {}) {
   const menu = state.menu || {};
@@ -111,30 +22,16 @@ export function renderMenuCatalogue({ state, onFilterChange, onMenuAction = {} }
     catalogueView: 'products',
     category: '',
     status: '',
-    locationId: '',
     page: 1,
     pageSize: 25,
     openDropdown: '',
     ...(menu.filters || {})
   };
   const catalogueView = filters.catalogueView === 'modifiers' ? 'modifiers' : 'products';
+  const allItems = menu.items || [];
   const allModifiers = menu.modifierItems || [];
-  const allItems = decorateMenuItemsWithModifierLinks(menu.items || [], allModifiers);
-  const modifierWorkspace = {
-    ...menu,
-    items: allItems,
-    modifierItems: allModifiers,
-    allRecipeItems: [...allItems, ...allModifiers],
-    ingredients: menu.ingredients || [],
-    locations: menu.locations || []
-  };
   const sourceRows = catalogueView === 'modifiers' ? allModifiers : allItems;
-  const locationOptions = getAccessibleSellingLocationOptions(menu.locations || [], state.access || {});
-  const activeLocationId = catalogueView === 'products' ? resolveActiveLocationId(filters.locationId, locationOptions) : '';
-  const filteredRows = catalogueView === 'modifiers' ? filterModifiers(sourceRows, filters) : filterItems(sourceRows, filters);
-  const items = catalogueView === 'products'
-    ? filteredRows.map((item) => applyMenuLocationPrice(item, activeLocationId, locationOptions))
-    : filteredRows;
+  const items = catalogueView === 'modifiers' ? filterModifiers(sourceRows, filters) : filterItems(sourceRows, filters);
   const paging = getPaging(items, filters);
   const pagedItems = items.slice(paging.startIndex, paging.endIndex);
   const selectedIds = new Set((menu.selectedIds || []).map(String));
@@ -157,7 +54,7 @@ export function renderMenuCatalogue({ state, onFilterChange, onMenuAction = {} }
       </div>
       <div class="menuCatalogue__headerActions">
         <input type="file" accept=".csv,.json,.xlsx,.xls,text/csv,application/json" hidden data-menu-import-input />
-        ${catalogueView === 'products' ? renderFileActionsDropdown(filters.openDropdown, menu.actionStatus, posLock) : renderModifierHeaderActions(menu.noteSuggestions)}
+        ${catalogueView === 'products' ? renderFileActionsDropdown(filters.openDropdown, menu.actionStatus, posLock) : ''}
         ${selectedCount ? renderInlineBulkDelete([...selectedIds], menu.actionStatus) : ''}
       </div>
     </header>
@@ -180,13 +77,6 @@ export function renderMenuCatalogue({ state, onFilterChange, onMenuAction = {} }
         openDropdown: filters.openDropdown,
         options: categoryOptions
       })}
-      ${catalogueView === 'products' && locationOptions.length ? renderDropdown({
-        id: 'locationId',
-        label: 'Selling Location',
-        value: activeLocationId,
-        openDropdown: filters.openDropdown,
-        options: locationOptions
-      }) : ''}
       ${renderDropdown({
         id: 'status',
         label: 'Status',
@@ -203,35 +93,11 @@ export function renderMenuCatalogue({ state, onFilterChange, onMenuAction = {} }
     ${renderEditModal(menu)}
     ${renderCategoryManagerModal(menu)}
     ${renderDeleteDialog(menu)}
-    ${catalogueView === 'modifiers' && menu.modifierLinksOpen && menu.viewingModifierLinks ? renderModifierLinkedItemsModal(menu.viewingModifierLinks, allItems) : ''}
-    ${catalogueView === 'modifiers' && menu.modifierStockRuleOpen && menu.editingModifier ? renderModifierStockActionDrawer(menu.editingModifier, modifierWorkspace) : ''}
-    ${catalogueView === 'modifiers' && menu.noteSuggestions?.open ? renderNoteSuggestionsModal(menu.noteSuggestions, modifierWorkspace) : ''}
     ${renderToast(menu.toast)}
   `;
 
   bindFilters(view, filters, onFilterChange);
   bindActions(view, pagedItems, onMenuAction, menu, posLock);
-  if (catalogueView === 'modifiers') {
-    bindModifierManagementControls(view, {
-      onCloseModifier: onMenuAction.onCloseModifier,
-      onSaveModifier: onMenuAction.onSaveModifier,
-      onModifierStockRuleChange: onMenuAction.onModifierStockRuleChange,
-      onOpenModifierStockPicker: onMenuAction.onOpenModifierStockPicker,
-      onCloseModifierStockPicker: onMenuAction.onCloseModifierStockPicker,
-      onModifierStockPickerSearch: onMenuAction.onModifierStockPickerSearch,
-      onModifierStockPickerSelect: onMenuAction.onModifierStockPickerSelect,
-      onOpenNoteSuggestions: onMenuAction.onOpenNoteSuggestions,
-      onCloseNoteSuggestions: onMenuAction.onCloseNoteSuggestions,
-      onRefreshNoteSuggestions: onMenuAction.onRefreshNoteSuggestions,
-      onToggleIgnoredNoteSuggestions: onMenuAction.onToggleIgnoredNoteSuggestions,
-      onStartNoteRuleSetup: onMenuAction.onStartNoteRuleSetup,
-      onCancelNoteRuleSetup: onMenuAction.onCancelNoteRuleSetup,
-      onNoteRuleDraftChange: onMenuAction.onNoteRuleDraftChange,
-      onSaveNoteRule: onMenuAction.onSaveNoteRule,
-      onIgnoreNoteSuggestion: onMenuAction.onIgnoreNoteSuggestion,
-      onRestoreNoteSuggestion: onMenuAction.onRestoreNoteSuggestion
-    });
-  }
 
   return view;
 }
@@ -347,27 +213,6 @@ function bindActions(view, visibleItems, onMenuAction, menu = {}, posLock = {}) 
 
   view.querySelectorAll('[data-menu-open-recipe]').forEach((button) => {
     button.addEventListener('click', () => onMenuAction.onOpenRecipe?.(button.dataset.menuOpenRecipe));
-  });
-
-  view.querySelectorAll('[data-menu-modifier-links]').forEach((button) => {
-    button.addEventListener('click', () => {
-      onMenuAction.onOpenModifierLinks?.(button.dataset.menuModifierLinks);
-    });
-  });
-
-  view.querySelectorAll('[data-menu-modifier-action-option]').forEach((button) => {
-    button.addEventListener('click', () => {
-      const modifierId = button.dataset.menuModifierActionOption || '';
-      const actionType = String(button.dataset.menuModifierActionValue || '').trim();
-      if (actionType) onMenuAction.onConfigureModifier?.(modifierId, { actionType });
-    });
-  });
-
-  view.querySelectorAll('[data-menu-modifier-links-close]').forEach((button) => {
-    button.addEventListener('click', () => onMenuAction.onCloseModifierLinks?.());
-  });
-  view.querySelector('[data-menu-modifier-links-backdrop]')?.addEventListener('click', (event) => {
-    if (event.target === event.currentTarget) onMenuAction.onCloseModifierLinks?.();
   });
 
   view.querySelectorAll('[data-menu-select]').forEach((checkbox) => {
@@ -540,10 +385,7 @@ function renderMenuRow(item, isSelected, posLock = {}) {
         <span></span>
       </label>
       <strong>
-        <span class="menuCatalogue__nameLine">
-          ${escapeHtml(item.name)}
-          ${renderLinkedToModifierPill(item)}
-        </span>
+        ${escapeHtml(item.name)}
         <small>${escapeHtml(getMenuItemMeta(item))}</small>
       </strong>
       <span class="menuCatalogue__variantColumn">${renderVariantColumn(item)}</span>
@@ -561,11 +403,6 @@ function renderMenuRow(item, isSelected, posLock = {}) {
   `;
 }
 
-function renderLinkedToModifierPill(item = {}) {
-  if (item.linkedToModifier !== true) return '';
-  return '<em class="menuCatalogue__pill menuCatalogue__pill--modifier" title="This menu product is linked from a product modifier option.">Linked to Modifier</em>';
-}
-
 function renderMenuCard(item) {
   return `
     <article class="menuCatalogue__card">
@@ -573,7 +410,7 @@ function renderMenuCard(item) {
         <span>${escapeHtml(item.category)}</span>
         ${renderStatus(item)}
       </div>
-      <h2>${escapeHtml(item.name)} ${renderLinkedToModifierPill(item)}</h2>
+      <h2>${escapeHtml(item.name)}</h2>
       ${renderVariantBadge(item)}
       ${renderModifierGroupsCell(item)}
       <div class="menuCatalogue__skuCard">SKU <strong>${escapeHtml(getSkuDisplay(item))}</strong></div>
@@ -607,9 +444,8 @@ function renderCatalogueModeToggle(activeView = 'products', productCount = 0, mo
 }
 
 function renderModifierBody(menu, items, pagedItems, paging) {
-  const suggestionCount = Number(menu.noteSuggestions?.items?.filter?.((entry) => entry.disposition !== 'IGNORED' && !entry.rule)?.length || 0);
   if (menu.status === 'loading') {
-    return renderLoadingPanel('Loading modifiers', 'Fetching all Yoco modifier groups, options, stock rules, and menu links.');
+    return renderLoadingPanel('Loading modifiers', 'Fetching modifier groups, add-ons, and menu links.');
   }
 
   if (menu.status === 'error') {
@@ -625,35 +461,28 @@ function renderModifierBody(menu, items, pagedItems, paging) {
     return `
       <div class="menuCatalogue__notice">
         <h2>No Modifiers Found</h2>
-        <p>No cached Yoco modifier groups or options are available. Run Integrations → Yoco → Sync Catalogue after deploying the latest worker.</p>
-        <button type="button" class="menuCatalogue__suggestionsButton" data-recipe-note-suggestions-open>
-          ${icon('sliders')}<span>Suggestions from orders</span>${suggestionCount ? `<strong>${suggestionCount}</strong>` : ''}
-        </button>
+        <p>No Yoco modifiers match the current filters.</p>
       </div>
     `;
   }
 
   return `
     <div class="menuCatalogue__list">
-      <div class="menuCatalogue__tableBar menuCatalogue__modifierTableBar">
+      <div class="menuCatalogue__tableBar">
         <div>
           <strong>${items.length} modifier${items.length === 1 ? '' : 's'}</strong>
           <span>Showing ${paging.total ? paging.startIndex + 1 : 0}-${paging.endIndex} of ${paging.total}</span>
         </div>
-        <div class="menuCatalogue__modifierTableActions">
-          <button type="button" class="menuCatalogue__suggestionsButton" data-recipe-note-suggestions-open>
-            ${icon('sliders')}<span>Suggestions from orders</span>${suggestionCount ? `<strong>${suggestionCount}</strong>` : ''}
-          </button>
-          ${renderPagingControls('menu', paging)}
-        </div>
+        ${renderPagingControls('menu', paging)}
       </div>
       <div class="menuCatalogue__modifierListHead">
         <span>Modifier Name</span>
-        <span>Group</span>
-        <span>Linked Items</span>
-        <span>Stock Action</span>
+        <span>Modifier Group</span>
+        <span>Price</span>
+        <span>Linked Product</span>
+        <span>Status</span>
       </div>
-      ${pagedItems.map((item) => renderModifierRow(item, menu.filters?.openDropdown || '')).join('')}
+      ${pagedItems.map(renderModifierRow).join('')}
       <div class="menuCatalogue__tableFooter">
         <span>${paging.total ? `${paging.startIndex + 1}-${paging.endIndex}` : '0'} of ${paging.total} modifiers</span>
         ${renderPageButtons('menu', paging)}
@@ -662,129 +491,21 @@ function renderModifierBody(menu, items, pagedItems, paging) {
   `;
 }
 
-function renderModifierHeaderActions(noteSuggestions = {}) {
-  const suggestionCount = Number(noteSuggestions?.items?.filter?.((entry) => entry.disposition !== 'IGNORED' && !entry.rule)?.length || 0);
-  return `
-    <button type="button" class="menuCatalogue__suggestionsButton menuCatalogue__suggestionsButton--header" data-recipe-note-suggestions-open>
-      ${icon('sliders')}
-      <span>Suggestions from orders</span>
-      ${suggestionCount ? `<strong>${suggestionCount}</strong>` : ''}
-    </button>
-  `;
-}
-
-function renderModifierRow(item = {}, openDropdown = '') {
-  const linkedItems = getModifierLinkedItemsDisplay(item);
-  const kind = getModifierKindLabel(item);
-  const action = String(item.stockRule?.actionType || '').toUpperCase();
+function renderModifierRow(item = {}) {
+  const linkedProduct = getLinkedProductDisplay(item);
   return `
     <article class="menuCatalogue__modifierRow">
-      <strong class="menuCatalogue__modifierName">
-        <span>${escapeHtml(item.name)}</span>
-        <small>${escapeHtml(kind)}</small>
+      <strong>
+        ${escapeHtml(item.name)}
+        <small>${escapeHtml(item.recipeSource === 'linked_product' ? 'Yoco product modifier' : 'Yoco modifier')}</small>
       </strong>
       <span>${escapeHtml(item.modifierGroup || 'Modifier Group')}</span>
-      <button type="button" class="menuCatalogue__linkedItemsButton" data-menu-modifier-links="${escapeAttribute(item.id)}" title="${escapeAttribute(linkedItems.title)}">
-        ${icon('list')}<span>${escapeHtml(linkedItems.label)}</span>
-      </button>
-      ${renderModifierActionDropdown(item, action, openDropdown)}
+      <span class="menuCatalogue__rowPrice">${formatCurrency(item.sellingPrice)}</span>
+      <span class="menuCatalogue__linkedProduct" title="${escapeAttribute(linkedProduct.title)}">${escapeHtml(linkedProduct.value)}</span>
+      <em class="menuCatalogue__modifierStatus menuCatalogue__modifierStatus--${escapeAttribute(item.status || 'unlinked')}">
+        ${escapeHtml(item.statusLabel || 'Unlinked')}
+      </em>
     </article>
-  `;
-}
-
-function getModifierKindLabel(item = {}) {
-  const kind = String(item.modifierKind || '').toLowerCase();
-  if (kind === 'note' || item.isNoteModifier) return 'Note modifier';
-  if (kind === 'product' || item.yocoModifierVariantId) return 'Product modifier';
-  return 'Option modifier';
-}
-
-function getModifierLinkedItemsDisplay(item = {}) {
-  const names = Array.isArray(item.linkedItemNames) && item.linkedItemNames.length
-    ? item.linkedItemNames
-    : Array.isArray(item.linkedProductNames) ? item.linkedProductNames : [];
-  const count = Number(item.linkedItemCount ?? names.length ?? 0) || 0;
-  if (!count && !names.length) return { label: 'No items', title: 'No menu items are linked to this modifier group.' };
-  const resolvedCount = count || names.length;
-  return {
-    label: `${resolvedCount} Item${resolvedCount === 1 ? '' : 's'}`,
-    title: names.length ? names.join(', ') : `${resolvedCount} linked menu items`
-  };
-}
-
-const modifierActionOptions = [
-  ['', 'Select stock action'],
-  ['ADD_RECIPE', 'Add recipe'],
-  ['ADD_STOCK_ITEM', 'Add stock item'],
-  ['REMOVE_INGREDIENT', 'Remove ingredient'],
-  ['REPLACE_INGREDIENT', 'Replace ingredient'],
-  ['NO_STOCK_CHANGE', 'No stock change']
-];
-
-function renderModifierActionDropdown(item = {}, action = '', openDropdown = '') {
-  const dropdownId = `modifier-action:${String(item.id || '')}`;
-  const isOpen = openDropdown === dropdownId;
-  const active = modifierActionOptions.find(([value]) => value === action) || modifierActionOptions[0];
-  return `
-    <div class="menuCatalogue__stockActionPicker ${isOpen ? 'is-open' : ''}" data-menu-dropdown-root>
-      <button type="button" data-menu-dropdown="${escapeAttribute(dropdownId)}" aria-expanded="${isOpen}" aria-haspopup="listbox" title="Choose the stock action and continue its setup.">
-        <span>${escapeHtml(active[1])}</span>
-        ${icon('chevron')}
-      </button>
-      <div class="menuCatalogue__stockActionMenu" role="listbox" aria-label="Stock action for ${escapeAttribute(item.name || 'modifier')}">
-        ${modifierActionOptions.filter(([value]) => value).map(([value, label]) => `
-          <button
-            type="button"
-            role="option"
-            aria-selected="${action === value}"
-            class="${action === value ? 'is-active' : ''}"
-            data-menu-modifier-action-option="${escapeAttribute(item.id)}"
-            data-menu-modifier-action-value="${escapeAttribute(value)}"
-          >
-            <span>${escapeHtml(label)}</span>
-            ${action === value ? icon('check') : ''}
-          </button>
-        `).join('')}
-      </div>
-    </div>
-  `;
-}
-
-function renderModifierLinkedItemsModal(item = {}, menuItems = []) {
-  const linked = resolveModifierLinkedItems(item, menuItems);
-  return `
-    <div class="menuCatalogue__linkedItemsBackdrop" data-menu-modifier-links-backdrop>
-      <section class="menuCatalogue__linkedItemsModal" role="dialog" aria-modal="true" aria-labelledby="modifier-linked-items-title">
-        <header>
-          <div>
-            <p>Linked menu items</p>
-            <h2 id="modifier-linked-items-title">${escapeHtml(item.name || 'Modifier')}</h2>
-            <span>${linked.length} linked item${linked.length === 1 ? '' : 's'}</span>
-          </div>
-          <button type="button" data-menu-modifier-links-close aria-label="Close linked items">${icon('x')}</button>
-        </header>
-        <div class="menuCatalogue__linkedItemsList">
-          ${linked.length ? linked.map((entry) => `
-            <article>
-              <span>${icon('list')}</span>
-              <div>
-                <strong>${escapeHtml(entry.name)}</strong>
-                <small>${escapeHtml(entry.category || 'Menu item')}</small>
-              </div>
-            </article>
-          `).join('') : `
-            <div class="menuCatalogue__linkedItemsEmpty">
-              ${icon('list')}
-              <strong>No linked menu items</strong>
-              <p>This modifier group is not currently assigned to a menu item.</p>
-            </div>
-          `}
-        </div>
-        <footer>
-          <button type="button" data-menu-modifier-links-close>Close</button>
-        </footer>
-      </section>
-    </div>
   `;
 }
 
@@ -1320,12 +1041,7 @@ function filterModifiers(items, filters) {
       linkedProduct.value.toLowerCase().includes(query) ||
       linkedProduct.title.toLowerCase().includes(query);
     const matchesGroup = !filters.category || item.modifierGroup === filters.category;
-    const kind = String(item.modifierKind || (item.isNoteModifier ? 'note' : 'option')).toLowerCase();
-    const configured = Boolean(item.stockRule?.actionType);
-    const matchesStatus = !filters.status ||
-      filters.status === kind ||
-      (filters.status === 'configured' && configured) ||
-      (filters.status === 'unconfigured' && !configured);
+    const matchesStatus = !filters.status || item.status === filters.status;
     return matchesQuery && matchesGroup && matchesStatus;
   });
 }

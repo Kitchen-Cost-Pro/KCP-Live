@@ -1,5 +1,4 @@
 import { completeFirstLoginPasswordChange, confirmPasswordReset, getAuthSecurityConfig, registerWorkspaceAccount, requestPasswordReset, signIn } from './services/authService.js';
-import { LEGAL_DOCUMENT_VERSION, PRIVACY_POLICY_URL, TERMS_OF_SERVICE_URL } from './legal.js';
 import styles from './styles/auth.module.css';
 
 let authTurnstileSiteKey = '';
@@ -10,8 +9,6 @@ let authTurnstileToken = '';
 let authTurnstileConfigLoaded = false;
 let authTurnstileConfigPromise = null;
 let authTurnstileLoadTimer = null;
-let authTurnstileConfigError = null;
-let authTurnstileConfigurationIssue = '';
 
 export function renderLogin({
   authState = {},
@@ -88,19 +85,13 @@ export function renderLogin({
     const formData = new FormData(registerForm);
 
     try {
-      if (formData.get('legalAccepted') !== 'on') {
-        throw new Error('You must agree to the Terms of Service and acknowledge the Privacy Policy before registering.');
-      }
       const turnstileToken = await requireAuthTurnstileToken(view);
       onBusy?.('Creating your workspace...', 'register');
       const result = await registerWorkspaceAccount({
         fullName: formData.get('fullName') || user?.displayName,
         siteName: formData.get('siteName'),
         email: user?.email || formData.get('email'),
-        turnstileToken,
-        termsAccepted: true,
-        privacyAcknowledged: true,
-        legalVersion: LEGAL_DOCUMENT_VERSION
+        turnstileToken
       });
       onRegistrationPending?.({
         ...result,
@@ -229,41 +220,21 @@ function getAuthTurnstileElements(root = document) {
 function bootAuthTurnstile(root) {
   const { retry } = getAuthTurnstileElements(root);
   retry?.addEventListener('click', () => reloadAuthTurnstile(root));
-  loadAuthTurnstileConfig(root).catch((error) => {
-    markAuthTurnstileUnavailable(
-      root,
-      error?.message
-        ? `Security configuration could not load: ${error.message}`
-        : 'Security configuration could not load. Check the API connection, then retry.'
-    );
-  });
+  loadAuthTurnstileConfig(root).catch(() => markAuthTurnstileUnavailable(root));
 }
 
-async function loadAuthTurnstileConfig(root, { force = false } = {}) {
-  if (force) {
-    authTurnstileConfigLoaded = false;
-    authTurnstileConfigPromise = null;
-    authTurnstileConfigError = null;
-    authTurnstileConfigurationIssue = '';
-  }
-
+async function loadAuthTurnstileConfig(root) {
   if (!authTurnstileConfigLoaded) {
-    authTurnstileConfigPromise ||= getAuthSecurityConfig({ force })
+    authTurnstileConfigPromise ||= getAuthSecurityConfig()
       .then((config = {}) => {
         authTurnstileSiteKey = String(config.siteKey || '').trim();
         authTurnstileEnabled = Boolean(config.enabled && authTurnstileSiteKey);
-        authTurnstileConfigurationIssue = authTurnstileSiteKey && !authTurnstileEnabled
-          ? 'Turnstile is configured with a site key, but the Worker secret is missing. Set TURNSTILE_SECRET_KEY and redeploy.'
-          : '';
-        authTurnstileConfigError = null;
         authTurnstileConfigLoaded = true;
         return config;
       })
       .catch((error) => {
-        authTurnstileConfigLoaded = false;
+        authTurnstileConfigLoaded = true;
         authTurnstileEnabled = false;
-        authTurnstileConfigError = error;
-        authTurnstileConfigPromise = null;
         throw error;
       });
     await authTurnstileConfigPromise;
@@ -291,13 +262,7 @@ function renderAuthTurnstile(root = document) {
   const { panel, widget, status, retry } = getAuthTurnstileElements(root);
   if (!panel || !widget) return;
   if (!authTurnstileEnabled || !authTurnstileSiteKey) {
-    if (authTurnstileConfigurationIssue || authTurnstileConfigError) {
-      panel.hidden = false;
-      if (status) status.textContent = authTurnstileConfigurationIssue || 'Security configuration could not load.';
-      retry?.classList.add(styles.isVisible);
-    } else {
-      panel.hidden = true;
-    }
+    panel.hidden = true;
     return;
   }
 
@@ -351,7 +316,7 @@ function markAuthTurnstileUnavailable(root, message = 'Security check could not 
   window.KCP_APP_TURNSTILE_LOAD_FAILED = true;
   authTurnstileToken = '';
   const { panel, status, retry } = getAuthTurnstileElements(root);
-  if (panel) panel.hidden = false;
+  if (panel && authTurnstileEnabled) panel.hidden = false;
   if (status) status.textContent = message;
   retry?.classList.add(styles.isVisible);
 }
@@ -364,19 +329,6 @@ function reloadAuthTurnstile(root = document) {
   if (widget) widget.innerHTML = '';
   if (status) status.textContent = 'Security check loading...';
   retry?.classList.remove(styles.isVisible);
-
-  if (!authTurnstileConfigLoaded || authTurnstileConfigError || authTurnstileConfigurationIssue) {
-    loadAuthTurnstileConfig(root, { force: true }).catch((error) => {
-      markAuthTurnstileUnavailable(
-        root,
-        error?.message
-          ? `Security configuration could not load: ${error.message}`
-          : 'Security configuration could not load. Check the API connection, then retry.'
-      );
-    });
-    return;
-  }
-
   renderAuthTurnstile(root);
 }
 
@@ -453,8 +405,6 @@ function renderCredentialsCard(authState) {
         ${authState.status === 'loading' ? 'Authenticating...' : 'Sign In To Workspace'}
       </button>
 
-      ${renderLoginLegalNotice()}
-
       <p class="${styles.authSwitch}">
         Need an account?
         <button type="button" data-auth-mode="register">Create one</button>
@@ -490,8 +440,6 @@ function renderRegistrationCard(authState, user = null) {
 
       ${renderAuthTurnstilePanel()}
 
-      ${renderRegistrationLegalAcceptance()}
-
       ${authState.error ? `<div class="${styles.errorBox}" role="alert">${escapeHtml(authState.error)}</div>` : ''}
 
       <button class="${styles.primaryButton}" type="submit" ${authState.status === 'loading' ? 'disabled' : ''}>
@@ -503,31 +451,6 @@ function renderRegistrationCard(authState, user = null) {
         <button type="button" data-auth-mode="login">Sign in</button>
       </p>
     </form>
-  `;
-}
-
-function renderLoginLegalNotice() {
-  return `
-    <p class="${styles.legalNotice}">
-      By signing in, you acknowledge the
-      <a href="${PRIVACY_POLICY_URL}" target="_blank" rel="noopener noreferrer">Privacy Policy</a>
-      and
-      <a href="${TERMS_OF_SERVICE_URL}" target="_blank" rel="noopener noreferrer">Terms of Service</a>.
-    </p>
-  `;
-}
-
-function renderRegistrationLegalAcceptance() {
-  return `
-    <label class="${styles.legalAcceptance}">
-      <input type="checkbox" name="legalAccepted" required />
-      <span>
-        I have read and agree to the
-        <a href="${TERMS_OF_SERVICE_URL}" target="_blank" rel="noopener noreferrer">Terms of Service</a>
-        and acknowledge the
-        <a href="${PRIVACY_POLICY_URL}" target="_blank" rel="noopener noreferrer">Privacy Policy</a>.
-      </span>
-    </label>
   `;
 }
 

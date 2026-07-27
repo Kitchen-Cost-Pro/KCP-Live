@@ -1,7 +1,14 @@
-import { callCloudflareWorkspaceRoute } from './cloudflareApi.js';
+import { callCloudflareRoute, callCloudflareWorkspaceRoute } from './cloudflareApi.js';
 import { fetchStock } from './stockService.js';
 import { parseBarcodeValues } from '../utils/barcodes.js';
 import { getEffectiveRecipeLines, getRecipeStatus, RECIPE_STATUS } from './recipeStatus.js';
+import {
+  buildProductRecipeSavePayload,
+  isRecipePersistenceApiCompatible,
+  normalizeRecipeLines,
+  recipeLinesMatch,
+  REQUIRED_RECIPE_PERSISTENCE_VERSION
+} from './recipePayload.js';
 
 export function subscribeRecipeWorkspace(workspaceId, { onSnapshot, onError } = {}) {
   const workspaceKey = requireWorkspace(workspaceId);
@@ -9,11 +16,10 @@ export function subscribeRecipeWorkspace(workspaceId, { onSnapshot, onError } = 
 
   const load = async () => {
     try {
-      const [productResponse, modifierResponse, stockResponse, noteResponse] = await Promise.all([
+      const [productResponse, modifierResponse, stockResponse] = await Promise.all([
         callCloudflareWorkspaceRoute(workspaceKey, 'products', { query: { limit: 500 } }),
         callCloudflareWorkspaceRoute(workspaceKey, 'yoco/modifier-recipes', { method: 'GET' }).catch(() => ({ items: [] })),
-        fetchStock(workspaceKey),
-        fetchModifierNoteSuggestions(workspaceKey).catch(() => ({ suggestions: [] }))
+        fetchStock(workspaceKey)
       ]);
       if (closed) return;
       const productItems = (productResponse.products || productResponse.items || []).map(normalizeRecipeItem);
@@ -23,15 +29,12 @@ export function subscribeRecipeWorkspace(workspaceId, { onSnapshot, onError } = 
         status: 'ready',
         items,
         ingredients: stockResponse.items || [],
-        locations: stockResponse.locations || [],
-        noteSuggestions: noteResponse.suggestions || [],
         source: 'Live catalogue',
         loaded: {
           firestoreItems: false,
           realtimeItems: false,
           menuItems: true,
-          ingredients: true,
-          noteSuggestions: true
+          ingredients: true
         },
         updatedAt: new Date().toISOString()
       });
@@ -49,7 +52,7 @@ export function subscribeRecipeWorkspace(workspaceId, { onSnapshot, onError } = 
 
 export async function fetchRecipeItems(workspaceId, options = {}) {
   const workspaceKey = requireWorkspace(workspaceId);
-  const [productResponse, modifierResponse, stockResponse, noteResponse] = await Promise.all([
+  const [productResponse, modifierResponse, stockResponse] = await Promise.all([
     callCloudflareWorkspaceRoute(workspaceKey, 'products', {
       query: {
         limit: 500,
@@ -62,90 +65,83 @@ export async function fetchRecipeItems(workspaceId, options = {}) {
         _refresh: options.cacheBust ? Date.now() : ''
       }
     }).catch(() => ({ items: [] })),
-    fetchStock(workspaceKey),
-    fetchModifierNoteSuggestions(workspaceKey, {
-      includeIgnored: options.includeIgnored,
-      cacheBust: options.cacheBust
-    }).catch(() => ({ suggestions: [] }))
+    fetchStock(workspaceKey)
   ]);
   const productItems = (productResponse.products || productResponse.items || []).map(normalizeRecipeItem);
   const modifierItems = (modifierResponse.modifiers || modifierResponse.items || []).map(normalizeRecipeItem);
   return {
     items: sortRecipeItems(filterActiveRecipeItems([...productItems, ...modifierItems])),
-    ingredients: stockResponse.items || [],
-    locations: stockResponse.locations || [],
-    noteSuggestions: noteResponse.suggestions || []
+    ingredients: stockResponse.items || []
   };
-}
-
-export async function fetchModifierNoteSuggestions(workspaceId, options = {}) {
-  const workspaceKey = requireWorkspace(workspaceId);
-  return callCloudflareWorkspaceRoute(workspaceKey, 'yoco/modifier-note-suggestions', {
-    method: 'GET',
-    query: {
-      includeIgnored: options.includeIgnored ? 1 : 0,
-      minimumSeen: 3,
-      _refresh: options.cacheBust ? Date.now() : ''
-    }
-  });
-}
-
-export async function saveModifierNoteRule(workspaceId, noteText, rule = {}) {
-  const workspaceKey = requireWorkspace(workspaceId);
-  return callCloudflareWorkspaceRoute(workspaceKey, 'yoco/modifier-note-rules', {
-    method: 'POST',
-    payload: { noteText, rule }
-  });
-}
-
-export async function ignoreModifierNoteSuggestion(workspaceId, noteText) {
-  const workspaceKey = requireWorkspace(workspaceId);
-  return callCloudflareWorkspaceRoute(workspaceKey, 'yoco/modifier-note-ignore', {
-    method: 'POST',
-    payload: { noteText }
-  });
-}
-
-export async function restoreModifierNoteSuggestion(workspaceId, noteText) {
-  const workspaceKey = requireWorkspace(workspaceId);
-  return callCloudflareWorkspaceRoute(workspaceKey, 'yoco/modifier-note-restore', {
-    method: 'POST',
-    payload: { noteText }
-  });
 }
 
 export async function updateRecipe(workspaceId, item, recipe = []) {
   const workspaceKey = requireWorkspace(workspaceId);
   if (!item?.id) throw new Error('Menu item id is required to update recipes.');
+  await assertRecipePersistenceApi();
   if (item.recipeOwnerType === 'yoco_modifier') {
     const ownerId = String(item.recipeOwnerId || item.id).replace(/^modifier:/, '');
-    await callCloudflareWorkspaceRoute(workspaceKey, `yoco/modifier-recipes/${encodeURIComponent(ownerId)}`, {
+    const result = await callCloudflareWorkspaceRoute(workspaceKey, `yoco/modifier-recipes/${encodeURIComponent(ownerId)}`, {
       method: 'PATCH',
+      timeoutMs: 15000,
       payload: {
         recipe: normalizeRecipeLines(recipe),
         linkedProductId: item.linkedProductId || '',
-        linkedProductIds: Array.isArray(item.linkedProductIds) ? item.linkedProductIds : linkedProductIdsFromValue(item.linkedProductId),
-        stockRule: normalizeModifierStockRule(item),
-        yocoModifierId: item.yocoModifierId || '',
-        yocoModifierGroupId: item.yocoModifierGroupId || '',
-        yocoModifierVariantId: item.yocoModifierVariantId || '',
-        name: item.name || ''
+        linkedProductIds: Array.isArray(item.linkedProductIds) ? item.linkedProductIds : linkedProductIdsFromValue(item.linkedProductId)
       }
     });
-    return;
+    if (result.persisted !== true) {
+      throw new Error('The modifier recipe response could not confirm that the changes were persisted.');
+    }
+    return result;
   }
 
-	  await callCloudflareWorkspaceRoute(workspaceKey, `products/${encodeURIComponent(item.id)}`, {
-	    method: 'PATCH',
-	    payload: {
-	      id: item.id,
-	      name: item.name,
-	      category: item.category || 'General',
-	      sellingPrice: Number(item.sellingPrice || item.price || 0) || 0,
-	      recipeSourceStockItemId: item.recipeSourceStockItemId || '',
-	      recipe: normalizeRecipeLines(recipe)
-	    }
-	  });
+  const payload = buildProductRecipeSavePayload(item, recipe);
+  const recipeRoute = `products/${encodeURIComponent(item.id)}/recipe`;
+  const result = await callCloudflareWorkspaceRoute(workspaceKey, recipeRoute, {
+    method: 'PATCH',
+    timeoutMs: 15000,
+    payload
+  });
+
+  if (result.persisted !== true || !recipeLinesMatch(payload.recipe, result.recipe || [])) {
+    throw new Error('The recipe response could not confirm that the saved ingredient lines match your changes.');
+  }
+  if (result.storageVerified?.recipeLines !== true || result.storageVerified?.productJson !== true) {
+    throw new Error('The recipe response did not verify every database representation.');
+  }
+
+  // A separate GET is deliberate: never close the editor based only on the mutation response.
+  // This catches a stale Worker, an incomplete transaction, or a write that was immediately lost.
+  const readBack = await callCloudflareWorkspaceRoute(workspaceKey, recipeRoute, {
+    method: 'GET',
+    timeoutMs: 15000,
+    query: { _refresh: Date.now() }
+  });
+  if (
+    readBack.persisted !== true ||
+    readBack.storageVerified?.recipeLines !== true ||
+    readBack.storageVerified?.productJson !== true ||
+    !recipeLinesMatch(payload.recipe, readBack.recipe || [])
+  ) {
+    throw new Error('KCP could not read the edited recipe back from the database. The editor has stayed open.');
+  }
+  return readBack;
+}
+
+let recipeApiVerifiedAt = 0;
+
+async function assertRecipePersistenceApi() {
+  if (Date.now() - recipeApiVerifiedAt < 60000) return;
+  const health = await callCloudflareRoute('health', { timeoutMs: 10000 });
+  if (!isRecipePersistenceApiCompatible(health)) {
+    const release = String(health.workerRelease || 'an older release').trim();
+    throw new Error(
+      `The KCP API is still running ${release}. Deploy the cloudflare-v2 Worker from this build before saving recipes ` +
+      `(required persistence contract: ${REQUIRED_RECIPE_PERSISTENCE_VERSION}).`
+    );
+  }
+  recipeApiVerifiedAt = Date.now();
 }
 
 export async function clearMultipleRecipes(workspaceId, items = []) {
@@ -332,7 +328,6 @@ function normalizeRecipeItem(item = {}) {
 	    recipeSourceRecipeLines,
 	    recipeOwnerType: item.recipeOwnerType || 'product',
 	    recipeOwnerId: item.recipeOwnerId || item.id || '',
-      stockRule: isModifierRecipeItem(item) ? normalizeModifierStockRule(item) : null,
 	    recipeSource: item.recipeSource || (recipeStatus === RECIPE_STATUS.COMPLETE_VIA_LINKED_STOCK_ITEM ? 'linked_stock_item' : recipe.length ? 'direct' : 'missing'),
 	    recipe,
 	    directRecipe: recipe,
@@ -369,30 +364,6 @@ function displaySourceLabel(source = '', fallback = 'Live data') {
   return value && !/flare|d1/i.test(value) ? value : fallback;
 }
 
-function normalizeModifierStockRule(item = {}) {
-  const source = item.stockRule && typeof item.stockRule === 'object' ? item.stockRule : {};
-  const ownerId = String(item.recipeOwnerId || item.id || '').replace(/^modifier:/, '');
-  const actionType = String(source.actionType || (item.recipeCount || item.linkedProductId ? 'ADD_RECIPE' : 'NO_STOCK_CHANGE')).toUpperCase();
-  return {
-    ...source,
-    actionType,
-    targetOwnerType: String(source.targetOwnerType || (actionType === 'ADD_RECIPE' ? 'yoco_modifier' : '')),
-    targetOwnerId: String(source.targetOwnerId || (actionType === 'ADD_RECIPE' ? ownerId : '')),
-    sourceStockItemId: String(source.sourceStockItemId || ''),
-    replacementStockItemId: String(source.replacementStockItemId || ''),
-    quantity: Number(source.quantity || 1) || 1,
-    unit: String(source.unit || 'ea'),
-    menuItemIds: Array.isArray(source.menuItemIds) ? source.menuItemIds.map(String).filter(Boolean) : [],
-    locationIds: [],
-    applyAllMatchingProducts: source.applyAllMatchingProducts !== false,
-    active: source.active !== false,
-    sourceModifierId: String(source.sourceModifierId || item.yocoModifierId || ''),
-    sourceModifierGroupId: String(source.sourceModifierGroupId || item.yocoModifierGroupId || ''),
-    sourceModifierVariantId: String(source.sourceModifierVariantId || item.yocoModifierVariantId || ''),
-    sourceName: String(source.sourceName || item.name || '')
-  };
-}
-
 function linkedProductIdsFromValue(value = '') {
   const raw = String(value || '').trim();
   if (!raw) return [];
@@ -413,19 +384,6 @@ function getModifierRecipeOwnerId(item = {}) {
 
 function linkedProductNamesFromValue(value = '') {
   return String(value || '').split(',').map((entry) => entry.trim()).filter(Boolean);
-}
-
-function normalizeRecipeLines(recipe) {
-  const lines = Array.isArray(recipe) ? recipe : Object.values(recipe || {});
-  return lines
-    .filter((line) => (line?.ingId || line?.stockItemId || line?.stock_item_id) && parseDecimal(line.qty ?? line.quantity, 0) > 0)
-    .map((line) => ({
-      ingId: String(line.ingId || line.stockItemId || line.stock_item_id),
-      stockItemId: String(line.stockItemId || line.stock_item_id || line.ingId),
-      qty: parseDecimal(line.qty ?? line.quantity, 0),
-      quantity: parseDecimal(line.quantity ?? line.qty, 0),
-      unit: String(line.unit || line.uom || 'ea').trim() || 'ea'
-    }));
 }
 
 function sortRecipeItems(items) {

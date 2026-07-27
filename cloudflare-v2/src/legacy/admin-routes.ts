@@ -1,10 +1,9 @@
 import type { AuthContext, Env, DbLike, DbStatementLike } from './types';
 import { error, json, readJson } from './http';
 import { requireAuth } from './auth';
-import { connectYoco, disconnectYoco, getYocoApiKey, getYocoConnection, resetYocoWebhook, syncYocoCatalogue } from '../modules/yoco-engine-v2/integration-service';
+import { connectYoco, disconnectYoco, getYocoApiKey, getYocoConnection, syncYocoCatalogue, syncYocoSales } from './yoco-service';
 import { sendEmail, type EmailDeliveryConfig } from './email';
 import { encryptTextWithSecret, decryptTextWithSecret } from './crypto';
-import { KCP_WORKER_RELEASE, KCP_WORKER_RELEASE_DATE, KCP_REFUND_PIPELINE_VERSION } from '../release';
 
 function text(value: unknown, fallback = '') {
   return String(value ?? fallback).trim();
@@ -191,7 +190,9 @@ function normalizeBroadcastPayload(value: Record<string, any> = {}) {
     : [normalizeBroadcastItem(value)].filter((item) => item.message);
   const first = items[0] || normalizeBroadcastItem(value);
   return {
-    enabled: Boolean(value.enabled ?? value.active ?? items.some((item) => item.enabled)),
+    enabled: items.length
+      ? items.some((item) => item.enabled)
+      : Boolean(value.enabled ?? value.active),
     severity: first.severity,
     gradient: first.gradient || '',
     title: first.title,
@@ -221,7 +222,7 @@ async function getActiveBroadcastConfig(env: Env) {
   const broadcast = await getBroadcastConfig(env);
   const now = Date.now();
   const activeItems = (broadcast.items || []).filter((item) => isBroadcastItemActive(item, now));
-  if (!broadcast.enabled || !activeItems.length) return null;
+  if (!activeItems.length) return null;
   const first = activeItems[0];
   return {
     ...broadcast,
@@ -564,6 +565,34 @@ async function maybeBootstrapAdminUser(env: Env, auth: AuthContext) {
   return findAdminUserByAuth(env, auth);
 }
 
+async function verifyFirebaseJwt(token: string, projectId: string): Promise<{ uid: string; email: string; name?: string } | null> {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const pad = (s: string) => s + '=='.slice(0, (4 - s.length % 4) % 4);
+    const decodeB64 = (s: string) => atob(pad(s.replace(/-/g, '+').replace(/_/g, '/')));
+    const header = JSON.parse(decodeB64(parts[0]));
+    const payload = JSON.parse(decodeB64(parts[1]));
+    const now = Math.floor(Date.now() / 1000);
+    if (payload.iss !== `https://securetoken.google.com/${projectId}`) return null;
+    if (payload.aud !== projectId) return null;
+    if (!payload.sub || payload.exp <= now || payload.iat > now + 300) return null;
+    const keysRes = await fetch('https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com');
+    if (!keysRes.ok) return null;
+    const { keys } = await keysRes.json() as { keys: any[] };
+    const jwk = keys.find((k: any) => k.kid === header.kid);
+    if (!jwk) return null;
+    const pubKey = await crypto.subtle.importKey('jwk', jwk, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']);
+    const data = new TextEncoder().encode(`${parts[0]}.${parts[1]}`);
+    const sig = Uint8Array.from(decodeB64(parts[2]), (c) => c.charCodeAt(0));
+    const valid = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', pubKey, sig, data);
+    if (!valid) return null;
+    return { uid: payload.sub, email: text(payload.email), name: payload.name };
+  } catch {
+    return null;
+  }
+}
+
 export async function requireAdmin(request: Request, env: Env) {
   const configured = text(env.ADMIN_API_TOKEN);
   const suppliedToken = text(request.headers.get('x-kcp-admin-token'));
@@ -582,12 +611,26 @@ export async function requireAdmin(request: Request, env: Env) {
         createdAt: '',
         updatedAt: '',
         createdBy: 'system',
-        notes: 'Environment token access'
+        notes: 'Legacy env token access'
       }
     };
   }
 
-  // The admin portal authenticates exclusively through the central D1 session plane.
+  // Try Firebase JWT (admin console uses Firebase Auth)
+  const authHeader = request.headers.get('authorization') || '';
+  const bearerMatch = authHeader.match(/^Bearer\s+(.+)$/i);
+  if (bearerMatch) {
+    const projectId = text(env.FIREBASE_PROJECT_ID || '');
+    const claims = await verifyFirebaseJwt(bearerMatch[1], projectId);
+    if (claims) {
+      const fakeAuth: AuthContext = { uid: claims.uid, email: claims.email, token: { sub: claims.uid, email: claims.email, name: claims.name || '' } };
+      let admin = await findAdminUserByAuth(env, fakeAuth);
+      if (!admin) admin = await maybeBootstrapAdminUser(env, fakeAuth);
+      if (admin) return { via: 'firebase' as const, auth: fakeAuth, admin };
+    }
+  }
+
+  // Fall back to D1 session token
   const auth = await requireAuth(request, env);
   let admin = await findAdminUserByAuth(env, auth);
   if (!admin) admin = await maybeBootstrapAdminUser(env, auth);
@@ -604,54 +647,47 @@ export async function getSystemBroadcast(request: Request, env: Env) {
 
 export async function getAdminSystemSettings(request: Request, env: Env) {
   await requireAdmin(request, env);
+  const storedBroadcast = await getBroadcastConfig(env);
+  const activeItems = (storedBroadcast.items || []).filter((item) => isBroadcastItemActive(item));
   return json(request, env, {
     ok: true,
     emailConfig: await getEmailConfigForClient(env),
-    broadcast: await getBroadcastConfig(env)
+    broadcast: normalizeBroadcastPayload({
+      enabled: activeItems.length > 0,
+      updatedAt: storedBroadcast.updatedAt,
+      updatedBy: storedBroadcast.updatedBy,
+      items: activeItems
+    })
   });
 }
 
-export async function getAdminAuditLogs(
-  request: Request,
-  env: Env,
-  operationalProvider?: (limit: number) => Promise<any[]>
-) {
+export async function getAdminAuditLogs(request: Request, env: Env) {
   await requireAdmin(request, env);
   await ensureAdminAuditTable(env);
   const url = new URL(request.url);
   const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 500), 1), 2000);
-  const adminRows = await env.DB.prepare(
-    `SELECT id, actor_uid, actor_email, action_type, target_id, details_json, created_at
-       FROM admin_audit_events
-      ORDER BY created_at DESC
-      LIMIT ?1`
-  ).bind(limit).all<any>();
-  let operationalRows: any[] = [];
-  if (operationalProvider) {
-    operationalRows = await operationalProvider(limit);
-  } else {
-    // Compatibility for single-database deployments. In the current architecture audit_events
-    // lives in each workspace DO and is supplied by the front Worker through operationalProvider.
-    try {
-      const rows = await env.DB.prepare(
-        `SELECT ae.id, ae.workspace_id, ae.actor_uid, ae.event_type, ae.entity_type, ae.entity_id, ae.after_json, ae.created_at,
-                au.email AS actor_email,
-                w.name AS workspace_name
-           FROM audit_events ae
-           LEFT JOIN app_users au ON au.id = ae.actor_uid
-           LEFT JOIN workspaces w ON w.id = ae.workspace_id
-          ORDER BY ae.created_at DESC
-          LIMIT ?1`
-      ).bind(limit).all<any>();
-      operationalRows = rows.results || [];
-    } catch {
-      operationalRows = [];
-    }
-  }
+  const [adminRows, operationalRows] = await Promise.all([
+    env.DB.prepare(
+      `SELECT id, actor_uid, actor_email, action_type, target_id, details_json, created_at
+         FROM admin_audit_events
+        ORDER BY created_at DESC
+        LIMIT ?1`
+    ).bind(limit).all<any>(),
+    env.DB.prepare(
+      `SELECT ae.id, ae.workspace_id, ae.actor_uid, ae.event_type, ae.entity_type, ae.entity_id, ae.after_json, ae.created_at,
+              au.email AS actor_email,
+              w.name AS workspace_name
+         FROM audit_events ae
+         LEFT JOIN app_users au ON au.id = ae.actor_uid
+         LEFT JOIN workspaces w ON w.id = ae.workspace_id
+        ORDER BY ae.created_at DESC
+        LIMIT ?1`
+    ).bind(limit).all<any>()
+  ]);
 
   const logs = [
     ...(adminRows.results || []).map(normalizeAdminAuditRow),
-    ...operationalRows.map(normalizeOperationalAuditRow)
+    ...(operationalRows.results || []).map(normalizeOperationalAuditRow)
   ].sort((a, b) => String(b.timestamp || '').localeCompare(String(a.timestamp || '')))
     .slice(0, limit);
 
@@ -748,12 +784,14 @@ export async function putAdminSystemBroadcast(request: Request, env: Env) {
   if (requestedAction === 'remove' || requestedAction === 'cancel') {
     const removeId = text(payload.id || payload.broadcastId || payload.removeId);
     if (!removeId) return error(request, env, 400, 'Broadcast id is required.');
+    const itemExists = (current.items || []).some((item) => item.id === removeId);
+    if (!itemExists) return error(request, env, 404, 'Broadcast could not be found.');
     const items = (current.items || [])
-      .filter((item) => item.message)
-      .map((item) => item.id === removeId
-        ? { ...item, enabled: false, updatedAt: now, updatedBy: adminEmail }
-        : item
-      );
+      .filter((item) => item.message && item.id !== removeId)
+      .filter((item) => {
+        const endsAt = Date.parse(item.endsAt);
+        return item.enabled && (!Number.isFinite(endsAt) || endsAt >= Date.now());
+      });
     const next = normalizeBroadcastPayload({
       enabled: items.some((item) => item.enabled),
       updatedAt: now,
@@ -769,17 +807,53 @@ export async function putAdminSystemBroadcast(request: Request, env: Env) {
   }
 
   if (requestedAction === 'clear' || payload.clear === true) {
-    const items = (current.items || [])
-      .filter((item) => item.message)
-      .map((item) => ({ ...item, enabled: false, updatedAt: now, updatedBy: adminEmail }));
     const next = normalizeBroadcastPayload({
       enabled: false,
+      updatedAt: now,
+      updatedBy: adminEmail,
+      items: []
+    });
+    const saved = await writeAdminSetting(env, SYSTEM_BROADCAST_SETTING_KEY, next, adminEmail);
+    await writeAdminAuditEvent(env, adminAuditActor(adminSession), 'broadcast.clear', 'system_broadcast', {});
+    return json(request, env, {
+      ok: true,
+      broadcast: normalizeBroadcastPayload(saved)
+    });
+  }
+
+  if (requestedAction === 'update') {
+    const updateId = text(payload.id || payload.broadcastId);
+    if (!updateId) return error(request, env, 400, 'Broadcast id is required.');
+    let updated = false;
+    const items = (current.items || []).map((item) => {
+      if (item.id !== updateId) return item;
+      updated = true;
+      return normalizeBroadcastItem({
+        ...item,
+        enabled: payload.enabled ?? payload.active ?? item.enabled,
+        severity: payload.severity ?? item.severity,
+        gradient: payload.gradient ?? item.gradient,
+        title: payload.title ?? item.title,
+        message: payload.message ?? payload.text ?? item.message,
+        startsAt: payload.startsAt ?? item.startsAt,
+        endsAt: payload.endsAt ?? item.endsAt,
+        createdAt: item.createdAt,
+        updatedAt: now,
+        updatedBy: adminEmail
+      });
+    });
+    if (!updated) return error(request, env, 404, 'Broadcast could not be found.');
+    const next = normalizeBroadcastPayload({
+      enabled: items.some((item) => item.enabled),
       updatedAt: now,
       updatedBy: adminEmail,
       items
     });
     const saved = await writeAdminSetting(env, SYSTEM_BROADCAST_SETTING_KEY, next, adminEmail);
-    await writeAdminAuditEvent(env, adminAuditActor(adminSession), 'broadcast.clear', 'system_broadcast', {});
+    await writeAdminAuditEvent(env, adminAuditActor(adminSession), 'broadcast.update', updateId, {
+      severity: payload.severity,
+      title: payload.title
+    });
     return json(request, env, {
       ok: true,
       broadcast: normalizeBroadcastPayload(saved)
@@ -800,7 +874,12 @@ export async function putAdminSystemBroadcast(request: Request, env: Env) {
   });
   if (nextItem.enabled && !nextItem.message) return error(request, env, 400, 'Broadcast message is required.');
 
-  const existingItems = (current.items || []).filter((item) => item.message);
+  const existingItems = (current.items || [])
+    .filter((item) => item.message && item.enabled)
+    .filter((item) => {
+      const endsAt = Date.parse(item.endsAt);
+      return !Number.isFinite(endsAt) || endsAt >= Date.now();
+    });
   const items = nextItem.enabled
     ? [nextItem, ...existingItems].slice(0, 8)
     : existingItems.map((item) => ({ ...item, enabled: false, updatedAt: now, updatedBy: adminEmail }));
@@ -1395,7 +1474,7 @@ export async function postAdminMember(request: Request, env: Env) {
   const payload = await readJson<Record<string, unknown>>(request);
   const workspaceId = text(payload.workspaceId);
   const email = text(payload.email).toLowerCase();
-  const role = text(payload.role || payload.roleKey || 'member');
+  const role = text(payload.role || 'member');
   const displayName = text(payload.displayName || payload.name || email.split('@')[0]);
   if (!workspaceId || !email) return error(request, env, 400, 'workspaceId and email are required.');
   const now = nowIso();
@@ -1878,7 +1957,7 @@ export async function getAdminYocoStatus(request: Request, env: Env, workspaceId
 }
 
 export async function buildAdminYocoStatus(env: Env, workspaceId: string) {
-  const [connection, catalogue, modifierCatalogue, locations, refundRecovery] = await Promise.all([
+  const [connection, catalogue, modifierCatalogue, locations] = await Promise.all([
     getYocoConnection(env, workspaceId),
     env.DB.prepare(
       `SELECT COUNT(*) AS itemsCount
@@ -1895,39 +1974,11 @@ export async function buildAdminYocoStatus(env: Env, workspaceId: string) {
       `SELECT COUNT(*) AS count
          FROM locations
         WHERE workspace_id = ?1 AND external_provider = 'yoco' AND active = 1`
-    ).bind(workspaceId).first<{ count: number }>(),
-    env.DB.prepare(
-      `SELECT COUNT(*) AS count
-         FROM yoco_webhook_events event
-        WHERE event.workspace_id = ?1
-          AND lower(replace(event.event_type, '_', '.')) IN ('payment.refunded', 'order.updated', 'refund.succeeded', 'refund.successful')
-          AND (
-            event.status IN ('attention', 'failed')
-            OR (
-              event.status = 'processing'
-              AND datetime(COALESCE(event.processed_at, event.created_at)) <= datetime('now', '-5 minutes')
-            )
-            OR (
-              event.status = 'processed'
-              AND lower(replace(event.event_type, '_', '.')) IN ('payment.refunded', 'refund.succeeded', 'refund.successful')
-              AND COALESCE(event.yoco_order_id, '') <> ''
-              AND NOT EXISTS (
-                SELECT 1
-                  FROM yoco_orders refund_order
-                 WHERE refund_order.workspace_id = event.workspace_id
-                   AND refund_order.order_type = 'refund'
-                   AND refund_order.parent_yoco_order_id = event.yoco_order_id
-              )
-            )
-          )`
     ).bind(workspaceId).first<{ count: number }>()
   ]);
   const status = text(connection?.status || 'disconnected').toLowerCase();
   return {
     ok: true,
-    workerRelease: KCP_WORKER_RELEASE,
-    workerReleaseDate: KCP_WORKER_RELEASE_DATE,
-    refundPipelineVersion: KCP_REFUND_PIPELINE_VERSION,
     status,
     connectionActive: connection?.connection_active === 1 || status === 'connected',
     syncState: 'idle',
@@ -1937,7 +1988,6 @@ export async function buildAdminYocoStatus(env: Env, workspaceId: string) {
     lastSyncCompletedAt: connection?.last_sales_sync_at || connection?.last_catalogue_sync_at || '',
     lastImportedAt: connection?.last_catalogue_sync_at || '',
     lastCheckedAt: connection?.last_sales_sync_at || connection?.last_catalogue_sync_at || '',
-    updatedAt: connection?.updated_at || connection?.created_at || '',
     lastError: connection?.last_error || '',
     webhook: {
       enabled: Boolean(connection?.webhook_id || connection?.webhook_secret),
@@ -1949,26 +1999,19 @@ export async function buildAdminYocoStatus(env: Env, workspaceId: string) {
       modifierGroupsCount: Number(modifierCatalogue?.modifierGroupsCount || 0),
       productModifiersCount: Number(modifierCatalogue?.productModifiersCount || 0)
     },
-    locations: { count: Number(locations?.count || 0) },
-    refundRecovery: {
-      pendingEvents: Number(refundRecovery?.count || 0),
-      automaticRetryEnabled: true,
-      retryIntervalSeconds: 15
-    }
+    locations: { count: Number(locations?.count || 0) }
   };
 }
 
 export async function postAdminYocoConnect(request: Request, env: Env, workspaceId: string) {
   const adminSession = await requireAdmin(request, env);
   const payload = await readJson<Record<string, unknown>>(request);
-  const connection = await connectYoco(env, workspaceId, text(payload.apiKey || payload.secretKey));
-  const catalogue = await syncYocoCatalogue(env, workspaceId);
+  const result = await connectYoco(env, workspaceId, text(payload.apiKey || payload.secretKey));
   await writeAdminAuditEvent(env, adminAuditActor(adminSession), 'yoco.connect', workspaceId, {
-    webhookEnabled: Boolean(connection.webhookEnabled),
-    connected: Boolean(connection.connected),
-    historicalSalesImported: false
+    webhookEnabled: Boolean(result.webhookEnabled),
+    connected: Boolean(result.connected)
   });
-  return json(request, env, { ok: true, ...connection, catalogueSync: catalogue, historicalSalesImported: false });
+  return json(request, env, { ok: true, ...result });
 }
 
 export async function postAdminYocoDisconnect(request: Request, env: Env, workspaceId: string) {
@@ -1988,15 +2031,24 @@ export async function postAdminYocoSyncCatalogue(request: Request, env: Env, wor
   return json(request, env, { ok: true, ...result });
 }
 
+export async function postAdminYocoSyncSales(request: Request, env: Env, workspaceId: string) {
+  const adminSession = await requireAdmin(request, env);
+  const result = await syncYocoSales(env, workspaceId);
+  await writeAdminAuditEvent(env, adminAuditActor(adminSession), 'yoco.sync_sales', workspaceId, {
+    imported: (result as any)?.imported,
+    updated: (result as any)?.updated
+  });
+  return json(request, env, { ok: true, ...result });
+}
+
 export async function postAdminYocoResetWebhook(request: Request, env: Env, workspaceId: string) {
   const adminSession = await requireAdmin(request, env);
   const apiKey = await getYocoApiKey(env, workspaceId);
   if (!apiKey) return error(request, env, 409, 'No Yoco API key stored for this workspace — connect Yoco first.');
-  const result = await resetYocoWebhook(env, workspaceId, apiKey);
+  await disconnectYoco(env, workspaceId);
+  const result = await connectYoco(env, workspaceId, apiKey);
   await writeAdminAuditEvent(env, adminAuditActor(adminSession), 'yoco.reset_webhook', workspaceId, {
-    webhookEnabled: Boolean(result.webhookEnabled),
-    createBeforeCleanup: true,
-    cleanupPending: Boolean(result.webhookCleanupPending),
+    webhookEnabled: Boolean(result.webhookEnabled)
   });
   return json(request, env, { ok: true, ...result });
 }
@@ -2104,13 +2156,13 @@ export async function getAdminGmailCallback(request: Request, env: Env) {
 
     return new Response(null, {
       status: 302,
-      headers: { location: `${adminOrigin}/admin/?gmail=connected` }
+      headers: { location: `${adminOrigin}/KCP%20Admin%20ConsoleByYOCO.html?gmail=connected` }
     });
   } catch (err) {
     const msg = encodeURIComponent(text((err as any)?.message || 'Gmail connect failed.'));
     return new Response(null, {
       status: 302,
-      headers: { location: `${adminOrigin}/admin/?gmail_error=${msg}` }
+      headers: { location: `${adminOrigin}/KCP%20Admin%20ConsoleByYOCO.html?gmail_error=${msg}` }
     });
   }
 }

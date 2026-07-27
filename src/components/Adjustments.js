@@ -202,10 +202,6 @@ function bindAdjustmentEvents(view, adjustments, filters, onAdjustmentFilterChan
     onAdjustmentFilterChange?.({ stockSearch: event.target.value, stockPage: 1 });
   });
 
-  view.querySelector('[data-adj-scan-barcode]')?.addEventListener('click', () => {
-    onAdjustmentAction.onScanBarcode?.();
-  });
-
   view.querySelectorAll('[data-adj-dropdown]').forEach((button) => {
     button.addEventListener('click', () => {
       const id = button.dataset.adjDropdown;
@@ -246,15 +242,6 @@ function bindAdjustmentEvents(view, adjustments, filters, onAdjustmentFilterChan
   view.querySelectorAll('[data-adj-stock-select]').forEach((checkbox) => {
     checkbox.addEventListener('change', () => {
       onAdjustmentAction.onToggleStockSelection?.(checkbox.dataset.adjStockSelect, checkbox.checked);
-    });
-  });
-
-  view.querySelectorAll('[data-adj-stock-row]').forEach((row) => {
-    row.addEventListener('click', (event) => {
-      if (event.target.closest('input, button, a, select, label')) return;
-      const checkbox = row.querySelector('[data-adj-stock-select]');
-      if (!checkbox || checkbox.disabled) return;
-      onAdjustmentAction.onToggleStockSelection?.(row.dataset.adjStockRow, !checkbox.checked);
     });
   });
 
@@ -363,10 +350,7 @@ function renderStockOverlay(stockItems, filters, selectedStockIds, allStockItems
         <div class="adj-overlayFilters">
           <label class="adj-overlaySearchLabel">
             ${renderFieldHelpLabel('Search', 'Search stock items you want to add into this manual adjustment.')}
-            <div class="adj-searchShell">
-              <input type="search" value="${escapeAttribute(filters.stockSearch || '')}" placeholder="Type name or scan barcode..." data-adj-stock-search data-focus-key="adj-stock-search" />
-              <button type="button" data-adj-scan-barcode aria-label="Scan barcode" title="Scan barcode">${icon('camera')}</button>
-            </div>
+            <input type="search" value="${escapeAttribute(filters.stockSearch || '')}" placeholder="Type name..." data-adj-stock-search data-focus-key="adj-stock-search" />
           </label>
           <label>
             ${renderFieldHelpLabel('Category', 'Filter the adjustment picker by category to find items faster.')}
@@ -395,7 +379,7 @@ function renderStockOverlay(stockItems, filters, selectedStockIds, allStockItems
     const isSelected = selectedStockIds.has(String(item.id));
     const isLockedOut = !isBulk && selectedStockIds.size > 0 && !isSelected;
     return `
-                <tr class="${item.alreadyAdded ? 'is-added' : ''}" data-adj-stock-row="${escapeAttribute(item.id)}">
+                <tr class="${item.alreadyAdded ? 'is-added' : ''}">
                   <td><input type="checkbox" data-adj-stock-select="${escapeAttribute(item.id)}" ${isSelected ? 'checked' : ''} ${isLockedOut ? 'disabled' : ''} /></td>
                   <td><strong>${escapeHtml(item.name || '')}</strong>${item.alreadyAdded ? '<span>Already added</span>' : ''}</td>
                   <td>${escapeHtml(item.category || '')}</td>
@@ -509,7 +493,7 @@ function renderLineDetailOverlay(detailDraft, sites, locations, filters = {}, st
         ${modeSelected === 'remove' ? `
           <div class="adj-detailWasteRow">
             <label>
-              ${renderFieldHelpLabel('Waste Reason', 'Classify wastage so dashboards can separate true waste from other stock corrections.')}
+              ${renderFieldHelpLabel('Waste Reason', 'Classify wastage so reporting can separate true waste from other stock corrections.')}
               ${renderOverlayDropdown({
     id: 'detail-wasteReason',
     action: 'detail:wasteReason',
@@ -656,7 +640,7 @@ function getStockMatches(stockItems = [], query = '', category = '', currentLine
       return (
         String(item.name || '').toLowerCase().includes(q) ||
         String(item.category || '').toLowerCase().includes(q) ||
-        stockItemHasBarcode(item, q)
+        (item.barcodes || []).some((barcode) => String(barcode).toLowerCase().includes(q))
       );
     })
     .map((item) => ({ ...item, alreadyAdded: currentKeys.has(String(item.id)) }));
@@ -666,35 +650,21 @@ function getCategoryOptions(stockItems = []) {
   return [...new Set(stockItems.filter(isPhysicalStockItem).map((item) => String(item.category || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
 }
 
-function stockItemHasBarcode(item = {}, query = '') {
-  const needle = String(query || '').trim().toLowerCase();
-  if (!needle) return false;
-  const directBarcodes = [item.barcode, ...(Array.isArray(item.barcodes) ? item.barcodes : [])];
-  if (directBarcodes.some((barcode) => String(barcode || '').toLowerCase().includes(needle))) return true;
-  return normalizeUomConfigurations(item.uomConfigurations || item.uomConfig || item.uomConversions)
-    .some((config) => config.barcode && config.barcode.toLowerCase().includes(needle));
-}
-
-function normalizeUomConfigurations(value = []) {
-  const rows = Array.isArray(value) ? value : (value && typeof value === 'object' ? [value] : []);
-  return rows
-    .map((entry = {}) => ({
-      barcode: String(entry.barcode || entry.customBarcode || entry.customUomBarcode || '').trim(),
-      isDefaultOrdering: ['true', '1', 'yes', 'on'].includes(String(entry.isDefaultOrdering ?? entry.defaultOrdering ?? entry.is_default_ordering ?? entry.defaultOrderUom ?? '').toLowerCase()) || entry.isDefaultOrdering === true || entry.defaultOrdering === true
-    }))
-    .filter((entry) => entry.barcode);
-}
-
 function isPhysicalStockItem(item = {}) {
-  // Adjustments can use Standard, Non Stock and Manufactured items, but not Sub-Recipe items.
+  if (item.isStocked === false) return false;
+  // Sub recipes are made in-house and cannot be manually adjusted.
   if (item.isSubRecipe === true) return false;
   const type = String(item.itemType || item.stockItemType || item.specificationType || '')
     .trim()
     .toLowerCase()
     .replace(/[\s-]+/g, '_');
-  if (['sub_recipe', 'subrecipe'].includes(type)) return false;
+  if (['recipe_source', 'non_stock', 'virtual', 'sub_recipe'].includes(type)) return false;
   const category = String(item.category || '').toLowerCase();
-  return !category.includes('sub recipe') &&
+  return !category.includes('recipe source') &&
+    !category.includes('non-stock') &&
+    !category.includes('non stock') &&
+    !category.includes('virtual') &&
+    !category.includes('sub recipe') &&
     !category.includes('sub-recipe');
 }
 
@@ -775,8 +745,6 @@ function renderWastageTab(adjustments, filters, onAdjustmentFilterChange, onAdju
   const locationOptions = locations.map((loc) => ({ value: loc.id, label: loc.displayName || loc.name }));
   const wasteOptions = WASTE_REASONS.map((r) => ({ value: r, label: r }));
   const totalCostImpact = (draft.items || []).reduce((sum, item) => sum + Number(item.estimatedCost || 0), 0);
-  const wastageValidationMessage = getWastageValidationMessage(draft);
-  const canRecordWastage = !wastageValidationMessage && !isSaving;
 
   if (filters.overlay === 'wastage-picker') {
     return renderWastagePickerOverlay(products, filters);
@@ -884,7 +852,7 @@ function renderWastageTab(adjustments, filters, onAdjustmentFilterChange, onAdju
                 <span>Est. Stock Cost</span>
                 <strong data-wastage-total>${formatCurrency(totalCostImpact)}</strong>
               </div>
-              <button type="button" class="adj-primary ${canRecordWastage ? '' : 'adj-primary--blocked'}" data-wastage-save aria-disabled="${canRecordWastage ? 'false' : 'true'}" data-wastage-validation="${escapeAttribute(wastageValidationMessage)}" ${isSaving ? 'disabled' : ''}>${isSaving ? 'Saving…' : 'Record Wastage'}</button>
+              <button type="button" class="adj-primary" data-wastage-save ${isSaving ? 'disabled' : ''}>${isSaving ? 'Saving…' : 'Record Wastage'}</button>
             </div>
           </section>
         `}
@@ -892,16 +860,6 @@ function renderWastageTab(adjustments, filters, onAdjustmentFilterChange, onAdju
     </div>
     ${renderWastageLog(adjustments)}
   `;
-}
-
-function getWastageValidationMessage(draft = {}) {
-  const items = Array.isArray(draft.items) ? draft.items : [];
-  if (!items.length) return 'Select at least one menu item to waste.';
-  if (!String(draft.locationId || '').trim()) return 'Select a location before recording wastage.';
-  if (!String(draft.wasteReason || '').trim()) return 'Select a waste reason before recording wastage.';
-  const invalidItem = items.find((item) => !(Number(String(item.quantity ?? '').replace(',', '.')) > 0));
-  if (invalidItem) return `Enter a quantity greater than zero for ${invalidItem.productName || 'every menu item'}.`;
-  return '';
 }
 
 function renderWastageLog(adjustments) {
@@ -1086,7 +1044,6 @@ function icon(name) {
     x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>',
     plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>',
     chevronDown: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>',
-    camera: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 4h-5L8 6H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-3l-1.5-2Z"/><circle cx="12" cy="12.5" r="3.5"/></svg>',
     clipboard: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg>',
     list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/></svg>',
     flame: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/></svg>'

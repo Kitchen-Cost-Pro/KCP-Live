@@ -1,8 +1,9 @@
 import './styles/main.css';
 import './styles/chat.css';
-import './styles/reporting.css';
 import { mountChatWidget, unmountChatWidget } from './components/Chat.js';
+import { mountCookieNotice } from './components/CookieNotice.js';
 import { renderAuthenticatedApp } from './appShell.js';
+import { renderDashboard } from './dashboard.js';
 import { renderLogin } from './auth.js';
 import {
   claimInvitationForUser,
@@ -27,18 +28,15 @@ import {
 } from './services/database.js';
 import {
   exportWorkspaceSnapshot,
-  getGoLiveReadiness,
   getStockCategoryOptions,
   getYocoCategoryOptions,
   getWorkspaceSettingsSnapshot,
   importWorkspaceSnapshot,
   normalizeSettings,
-  savePersonalSettings,
   saveWorkspaceSettings
 } from './services/settingsService.js';
-import { ACTION_PERMISSION_MAP, canManagePermissionSets, ensureExplicitDataPermissionSchema, getAccessRenderRevision, hasPermission, hasSectionAccess, normalizeRoleName, resolveRoleDefinition, toRoleLabel } from './services/roleService.js';
-import { buildSupplierPurchaseOrderPdfFile as buildSupplierPurchaseOrderPdfDocument, buildManufacturingBuilderXlsx, downloadFileBlob, downloadStyledRecipeTemplateXlsx, downloadStyledStockTemplateXlsx, parseDataFile } from './services/dataService.js';
-import { KCP_PDF_THEME } from './utils/pdfTheme.js';
+import { ACTION_PERMISSION_MAP, canManagePermissionSets, hasPermission, hasSectionAccess, normalizeRoleName, resolveRoleDefinition, toRoleLabel } from './services/roleService.js';
+import { buildSupplierPurchaseOrderPdfFile as buildSupplierPurchaseOrderPdfDocument, buildManufacturingBuilderXlsx, downloadFileBlob, parseDataFile } from './services/dataService.js';
 import {
   buildMenuCatalogueRows,
   buildGoodsReceiptDocumentRows,
@@ -52,8 +50,10 @@ import {
   exportObjectRows,
   exportSchemas,
 } from './services/exportService.js';
-import { callCloudflareWorkspaceRoute, clearApiCache } from './services/cloudflareApi.js';
-import { sendSupplierEmailWithGmail, syncYocoCatalogue, syncYocoSales } from './services/integrationService.js';
+import { dashboardTileKeys, subscribeDashboardTiles } from './services/dashboardTileService.js';
+const fetchReportConfigs = () => Promise.resolve([]);
+const saveReportConfig = (workspaceId, config) => Promise.resolve(config);
+const deleteReportConfig = () => Promise.resolve();
 import { fetchSystemBroadcast } from './services/systemBroadcastService.js';
 import { DEFAULT_STOCK_LOCATION_ID, DEFAULT_STOCK_LOCATION_NAME } from './services/locationModel.js';
 import {
@@ -65,12 +65,7 @@ import {
 } from './themePresets.js';
 import { matchesBarcodeQuery, parseBarcodeValues } from './utils/barcodes.js';
 import { todayLocal } from './utils/date.js';
-import {
-  cleanupAppDropdownPortal,
-  installAppDropdownPortalSystem,
-  scheduleAppDropdownPortalRefresh
-} from './utils/appDropdownPortal.js';
-import { isStockCountableItem, isTransferEligibleStockItem } from './services/stockCountEligibility.js';
+import { isStockCountableItem } from './services/stockCountEligibility.js';
 // Canonical per-location balance resolver (same one the Transfers UI uses to show before/after),
 // so the transfer insufficient-stock validation resolves the source balance identically.
 import { getLocationStock as resolveLocationStock } from './utils/stockBalances.js';
@@ -78,14 +73,15 @@ import { getLocationStock as resolveLocationStock } from './utils/stockBalances.
 const app = document.querySelector('#app');
 const THEME_STORAGE_KEY = 'kcp-live-theme';
 const ROUTE_STORAGE_KEY = 'kcp-live-route';
+const DASHBOARD_RANGE_STORAGE_KEY = 'kcp-live-dashboard-range';
 const AUTO_LOGIN_STORAGE_PREFIX = 'kcp:auto-login-workspace:v1';
 const DRAFT_STORAGE_PREFIX = 'kcp:drafts:v1';
+const REPORT_CONFIG_STORAGE_PREFIX = 'kcp:report-configs:v1';
 const ADJUSTMENT_PAGE_SIZE = 25;
-const PERSISTED_ROUTES = ['dashboard', 'products', 'recipes', 'ingredients', 'suppliers', 'purchase-orders', 'grv', 'credit-note', 'adjustments', 'transfers', 'stock-count', 'locations', 'mfg-products', 'reporting', 'reporting-scheduling', 'integrations', 'user-management', 'custom-roles', 'settings', 'settings-business', 'settings-customization'];
+const PERSISTED_ROUTES = ['dashboard', 'products', 'recipes', 'ingredients', 'suppliers', 'purchase-orders', 'grv', 'credit-note', 'adjustments', 'transfers', 'stock-count', 'locations', 'mfg-products', 'integrations', 'user-management', 'custom-roles', 'settings', 'settings-business', 'settings-customization'];
 const SETTINGS_ROUTES = ['settings', 'settings-business', 'settings-customization'];
 
-installAppDropdownPortalSystem();
-
+const dashboardNodeKeys = dashboardTileKeys;
 
 function showBrandConfirmDialog({
   eyebrow = 'Confirm Action',
@@ -160,7 +156,12 @@ export const appState = {
     active: getInitialRoute()
   },
   theme: getInitialTheme(),
+  dashboardRange: getInitialDashboardRange(),
+  dashboardChartTab: 'costOfSales',
+  dashboardSiteId: '',
+  dashboardLocationId: '',
   source: null,
+  dashboard: createDashboardState('idle'),
   menu: createMenuState('idle'),
   recipes: createRecipeState('idle'),
   stock: createStockState('idle'),
@@ -173,6 +174,7 @@ export const appState = {
   stockTake: createStockTakeState('idle'),
   locations: createLocationState('idle'),
   manufacturing: createManufacturingState('idle'),
+  analytics: {},
   userManagement: createUserManagementState('idle'),
   roleManagement: createRoleManagementState('idle'),
   settings: createSettingsState('idle')
@@ -181,11 +183,15 @@ export const appState = {
 window.__KCP_LIVE_STATE__ = appState;
 
 window.addEventListener('kcp:integrations-sync-complete', () => {
-  // Integration actions update their own drawer/status UI. Do not remount the active module
-  // after a background sync: that looked like a random page reload and reset report/table state.
-  // Fresh data is loaded by the module's explicit Refresh action or the next navigation.
+  flushDeferredRealtimeSnapshots();
+  // Refetch the active tab so freshly synced Yoco catalogue/locations/sales appear without a
+  // reload. Skip if the user is mid-edit (a modal/typing) to avoid disrupting them.
+  if (appState.user && appState.workspace && !isUserBusy()) {
+    refreshActiveTabFromApi().catch(() => {});
+  }
 });
 
+let unsubscribeDashboard = null;
 let unsubscribeAccess = null;
 let systemBroadcastRefreshTimer = null;
 let integrationAutoSyncTimer = null;
@@ -195,6 +201,7 @@ let dataVersionPollVisibilityHandler = null;
 let lastSeenDataVersion = null;
 let _integrationVisibilityHandler = null;
 let _globalSavingOverlay = null;
+let dashboardSubscriptionToken = 0;
 let accessSubscriptionToken = 0;
 let unsubscribeMenu = null;
 let menuSubscriptionToken = 0;
@@ -207,7 +214,6 @@ let unsubscribeSuppliers = null;
 let supplierSubscriptionToken = 0;
 let unsubscribePurchaseOrders = null;
 let purchaseOrderSubscriptionToken = 0;
-let pendingReportingPurchaseOrderSeed = null;
 let unsubscribeGrv = null;
 let grvSubscriptionToken = 0;
 let unsubscribeCreditNotes = null;
@@ -243,6 +249,9 @@ let focusRestoreToken = 0;
 let settingsDraftRenderTimer = null;
 let supplierDraftRenderTimer = null;
 let purchaseOrderLineRenderTimer = null;
+let dashboardRangeRefreshTimer = null;
+let dashboardSnapshotRenderTimer = null;
+let pendingDashboardSnapshot = null;
 const deferredRealtimeSnapshots = new Map();
 let deferredRealtimeSnapshotFlushTimer = null;
 let modalScrollLockSyncQueued = false;
@@ -263,9 +272,11 @@ if (!appState.user && !appState.workspace) {
   appState.auth = { status: 'idle', error: '', mode: 'login' };
   renderApp();
 }
+mountCookieNotice();
 
 listenToAuthChanges(async (user) => {
   cleanupAccessSubscription();
+  cleanupWorkspaceSubscription();
   cleanupMenuSubscription();
   cleanupRecipeSubscription();
   cleanupStockSubscription();
@@ -294,7 +305,8 @@ listenToAuthChanges(async (user) => {
       route: { active: getInitialRoute() },
       theme: appState.theme,
       source: null,
-          menu: createMenuState('idle'),
+      dashboard: createDashboardState('idle'),
+      menu: createMenuState('idle'),
       recipes: createRecipeState('idle'),
       stock: createStockState('idle'),
       suppliers: createSupplierState('idle'),
@@ -306,7 +318,8 @@ listenToAuthChanges(async (user) => {
       stockTake: createStockTakeState('idle'),
       locations: createLocationState('idle'),
       manufacturing: createManufacturingState('idle'),
-          userManagement: createUserManagementState('idle'),
+      analytics: {},
+      userManagement: createUserManagementState('idle'),
       roleManagement: createRoleManagementState('idle'),
       settings: createSettingsState('idle')
     });
@@ -330,6 +343,7 @@ async function loadAuthenticatedUser(user) {
   appState.user = user;
   appState.autoLoginPreference = readAutoLoginPreference(user);
   appState.auth = { status: 'loading', error: '' };
+  appState.dashboard = createDashboardState('loading');
   appState.recipes = createRecipeState('idle', appState.recipes.filters);
   appState.stock = createStockState('idle', appState.stock.filters);
   appState.suppliers = createSupplierState('idle', appState.suppliers.filters);
@@ -341,6 +355,7 @@ async function loadAuthenticatedUser(user) {
   appState.stockTake = createStockTakeState('idle', appState.stockTake.filters, appState.stockTake.sessionActive);
   appState.locations = createLocationState('idle', appState.locations.filters);
   appState.manufacturing = createManufacturingState('idle', appState.manufacturing.filters);
+  appState.analytics = {};
   appState.userManagement = createUserManagementState('idle', appState.userManagement.filters);
   appState.roleManagement = createRoleManagementState('idle');
   appState.settings = createSettingsState('idle', appState.settings?.draft);
@@ -372,6 +387,7 @@ async function loadAuthenticatedUser(user) {
       appState.workspaceOptions = [];
       appState.workspaceError = '';
       appState.auth = { status: 'force-password-reset', error: '', mode: 'set-password' };
+      appState.dashboard = createDashboardState('idle');
       renderApp();
       return;
     }
@@ -416,6 +432,7 @@ async function loadAuthenticatedUser(user) {
     appState.workspace = null;
     appState.workspaceError = '';
     appState.auth = { status: 'workspace-select', error: '' };
+    appState.dashboard = createDashboardState('idle');
     renderApp();
   } catch (error) {
     if (userUsesGoogleProvider(user)) {
@@ -436,6 +453,7 @@ function routeToWorkspaceRegistration(user, error = '') {
     appState.workspaceOptions = [];
   appState.autoLoginPreference = readAutoLoginPreference(user);
   appState.workspaceError = '';
+  appState.dashboard = createDashboardState('idle');
   appState.auth = {
     status: 'idle',
     error,
@@ -495,6 +513,7 @@ async function handlePostPasswordChange() {
     appState.workspace = null;
     appState.workspaceError = '';
     appState.auth = { status: 'workspace-select', error: '' };
+    appState.dashboard = createDashboardState('idle');
     renderApp();
   } catch (error) {
     appState.auth = { status: 'force-password-reset', error: error.message || 'Could not load your approved workspace.', mode: 'set-password' };
@@ -557,19 +576,17 @@ function startIntegrationAutoSync() {
     const workspaceId = appState.workspace?.id;
     if (!workspaceId) return;
     try {
-      await Promise.all([
-        syncYocoSales(workspaceId, { resetWebhook: false }),
-        syncYocoCatalogue(workspaceId, { resetWebhook: false })
-      ]);
-      // Background integration work must never remount the user's active screen. The user can
-      // explicitly refresh the current module when they are ready to consume newly synced data.
+      const { syncYocoSales, syncYocoCatalogue } = await import('./services/integrationService.js');
+      await Promise.all([syncYocoSales(workspaceId), syncYocoCatalogue(workspaceId)]);
+      // Re-check: user may have opened a modal or started typing while sync was in-flight
+      if (!isUserBusy()) refreshActiveTabFromApi().catch(() => {});
     } catch { /* silent */ }
   };
 
   const startTimer = () => {
     if (integrationAutoSyncTimer) window.clearInterval(integrationAutoSyncTimer);
-    // Background sync is intentionally infrequent and silent. It must not repaint the current
-    // module or create a delayed four-second refresh after every workspace bootstrap.
+    // 15 min (was 5). Each cycle re-fetches the active tab's whole call batch, so this is
+    // the dominant recurring Workers/D1 cost — a longer interval keeps free-tier headroom.
     integrationAutoSyncTimer = window.setInterval(runSync, 900000);
   };
 
@@ -594,9 +611,14 @@ function startIntegrationAutoSync() {
   window.addEventListener('focus', onActive);
   window.addEventListener('blur', onInactive);
 
-  // Only start the silent 15-minute timer when the tab is already in focus. Do not run a
-  // delayed startup sync because its completion used to remount the page a few seconds after login.
-  if (isActive()) startTimer();
+  // Only start now if the tab is already in focus
+  if (isActive()) {
+    startTimer();
+    // Pull catalogue + sales once shortly after the workspace opens so new/deleted products and
+    // locations appear without waiting for the 15-min timer or a manual sync. Change-detection on
+    // the worker keeps this cheap (writes only deltas). Delay lets the initial tab load settle.
+    window.setTimeout(() => { if (isActive()) runSync(); }, 4000);
+  }
 }
 
 function stopIntegrationAutoSync() {
@@ -612,13 +634,9 @@ function stopIntegrationAutoSync() {
 
 function startSystemBroadcastRefresh() {
   if (systemBroadcastRefreshTimer) window.clearInterval(systemBroadcastRefreshTimer);
-  // The initial broadcast request is also silent. Permission, route, or settings hydration will
-  // naturally display it on the next normal render without an unrelated full-page remount.
-  loadSystemBroadcast({ render: false });
+  loadSystemBroadcast();
   systemBroadcastRefreshTimer = window.setInterval(() => {
-    // Store the latest broadcast silently. The next normal render can display it without
-    // replacing the active module while the user is working.
-    if (appState.user && appState.workspace) loadSystemBroadcast({ render: false });
+    if (appState.user && appState.workspace) loadSystemBroadcast();
   }, 900000);
 }
 
@@ -628,49 +646,13 @@ function stopSystemBroadcastRefresh() {
   appState.systemBroadcast = null;
 }
 
-// Cross-user change detection: poll a tiny "data-version" signal without remounting the active
-// screen. A changed version emits a passive event; users consume fresh data through explicit
-// Refresh actions or normal navigation, so forms, drawers, filters, and scroll never reset.
-const DATA_VERSION_POLL_INTERVAL_MS = 120000; // 2 min on normal modules
-const STOCK_DATA_VERSION_POLL_INTERVAL_MS = 15000; // near-live stock-tab refresh for POS/Yoco webhooks
-let stockLiveRefreshInstalled = false;
-
-// When the data-version poll detects a change (a Yoco/POS webhook bumped stock_movements), silently
-// re-fetch stock while the Stock Items tab is open. Uses applyRealtimeSnapshot so the update is
-// deferred while the user is editing and never remounts the page (no "refresh" flicker).
-async function refreshStockFromDataVersion(workspaceId) {
-  if (appState.route.active !== 'ingredients') return;
-  if (!workspaceId || appState.workspace?.id !== workspaceId) return;
-  try {
-    clearApiCache();
-    const { fetchStock } = await import('./services/stockService.js');
-    const stock = await fetchStock(workspaceId);
-    if (appState.route.active !== 'ingredients' || appState.workspace?.id !== workspaceId) return;
-    applyRealtimeSnapshot('stock', () => {
-      appState.stock = {
-        ...appState.stock,
-        status: 'ready',
-        items: stock.items || appState.stock.items || [],
-        locations: stock.locations || appState.stock.locations || [],
-        categories: stock.categories || appState.stock.categories || [],
-        uoms: stock.uoms || appState.stock.uoms || [],
-        updatedAt: stock.updatedAt || new Date().toISOString(),
-        error: ''
-      };
-    });
-  } catch { /* silent — a failed live refresh must never disrupt the app */ }
-}
-
-function installStockLiveRefresh() {
-  if (stockLiveRefreshInstalled) return;
-  stockLiveRefreshInstalled = true;
-  window.addEventListener('kcp:data-version-changed', (event) => {
-    refreshStockFromDataVersion(event?.detail?.workspaceId || appState.workspace?.id);
-  });
-}
+// Cross-user live refresh: poll a tiny "data-version" signal and, when it changes because another
+// user (or another device) committed something, refetch the active tab so the change appears
+// without a manual reload. Gated on tab visibility + user-not-busy and only refetches on an actual
+// version change, so the recurring cost is a single cheap indexed query — negligible on free tier.
+const DATA_VERSION_POLL_INTERVAL_MS = 120000; // 2 min
 
 function startDataVersionPoll() {
-  installStockLiveRefresh();
   // Re-establish the baseline on (re)start so a workspace switch doesn't fire a spurious refetch.
   lastSeenDataVersion = null;
   const pollOnce = async () => {
@@ -679,6 +661,7 @@ function startDataVersionPoll() {
     const workspaceId = appState.workspace?.id;
     if (!workspaceId) return;
     try {
+      const { callCloudflareWorkspaceRoute } = await import('./services/cloudflareApi.js');
       const response = await callCloudflareWorkspaceRoute(workspaceId, 'data-version', { query: { t: Date.now() } });
       const version = String(response?.version ?? '');
       // First observation establishes the baseline without refetching.
@@ -688,35 +671,18 @@ function startDataVersionPoll() {
       }
       if (version && version !== lastSeenDataVersion) {
         lastSeenDataVersion = version;
-        // Record the change without remounting the active module. Automatic DOM replacement here
-        // caused the recurring 'page refresh' effect and could close drawers or reset filters.
-        window.dispatchEvent(new CustomEvent('kcp:data-version-changed', {
-          detail: { workspaceId, version }
-        }));
+        // Don't yank data out from under an open modal / active edit — refresh on the next tick.
+        if (!isUserBusy()) refreshActiveTabFromApi().catch(() => {});
       }
     } catch { /* silent — a failed poll should never disrupt the app */ }
   };
 
-  const currentPollInterval = () => (
-    appState.route.active === 'ingredients'
-      ? STOCK_DATA_VERSION_POLL_INTERVAL_MS
-      : DATA_VERSION_POLL_INTERVAL_MS
-  );
   const startTimer = () => {
-    if (dataVersionPollTimer) window.clearTimeout(dataVersionPollTimer);
-    const scheduleNext = () => {
-      if (dataVersionPollTimer) window.clearTimeout(dataVersionPollTimer);
-      dataVersionPollTimer = window.setTimeout(async () => {
-        dataVersionPollTimer = null;
-        await pollOnce();
-        if (document.visibilityState === 'visible') scheduleNext();
-      }, currentPollInterval());
-    };
-    pollOnce().catch(() => {});
-    scheduleNext();
+    if (dataVersionPollTimer) window.clearInterval(dataVersionPollTimer);
+    dataVersionPollTimer = window.setInterval(pollOnce, DATA_VERSION_POLL_INTERVAL_MS);
   };
   const stopTimer = () => {
-    if (dataVersionPollTimer) { window.clearTimeout(dataVersionPollTimer); dataVersionPollTimer = null; }
+    if (dataVersionPollTimer) { window.clearInterval(dataVersionPollTimer); dataVersionPollTimer = null; }
   };
 
   if (dataVersionPollVisibilityHandler) {
@@ -731,7 +697,7 @@ function startDataVersionPoll() {
 }
 
 function stopDataVersionPoll() {
-  if (dataVersionPollTimer) { window.clearTimeout(dataVersionPollTimer); dataVersionPollTimer = null; }
+  if (dataVersionPollTimer) { window.clearInterval(dataVersionPollTimer); dataVersionPollTimer = null; }
   if (dataVersionPollVisibilityHandler) {
     document.removeEventListener('visibilitychange', dataVersionPollVisibilityHandler);
     dataVersionPollVisibilityHandler = null;
@@ -838,6 +804,7 @@ function toggleAutoLoginPreference(enabled) {
 }
 
 async function selectWorkspace(workspace, options = {}) {
+  cleanupWorkspaceSubscription();
   cleanupMenuSubscription();
   cleanupRecipeSubscription();
   cleanupStockSubscription();
@@ -857,6 +824,7 @@ async function selectWorkspace(workspace, options = {}) {
   appState.workspaceError = '';
   appState.access = createAccessState('loading');
   appState.source = null;
+  appState.dashboard = createDashboardState(appState.route.active === 'dashboard' ? 'loading' : 'idle', workspace.id);
   appState.menu = createMenuState(appState.route.active === 'products' ? 'loading' : 'idle', appState.menu.filters);
   appState.recipes = createRecipeState(appState.route.active === 'recipes' ? 'loading' : 'idle', appState.recipes.filters);
   appState.stock = createStockState(appState.route.active === 'ingredients' ? 'loading' : 'idle', appState.stock.filters);
@@ -869,6 +837,7 @@ async function selectWorkspace(workspace, options = {}) {
   appState.stockTake = createStockTakeState(appState.route.active === 'stock-count' ? 'loading' : 'idle', appState.stockTake.filters, appState.stockTake.sessionActive);
   appState.locations = createLocationState(appState.route.active === 'locations' ? 'loading' : 'idle', appState.locations.filters);
   appState.manufacturing = createManufacturingState(appState.route.active === 'mfg-products' ? 'loading' : 'idle', appState.manufacturing.filters);
+  appState.analytics = {};
   appState.userManagement = createUserManagementState(appState.route.active === 'user-management' ? 'loading' : 'idle', appState.userManagement.filters);
   appState.roleManagement = createRoleManagementState(appState.route.active === 'custom-roles' ? 'loading' : 'idle');
   appState.settings = createSettingsState(isSettingsRoute(appState.route.active) ? 'loading' : 'idle', appState.settings?.draft);
@@ -911,17 +880,13 @@ async function selectWorkspace(workspace, options = {}) {
 
 function navigateTo(sectionId) {
   if (String(sectionId || '').trim() === 'low-stock-alerts') {
-    openLowStockAlerts();
+    openLowStockAlertsReport();
     return;
   }
 
   const nextSection = resolveAccessibleRoute(sectionId || 'dashboard');
 
-  if (nextSection === 'reporting') clearReportingNavigationParameters();
-  if (appState.route.active === nextSection) {
-    if (nextSection === 'reporting') renderApp();
-    return;
-  }
+  if (appState.route.active === nextSection) return;
 
   appState.route = { active: nextSection };
   persistRoute(nextSection);
@@ -939,9 +904,19 @@ function navigateTo(sectionId) {
     cleanupStockTakeSubscription();
     cleanupLocationSubscription();
     cleanupManufacturingSubscription();
+
+    appState.dashboard = createDashboardState('loading', appState.workspace?.id);
     renderApp();
+    startDashboardSubscription(appState.workspace?.id);
     return;
   }
+
+  cleanupWorkspaceSubscription();
+
+  appState.dashboard = {
+    ...appState.dashboard,
+    status: 'idle'
+  };
 
   if (nextSection === 'products') {
     cleanupRecipeSubscription();
@@ -1248,6 +1223,7 @@ function navigateTo(sectionId) {
   appState.stockTake = createStockTakeState('idle', appState.stockTake.filters, appState.stockTake.sessionActive);
   appState.locations = createLocationState('idle', appState.locations.filters);
   appState.manufacturing = createManufacturingState('idle', appState.manufacturing.filters);
+  appState.analytics = {};
   appState.userManagement = createUserManagementState('idle', appState.userManagement.filters);
   appState.roleManagement = createRoleManagementState('idle');
   renderApp();
@@ -1278,7 +1254,7 @@ function bootstrapActiveRouteForWorkspace(workspaceId) {
   }
 
   if (nextSection === 'dashboard') {
-    renderApp();
+    startDashboardSubscription(workspaceId);
     return;
   }
   if (nextSection === 'products') {
@@ -1351,11 +1327,6 @@ function forceRefreshActiveTab() {
 }
 
 async function refreshActiveTabFromApi() {
-  // Dashboard and Reporting own their internal filters and async report runs.
-  // Background data-version/Yoco syncs must not replace or silently refresh them;
-  // both surfaces expose explicit refresh controls.
-  if (['dashboard', 'reporting', 'reporting-scheduling'].includes(appState.route.active)) return;
-
   const workspaceId = appState.workspace?.id;
   // Drop focus + clear any pending focus restore so the post-save render actually paints
   // (renderApp() suppresses DOM updates while a text field is focused). This makes saves
@@ -1372,38 +1343,38 @@ async function refreshActiveTabFromApi() {
   // An explicit refresh (post-save, data-version poll on a real change, Yoco sync-complete) must
   // fetch fresh — drop the short-lived GET cache so navigation stays fast but refreshes are live.
   try {
+    const { clearApiCache } = await import('./services/cloudflareApi.js');
     clearApiCache();
   } catch { /* cache clear is best-effort */ }
 
   try {
     if (appState.route.active === 'products') {
-      const [{ fetchMenuItems, fetchMenuModifiers }, { fetchStock }, { fetchModifierNoteSuggestions }] = await Promise.all([
-        import('./services/menuService.js'),
-        import('./services/stockService.js'),
-        import('./services/recipeService.js')
-      ]);
-      const [refreshedItems, refreshedModifiers, stockSnapshot, noteSnapshot] = await Promise.all([
+      const { fetchMenuItems, fetchMenuModifiers } = await import('./services/menuService.js');
+      const [refreshedItems, refreshedModifiers] = await Promise.all([
         fetchMenuItems(workspaceId, { cacheBust: true }),
-        fetchMenuModifiers(workspaceId, { cacheBust: true }),
-        fetchStock(workspaceId),
-        fetchModifierNoteSuggestions(workspaceId, {
-          includeIgnored: appState.menu.noteSuggestions?.includeIgnored,
-          cacheBust: true
-        }).catch(() => ({ suggestions: appState.menu.noteSuggestions?.items || [] }))
+        fetchMenuModifiers(workspaceId, { cacheBust: true })
       ]);
       appState.menu = {
         ...appState.menu,
         status: 'ready',
         items: refreshedItems,
         modifierItems: refreshedModifiers,
-        ingredients: stockSnapshot.items || appState.menu.ingredients || [],
-        locations: stockSnapshot.locations || appState.menu.locations || [],
-        noteSuggestions: {
-          ...(appState.menu.noteSuggestions || {}),
-          status: 'ready',
-          items: noteSnapshot.suggestions || [],
-          error: ''
-        },
+        source: 'Live catalogue',
+        updatedAt: new Date().toISOString(),
+        error: ''
+      };
+      renderApp();
+      return;
+    }
+
+    if (appState.route.active === 'recipes') {
+      const { fetchRecipeItems } = await import('./services/recipeService.js');
+      const refreshed = await fetchRecipeItems(workspaceId, { cacheBust: true });
+      appState.recipes = {
+        ...appState.recipes,
+        status: 'ready',
+        items: refreshed.items || [],
+        ingredients: refreshed.ingredients || [],
         source: 'Live catalogue',
         updatedAt: new Date().toISOString(),
         error: ''
@@ -1528,6 +1499,122 @@ async function refreshActiveTabFromApi() {
   }
 }
 
+function startDashboardSubscription(workspaceId) {
+  cleanupWorkspaceSubscription();
+  const subscriptionToken = ++dashboardSubscriptionToken;
+
+  if (!workspaceId) {
+    appState.dashboard = createDashboardState('idle');
+    return;
+  }
+
+  appState.dashboard = createDashboardState('loading', workspaceId);
+  renderDashboardOnly();
+
+  unsubscribeDashboard = subscribeDashboardTiles(workspaceId, {
+    range: appState.dashboardRange,
+    siteId: appState.dashboardLocationId || appState.dashboardSiteId,
+    onSnapshot: (snapshot) => {
+      if (
+        subscriptionToken !== dashboardSubscriptionToken ||
+        appState.route.active !== 'dashboard' ||
+        appState.workspace?.id !== workspaceId
+      ) return;
+
+      const nextSignature = getDashboardSnapshotSignature(snapshot);
+      if (appState.dashboard?.metrics && nextSignature === appState.dashboard.signature) {
+        appState.dashboard = {
+          ...appState.dashboard,
+          connection: snapshot.connection || appState.dashboard.connection,
+          loaded: snapshot.loaded || appState.dashboard.loaded,
+          errors: snapshot.errors || appState.dashboard.errors,
+          isReady: snapshot.isReady || appState.dashboard.isReady,
+          insights: snapshot.insights || appState.dashboard.insights || {},
+          siteName: snapshot.siteName || appState.dashboard.siteName || ''
+        };
+        return;
+      }
+
+      appState.source = snapshot.source || appState.source;
+      appState.dashboard = {
+        status: snapshot.isReady || snapshot.metrics ? 'ready' : 'loading',
+        workspaceId,
+        metrics: snapshot.metrics,
+        loaded: snapshot.loaded,
+        errors: snapshot.errors,
+        isReady: snapshot.isReady,
+        connection: snapshot.connection,
+        insights: snapshot.insights || {},
+        siteName: snapshot.siteName || appState.dashboard?.siteName || '',
+        signature: nextSignature
+      };
+      renderDashboardOnly();
+    },
+    onError: (error, nodeKey) => {
+      if (
+        subscriptionToken !== dashboardSubscriptionToken ||
+        appState.route.active !== 'dashboard' ||
+        appState.workspace?.id !== workspaceId
+      ) return;
+
+      appState.dashboard.errors = {
+        ...appState.dashboard.errors,
+        [nodeKey]: error
+      };
+      appState.dashboard.connection = {
+        ...appState.dashboard.connection,
+        status: 'error',
+        label: 'Attention',
+        lastUpdated: new Date().toISOString()
+      };
+      renderDashboardOnly();
+    }
+  });
+}
+
+function getDashboardSnapshotSignature(snapshot = {}) {
+  const summary = snapshot.metrics?.summary || {};
+  const ranges = snapshot.metrics?.ranges || {};
+  const trends = snapshot.metrics?.trends || {};
+  const today = snapshot.metrics?.today || '';
+  const insights = snapshot.insights || {};
+  const siteName = snapshot.siteName || '';
+  const siteId = appState.dashboardSiteId || '';
+  return JSON.stringify({ summary, ranges, trends, today, insights, siteName, siteId });
+}
+
+function isCustomDashboardRange(range = '') {
+  return /^custom:\d{4}-\d{2}-\d{2}:\d{4}-\d{2}-\d{2}$/.test(String(range || ''));
+}
+
+function getDashboardHydrationNodes(range = appState.dashboardRange) {
+  if (!isCustomDashboardRange(range)) return [];
+
+  const overviewNodes = [
+    'settings',
+    'locations',
+    'ingredients',
+    'products',
+    'suppliers',
+    'purchaseOrders',
+    'stockTakes',
+    'stockTakeTemplates',
+    'logs_grv',
+    'logs_adj',
+    'logs_stocktakes',
+    'logs_transfers',
+    'logs_sales'
+  ];
+
+  return [
+    ...overviewNodes,
+    'logs_cn',
+    'logs_mfg',
+    'sessionOpeningStock',
+    'logs_snapshots'
+  ];
+}
+
 async function loadSettings(workspaceId) {
   const loadToken = ++settingsLoadToken;
 
@@ -1544,14 +1631,13 @@ async function loadSettings(workspaceId) {
   };
 
   try {
-    const [settingsSnapshot, siteConfig, yocoCategories, stockCategories, goLiveReadiness] = await Promise.all([
+    const [settingsSnapshot, siteConfig, yocoCategories, stockCategories] = await Promise.all([
       getWorkspaceSettingsSnapshot(workspaceId),
       import('./services/orgTransferService.js')
         .then(({ getSiteConfiguration }) => getSiteConfiguration(workspaceId))
         .catch(() => null),
       getYocoCategoryOptions(workspaceId).catch(() => []),
-      getStockCategoryOptions(workspaceId).catch(() => []),
-      getGoLiveReadiness(workspaceId).catch(() => ({ productCount: 0, recipeCount: 0, locationCount: 0 }))
+      getStockCategoryOptions(workspaceId).catch(() => [])
     ]);
     const settings = normalizeSettings({
       ...settingsSnapshot,
@@ -1573,7 +1659,6 @@ async function loadSettings(workspaceId) {
       draft: settings,
       yocoCategories,
       stockCategories,
-      goLiveReadiness,
       error: ''
     };
     applyWorkspaceSettingsEffects(settings);
@@ -1615,7 +1700,7 @@ async function startMenuSubscription(workspaceId) {
     ) return;
 
     unsubscribeMenu = subscribeMenuCatalogue(workspaceId, {
-      onSnapshot: ({ status, items, modifierItems, locations, ingredients, noteSuggestions, posIntegration, source, updatedAt, error }) => {
+      onSnapshot: ({ status, items, modifierItems, locations, posIntegration, source, updatedAt, error }) => {
         if (
           subscriptionToken !== menuSubscriptionToken ||
           appState.route.active !== 'products' ||
@@ -1627,33 +1712,17 @@ async function startMenuSubscription(workspaceId) {
           const nextStatus = status === 'ready' || !(appState.menu.items || []).length
             ? status
             : appState.menu.status;
-          const nextLocations = locations || appState.menu.locations || [];
-          const allowedLocationIds = new Set(getLocationsAllowedForCurrentRole(nextLocations).map((location) => String(location.id || location.locationId || '')).filter(Boolean));
-          const defaultLocationId = getDefaultSellingLocationId(nextLocations);
-          const currentLocationId = String(appState.menu.filters?.locationId || '');
-          const nextFilters = {
-            ...appState.menu.filters,
-            locationId: currentLocationId && (!allowedLocationIds.size || allowedLocationIds.has(currentLocationId)) ? currentLocationId : defaultLocationId
-          };
           appState.menu = {
             ...appState.menu,
             status: nextStatus,
             items,
             modifierItems: modifierItems || [],
-            locations: nextLocations,
-            ingredients: ingredients || appState.menu.ingredients || [],
-            noteSuggestions: {
-              ...(appState.menu.noteSuggestions || {}),
-              status: 'ready',
-              items: noteSuggestions || [],
-              error: ''
-            },
+            locations: locations || appState.menu.locations || [],
             posIntegration: posIntegration || { active: false, provider: '', label: '' },
             source,
             updatedAt,
             error: error?.message || '',
-            selectedIds: posIntegration?.active ? [] : (appState.menu.selectedIds || []).filter((id) => liveIds.has(String(id))),
-            filters: nextFilters
+            selectedIds: posIntegration?.active ? [] : (appState.menu.selectedIds || []).filter((id) => liveIds.has(String(id)))
           };
         });
       },
@@ -1714,7 +1783,7 @@ async function startRecipeSubscription(workspaceId) {
     ) return;
 
     unsubscribeRecipes = subscribeRecipeWorkspace(workspaceId, {
-      onSnapshot: ({ status, items, ingredients, locations, noteSuggestions, source, updatedAt, loaded }) => {
+      onSnapshot: ({ status, items, ingredients, source, updatedAt, loaded }) => {
         if (
           subscriptionToken !== recipeSubscriptionToken ||
           appState.route.active !== 'recipes' ||
@@ -1743,18 +1812,11 @@ async function startRecipeSubscription(workspaceId) {
             status,
             items,
             ingredients,
-            locations: locations || appState.recipes.locations || [],
 	          source,
 	          updatedAt,
 	          loaded,
 	          editingItem,
 	          draftRecipe,
-            noteSuggestions: {
-              ...(appState.recipes.noteSuggestions || {}),
-              status: 'ready',
-              items: noteSuggestions || [],
-              error: ''
-            },
             modalFocusRequest: pendingOpenItem ? `${String(pendingOpenItem.id || pendingOpenItemName || pendingOpenItemId)}:${Date.now()}` : appState.recipes.modalFocusRequest,
 	          pendingOpenItemId: pendingOpenItem ? '' : pendingOpenItemId,
 	          pendingOpenItemName: pendingOpenItem ? '' : pendingOpenItemName,
@@ -1829,27 +1891,18 @@ async function startStockSubscription(workspaceId) {
             ? status
             : appState.stock.status;
           const editingItem = appState.stock.editingItem || null;
-          const nextLocations = locations || appState.stock.locations || [];
-          const allowedLocationIds = new Set(getLocationsAllowedForCurrentRole(nextLocations).map((location) => String(location.id || location.locationId || '')).filter(Boolean));
-          const defaultLocationId = getDefaultSellingLocationId(nextLocations);
-          const currentLocationId = String(appState.stock.filters?.locationId || '');
-          const nextFilters = {
-            ...appState.stock.filters,
-            locationId: currentLocationId && (!allowedLocationIds.size || allowedLocationIds.has(currentLocationId)) ? currentLocationId : defaultLocationId
-          };
           appState.stock = {
             ...appState.stock,
             status: nextStatus,
             items,
             sites,
-            locations: nextLocations,
+            locations,
             categories,
             uoms,
             loaded,
             updatedAt,
             editingItem,
-            selectedIds: (appState.stock.selectedIds || []).filter((id) => liveIds.has(String(id))),
-            filters: nextFilters
+            selectedIds: (appState.stock.selectedIds || []).filter((id) => liveIds.has(String(id)))
           };
         });
       },
@@ -2000,7 +2053,6 @@ async function startPurchaseOrderSubscription(workspaceId) {
           draftOrder,
           selectedIds: (appState.purchaseOrders.selectedIds || []).filter((id) => liveIds.has(String(id)))
         };
-        applyPendingReportingPurchaseOrderSeed();
         renderApp();
       },
       onError: (error) => {
@@ -2730,7 +2782,7 @@ async function startManufacturingSubscription(workspaceId) {
 
 
 
-function openLowStockAlerts() {
+function openLowStockAlertsReport() {
   navigateTo('ingredients');
 }
 
@@ -2743,426 +2795,6 @@ function updateMenuFilters(nextFilters) {
     }
   };
   renderApp();
-}
-
-
-function openMenuModifierEditor(modifierId = '', options = {}) {
-  const modifier = (appState.menu.modifierItems || []).find((entry) => String(entry.id) === String(modifierId));
-  if (!modifier) {
-    showMenuToast('Modifier could not be found. Refresh the catalogue and try again.', 'error');
-    return;
-  }
-  const editingModifier = structuredCloneSafe(modifier);
-  editingModifier.stockRule = {
-    ...(editingModifier.stockRule || {}),
-    locationIds: []
-  };
-  if (options?.actionType) {
-    editingModifier.stockRule = {
-      ...(editingModifier.stockRule || {}),
-      actionType: String(options.actionType).toUpperCase()
-    };
-  }
-  appState.menu = {
-    ...appState.menu,
-    editingModifier,
-    modifierStockRuleOpen: true,
-    modifierStockPicker: null,
-    viewingModifierLinks: null,
-    modifierLinksOpen: false,
-    filters: {
-      ...appState.menu.filters,
-      openDropdown: ''
-    },
-    actionError: ''
-  };
-  renderApp();
-}
-
-function openMenuModifierLinks(modifierId = '') {
-  const modifier = (appState.menu.modifierItems || []).find((entry) => String(entry.id) === String(modifierId));
-  if (!modifier) {
-    showMenuToast('Modifier links could not be found. Refresh the catalogue and try again.', 'error');
-    return;
-  }
-  appState.menu = {
-    ...appState.menu,
-    viewingModifierLinks: structuredCloneSafe(modifier),
-    modifierLinksOpen: true,
-    editingModifier: null,
-    modifierStockRuleOpen: false,
-    modifierStockPicker: null,
-    filters: {
-      ...appState.menu.filters,
-      openDropdown: ''
-    },
-    actionError: ''
-  };
-  renderApp();
-}
-
-function closeMenuModifierLinks() {
-  appState.menu = {
-    ...appState.menu,
-    viewingModifierLinks: null,
-    modifierLinksOpen: false
-  };
-  renderApp();
-}
-
-function closeMenuModifierEditor() {
-  appState.menu = {
-    ...appState.menu,
-    editingModifier: null,
-    modifierStockRuleOpen: false,
-    modifierStockPicker: null,
-    viewingModifierLinks: null,
-    modifierLinksOpen: false,
-    actionStatus: '',
-    actionError: ''
-  };
-  renderApp();
-}
-
-function updateMenuModifierStockRule(patch = {}) {
-  const current = appState.menu.editingModifier;
-  if (!current) return;
-  appState.menu = {
-    ...appState.menu,
-    editingModifier: {
-      ...current,
-      stockRule: {
-        ...(current.stockRule || {}),
-        ...patch,
-        locationIds: []
-      }
-    },
-    actionError: ''
-  };
-  renderApp();
-}
-
-function openMenuModifierStockPicker(mode = '') {
-  if (!appState.menu.editingModifier) return;
-  appState.menu = {
-    ...appState.menu,
-    modifierStockPicker: { open: true, mode: String(mode || ''), query: '' }
-  };
-  renderApp();
-}
-
-function closeMenuModifierStockPicker() {
-  appState.menu = { ...appState.menu, modifierStockPicker: null };
-  renderApp();
-}
-
-function searchMenuModifierStockPicker(query = '') {
-  appState.menu = {
-    ...appState.menu,
-    modifierStockPicker: {
-      ...(appState.menu.modifierStockPicker || {}),
-      open: true,
-      query: String(query || '')
-    }
-  };
-  renderApp();
-}
-
-function selectMenuModifierStockPicker(value = '') {
-  const mode = String(appState.menu.modifierStockPicker?.mode || '');
-  const raw = String(value || '');
-  if (!mode || !raw) return;
-  if (mode === 'recipeTarget') {
-    const separator = raw.indexOf('|');
-    updateMenuModifierStockRule({
-      targetOwnerType: separator >= 0 ? raw.slice(0, separator) : '',
-      targetOwnerId: separator >= 0 ? raw.slice(separator + 1) : raw
-    });
-  } else if (mode === 'stockTarget') {
-    const selected = (appState.menu.ingredients || []).find((entry) => String(entry.id) === raw);
-    updateMenuModifierStockRule({ targetOwnerType: 'stock_item', targetOwnerId: raw, unit: String(selected?.unit || 'ea') });
-  } else if (mode === 'source') {
-    updateMenuModifierStockRule({ sourceStockItemId: raw, replacementStockItemId: '', quantity: 1 });
-  } else if (mode === 'replacement') {
-    updateMenuModifierStockRule({ replacementStockItemId: raw });
-  }
-  appState.menu = { ...appState.menu, modifierStockPicker: null };
-  renderApp();
-}
-
-async function saveMenuModifierRule() {
-  const modifier = appState.menu.editingModifier;
-  if (!modifier) return;
-  appState.menu = {
-    ...appState.menu,
-    actionStatus: 'saving-modifier',
-    actionError: ''
-  };
-  renderApp();
-  try {
-    const { updateRecipe } = await import('./services/recipeService.js');
-    await updateRecipe(appState.workspace?.id, modifier, modifier.recipe || []);
-    const { fetchMenuModifiers } = await import('./services/menuService.js');
-    const modifierItems = await fetchMenuModifiers(appState.workspace?.id, { cacheBust: true });
-    appState.menu = {
-      ...appState.menu,
-      modifierItems,
-      editingModifier: null,
-      modifierStockRuleOpen: false,
-      modifierStockPicker: null,
-      actionStatus: '',
-      actionError: '',
-      updatedAt: new Date().toISOString()
-    };
-    showMenuToast('Modifier stock action saved.', 'success');
-  } catch (error) {
-    appState.menu = {
-      ...appState.menu,
-      actionStatus: '',
-      actionError: error.message || 'Could not save the modifier stock action.'
-    };
-    showMenuToast(error.message || 'Could not save the modifier stock action.', 'error');
-  }
-  renderApp();
-}
-
-async function refreshMenuNoteSuggestions(options = {}) {
-  const includeIgnored = options.includeIgnored ?? appState.menu.noteSuggestions?.includeIgnored ?? false;
-  appState.menu = {
-    ...appState.menu,
-    noteSuggestions: {
-      ...(appState.menu.noteSuggestions || {}),
-      status: 'loading',
-      includeIgnored,
-      error: ''
-    }
-  };
-  renderApp();
-  try {
-    const { fetchModifierNoteSuggestions } = await import('./services/recipeService.js');
-    const response = await fetchModifierNoteSuggestions(appState.workspace?.id, {
-      includeIgnored,
-      cacheBust: true
-    });
-    appState.menu = {
-      ...appState.menu,
-      noteSuggestions: {
-        ...(appState.menu.noteSuggestions || {}),
-        status: 'ready',
-        includeIgnored,
-        items: response.suggestions || [],
-        error: ''
-      }
-    };
-  } catch (error) {
-    appState.menu = {
-      ...appState.menu,
-      noteSuggestions: {
-        ...(appState.menu.noteSuggestions || {}),
-        status: 'error',
-        includeIgnored,
-        error: error.message || 'Could not load suggestions from orders.'
-      }
-    };
-  }
-  renderApp();
-}
-
-function openMenuNoteSuggestions() {
-  appState.menu = {
-    ...appState.menu,
-    filters: { ...appState.menu.filters, openDropdown: '' },
-    noteSuggestions: {
-      ...(appState.menu.noteSuggestions || {}),
-      open: true,
-      error: ''
-    }
-  };
-  renderApp();
-  if (!['ready', 'loading'].includes(appState.menu.noteSuggestions?.status)) {
-    refreshMenuNoteSuggestions();
-  }
-}
-
-function closeMenuNoteSuggestions() {
-  appState.menu = {
-    ...appState.menu,
-    noteSuggestions: {
-      ...(appState.menu.noteSuggestions || {}),
-      open: false,
-      editingId: '',
-      draft: null,
-      error: ''
-    }
-  };
-  renderApp();
-}
-
-function startMenuNoteRuleSetup(suggestionId = '') {
-  const suggestion = (appState.menu.noteSuggestions?.items || [])
-    .find((entry) => String(entry.id) === String(suggestionId));
-  if (!suggestion) return;
-  const existing = suggestion.rule || {};
-  const actionType = String(existing.actionType || 'NO_STOCK_CHANGE').toUpperCase();
-  appState.menu = {
-    ...appState.menu,
-    noteSuggestions: {
-      ...(appState.menu.noteSuggestions || {}),
-      editingId: suggestion.id,
-      error: '',
-      draft: {
-        noteText: suggestion.notePhrase || suggestion.normalizedText || '',
-        normalizedText: suggestion.normalizedText || '',
-        actionType,
-        targetOwnerType: String(existing.targetOwnerType || (actionType === 'ADD_RECIPE' ? 'product' : actionType === 'ADD_STOCK_ITEM' ? 'stock_item' : '')),
-        targetOwnerId: String(existing.targetOwnerId || ''),
-        sourceStockItemId: String(existing.sourceStockItemId || ''),
-        replacementStockItemId: String(existing.replacementStockItemId || ''),
-        quantity: Number(existing.quantity || 1) || 1,
-        unit: String(existing.unit || ''),
-        menuItemIds: Array.isArray(existing.menuItemIds) && existing.menuItemIds.length
-          ? existing.menuItemIds.map(String)
-          : (suggestion.menuItemIds || []).map(String),
-        locationIds: Array.isArray(existing.locationIds) && existing.locationIds.length
-          ? existing.locationIds.map(String)
-          : (suggestion.locationIds || []).map(String)
-      }
-    }
-  };
-  renderApp();
-}
-
-function cancelMenuNoteRuleSetup() {
-  appState.menu = {
-    ...appState.menu,
-    noteSuggestions: {
-      ...(appState.menu.noteSuggestions || {}),
-      editingId: '',
-      draft: null,
-      error: ''
-    }
-  };
-  renderApp();
-}
-
-function updateMenuNoteRuleDraft(patch = {}) {
-  const current = appState.menu.noteSuggestions?.draft;
-  if (!current) return;
-  const next = { ...current, ...patch };
-  if (patch.actionType) {
-    const actionType = String(patch.actionType).toUpperCase();
-    next.actionType = actionType;
-    next.targetOwnerType = actionType === 'ADD_RECIPE'
-      ? 'product'
-      : actionType === 'ADD_STOCK_ITEM'
-        ? 'stock_item'
-        : '';
-    next.targetOwnerId = '';
-    next.sourceStockItemId = '';
-    next.replacementStockItemId = '';
-  }
-  appState.menu = {
-    ...appState.menu,
-    noteSuggestions: {
-      ...(appState.menu.noteSuggestions || {}),
-      draft: next,
-      error: ''
-    }
-  };
-  renderApp();
-}
-
-async function saveMenuNoteRule() {
-  const noteState = appState.menu.noteSuggestions || {};
-  const draft = noteState.draft;
-  if (!draft?.noteText) return;
-  const actionType = String(draft.actionType || '').toUpperCase();
-  const targetRequired = ['ADD_RECIPE', 'ADD_STOCK_ITEM'].includes(actionType);
-  const sourceRequired = ['REMOVE_INGREDIENT', 'REPLACE_INGREDIENT'].includes(actionType);
-  const replacementRequired = actionType === 'REPLACE_INGREDIENT';
-  if (!actionType || (targetRequired && !draft.targetOwnerId) || (sourceRequired && !draft.sourceStockItemId) || (replacementRequired && !draft.replacementStockItemId)) {
-    appState.menu = {
-      ...appState.menu,
-      noteSuggestions: { ...noteState, error: 'Complete the stock action before saving.' }
-    };
-    renderApp();
-    return;
-  }
-  appState.menu = {
-    ...appState.menu,
-    noteSuggestions: { ...noteState, status: 'saving', error: '' }
-  };
-  renderApp();
-  try {
-    const { saveModifierNoteRule } = await import('./services/recipeService.js');
-    await saveModifierNoteRule(appState.workspace?.id, draft.noteText, {
-      actionType,
-      targetOwnerType: draft.targetOwnerType || '',
-      targetOwnerId: draft.targetOwnerId || '',
-      sourceStockItemId: draft.sourceStockItemId || '',
-      replacementStockItemId: draft.replacementStockItemId || '',
-      quantity: Math.max(0.000001, Number(draft.quantity || 1) || 1),
-      unit: draft.unit || '',
-      menuItemIds: Array.isArray(draft.menuItemIds) ? draft.menuItemIds : [],
-      locationIds: Array.isArray(draft.locationIds) ? draft.locationIds : [],
-      applyAllMatchingProducts: !Array.isArray(draft.menuItemIds) || draft.menuItemIds.length === 0,
-      active: true
-    });
-    appState.menu = {
-      ...appState.menu,
-      noteSuggestions: {
-        ...(appState.menu.noteSuggestions || {}),
-        editingId: '',
-        draft: null,
-        status: 'ready',
-        error: ''
-      }
-    };
-    await refreshMenuNoteSuggestions();
-    showMenuToast('Note rule approved. Exact matching notes can now affect stock.', 'success');
-  } catch (error) {
-    appState.menu = {
-      ...appState.menu,
-      noteSuggestions: {
-        ...(appState.menu.noteSuggestions || {}),
-        status: 'error',
-        error: error.message || 'Could not save the note rule.'
-      }
-    };
-    renderApp();
-  }
-}
-
-async function setMenuNoteSuggestionDisposition(noteText = '', disposition = 'IGNORED') {
-  const noteState = appState.menu.noteSuggestions || {};
-  appState.menu = {
-    ...appState.menu,
-    noteSuggestions: { ...noteState, status: 'saving', error: '' }
-  };
-  renderApp();
-  try {
-    const service = await import('./services/recipeService.js');
-    if (disposition === 'SUGGESTED') {
-      await service.restoreModifierNoteSuggestion(appState.workspace?.id, noteText);
-    } else {
-      await service.ignoreModifierNoteSuggestion(appState.workspace?.id, noteText);
-    }
-    await refreshMenuNoteSuggestions();
-  } catch (error) {
-    appState.menu = {
-      ...appState.menu,
-      noteSuggestions: {
-        ...(appState.menu.noteSuggestions || {}),
-        status: 'error',
-        error: error.message || 'Could not update the note suggestion.'
-      }
-    };
-    renderApp();
-  }
-}
-
-function toggleMenuIgnoredNoteSuggestions(includeIgnored = false) {
-  refreshMenuNoteSuggestions({ includeIgnored: Boolean(includeIgnored) });
 }
 
 async function scanMenuBarcode() {
@@ -3187,6 +2819,97 @@ async function scanMenuBarcode() {
   } catch (error) {
     showMenuToast(error.message || 'Could not start the barcode scanner.', 'error');
   }
+}
+
+function updateDashboardRange(range) {
+  const nextRange = normalizeDashboardRange(range);
+  if (appState.dashboardRange === nextRange && !appState.dashboard.rangeLoading) return;
+
+  appState.dashboardRange = nextRange;
+  appState.dashboard = {
+    ...appState.dashboard,
+    rangeLoading: true
+  };
+
+  try {
+    localStorage.setItem(DASHBOARD_RANGE_STORAGE_KEY, nextRange);
+  } catch (error) {
+    console.warn('[Dashboard] Could not persist range preference:', error);
+  }
+
+  syncDashboardRangeUrl(nextRange);
+
+  renderApp();
+
+  if (appState.workspace?.id) {
+    startDashboardSubscription(appState.workspace.id);
+    return;
+  }
+
+  if (dashboardRangeRefreshTimer) window.clearTimeout(dashboardRangeRefreshTimer);
+  dashboardRangeRefreshTimer = window.setTimeout(() => {
+    appState.dashboard = {
+      ...appState.dashboard,
+      rangeLoading: false
+    };
+    renderApp();
+    dashboardRangeRefreshTimer = null;
+  }, 160);
+}
+
+function updateDashboardSite(siteId = '') {
+  const nextSiteId = String(siteId || '').trim();
+  if (appState.dashboardSiteId === nextSiteId && !appState.dashboard.rangeLoading) return;
+
+  appState.dashboardSiteId = nextSiteId;
+  appState.dashboard = {
+    ...appState.dashboard,
+    rangeLoading: true
+  };
+
+  renderApp();
+
+  if (appState.workspace?.id) {
+    startDashboardSubscription(appState.workspace.id);
+  }
+}
+
+function updateDashboardLocation(locationId = '') {
+  appState.dashboardLocationId = String(locationId || '').trim();
+  appState.dashboard = { ...appState.dashboard, rangeLoading: true };
+  renderApp();
+  if (appState.workspace?.id) {
+    startDashboardSubscription(appState.workspace.id);
+  }
+}
+
+function setDashboardChartTab(tab = 'costOfSales') {
+  const next = ['costOfSales', 'stockValue', 'wastage', 'manufacturingWastage'].includes(String(tab)) ? String(tab) : 'costOfSales';
+  if (appState.dashboardChartTab === next) return;
+  appState.dashboardChartTab = next;
+  // Series are already loaded in metrics.trends — no re-fetch, just re-render.
+  renderDashboardOnly();
+}
+
+function refreshDashboardDirect() {
+  if (!appState.workspace?.id) return;
+
+  pendingDashboardSnapshot = null;
+  if (dashboardSnapshotRenderTimer) {
+    window.clearTimeout(dashboardSnapshotRenderTimer);
+    dashboardSnapshotRenderTimer = null;
+  }
+
+  try {
+    sessionStorage.removeItem(DASHBOARD_RANGE_STORAGE_KEY);
+    localStorage.removeItem(DASHBOARD_RANGE_STORAGE_KEY);
+  } catch (error) {
+    console.warn('[Dashboard] Could not clear dashboard cache keys:', error);
+  }
+
+  appState.dashboardRange = '7';
+  appState.source = { settings: appState.source?.settings || {} };
+  startDashboardSubscription(appState.workspace.id);
 }
 
 function updateMenuSelection(itemId, selected) {
@@ -3732,10 +3455,10 @@ async function importMenuFile(file) {
 
   try {
     const rows = await parseDataFile(file, { preferredSheetNames: ['Menu_Import'] });
-    const { items, review } = mapLegacyMenuRows(rows);
+    const { items, report } = mapLegacyMenuRows(rows);
 
     if (!items.length) {
-      throw new Error(formatImportFailure('No valid menu catalogue rows were found in this file.', review.errors));
+      throw new Error(formatImportFailure('No valid menu catalogue rows were found in this file.', report.errors));
     }
 
     const { importMenuItems } = await import('./services/menuService.js');
@@ -3746,16 +3469,16 @@ async function importMenuFile(file) {
       actionStatus: '',
       actionError: ''
     };
-    const skippedCount = Number(review.errors.length || result.skippedCount || 0);
+    const skippedCount = Number(report.errors.length || result.skippedCount || 0);
     if (skippedCount) {
       showImportNotification({
         moduleLabel: 'Menu Import',
         title: 'Menu Import Needs Attention',
         message: `${result.importedCount || 0} item${Number(result.importedCount || 0) === 1 ? '' : 's'} imported, but ${skippedCount} row${skippedCount === 1 ? '' : 's'} need fixing. Confirm this message, fix the errors, and try again.`,
-        errors: review.errors,
+        errors: report.errors,
         importedCount: result.importedCount || 0,
         skippedCount,
-        totalRows: review.totalRows,
+        totalRows: report.totalRows,
         tone: 'warning',
         confirmLabel: 'Confirm & Fix Errors'
       });
@@ -3858,249 +3581,6 @@ function updateRecipeFilters(nextFilters) {
   renderApp();
 }
 
-async function refreshRecipeNoteSuggestions(options = {}) {
-  const includeIgnored = options.includeIgnored ?? appState.recipes.noteSuggestions?.includeIgnored ?? false;
-  appState.recipes = {
-    ...appState.recipes,
-    noteSuggestions: {
-      ...(appState.recipes.noteSuggestions || {}),
-      status: 'loading',
-      includeIgnored,
-      error: ''
-    }
-  };
-  renderApp();
-  try {
-    const { fetchModifierNoteSuggestions } = await import('./services/recipeService.js');
-    const response = await fetchModifierNoteSuggestions(appState.workspace?.id, {
-      includeIgnored,
-      cacheBust: true
-    });
-    appState.recipes = {
-      ...appState.recipes,
-      noteSuggestions: {
-        ...(appState.recipes.noteSuggestions || {}),
-        status: 'ready',
-        includeIgnored,
-        items: response.suggestions || [],
-        error: ''
-      }
-    };
-  } catch (error) {
-    appState.recipes = {
-      ...appState.recipes,
-      noteSuggestions: {
-        ...(appState.recipes.noteSuggestions || {}),
-        status: 'error',
-        includeIgnored,
-        error: error.message || 'Could not load suggestions from orders.'
-      }
-    };
-  }
-  renderApp();
-}
-
-function openRecipeNoteSuggestions() {
-  appState.recipes = {
-    ...appState.recipes,
-    filters: { ...appState.recipes.filters, openDropdown: '' },
-    noteSuggestions: {
-      ...(appState.recipes.noteSuggestions || {}),
-      open: true,
-      error: ''
-    }
-  };
-  renderApp();
-  if (!['ready', 'loading'].includes(appState.recipes.noteSuggestions?.status)) {
-    refreshRecipeNoteSuggestions();
-  }
-}
-
-function closeRecipeNoteSuggestions() {
-  appState.recipes = {
-    ...appState.recipes,
-    noteSuggestions: {
-      ...(appState.recipes.noteSuggestions || {}),
-      open: false,
-      editingId: '',
-      draft: null,
-      error: ''
-    }
-  };
-  renderApp();
-}
-
-function startRecipeNoteRuleSetup(suggestionId = '') {
-  const suggestion = (appState.recipes.noteSuggestions?.items || [])
-    .find((entry) => String(entry.id) === String(suggestionId));
-  if (!suggestion) return;
-  const existing = suggestion.rule || {};
-  const actionType = String(existing.actionType || 'NO_STOCK_CHANGE').toUpperCase();
-  appState.recipes = {
-    ...appState.recipes,
-    noteSuggestions: {
-      ...(appState.recipes.noteSuggestions || {}),
-      editingId: suggestion.id,
-      error: '',
-      draft: {
-        noteText: suggestion.notePhrase || suggestion.normalizedText || '',
-        normalizedText: suggestion.normalizedText || '',
-        actionType,
-        targetOwnerType: String(existing.targetOwnerType || (actionType === 'ADD_RECIPE' ? 'product' : actionType === 'ADD_STOCK_ITEM' ? 'stock_item' : '')),
-        targetOwnerId: String(existing.targetOwnerId || ''),
-        sourceStockItemId: String(existing.sourceStockItemId || ''),
-        replacementStockItemId: String(existing.replacementStockItemId || ''),
-        quantity: Number(existing.quantity || 1) || 1,
-        unit: String(existing.unit || ''),
-        menuItemIds: Array.isArray(existing.menuItemIds) && existing.menuItemIds.length
-          ? existing.menuItemIds.map(String)
-          : (suggestion.menuItemIds || []).map(String),
-        locationIds: Array.isArray(existing.locationIds) && existing.locationIds.length
-          ? existing.locationIds.map(String)
-          : (suggestion.locationIds || []).map(String)
-      }
-    }
-  };
-  renderApp();
-}
-
-function cancelRecipeNoteRuleSetup() {
-  appState.recipes = {
-    ...appState.recipes,
-    noteSuggestions: {
-      ...(appState.recipes.noteSuggestions || {}),
-      editingId: '',
-      draft: null,
-      error: ''
-    }
-  };
-  renderApp();
-}
-
-function updateRecipeNoteRuleDraft(patch = {}) {
-  const current = appState.recipes.noteSuggestions?.draft;
-  if (!current) return;
-  const next = { ...current, ...patch };
-  if (patch.actionType) {
-    const actionType = String(patch.actionType).toUpperCase();
-    next.actionType = actionType;
-    next.targetOwnerType = actionType === 'ADD_RECIPE'
-      ? 'product'
-      : actionType === 'ADD_STOCK_ITEM'
-        ? 'stock_item'
-        : '';
-    next.targetOwnerId = '';
-    next.sourceStockItemId = '';
-    next.replacementStockItemId = '';
-  }
-  appState.recipes = {
-    ...appState.recipes,
-    noteSuggestions: {
-      ...(appState.recipes.noteSuggestions || {}),
-      draft: next,
-      error: ''
-    }
-  };
-  renderApp();
-}
-
-async function saveRecipeNoteRule() {
-  const noteState = appState.recipes.noteSuggestions || {};
-  const draft = noteState.draft;
-  if (!draft?.noteText) return;
-  const actionType = String(draft.actionType || '').toUpperCase();
-  const targetRequired = ['ADD_RECIPE', 'ADD_STOCK_ITEM'].includes(actionType);
-  const sourceRequired = ['REMOVE_INGREDIENT', 'REPLACE_INGREDIENT'].includes(actionType);
-  const replacementRequired = actionType === 'REPLACE_INGREDIENT';
-  if (!actionType || (targetRequired && !draft.targetOwnerId) || (sourceRequired && !draft.sourceStockItemId) || (replacementRequired && !draft.replacementStockItemId)) {
-    appState.recipes = {
-      ...appState.recipes,
-      noteSuggestions: {
-        ...noteState,
-        error: 'Complete the stock action before saving.'
-      }
-    };
-    renderApp();
-    return;
-  }
-
-  appState.recipes = {
-    ...appState.recipes,
-    noteSuggestions: { ...noteState, status: 'saving', error: '' }
-  };
-  renderApp();
-  try {
-    const { saveModifierNoteRule } = await import('./services/recipeService.js');
-    await saveModifierNoteRule(appState.workspace?.id, draft.noteText, {
-      actionType,
-      targetOwnerType: draft.targetOwnerType || '',
-      targetOwnerId: draft.targetOwnerId || '',
-      sourceStockItemId: draft.sourceStockItemId || '',
-      replacementStockItemId: draft.replacementStockItemId || '',
-      quantity: Math.max(0.000001, Number(draft.quantity || 1) || 1),
-      unit: draft.unit || '',
-      menuItemIds: Array.isArray(draft.menuItemIds) ? draft.menuItemIds : [],
-      locationIds: Array.isArray(draft.locationIds) ? draft.locationIds : [],
-      applyAllMatchingProducts: !Array.isArray(draft.menuItemIds) || draft.menuItemIds.length === 0,
-      active: true
-    });
-    appState.recipes = {
-      ...appState.recipes,
-      noteSuggestions: {
-        ...(appState.recipes.noteSuggestions || {}),
-        editingId: '',
-        draft: null,
-        status: 'ready',
-        error: ''
-      }
-    };
-    await refreshRecipeNoteSuggestions();
-    showRecipeToast('Note rule approved. Exact matching notes can now affect stock.', 'success');
-  } catch (error) {
-    appState.recipes = {
-      ...appState.recipes,
-      noteSuggestions: {
-        ...(appState.recipes.noteSuggestions || {}),
-        status: 'error',
-        error: error.message || 'Could not save the note rule.'
-      }
-    };
-    renderApp();
-  }
-}
-
-async function setRecipeNoteSuggestionDisposition(noteText = '', disposition = 'IGNORED') {
-  const noteState = appState.recipes.noteSuggestions || {};
-  appState.recipes = {
-    ...appState.recipes,
-    noteSuggestions: { ...noteState, status: 'saving', error: '' }
-  };
-  renderApp();
-  try {
-    const service = await import('./services/recipeService.js');
-    if (disposition === 'SUGGESTED') {
-      await service.restoreModifierNoteSuggestion(appState.workspace?.id, noteText);
-    } else {
-      await service.ignoreModifierNoteSuggestion(appState.workspace?.id, noteText);
-    }
-    await refreshRecipeNoteSuggestions();
-  } catch (error) {
-    appState.recipes = {
-      ...appState.recipes,
-      noteSuggestions: {
-        ...(appState.recipes.noteSuggestions || {}),
-        status: 'error',
-        error: error.message || 'Could not update the note suggestion.'
-      }
-    };
-    renderApp();
-  }
-}
-
-function toggleRecipeIgnoredNoteSuggestions(includeIgnored = false) {
-  refreshRecipeNoteSuggestions({ includeIgnored: Boolean(includeIgnored) });
-}
-
 async function scanRecipeIngredientBarcode(target = 'ingredient') {
   const isRecipeSearch = target === 'recipe';
 
@@ -4135,62 +3615,6 @@ async function scanRecipeIngredientBarcode(target = 'ingredient') {
     });
   } catch (error) {
     showRecipeToast(error.message || 'Could not start the barcode scanner.', 'error');
-  }
-}
-
-async function scanPurchaseOrderBarcode() {
-  try {
-    const { openBarcodeScanner } = await import('./services/barcodeScanner.js');
-    await openBarcodeScanner({
-      title: 'Scan Purchase Order Barcode',
-      helper: 'Scan a stock item barcode to filter the purchase order stock picker.',
-      onScan: (code) => {
-        const barcode = String(code || '').trim();
-        if (!barcode) return;
-        appState.purchaseOrders = {
-          ...appState.purchaseOrders,
-          filters: {
-            ...appState.purchaseOrders.filters,
-            lineQuery: barcode,
-            openDropdown: ''
-          }
-        };
-        renderApp();
-        showPurchaseOrderToast(`Barcode ${barcode} loaded into purchase order stock search.`, 'success');
-      }
-    });
-  } catch (error) {
-    showPurchaseOrderToast(error.message || 'Could not start the purchase order barcode scanner.', 'error');
-  }
-}
-
-async function scanAdjustmentBarcode() {
-  try {
-    const { openBarcodeScanner } = await import('./services/barcodeScanner.js');
-    await openBarcodeScanner({
-      title: 'Scan Adjustment Barcode',
-      helper: 'Scan a stock item barcode to filter the adjustment stock picker.',
-      onScan: (code) => {
-        const barcode = String(code || '').trim();
-        if (!barcode) return;
-        appState.adjustments = {
-          ...appState.adjustments,
-          filters: {
-            ...appState.adjustments.filters,
-            adjustmentWorkflow: 'bulk',
-            overlay: 'stock',
-            stockSearch: barcode,
-            stockPage: 1,
-            selectedStockIds: [],
-            openDropdown: ''
-          }
-        };
-        renderApp();
-        showAdjustmentToast(`Barcode ${barcode} loaded into adjustment stock search.`, 'success');
-      }
-    });
-  } catch (error) {
-    showAdjustmentToast(error.message || 'Could not start the adjustment barcode scanner.', 'error');
   }
 }
 
@@ -4269,7 +3693,6 @@ function openRecipeEditor(itemId) {
     pickerStep: 'select',
     pickerSelectedIds: [],
     pickerQuantities: {},
-    modifierStockPicker: null,
     confirmLineRemoval: null,
     filters: {
       ...appState.recipes.filters,
@@ -4277,7 +3700,6 @@ function openRecipeEditor(itemId) {
       ingredientCategory: '',
       ingredientType: '',
       ingredientCategoryDropdownSearch: '',
-      modifierStockRuleOpen: false,
       openDropdown: ''
     },
     pendingFocus: null,
@@ -4314,7 +3736,6 @@ function openRecipeSetupFromMenu(itemId) {
       pickerStep: 'select',
       pickerSelectedIds: [],
       pickerQuantities: {},
-      modifierStockPicker: null,
       confirmLineRemoval: null,
       pendingOpenItemId: '',
       pendingOpenItemName: '',
@@ -4348,17 +3769,11 @@ function closeRecipeEditor() {
     pickerStep: 'select',
     pickerSelectedIds: [],
     pickerQuantities: {},
-    modifierStockPicker: null,
     confirmLineRemoval: null,
     pendingFocus: null,
     modalFocusRequest: '',
     actionStatus: '',
-    actionError: '',
-    filters: {
-      ...appState.recipes.filters,
-      modifierStockRuleOpen: false,
-      openDropdown: ''
-    }
+    actionError: ''
   };
   renderApp();
 }
@@ -4366,9 +3781,11 @@ function closeRecipeEditor() {
 function updateRecipeLine(index, qty) {
   const nextRecipe = [...(appState.recipes.draftRecipe || [])];
   if (!nextRecipe[index]) return;
+  const quantity = normalizeRecipeQtyInput(qty);
   nextRecipe[index] = {
     ...nextRecipe[index],
-    qty: normalizeRecipeQtyInput(qty)
+    qty: quantity,
+    quantity
   };
   appState.recipes = {
     ...appState.recipes,
@@ -4502,12 +3919,17 @@ function addRecipeIngredient(ingredientId, qty = 0) {
   const existingIndex = draft.findIndex((line) => String(line.ingId) === id);
   let focusIndex = existingIndex;
   if (existingIndex >= 0) {
+    const nextQuantity = parseDecimalInputValue(
+      draft[existingIndex].qty ?? draft[existingIndex].quantity,
+      0
+    ) + quantity;
     draft[existingIndex] = {
       ...draft[existingIndex],
-      qty: parseDecimalInputValue(draft[existingIndex].qty, 0) + quantity
+      qty: nextQuantity,
+      quantity: nextQuantity
     };
   } else {
-    draft.push({ ingId: id, qty: quantity });
+    draft.push({ ingId: id, stockItemId: id, qty: quantity, quantity });
     focusIndex = draft.length - 1;
   }
 
@@ -4749,102 +4171,6 @@ function updateRecipeModifierProductLink(productIds = []) {
 	  renderApp();
 }
 
-
-function updateRecipeModifierStockRule(patch = {}) {
-  const item = appState.recipes.editingItem;
-  if (!item || item.recipeOwnerType !== 'yoco_modifier') return;
-  const ownerId = String(item.recipeOwnerId || item.id || '').replace(/^modifier:/, '');
-  const fallbackAction = item.recipeCount || linkedProductIdsFromRecipeItem(item).length ? 'ADD_RECIPE' : 'NO_STOCK_CHANGE';
-  const current = item.stockRule && typeof item.stockRule === 'object' ? item.stockRule : {};
-  const actionType = String(patch.actionType || current.actionType || fallbackAction).toUpperCase();
-  const next = {
-    ...current,
-    actionType,
-    targetOwnerType: String(current.targetOwnerType || (actionType === 'ADD_RECIPE' ? 'yoco_modifier' : actionType === 'ADD_STOCK_ITEM' ? 'stock_item' : '')),
-    targetOwnerId: String(current.targetOwnerId || (actionType === 'ADD_RECIPE' ? ownerId : '')),
-    sourceStockItemId: String(current.sourceStockItemId || ''),
-    replacementStockItemId: String(current.replacementStockItemId || ''),
-    quantity: Number(current.quantity || 1) || 1,
-    unit: String(current.unit || ''),
-    menuItemIds: Array.isArray(current.menuItemIds) ? current.menuItemIds.map(String).filter(Boolean) : [],
-    locationIds: [],
-    applyAllMatchingProducts: current.applyAllMatchingProducts !== false,
-    active: current.active !== false,
-    sourceModifierId: String(current.sourceModifierId || item.yocoModifierId || ''),
-    sourceModifierGroupId: String(current.sourceModifierGroupId || item.yocoModifierGroupId || ''),
-    sourceModifierVariantId: String(current.sourceModifierVariantId || item.yocoModifierVariantId || ''),
-    sourceName: String(current.sourceName || item.name || ''),
-    ...patch
-  };
-
-  next.locationIds = [];
-
-  if (actionType === 'ADD_RECIPE') {
-    next.targetOwnerType ||= 'yoco_modifier';
-    next.targetOwnerId ||= ownerId;
-  }
-  if (actionType === 'ADD_STOCK_ITEM') next.targetOwnerType = 'stock_item';
-  if (next.applyAllMatchingProducts) next.menuItemIds = [];
-
-  appState.recipes = {
-    ...appState.recipes,
-    editingItem: {
-      ...item,
-      stockRule: next
-    },
-    actionError: ''
-  };
-  renderApp();
-}
-
-function openRecipeModifierStockPicker(mode = '') {
-  if (!appState.recipes.editingItem) return;
-  appState.recipes = {
-    ...appState.recipes,
-    modifierStockPicker: { open: true, mode: String(mode || ''), query: '' }
-  };
-  renderApp();
-}
-
-function closeRecipeModifierStockPicker() {
-  appState.recipes = { ...appState.recipes, modifierStockPicker: null };
-  renderApp();
-}
-
-function searchRecipeModifierStockPicker(query = '') {
-  appState.recipes = {
-    ...appState.recipes,
-    modifierStockPicker: {
-      ...(appState.recipes.modifierStockPicker || {}),
-      open: true,
-      query: String(query || '')
-    }
-  };
-  renderApp();
-}
-
-function selectRecipeModifierStockPicker(value = '') {
-  const mode = String(appState.recipes.modifierStockPicker?.mode || '');
-  const raw = String(value || '');
-  if (!mode || !raw) return;
-  if (mode === 'recipeTarget') {
-    const separator = raw.indexOf('|');
-    updateRecipeModifierStockRule({
-      targetOwnerType: separator >= 0 ? raw.slice(0, separator) : '',
-      targetOwnerId: separator >= 0 ? raw.slice(separator + 1) : raw
-    });
-  } else if (mode === 'stockTarget') {
-    const selected = (appState.recipes.ingredients || []).find((entry) => String(entry.id) === raw);
-    updateRecipeModifierStockRule({ targetOwnerType: 'stock_item', targetOwnerId: raw, unit: String(selected?.unit || 'ea') });
-  } else if (mode === 'source') {
-    updateRecipeModifierStockRule({ sourceStockItemId: raw, replacementStockItemId: '', quantity: 1 });
-  } else if (mode === 'replacement') {
-    updateRecipeModifierStockRule({ replacementStockItemId: raw });
-  }
-  appState.recipes = { ...appState.recipes, modifierStockPicker: null };
-  renderApp();
-}
-
 function updateRecipeSourceStockItem(stockItemId = '') {
   const item = appState.recipes.editingItem;
   if (!item || item.recipeOwnerType === 'yoco_modifier') return;
@@ -4935,16 +4261,27 @@ function applyRecipePickerSelection() {
     const existingIndex = draft.findIndex((line) => String(line.ingId) === id);
 
     if (existingIndex >= 0) {
+      const nextQuantity = parseDecimalInputValue(
+        draft[existingIndex].qty ?? draft[existingIndex].quantity,
+        0
+      ) + quantity;
       draft[existingIndex] = {
         ...draft[existingIndex],
-        qty: parseDecimalInputValue(draft[existingIndex].qty, 0) + quantity,
+        qty: nextQuantity,
+        quantity: nextQuantity,
         ...(selectedUnit ? { unit: selectedUnit } : {})
       };
       mergedCount += 1;
       return;
     }
 
-    draft.push({ ingId: id, qty: quantity, ...(selectedUnit ? { unit: selectedUnit } : {}) });
+    draft.push({
+      ingId: id,
+      stockItemId: id,
+      qty: quantity,
+      quantity,
+      ...(selectedUnit ? { unit: selectedUnit } : {})
+    });
     addedCount += 1;
   });
 
@@ -5092,7 +4429,6 @@ async function confirmRecipeDelete() {
         ...appState.recipes,
         items: refreshedRecipeData?.items || previousRecipeItems,
         ingredients: refreshedRecipeData?.ingredients || appState.recipes.ingredients,
-        locations: refreshedRecipeData?.locations || appState.recipes.locations || [],
         confirmDelete: null,
         actionStatus: '',
         actionError: blockingError.message || 'Could not delete selected recipes.'
@@ -5114,7 +4450,6 @@ async function confirmRecipeDelete() {
       ...appState.recipes,
       items: nextRecipeItems,
       ingredients: refreshedRecipeData?.ingredients || appState.recipes.ingredients,
-      locations: refreshedRecipeData?.locations || appState.recipes.locations || [],
       selectedIds: (appState.recipes.selectedIds || []).filter((id) => !affectedIds.has(String(id))),
       confirmDelete: null,
       actionStatus: '',
@@ -5173,6 +4508,12 @@ function getRecipeDeleteToast(productCount = 0, modifierCount = 0) {
 async function saveCurrentRecipe() {
   const item = appState.recipes.editingItem;
   if (!item) return;
+  const workspaceId = appState.workspace?.id;
+  const draftRecipe = structuredCloneSafe(appState.recipes.draftRecipe || []);
+  let settleSaveState = (state) => ({
+    ...state,
+    actionStatus: state.actionStatus === 'saving' ? '' : state.actionStatus
+  });
 
   appState.recipes = {
     ...appState.recipes,
@@ -5184,9 +4525,22 @@ async function saveCurrentRecipe() {
 
   try {
     const { updateRecipe } = await import('./services/recipeService.js');
-    await updateRecipe(appState.workspace?.id, item, appState.recipes.draftRecipe || []);
+    const {
+      awaitRecipeSave,
+      mergeVerifiedRecipeSave,
+      settleRecipeSaveState
+    } = await import('./services/recipePayload.js');
+    settleSaveState = settleRecipeSaveState;
+    const result = await awaitRecipeSave(
+      updateRecipe(workspaceId, item, draftRecipe)
+    );
+    const savedItem = mergeVerifiedRecipeSave(item, result, draftRecipe);
+    const savedItemId = String(savedItem.id || item.id);
     appState.recipes = {
       ...appState.recipes,
+      items: (appState.recipes.items || []).map((entry) => (
+        String(entry.id) === savedItemId ? savedItem : entry
+      )),
       editingItem: null,
       draftRecipe: [],
       pickerOpen: false,
@@ -5197,17 +4551,31 @@ async function saveCurrentRecipe() {
       actionStatus: '',
       actionError: ''
     };
-    showRecipeToast('Recipe Blueprint Saved.', 'success');
-    refreshActiveTabFromApi().catch(() => {});
+    appState.menu = {
+      ...appState.menu,
+      items: (appState.menu.items || []).map((entry) => (
+        String(entry.id) === savedItemId ? { ...entry, ...savedItem } : entry
+      ))
+    };
+    renderApp();
+    showRecipeToast('Recipe saved and verified.', 'success');
+    refreshActiveTabFromApi().catch((error) => {
+      console.warn('[RecipeSave] Recipe was verified, but the background catalogue refresh failed.', error);
+    });
   } catch (error) {
     appState.recipes = {
       ...appState.recipes,
       actionStatus: '',
       actionError: error.message || 'Could not save recipe.'
     };
-    renderApp();
   } finally {
+    appState.recipes = settleSaveState(appState.recipes);
+    pendingFocusField = null;
+    if (typeof document !== 'undefined' && document.activeElement && typeof document.activeElement.blur === 'function') {
+      document.activeElement.blur();
+    }
     hideGlobalSaving();
+    renderApp({ force: true });
   }
 }
 
@@ -5225,10 +4593,10 @@ async function importRecipeFile(file) {
     if (!rows.length) {
       throw new Error('The file appears to be empty or could not be read. Make sure you\'re importing a Recipe Import template (.csv or .xlsx) that has been filled out.');
     }
-    const { recipes, review, missingIngredients } = mapLegacyRecipeRows(rows);
+    const { recipes, report, missingIngredients } = mapLegacyRecipeRows(rows);
     if (!recipes.length) {
-      const errorDetail = review.errors.length
-        ? formatImportErrors(review.errors, 8)
+      const errorDetail = report.errors.length
+        ? formatImportErrors(report.errors, 8)
         : 'Make sure the file uses the Recipe Import template with Product_Name, Ingredient_Name, and Quantity_Needed columns. The recipe builder export is not an import template.';
       throw new Error(`No valid recipe rows were found in this file. ${errorDetail}`);
     }
@@ -5241,7 +4609,7 @@ async function importRecipeFile(file) {
       actionError: ''
     };
     const importErrors = [
-      ...(review.errors || []),
+      ...(report.errors || []),
       ...((result.errors || []).map((entry) => ({
         code: entry.code || 'ERR_RECIPE_IMPORT',
         row: entry.row || '',
@@ -5257,7 +4625,7 @@ async function importRecipeFile(file) {
         errors: importErrors,
         importedCount: result.importedCount || 0,
         skippedCount,
-        totalRows: review.totalRows,
+        totalRows: report.totalRows,
         tone: 'warning',
         confirmLabel: 'Confirm & Fix Errors'
       });
@@ -5323,6 +4691,7 @@ async function exportRecipeTemplate(format = 'csv') {
 
   if (normalizedFormat === 'xlsx') {
     try {
+      const { downloadStyledRecipeTemplateXlsx } = await import('./services/dataService.js');
       const products = [...new Set(
         (appState.recipes.items || []).map((item) => item.name || '').filter(Boolean)
       )].sort((a, b) => a.localeCompare(b));
@@ -5387,10 +4756,10 @@ function updateStockFilters(nextFilters) {
   renderApp();
 }
 
-function dismissStockImportReview() {
+function dismissStockImportReport() {
   appState.stock = {
     ...appState.stock,
-    importReview: null
+    importReport: null
   };
   renderApp();
 }
@@ -5925,17 +5294,6 @@ async function saveStockItem(item) {
     return;
   }
 
-  const duplicateNameError = getDuplicateStockItemNameError(item, appState.stock.items || []);
-  if (duplicateNameError) {
-    appState.stock = {
-      ...appState.stock,
-      actionStatus: '',
-      actionError: duplicateNameError
-    };
-    renderApp();
-    return;
-  }
-
   appState.stock = {
     ...appState.stock,
     actionStatus: 'saving',
@@ -5957,9 +5315,8 @@ async function saveStockItem(item) {
       actionStatus: '',
       actionError: ''
     };
-    renderApp();
-    refreshActiveTabFromApi().catch(() => {});
-    showStockToast('Stock item saved.', 'success');
+    await refreshActiveTabFromApi();
+    showStockToast('Stock item and recipe saved.', 'success');
   } catch (error) {
     appState.stock = {
       ...appState.stock,
@@ -5970,42 +5327,6 @@ async function saveStockItem(item) {
   } finally {
     hideGlobalSaving();
   }
-}
-
-function getDuplicateStockItemNameError(item = {}, stockItems = []) {
-  const nextName = String(item.name || '').trim();
-  const nextKey = normalizeStockItemDuplicateName(nextName);
-  if (!nextKey) return '';
-
-  const currentIds = new Set(
-    String(item.id || '')
-      .split(',')
-      .map((id) => id.trim())
-      .filter(Boolean)
-  );
-
-  const duplicate = (stockItems || []).find((entry = {}) => {
-    if (normalizeStockItemDuplicateName(entry.name) !== nextKey) return false;
-    const entryIds = String(entry.mergedIds || entry.id || '')
-      .split(',')
-      .map((id) => id.trim())
-      .filter(Boolean);
-    if (!currentIds.size) return true;
-    return !entryIds.some((id) => currentIds.has(id));
-  });
-
-  return duplicate
-    ? `A stock item named "${nextName}" already exists. Stock item names must be unique.`
-    : '';
-}
-
-function normalizeStockItemDuplicateName(value = '') {
-  return String(value || '')
-    .normalize('NFKC')
-    .toLowerCase()
-    .replace(/[\u200B-\u200D\uFEFF]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
 }
 
 function getStockUomConfigurationError(configurations = []) {
@@ -6309,7 +5630,7 @@ function requestResetStockTotals(mode = 'reporting_stock') {
     renderApp();
     return;
   }
-  const resetMode = mode === 'reporting' || mode === 'dashboard' ? 'reporting' : 'reporting_stock';
+  const resetMode = mode === 'reporting' ? 'reporting' : 'reporting_stock';
   appState.settings = {
     ...appState.settings,
     confirmResetTotals: { mode: resetMode, confirmText: '' },
@@ -6330,7 +5651,7 @@ function updateResetTotalsConfirmText(value = '') {
   };
   // Update the confirm button's disabled state directly — calling renderApp() here
   // destroys and recreates the DOM, collapsing the input and losing focus on every keystroke.
-  const resetMode = appState.settings.confirmResetTotals?.mode === 'reporting' || appState.settings.confirmResetTotals?.mode === 'dashboard' ? 'reporting' : 'reporting_stock';
+  const resetMode = appState.settings.confirmResetTotals?.mode === 'reporting' ? 'reporting' : 'reporting_stock';
   const requiredText = resetMode === 'reporting' ? 'Reset Reporting' : 'Reset Reporting and Stock Values';
   const btn = document.querySelector('[data-settings-confirm-reset-totals]');
   if (btn) btn.disabled = confirmText !== requiredText || appState.settings.actionStatus === 'resetting';
@@ -6356,7 +5677,7 @@ async function confirmResetStockTotals() {
     renderApp();
     return;
   }
-  const resetMode = appState.settings.confirmResetTotals?.mode === 'reporting' || appState.settings.confirmResetTotals?.mode === 'dashboard'
+  const resetMode = appState.settings.confirmResetTotals?.mode === 'reporting'
     ? 'reporting'
     : 'reporting_stock';
   const requiredText = resetMode === 'reporting'
@@ -6378,8 +5699,8 @@ async function confirmResetStockTotals() {
   renderApp();
 
   try {
-    const { resetWorkspaceReportingHistory } = await import('./services/stockService.js');
-    const result = await resetWorkspaceReportingHistory(appState.workspace?.id, {
+    const { resetWorkspaceReporting } = await import('./services/stockService.js');
+    const result = await resetWorkspaceReporting(appState.workspace?.id, {
       includeStockOnHand: resetMode === 'reporting_stock'
     });
     appState.settings = {
@@ -6389,15 +5710,15 @@ async function confirmResetStockTotals() {
       actionError: ''
     };
     const toastMessage = resetMode === 'reporting_stock'
-      ? `Reporting data reset and ${result.stockResetCount || 0} stock item${Number(result.stockResetCount || 0) === 1 ? '' : 's'} zeroed.`
-      : 'Reporting data reset.';
+      ? `Reporting reset and ${result.stockResetCount || 0} stock item${Number(result.stockResetCount || 0) === 1 ? '' : 's'} zeroed.`
+      : 'Reporting, dashboard summaries, and report totals reset.';
     showSettingsToast(toastMessage, 'success');
     await selectWorkspace(appState.workspace);
   } catch (error) {
     appState.settings = {
       ...appState.settings,
       actionStatus: '',
-      actionError: error.message || 'Could not reset reporting data.'
+      actionError: error.message || 'Could not reset reporting.'
     };
     renderApp();
   }
@@ -6409,20 +5730,15 @@ async function importStockFile(file) {
     ...appState.stock,
     actionStatus: 'importing',
     actionError: '',
-    importReview: null
+    importReport: null
   };
   renderApp();
 
   try {
-    const { detectImportFileType, IMPORT_TYPES } = await import('./services/locationCostingService.js');
-    const fileType = await detectImportFileType(file);
-    if (fileType === IMPORT_TYPES.LOCATION_COSTING_IMPORT) {
-      throw new Error('This file looks like a Location Costing Import. Please upload it in the Location Costing Import section.');
-    }
     const rows = await parseDataFile(file, { preferredSheetNames: ['Stock_Import'] });
-    const { items, review } = mapLegacyStockRows(rows);
-    if (!items.length && !review.errors.length && !review.skippedCount) throw new Error('No valid stock item rows were found in this file.');
-    const ignoredAdjustmentCount = (review.errors || []).filter((entry) => entry.code === 'WARN_STOCK_ADJUSTMENT_IGNORED').length;
+    const { items, report } = mapLegacyStockRows(rows);
+    if (!items.length && !report.errors.length && !report.skippedCount) throw new Error('No valid stock item rows were found in this file.');
+    const ignoredAdjustmentCount = (report.errors || []).filter((entry) => entry.code === 'WARN_STOCK_ADJUSTMENT_IGNORED').length;
 
     let result = { importedCount: 0 };
     if (items.length) {
@@ -6433,17 +5749,17 @@ async function importStockFile(file) {
       });
     }
     const nextReport = {
-      ...review,
+      ...report,
       importedCount: result.importedCount || 0,
-      skippedCount: review.skippedCount || 0
+      skippedCount: report.skippedCount || 0
     };
     const skippedCount = Number(nextReport.skippedCount || 0);
-    const hasReportEntries = skippedCount > 0 || ignoredAdjustmentCount > 0 || (review.errors || []).length > 0;
+    const hasReportEntries = skippedCount > 0 || ignoredAdjustmentCount > 0 || (report.errors || []).length > 0;
     appState.stock = {
       ...appState.stock,
       actionStatus: '',
       actionError: '',
-      importReview: hasReportEntries ? nextReport : null
+      importReport: hasReportEntries ? nextReport : null
     };
     if (hasReportEntries) {
       renderApp();
@@ -6455,7 +5771,7 @@ async function importStockFile(file) {
       ...appState.stock,
       actionStatus: '',
       actionError: '',
-      importReview: null
+      importReport: null
     };
     showImportNotification({
       moduleLabel: 'Stock Import',
@@ -6466,239 +5782,6 @@ async function importStockFile(file) {
       confirmLabel: 'Confirm & Try Again'
     });
   }
-}
-
-
-async function exportLocationCostingSheet(format = 'xlsx') {
-  const normalizedFormat = String(format || 'xlsx').toLowerCase() === 'pdf' ? 'pdf' : 'xlsx';
-  const locationId = String(appState.stock.filters?.locationCostingLocationId || '').trim();
-  if (!locationId) {
-    showStockToast('Please select a location before exporting or importing location costs.', 'warning');
-    return;
-  }
-  appState.stock = { ...appState.stock, actionStatus: 'exporting-location-costing', actionError: '' };
-  renderApp();
-  try {
-    const locations = appState.stock.locations || appState.locations?.items || [];
-    if (normalizedFormat === 'pdf') {
-      const result = await exportLocationCostingPdf({
-        stockItems: appState.stock.items || [],
-        locations,
-        locationId,
-        workspaceName: appState.workspace?.siteName || appState.workspace?.name || 'KCP'
-      });
-      appState.stock = {
-        ...appState.stock,
-        actionStatus: '',
-        actionError: '',
-        filters: {
-          ...appState.stock.filters,
-          locationCostingPickerKind: '',
-          locationCostingLocationIdDropdownSearch: '',
-          openDropdown: ''
-        }
-      };
-      showStockToast(`Location cost PDF exported for ${result.locationName}.`, 'success');
-      return;
-    }
-
-    const { exportLocationCostingTemplate } = await import('./services/locationCostingService.js');
-    const result = await exportLocationCostingTemplate({
-      stockItems: appState.stock.items || [],
-      locations,
-      locationId,
-      workspaceName: appState.workspace?.siteName || appState.workspace?.name || 'KCP'
-    });
-    appState.stock = {
-      ...appState.stock,
-      actionStatus: '',
-      actionError: '',
-      filters: {
-        ...appState.stock.filters,
-        locationCostingPickerKind: '',
-        locationCostingLocationIdDropdownSearch: '',
-        openDropdown: ''
-      }
-    };
-    showStockToast(`Location cost sheet exported for ${result.locationName}.`, 'success');
-  } catch (error) {
-    appState.stock = { ...appState.stock, actionStatus: '', actionError: error.message || 'Could not export location costs.' };
-    showStockToast(error.message || 'Could not export location costs.', 'error');
-  }
-}
-
-async function exportLocationCostingPdf({ stockItems = [], locations = [], locationId = '', workspaceName = 'KCP' } = {}) {
-  const selectedLocation = (locations || []).find((location) => String(location.id || location.locationId || '') === String(locationId || ''));
-  if (!selectedLocation) throw new Error('Please select a location before exporting or importing location costs.');
-  const locationName = getLocationNameForCostingExport(selectedLocation);
-  const columns = ['Item Name', 'SKU / Barcode', 'Category', 'UOM', 'Cost Ex VAT'];
-  const rows = (stockItems || [])
-    .filter((item) => item && typeof item === 'object' && item.id)
-    .slice()
-    .sort((left, right) => {
-      const categoryCompare = String(left.category || '').localeCompare(String(right.category || ''));
-      if (categoryCompare !== 0) return categoryCompare;
-      return String(left.name || '').localeCompare(String(right.name || ''));
-    })
-    .map((item) => ({
-      'Item Name': item.name || '',
-      'SKU / Barcode': getStockCostingSkuBarcode(item),
-      Category: item.category || item.inventoryCategory || 'General',
-      UOM: item.unit || item.uom || 'ea',
-      'Cost Ex VAT': formatCurrency(resolveStockLocationCostForExport(item, locationId))
-    }));
-
-  await exportObjectRows({
-    format: 'pdf',
-    filename: `kcp-location-costing-${slugifyExportName(locationName)}-${getExportTimestamp()}`,
-    sheetName: 'Location Costing',
-    title: 'Location Costing Report',
-    subtitle: `${workspaceName || 'KCP'} | ${locationName} | ${new Date().toLocaleString('en-ZA')}`,
-    rows,
-    columns,
-    summaryRows: [
-      { label: 'Report', value: 'Location Costing' },
-      { label: 'Location', value: locationName },
-      { label: 'Items', value: rows.length },
-      { label: 'Generated', value: new Date().toLocaleString('en-ZA') }
-    ],
-    branding: getPdfBranding()
-  });
-  return { rowCount: rows.length, locationName };
-}
-
-function resolveStockLocationCostForExport(item = {}, locationId = '') {
-  const costs = item.locationCosts || item.locationPrices || item.locationPricing || item.pricesByLocation || {};
-  const entry = costs[String(locationId || '')];
-  if (entry && typeof entry === 'object') return Number(entry.cost ?? entry.unitCost ?? entry.price ?? item.cost ?? 0) || 0;
-  if (entry !== undefined && entry !== null && entry !== '') return Number(entry) || 0;
-  return Number(item.cost ?? item.unitCost ?? 0) || 0;
-}
-
-function getStockCostingSkuBarcode(item = {}) {
-  return [item.sku || item.SKU || item.stockCode || item.itemCode || '', parseBarcodeValues(item)[0] || '']
-    .filter(Boolean)
-    .join(' / ');
-}
-
-function getLocationNameForCostingExport(location = {}) {
-  return String(location.displayName || location.name || location.locationName || location.id || 'Location').trim();
-}
-
-async function importLocationCostingFile(file) {
-  if (!file) return;
-  const selectedLocationId = String(appState.stock.filters?.locationCostingLocationId || '').trim();
-  appState.stock = { ...appState.stock, actionStatus: 'importing-location-costing', actionError: '', locationCostingPreview: null };
-  renderApp();
-  try {
-    const {
-      detectImportFileType,
-      IMPORT_TYPES,
-      parseLocationCostingImport,
-      applyLocationCostingImport,
-      applyLocationCostPreviewToItems
-    } = await import('./services/locationCostingService.js');
-    const fileType = await detectImportFileType(file);
-    if (fileType === IMPORT_TYPES.STOCK_ITEM_IMPORT) {
-      throw new Error('This file looks like a Stock Item Import. Please upload it in the Stock Item Import section.');
-    }
-    if (fileType !== IMPORT_TYPES.LOCATION_COSTING_IMPORT) {
-      throw new Error('We could not identify this import file. Please download a fresh template from the correct section and try again.');
-    }
-    const preview = await parseLocationCostingImport(file, {
-      selectedLocationId,
-      requireFileLocationMetadata: !selectedLocationId,
-      stockItems: appState.stock.items || [],
-      locations: appState.stock.locations || appState.locations?.items || []
-    });
-    if (preview.summary?.errors) {
-      throw new Error('Some rows have invalid costs. Fix the highlighted rows and upload again.');
-    }
-    if (!preview.summary?.toUpdate) {
-      appState.stock = {
-        ...appState.stock,
-        actionStatus: '',
-        actionError: '',
-        locationCostingPreview: null,
-        filters: {
-          ...appState.stock.filters,
-          locationCostingLocationId: preview.locationId || appState.stock.filters?.locationCostingLocationId || '',
-          locationCostingPickerKind: '',
-          locationCostingLocationIdDropdownSearch: '',
-          openDropdown: ''
-        }
-      };
-      renderApp();
-      showStockToast('No changes found.', 'info');
-      return;
-    }
-    appState.stock = { ...appState.stock, actionStatus: 'saving-location-costing', actionError: '', locationCostingPreview: null };
-    renderApp();
-    const result = await applyLocationCostingImport(appState.workspace?.id, preview);
-    appState.stock = {
-      ...appState.stock,
-      actionStatus: '',
-      actionError: '',
-      locationCostingPreview: null,
-      items: applyLocationCostPreviewToItems(appState.stock.items || [], preview),
-      filters: {
-        ...appState.stock.filters,
-        locationCostingLocationId: preview.locationId || appState.stock.filters?.locationCostingLocationId || '',
-        locationCostingPickerKind: '',
-        locationCostingLocationIdDropdownSearch: '',
-        openDropdown: ''
-      }
-    };
-    showStockToast(`Location costs updated successfully for ${preview.locationName}.`, 'success');
-    refreshActiveTabFromApi().catch((error) => console.warn('[Stock] Location cost refresh failed:', error));
-    return result;
-  } catch (error) {
-    appState.stock = { ...appState.stock, actionStatus: '', actionError: error.message || 'This file is not a Location Costing Import file. Please upload the correct template.', locationCostingPreview: null };
-    showStockToast(error.message || 'This file is not a Location Costing Import file. Please upload the correct template.', 'error');
-  }
-}
-
-async function confirmLocationCostingImport() {
-  const preview = appState.stock.locationCostingPreview;
-  if (!preview) return;
-  if (preview.summary?.errors) {
-    showStockToast('Some rows have invalid costs. Fix the highlighted rows and upload again.', 'warning');
-    return;
-  }
-  if (!preview.summary?.toUpdate) {
-    showStockToast('No changes found.', 'info');
-    return;
-  }
-  appState.stock = { ...appState.stock, actionStatus: 'saving-location-costing', actionError: '' };
-  renderApp();
-  try {
-    const { applyLocationCostingImport, applyLocationCostPreviewToItems } = await import('./services/locationCostingService.js');
-    const result = await applyLocationCostingImport(appState.workspace?.id, preview);
-    appState.stock = {
-      ...appState.stock,
-      actionStatus: '',
-      actionError: '',
-      locationCostingPreview: null,
-      items: applyLocationCostPreviewToItems(appState.stock.items || [], preview),
-      filters: {
-        ...appState.stock.filters,
-        locationCostingPickerKind: '',
-        locationCostingLocationIdDropdownSearch: '',
-        openDropdown: ''
-      }
-    };
-    showStockToast(`Location costs updated successfully for ${preview.locationName}.`, 'success');
-    refreshActiveTabFromApi().catch((error) => console.warn('[Stock] Location cost refresh failed:', error));
-    return result;
-  } catch (error) {
-    appState.stock = { ...appState.stock, actionStatus: '', actionError: error.message || 'We could not update location costs right now. No changes were applied. Please try again.' };
-    showStockToast(error.message || 'We could not update location costs right now. No changes were applied. Please try again.', 'error');
-  }
-}
-
-function cancelLocationCostingImport() {
-  appState.stock = { ...appState.stock, locationCostingPreview: null, actionStatus: '', actionError: '' };
-  renderApp();
 }
 
 async function exportStockItems(format = 'csv') {
@@ -6778,16 +5861,6 @@ async function exportStockTemplate(format = 'csv') {
   const timestamp = getExportTimestamp();
 
   try {
-    if (normalizedFormat === 'xlsx') {
-      await downloadStyledStockTemplateXlsx(`kcp-stock-items-template-${timestamp}`, {
-        columns: exportSchemas.stock,
-        rows: buildTemplateRows(exportSchemas.stock),
-        columnWidths: getStockImportTemplateColumnWidths(),
-        maxRows: 250
-      });
-      showStockToast('Stock template exported as XLSX.', 'success');
-      return;
-    }
     await exportObjectRows({
       format: normalizedFormat,
       filename: `kcp-stock-items-template-${timestamp}`,
@@ -6817,7 +5890,6 @@ function getStockImportTemplateColumnWidths() {
     SKU: 18,
     Category: 18,
     Base_UOM: 12,
-    Default_Ordering_UOM: 22,
     Cost_Ex_VAT: 14,
     VAT_Enabled: 14,
     Barcode: 18,
@@ -6979,23 +6051,6 @@ function updateSupplierDraftSilent(updates = {}) {
 function updateSettingsDraftSilent(updates = {}) {
   const draft = appState.settings.draft || {};
   appState.settings = { ...appState.settings, draft: { ...draft, ...updates } };
-}
-
-function updateSettingsTaxFieldSilent(key = '', value = '') {
-  const normalizedKey = String(key || '').trim();
-  if (!normalizedKey) return;
-  const draft = appState.settings.draft || createDefaultSettingsDraft();
-  appState.settings = {
-    ...appState.settings,
-    actionError: '',
-    draft: {
-      ...draft,
-      companyTaxInfo: {
-        ...(draft.companyTaxInfo && typeof draft.companyTaxInfo === 'object' ? draft.companyTaxInfo : {}),
-        [normalizedKey]: value
-      }
-    }
-  };
 }
 
 async function saveSupplier(item) {
@@ -7175,8 +6230,8 @@ async function importSupplierFile(file) {
 
   try {
     const rows = await parseDataFile(file, { preferredSheetNames: ['Supplier_Import'] });
-    const { rows: supplierRows, review } = mapSupplierImportRows(rows);
-    if (!supplierRows.length) throw new Error(formatImportFailure('No valid supplier rows were found in this file.', review.errors));
+    const { rows: supplierRows, report } = mapSupplierImportRows(rows);
+    if (!supplierRows.length) throw new Error(formatImportFailure('No valid supplier rows were found in this file.', report.errors));
 
     const { importSuppliers } = await import('./services/supplierService.js');
     const result = await importSuppliers(appState.workspace?.id, supplierRows);
@@ -7189,16 +6244,16 @@ async function importSupplierFile(file) {
       actionStatus: '',
       actionError: ''
     };
-    const skippedCount = Number(review.errors.length || result.skippedCount || 0);
+    const skippedCount = Number(report.errors.length || result.skippedCount || 0);
     if (skippedCount) {
       showImportNotification({
         moduleLabel: 'Supplier Import',
         title: 'Supplier Import Needs Attention',
         message: `${result.importedCount || 0} supplier${Number(result.importedCount || 0) === 1 ? '' : 's'} imported, but ${skippedCount} row${skippedCount === 1 ? '' : 's'} need fixing. Confirm this message, fix the errors, and try again.`,
-        errors: review.errors,
+        errors: report.errors,
         importedCount: result.importedCount || 0,
         skippedCount,
-        totalRows: review.totalRows,
+        totalRows: report.totalRows,
         tone: 'warning',
         confirmLabel: 'Confirm & Fix Errors'
       });
@@ -7329,176 +6384,6 @@ function updateAllPurchaseOrderSelection(orderIds = [], selected) {
     selectedIds: [...selectedIds]
   };
   renderApp();
-}
-
-
-function openPurchaseOrderFromReportingLowStock(payload = {}) {
-  const rawItems = Array.isArray(payload.items) && payload.items.length ? payload.items : [payload];
-  pendingReportingPurchaseOrderSeed = {
-    source: payload.source || 'stock_control',
-    supplierId: String(payload.supplierId || '').trim(),
-    supplierName: String(payload.supplierName || '').trim(),
-    items: rawItems.map(normalizeReportingLowStockSeedItem).filter((item) => item.itemId || item.itemName)
-  };
-  if (!pendingReportingPurchaseOrderSeed.items.length) {
-    pendingReportingPurchaseOrderSeed = null;
-    return;
-  }
-  navigateTo('purchase-orders');
-}
-
-function normalizeReportingLowStockSeedItem(payload = {}) {
-  return {
-    itemId: String(payload.itemId || payload.stockItemId || '').trim(),
-    itemName: String(payload.itemName || payload.stockItemName || '').trim(),
-    locationId: String(payload.locationId || '').trim(),
-    locationName: String(payload.locationName || '').trim(),
-    supplierId: String(payload.supplierId || '').trim(),
-    supplierName: String(payload.supplierName || '').trim(),
-    requiredQty: Number(payload.requiredQty || 0) || 0,
-    purchaseUom: String(payload.purchaseUom || '').trim(),
-    purchaseUomQty: Number(payload.purchaseUomQty || payload.requiredQty || 0) || 0,
-    unitCostExVat: Number(payload.unitCostExVat || payload.lastPurchaseCost || 0) || 0,
-    parLevel: Number(payload.parLevel || 0) || 0,
-    currentStock: Number(payload.currentStock || 0) || 0,
-    lowStockThreshold: Number(payload.lowStockThreshold || payload.threshold || 0) || 0
-  };
-}
-
-function applyPendingReportingPurchaseOrderSeed() {
-  const seed = pendingReportingPurchaseOrderSeed;
-  if (!seed) return false;
-  const stockItems = appState.purchaseOrders.stockItems || [];
-  const locations = appState.purchaseOrders.locations || [];
-  if (!stockItems.length || !locations.length) return false;
-
-  const seedItems = Array.isArray(seed.items) && seed.items.length ? seed.items : [normalizeReportingLowStockSeedItem(seed)];
-  const orderLines = [];
-  const skipped = [];
-
-  seedItems.forEach((itemSeed) => {
-    const stockItem = findPurchaseOrderStockItemForSeed(itemSeed, stockItems);
-    if (!stockItem) {
-      skipped.push(itemSeed.itemName || 'Unknown item');
-      return;
-    }
-    if (!isOrderableStockItem(stockItem)) {
-      skipped.push(`${stockItem.name} cannot be ordered`);
-      return;
-    }
-    orderLines.push(buildPurchaseOrderLineFromReportingSeed(itemSeed, stockItem, locations));
-  });
-
-  if (!orderLines.length) {
-    showPurchaseOrderToast(skipped.length ? `No orderable selected items were found. ${skipped.slice(0, 3).join(', ')}` : 'No orderable selected items were found.', 'error');
-    pendingReportingPurchaseOrderSeed = null;
-    return false;
-  }
-
-  const firstLine = orderLines[0] || {};
-  const forcedSupplierId = String(seed.supplierId || '').trim();
-  const forcedSupplierName = String(seed.supplierName || '').trim();
-  const inferredSupplierId = forcedSupplierId || firstLine.supplierId || '';
-  const inferredSupplierName = forcedSupplierName || firstLine.supplierName || '';
-  const locationId = firstLine.locationId || getDefaultPurchaseOrderLocationId(null);
-  const locationName = firstLine.locationName || getPurchaseOrderLocationName(locationId, '');
-  const siteId = getSiteIdForLocation(locations, locationId);
-  const siteName = getSiteNameById(appState.purchaseOrders.sites || [], siteId, '');
-  const uniqueLocations = new Set(orderLines.map((line) => String(line.locationId || '')).filter(Boolean));
-
-  pendingReportingPurchaseOrderSeed = null;
-  appState.purchaseOrders = {
-    ...appState.purchaseOrders,
-    draftOrder: {
-      id: '',
-      poNumber: '',
-      reference: orderLines.length > 1 ? 'Created from Stock Control selection' : 'Created from Stock Control report',
-      date: todayLocal(),
-      supplierId: inferredSupplierId,
-      supplierName: inferredSupplierName,
-      supplierQuery: inferredSupplierName,
-      siteId,
-      siteName,
-      locationId,
-      targetLocation: locationId,
-      targetLocationName: locationName,
-      inputMode: 'input',
-      supplierPickerOpen: !inferredSupplierId && !inferredSupplierName,
-      status: 'draft',
-      items: orderLines.map((line) => ({
-        ...line,
-        supplierId: forcedSupplierId || line.supplierId || '',
-        supplierName: forcedSupplierName || line.supplierName || ''
-      })),
-      notes: buildReportingLowStockPurchaseOrderNotes({ orderLines, skipped, uniqueLocations })
-    },
-    actionError: '',
-    toast: {
-      tone: skipped.length ? 'warning' : 'success',
-      message: `${orderLines.length} selected item${orderLines.length === 1 ? '' : 's'} added to a purchase order draft.${skipped.length ? ` ${skipped.length} item${skipped.length === 1 ? '' : 's'} skipped.` : ''}`
-    },
-    filters: {
-      ...appState.purchaseOrders.filters,
-      supplierQuery: inferredSupplierName,
-      lineQuery: '',
-      overlay: '',
-      calendarCursor: '',
-      openDropdown: ''
-    }
-  };
-  return true;
-}
-
-function buildPurchaseOrderLineFromReportingSeed(seed = {}, stockItem = {}, locations = []) {
-  const locationId = seed.locationId || getDefaultPurchaseOrderLocationId(null);
-  const locationName = seed.locationName || getPurchaseOrderLocationName(locationId, '');
-  const defaultSelection = getDefaultLineUomSelection(stockItem);
-  const selectedUom = seed.purchaseUom || defaultSelection.selectedUom || stockItem.unit || 'ea';
-  const uomSelection = seed.purchaseUom ? getLineUomSelection(stockItem, selectedUom) : defaultSelection;
-  const qty = Number(seed.purchaseUomQty || 0) > 0
-    ? Number(seed.purchaseUomQty)
-    : (uomSelection.ratio ? Number(seed.requiredQty || 0) / uomSelection.ratio : Number(seed.requiredQty || 0));
-  const cleanQty = Number.isFinite(qty) && qty > 0 ? Number(qty.toFixed(3)) : 0;
-  const suggestedQty = cleanQty || Math.max(Number(seed.parLevel || 0) - Number(seed.currentStock || 0), 0) || 1;
-  return {
-    id: stockItem.id,
-    stockItemId: stockItem.id,
-    stockItemName: stockItem.name,
-    qty: Number.isFinite(suggestedQty) && suggestedQty > 0 ? Number(suggestedQty.toFixed(3)) : 0,
-    packSize: uomSelection.ratio || 1,
-    unitCost: Number(seed.unitCostExVat || stockItem.lastPurchasePrice || stockItem.lastPurchaseCost || stockItem.latestPurchasePrice || stockItem.cost || 0) || 0,
-    unit: stockItem.unit || uomSelection.baseUom || 'ea',
-    selectedUom: uomSelection.selectedUom || selectedUom,
-    uomConfigurations: normalizeLineUomConfigurations(stockItem.uomConfigurations || stockItem.uomConfig || stockItem.uomConversions),
-    locationId,
-    targetLocation: locationId,
-    locationName,
-    targetLocationName: locationName,
-    supplierId: seed.supplierId || '',
-    supplierName: seed.supplierName || '',
-    reportingContext: {
-      parLevel: seed.parLevel,
-      currentStock: seed.currentStock,
-      requiredQty: seed.requiredQty,
-      lowStockThreshold: seed.lowStockThreshold
-    }
-  };
-}
-
-function buildReportingLowStockPurchaseOrderNotes({ orderLines = [], skipped = [], uniqueLocations = new Set() } = {}) {
-  const locationsText = [...uniqueLocations].map((id) => getPurchaseOrderLocationName(id, id)).filter(Boolean).join(', ');
-  const base = `Pre-created from selected Stock Control items${locationsText ? ` for ${locationsText}` : ''}. Items are included because they were explicitly selected, even when current stock is above par. Review supplier, quantity, location and cost before saving.`;
-  const skippedText = skipped.length ? ` Skipped: ${skipped.slice(0, 5).join(', ')}${skipped.length > 5 ? ` and ${skipped.length - 5} more` : ''}.` : '';
-  return `${base}${skippedText}`;
-}
-
-function findPurchaseOrderStockItemForSeed(seed = {}, stockItems = []) {
-  const itemId = String(seed.itemId || '').trim();
-  const itemName = String(seed.itemName || '').trim().toLowerCase();
-  return (stockItems || []).find((item) => itemId && String(item.id) === itemId)
-    || (stockItems || []).find((item) => itemId && String(item.stockItemId || item.itemId || item.sourceId || '') === itemId)
-    || (stockItems || []).find((item) => itemName && String(item.name || '').trim().toLowerCase() === itemName)
-    || null;
 }
 
 function openPurchaseOrderDraft(orderId) {
@@ -7632,10 +6517,6 @@ function addPurchaseOrderLine(stockItemId) {
   const draft = appState.purchaseOrders.draftOrder;
   const stockItem = getPoStockItemById(stockItemId);
   if (!draft || !stockItem || String(draft.status || '').toLowerCase() === 'completed') return;
-  if (!isOrderableStockItem(stockItem)) {
-    showPurchaseOrderToast('Only Standard and Non Stock items can be added to purchase orders.', 'warning');
-    return;
-  }
 
   const items = [...(draft.items || [])];
   const index = items.findIndex((line) => String(line.stockItemId) === String(stockItem.id));
@@ -7961,6 +6842,7 @@ async function sendPurchaseOrderEmail(orderId) {
   const pdfFile = await buildSupplierPurchaseOrderPdfFile(filename, documentOrder, documentContext);
 
   try {
+    const { sendSupplierEmailWithGmail } = await import('./services/integrationService.js');
     await sendSupplierEmailWithGmail(appState.workspace?.id, {
       to: recipient,
       cc: ccList,
@@ -8042,14 +6924,16 @@ async function buildSupplierPurchaseOrderPdfFile(filename, order = {}, context =
       supplierNotes: siteInfo.supplierNotes
     },
     items: (order.items || []).map((item) => {
+      const packSize = getPurchaseOrderLinePackSize(item);
       return {
         description: item.name || item.stockItemName || '',
-        unit: item.selectedUom || item.purchaseUom || item.orderUom || item.unit || 'EA',
+        unit: item.unit || 'EA',
+        packSize: formatDocumentQuantity(packSize),
         quantity: formatDocumentQuantity(item.qty ?? item.quantity ?? ''),
         notes: item.notes || item.note || 'Confirm availability'
       };
     }),
-    instruction: 'Please confirm receipt of this purchase order. Items must be supplied according to the listed UOM and quantity. Any unavailable items, substitutions, UOM changes, or quantity changes must be confirmed before delivery.'
+    instruction: 'Please confirm receipt of this purchase order. Items must be supplied according to the listed pack size and quantity. Any unavailable items, substitutions, or quantity changes must be confirmed before delivery.'
   });
 }
 
@@ -8529,7 +7413,6 @@ function createEmptyGrvDraft(seed = {}) {
     locationName,
     notes: '',
     pricesIncludeVat: false,
-    overrideCostPrice: true,
     transportEx: '',
     invoiceDiscountEx: '',
     invoiceTotalEx: '',
@@ -8938,7 +7821,6 @@ async function openGrvFromPurchaseOrder(orderId) {
     const lineLocationId = String(line.locationId || line.targetLocation || locationId || fallbackLocationId);
     const lineLocationName = line.locationName || line.targetLocationName || getGrvLocationName(lineLocationId, locationName);
     const stockItem = getGrvStockItemById(line.stockItemId);
-    if (stockItem && !isOrderableStockItem(stockItem)) return [];
     return [{
       id: line.id || line.stockItemId,
       purchaseOrderLineId: line.id || '',
@@ -9297,10 +8179,6 @@ function addGrvLine(stockItemId) {
   const draft = appState.grv.draftReceipt || createEmptyGrvDraft();
   const stockItem = getGrvStockItemById(stockItemId);
   if (!draft || !stockItem) return;
-  if (!isOrderableStockItem(stockItem)) {
-    showGrvToast('Only Standard and Non Stock items can be added to GRV.', 'warning');
-    return;
-  }
 
   const items = [...(draft.items || [])];
   if (items.some((line) => String(line.stockItemId) === String(stockItem.id))) return;
@@ -9335,7 +8213,7 @@ function addMultipleGrvLines(stockItemIds = []) {
   [...new Set((stockItemIds || []).map(String).filter(Boolean))].forEach((stockItemId) => {
     if (existingIds.has(stockItemId)) return;
     const stockItem = getGrvStockItemById(stockItemId);
-    if (!stockItem || !isOrderableStockItem(stockItem)) return;
+    if (!stockItem) return;
     nextItems.push(buildGrvDraftLine(stockItem, draft));
     existingIds.add(stockItemId);
   });
@@ -9737,8 +8615,6 @@ async function saveGrvReceipt(options = {}) {
       supplierName: resolvedSupplier?.name || supplierName,
       submittedByUserId: appState.user?.uid || appState.user?.id || '',
       submittedByName: appState.user?.displayName || appState.user?.email || '',
-      overrideCostPrice: draft.overrideCostPrice !== false,
-      costingMethod: String(appState.source?.settings?.costingMethod || appState.settings?.business?.costingMethod || 'last'),
       items: hydratedItems
     };
     const savedReceipt = await saveGoodsReceipt(appState.workspace?.id, receiptPayload);
@@ -9758,7 +8634,6 @@ async function saveGrvReceipt(options = {}) {
         selectedLineIndexes: [],
         calendarCursor: '',
         openDropdown: '',
-        headerLocationQuery: '',
         overlay: ''
       }
     };
@@ -9869,29 +8744,22 @@ function hydrateCreditNoteFromGrv(receiptId) {
     || receipt.targetLocationName
     || getLocationNameById(appState.creditNotes.locations || [], defaultLocationId, existingDraft.locationName || 'Main Store');
 
-  const items = (receipt.items || []).flatMap((line) => {
-    const stockItemId = resolveStockItemIdFromLine(line);
-    const stockItem = getCreditNoteStockItemById(stockItemId);
-    if (stockItem && !isOrderableStockItem(stockItem)) return [];
-    return [{
-      stockItemId,
-      id: line.id || '',
-      stockItemName: line.stockItemName || line.name || '',
-      unit: line.unit || stockItem?.unit || 'ea',
-      selectedUom: line.selectedUom || line.receivingUom || line.purchaseUom || line.unit || stockItem?.unit || 'ea',
-      returnUom: line.selectedUom || line.receivingUom || line.purchaseUom || line.unit || stockItem?.unit || 'ea',
-      uomConfigurations: normalizeLineUomConfigurations(line.uomConfigurations || stockItem?.uomConfigurations || stockItem?.uomConfig || stockItem?.uomConversions),
-      returnedQty: Number(line.receivedQty ?? line.packQty ?? line.orderedQty ?? 0) || 0,
-      packQty: Number(line.receivedQty ?? line.packQty ?? line.orderedQty ?? 0) || 0,
-      originalOrderQty: Number(line.orderedQty ?? line.qty ?? line.quantity ?? line.receivedQty ?? line.packQty ?? 0) || 0,
-      maxReturnQty: Number(line.orderedQty ?? line.qty ?? line.quantity ?? line.receivedQty ?? line.packQty ?? 0) || 0,
-      packSize: getPositivePackSizeValue(line.packSize),
-      unitCost: Number(line.unitCost || 0) || 0,
-      vatEnabled: line.vatEnabled !== false && stockItem?.vatEnabled !== false,
-      locationId: String(line.locationId || line.targetLocation || defaultLocationId),
-      locationName: line.locationName || line.targetLocationName || defaultLocationName
-    }];
-  });
+  const items = (receipt.items || []).map((line) => ({
+    stockItemId: resolveStockItemIdFromLine(line),
+    id: line.id || '',
+    stockItemName: line.stockItemName || line.name || '',
+    unit: line.unit || 'ea',
+    selectedUom: line.selectedUom || line.receivingUom || line.purchaseUom || line.unit || 'ea',
+    returnUom: line.selectedUom || line.receivingUom || line.purchaseUom || line.unit || 'ea',
+    uomConfigurations: normalizeLineUomConfigurations(line.uomConfigurations || line.uomConfig || line.uomConversions),
+    returnedQty: Number(line.receivedQty ?? line.packQty ?? line.orderedQty ?? 0) || 0,
+    packQty: Number(line.receivedQty ?? line.packQty ?? line.orderedQty ?? 0) || 0,
+    packSize: getPositivePackSizeValue(line.packSize),
+    unitCost: Number(line.unitCost || 0) || 0,
+    vatEnabled: line.vatEnabled !== false,
+    locationId: String(line.locationId || line.targetLocation || defaultLocationId),
+    locationName: line.locationName || line.targetLocationName || defaultLocationName
+  }));
 
   appState.creditNotes = {
     ...appState.creditNotes,
@@ -10073,7 +8941,7 @@ function addCreditNoteSelectedStock() {
   const items = [...(draft.items || [])];
   const existingKeys = new Set(items.map((line) => `${String(line.stockItemId || '')}::${String(line.locationId || draft.locationId || '')}`));
   (appState.creditNotes.stockItems || [])
-    .filter((item) => ids.has(String(item.id)) && isOrderableStockItem(item))
+    .filter((item) => ids.has(String(item.id)))
     .forEach((item) => {
       const locationId = draft.locationId || 'main';
       const key = `${String(item.id)}::${String(locationId)}`;
@@ -10259,8 +9127,6 @@ function applyCreditNoteLineDetail() {
       packSize,
       unitCost: Number(entry.unitCost || 0) || 0,
       vatEnabled: entry.vatEnabled !== false,
-      originalOrderQty: Number(entry.originalOrderQty ?? entry.maxReturnQty ?? 0) || 0,
-      maxReturnQty: Number(entry.maxReturnQty ?? entry.originalOrderQty ?? 0) || 0,
       locationId: entry.locationId || detail.locationId || draft.locationId || 'main',
       locationName: entry.locationName || detail.locationName || draft.locationName || 'Main Store'
     };
@@ -10341,27 +9207,6 @@ function removeCreditNoteLine(index) {
   renderApp();
 }
 
-function getCreditNotePurchaseOrderQuantityError(draft = {}) {
-  if (!String(draft.sourcePoId || '').trim()) return '';
-  const totals = new Map();
-  for (const line of draft.items || []) {
-    const stockItemId = resolveStockItemIdFromLine(line);
-    if (!stockItemId) continue;
-    const returnedQty = Number(parseDecimalInputValue(line.returnedQty ?? line.packQty ?? 0)) || 0;
-    const maxReturnQty = Number(line.maxReturnQty ?? line.originalOrderQty ?? 0) || 0;
-    const current = totals.get(stockItemId) || { returnedQty: 0, maxReturnQty: 0, name: line.stockItemName || 'This item' };
-    current.returnedQty += returnedQty;
-    current.maxReturnQty += maxReturnQty;
-    totals.set(stockItemId, current);
-  }
-  for (const entry of totals.values()) {
-    if (entry.maxReturnQty > 0 && entry.returnedQty > entry.maxReturnQty + 0.000001) {
-      return `${entry.name} cannot return more than the original purchase order quantity of ${formatDocumentQuantity(entry.maxReturnQty)}.`;
-    }
-  }
-  return '';
-}
-
 async function saveCreditNoteDraft() {
   const draft = appState.creditNotes.draftNote || createEmptyCreditNoteDraft();
   if (!String(draft.notes || '').trim()) {
@@ -10377,11 +9222,6 @@ async function saveCreditNoteDraft() {
   const creditItems = draft.items || [];
   if (!String(draft.locationId || '').trim() && !creditItems.some((line) => String(line.locationId || '').trim())) {
     showCreditNoteToast('Select a location before committing the credit note.', 'error');
-    return;
-  }
-  const purchaseOrderQtyError = getCreditNotePurchaseOrderQuantityError(draft);
-  if (purchaseOrderQtyError) {
-    showCreditNoteToast(purchaseOrderQtyError, 'error');
     return;
   }
   // Stable id persisted on the draft so a retry / re-save reuses it and the backend's
@@ -10563,14 +9403,13 @@ function selectAllVisibleAdjustmentStock() {
   const query = String(filters.stockSearch || '').trim().toLowerCase();
   const category = String(filters.stockCategory || '').trim();
   const matchedItems = (appState.adjustments.stockItems || [])
-    .filter(isAdjustmentStockItem)
     .filter((item) => {
       if (category && String(item.category || '') !== category) return false;
       if (!query) return true;
       return (
         String(item.name || '').toLowerCase().includes(query) ||
         String(item.category || '').toLowerCase().includes(query) ||
-        matchesBarcodeQuery(item, query)
+        (item.barcodes || []).some((barcode) => String(barcode).toLowerCase().includes(query))
       );
     });
   const currentPage = Math.max(Number(filters.stockPage || 1) || 1, 1);
@@ -10593,7 +9432,7 @@ function addAdjustmentSelectedStock() {
   if (!ids.size) return;
   const draft = normalizeAdjustmentDraftLocation(appState.adjustments.draftAdjustment || createEmptyAdjustmentDraft());
   const entries = (appState.adjustments.stockItems || [])
-    .filter((item) => ids.has(String(item.id)) && isAdjustmentStockItem(item))
+    .filter((item) => ids.has(String(item.id)))
     .map((item) => ({
       stockItemId: String(item.id),
       stockItemName: item.name || '',
@@ -10969,23 +9808,9 @@ function updateWastageQty(index, value) {
 async function saveWastageDraft() {
   const draft = appState.adjustments.wastageDraft || createEmptyWastageDraft();
   const locations = appState.adjustments.locations || [];
-  const locationObj = getLocationById(locations, draft.locationId);
-  const locationId = String(draft.locationId || '').trim();
-  const locationName = locationId ? getLocationNameById(locations, locationId, locationObj?.name || 'Main Store') : '';
-  const items = Array.isArray(draft.items) ? draft.items : [];
-  let validationError = '';
-  if (!items.length) validationError = 'Select at least one menu item to waste.';
-  else if (!locationId || !locationObj) validationError = 'Select a valid location before recording wastage.';
-  else if (!String(draft.wasteReason || '').trim()) validationError = 'Select a waste reason before recording wastage.';
-  else {
-    const invalidItem = items.find((item) => !(Number(parseDecimalInputValue(item.quantity)) > 0));
-    if (invalidItem) validationError = `Enter a quantity greater than zero for ${invalidItem.productName || 'every menu item'}.`;
-  }
-  if (validationError) {
-    appState.adjustments = { ...appState.adjustments, wastageStatus: '', wastageError: validationError };
-    renderApp();
-    return;
-  }
+  const locationObj = getLocationById(locations, draft.locationId) || getDefaultLocation(locations);
+  const locationId = locationObj?.id || draft.locationId || '';
+  const locationName = locationId ? getLocationNameById(locations, locationId, locationObj?.name || 'Main Store') : (locationObj?.name || 'Main Store');
 
   if (!draft.id) draft.id = makeStableSubmitId('wst_adj');
   appState.adjustments = { ...appState.adjustments, wastageDraft: draft, wastageStatus: 'saving', wastageError: '' };
@@ -11274,23 +10099,7 @@ function clearRestaurantBackground() {
 }
 
 async function saveSettingsDraft(options = {}) {
-  if (settingsDraftRenderTimer) {
-    clearTimeout(settingsDraftRenderTimer);
-    settingsDraftRenderTimer = null;
-  }
-  const baseDraft = options.draft || appState.settings.draft || createDefaultSettingsDraft();
-  const draft = options.draftPatch
-    ? {
-        ...baseDraft,
-        ...options.draftPatch,
-        companyTaxInfo: options.draftPatch.companyTaxInfo
-          ? {
-              ...(baseDraft.companyTaxInfo && typeof baseDraft.companyTaxInfo === 'object' ? baseDraft.companyTaxInfo : {}),
-              ...options.draftPatch.companyTaxInfo
-            }
-          : baseDraft.companyTaxInfo
-      }
-    : baseDraft;
+  const draft = options.draft || appState.settings.draft || createDefaultSettingsDraft();
   if (isClearlyInvalidVatNumber(draft.companyTaxInfo?.vatNumber)) {
     showSettingsToast('VAT number looks invalid. Leave it blank or enter a valid tax identifier.', 'error');
     return false;
@@ -11305,7 +10114,7 @@ async function saveSettingsDraft(options = {}) {
   showGlobalSaving('Saving Settings');
 
   try {
-    const saved = await saveWorkspaceSettings(appState.workspace?.id, draft, { includePersonal: false });
+    const saved = await saveWorkspaceSettings(appState.workspace?.id, draft);
     appState.settings = {
       ...appState.settings,
       status: 'ready',
@@ -11316,12 +10125,8 @@ async function saveSettingsDraft(options = {}) {
       appearanceModal: options.closeAppearanceModal ? '' : appState.settings.appearanceModal
     };
     applyWorkspaceSettingsEffects(saved);
-    const previousSiteName = String(appState.workspace?.siteName || '').trim();
     updateWorkspaceSiteName(saved.siteName);
-    const nextSiteName = String(saved.siteName || '').trim();
-    if (options.syncSiteName !== false && nextSiteName && nextSiteName !== previousSiteName) {
-      await syncDefaultWorkspaceSiteName(nextSiteName);
-    }
+    await syncDefaultWorkspaceSiteName(saved.siteName);
     showSettingsToast(options.successMessage || 'Settings saved.', 'success');
     return true;
   } catch (error) {
@@ -11338,59 +10143,12 @@ async function saveSettingsDraft(options = {}) {
 }
 
 async function saveAppearanceSettingsDraft() {
-  const draft = appState.settings.draft || createDefaultSettingsDraft();
-  appState.settings = {
-    ...appState.settings,
-    actionStatus: 'saving',
-    actionError: ''
-  };
-  renderApp();
-  showGlobalSaving('Saving My Appearance');
-  try {
-    const saved = await savePersonalSettings(appState.workspace?.id, draft);
-    appState.settings = {
-      ...appState.settings,
-      status: 'ready',
-      values: { ...(appState.settings.values || {}), ...saved },
-      draft: { ...draft, ...saved },
-      actionStatus: '',
-      actionError: '',
-      appearanceModal: ''
-    };
-    applyWorkspaceSettingsEffects(appState.settings.values);
-    showSettingsToast('Your personal appearance settings were saved.', 'success');
-  } catch (error) {
-    appState.settings = {
-      ...appState.settings,
-      actionStatus: '',
-      actionError: error.message || 'Could not save your appearance settings.'
-    };
-    renderApp();
-  } finally {
-    hideGlobalSaving();
-  }
-}
-
-async function confirmGoLiveStockDepletion() {
-  const confirmed = await showBrandConfirmDialog({
-    eyebrow: 'Business Settings',
-    title: 'Go live with stock depletion?',
-    message: 'Once live, completed Yoco sales will start depleting stock automatically.',
-    confirmLabel: 'Confirm Go Live',
-    cancelLabel: 'Cancel',
-    tone: 'info'
-  });
-  if (!confirmed) return;
-  await goLiveStockDepletion();
+  await saveSettingsDraft({ closeAppearanceModal: true });
 }
 
 async function goLiveStockDepletion() {
   const draft = appState.settings.draft || createDefaultSettingsDraft();
-  const nextDraft = {
-    ...draft,
-    stockDepletionEnabled: true,
-    stockDepletionEnabledAt: new Date().toISOString()
-  };
+  const nextDraft = { ...draft, stockDepletionEnabled: true };
   await saveSettingsDraft({
     draft: nextDraft,
     successMessage: 'You are live. Completed Yoco sales will now deplete stock.'
@@ -11565,9 +10323,9 @@ function applyRestaurantGlassSurfaces() {
   const computed = getComputedStyle(root);
   const isDark = appState.theme === 'dark';
   const surfaceAlphas = [
-    ['--surface-primary', isDark ? 0.92 : 0.92],
-    ['--surface-secondary', isDark ? 0.82 : 0.84],
-    ['--surface-elevated', isDark ? 0.97 : 0.98]
+    ['--surface-primary', isDark ? 0.84 : 0.88],
+    ['--surface-secondary', isDark ? 0.72 : 0.78],
+    ['--surface-elevated', isDark ? 0.88 : 0.92]
   ];
 
   surfaceAlphas.forEach(([name, alpha]) => {
@@ -11576,11 +10334,9 @@ function applyRestaurantGlassSurfaces() {
     if (glassColor) root.style.setProperty(name, glassColor);
   });
 
-  root.style.setProperty('--restaurant-theme-overlay', isDark ? 'rgba(15, 19, 25, 0.12)' : 'rgba(242, 245, 249, 0.08)');
-  root.style.setProperty('--restaurant-theme-panel', isDark ? 'rgba(24, 30, 38, 0.58)' : 'rgba(255, 255, 255, 0.62)');
-  root.style.setProperty('--restaurant-theme-page-tint', isDark ? 'rgba(15, 19, 25, 0.66)' : 'rgba(242, 245, 249, 0.68)');
-  root.style.setProperty('--restaurant-theme-page-tint-soft', isDark ? 'rgba(15, 19, 25, 0.40)' : 'rgba(242, 245, 249, 0.40)');
-  root.style.setProperty('--surface-glass-blur', isDark ? '12px' : '10px');
+  root.style.setProperty('--restaurant-theme-page-tint', isDark ? 'rgba(7, 17, 31, 0.54)' : 'rgba(246, 248, 251, 0.58)');
+  root.style.setProperty('--restaurant-theme-page-tint-soft', isDark ? 'rgba(7, 17, 31, 0.28)' : 'rgba(246, 248, 251, 0.34)');
+  root.style.setProperty('--surface-glass-blur', isDark ? '10px' : '8px');
 }
 
 function toAlphaColor(colorValue = '', alpha = 1) {
@@ -11850,37 +10606,6 @@ function updateTransferLocation(side, locationId) {
   });
 }
 
-
-async function scanTransferSearch(target = 'stock') {
-  const mode = target === 'template' ? 'template' : 'stock';
-  try {
-    const { openBarcodeScanner } = await import('./services/barcodeScanner.js');
-    await openBarcodeScanner({
-      title: mode === 'template' ? 'Scan Template Item' : 'Scan Transfer Item',
-      helper: mode === 'template'
-        ? 'Scan a stock barcode to filter the transfer template picker.'
-        : 'Scan a stock barcode to filter transferable stock items.',
-      onScan: (barcode) => {
-        const value = String(barcode || '').trim();
-        if (!value) return;
-        appState.transfers = {
-          ...appState.transfers,
-          filters: {
-            ...appState.transfers.filters,
-            [mode === 'template' ? 'templateSearch' : 'stockSearch']: value
-          }
-        };
-        renderApp();
-        showTransferToast(mode === 'template'
-          ? `Barcode ${value} loaded into transfer template search.`
-          : `Barcode ${value} loaded into transfer search.`, 'success');
-      }
-    });
-  } catch (error) {
-    showTransferToast(error.message || 'Could not start the transfer scanner.', 'error');
-  }
-}
-
 function toggleTransferStockSelection(stockItemId, checked) {
   const ids = new Set((appState.transfers.filters?.selectedStockIds || []).map(String));
   if (checked) ids.add(String(stockItemId));
@@ -11894,9 +10619,19 @@ function selectAllVisibleTransferStock() {
   const category = String(filters.stockCategory || '').trim();
   const selected = (appState.transfers.stockItems || [])
     .filter((item) => {
-      if (!isTransferEligibleStockItem(item)) return false;
+      // Mirror the transfer picker's isPhysicalStockItem exclusions so Select-All can't pull in
+      // sub recipes / non-stock items that are hidden from the list.
+      if (item.isStocked === false || item.isSubRecipe === true) return false;
+      const type = String(item.itemType || item.stockItemType || item.specificationType || '')
+        .trim().toLowerCase().replace(/[\s-]+/g, '_');
+      if (['recipe_source', 'non_stock', 'virtual', 'sub_recipe'].includes(type)) return false;
       if (category && String(item.category || '') !== category) return false;
-      return transferItemMatchesQuery(item, query);
+      if (!query) return true;
+      return (
+        String(item.name || '').toLowerCase().includes(query) ||
+        String(item.category || '').toLowerCase().includes(query) ||
+        (item.barcodes || []).some((barcode) => String(barcode).toLowerCase().includes(query))
+      );
     })
     .map((item) => String(item.id))
     .filter(Boolean);
@@ -11913,7 +10648,7 @@ function addTransferSelectedStock() {
   const items = [...(draft.items || [])];
 
   (appState.transfers.stockItems || [])
-    .filter((item) => ids.has(String(item.id)) && isTransferEligibleStockItem(item))
+    .filter((item) => ids.has(String(item.id)))
     .forEach((item) => {
       const existingIndex = items.findIndex((line) => String(line.stockItemId) === String(item.id));
       if (existingIndex >= 0) return;
@@ -12014,13 +10749,9 @@ async function saveTransferDraft() {
       await postExternalTransfer({
         id: draft.id,
         from_site_id: appState.workspace?.id,
-        from_site_name: appState.workspace?.name || draft.fromSiteName || '',
         to_site_id: draft.externalSiteId,
-        to_site_name: draft.externalSiteName || '',
         from_location_id: draft.fromLocationId,
-        from_location_name: draft.fromLocationName || '',
         to_location_id: draft.externalLocationId,
-        to_location_name: draft.externalLocationName || '',
         note: draft.note,
         items: draft.items
       });
@@ -12099,23 +10830,6 @@ function getTransferDraftValidation(draft = {}, transferScope = 'internal') {
     };
   }
 
-  const stockItems = appState.transfers.stockItems || [];
-  const invalidItemIndex = (draft.items || []).findIndex((item) => {
-    const stockItem = stockItems.find((entry) => String(entry.id) === String(item.stockItemId));
-    return stockItem && !isTransferEligibleStockItem(stockItem);
-  });
-  if (invalidItemIndex >= 0) {
-    const line = draft.items[invalidItemIndex] || {};
-    const stockItem = stockItems.find((entry) => String(entry.id) === String(line.stockItemId));
-    const name = line.stockItemName || stockItem?.name || 'This item';
-    const message = `${name} cannot be transferred. Transfers only allow Standard, Non Stock and Manufacturing items.`;
-    return {
-      field: `lineQty:${invalidItemIndex}`,
-      message,
-      toast: message
-    };
-  }
-
   const missingQuantityIndex = (draft.items || []).findIndex((item) => parseTransferDraftQuantity(item.quantity) <= 0);
   if (missingQuantityIndex >= 0) {
     return {
@@ -12126,6 +10840,7 @@ function getTransferDraftValidation(draft = {}, transferScope = 'internal') {
   }
 
   // Block the transfer when any line exceeds the stock available at the source location.
+  const stockItems = appState.transfers.stockItems || [];
   const locations = appState.transfers.locations || [];
   const insufficientIndex = (draft.items || []).findIndex((item) => {
     const stockItem = stockItems.find((entry) => String(entry.id) === String(item.stockItemId));
@@ -12157,48 +10872,13 @@ function parseTransferDraftQuantity(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-
-function getTransferItemBarcodeCandidates(item = {}) {
-  const uomRows = [
-    ...(Array.isArray(item.uomConfigurations) ? item.uomConfigurations : []),
-    ...(Array.isArray(item.uomConfig) ? item.uomConfig : []),
-    ...(Array.isArray(item.uomConversions) ? item.uomConversions : []),
-    ...(Array.isArray(item.customUnits) ? item.customUnits : [])
-  ];
-  return [
-    item.id,
-    item.stockItemId,
-    item.name,
-    item.sku,
-    item.SKU,
-    item.code,
-    item.itemCode,
-    item.stockCode,
-    item.barcode,
-    ...(Array.isArray(item.barcodes) ? item.barcodes : []),
-    ...uomRows.flatMap((row = {}) => [row.barcode, row.customBarcode, row.customUomBarcode, row.uomBarcode, row.sku])
-  ].filter((value) => String(value || '').trim());
-}
-
-function transferItemMatchesQuery(item = {}, query = '') {
-  const q = String(query || '').trim().toLowerCase();
-  if (!q) return true;
-  return getTransferItemBarcodeCandidates(item).some((value) => String(value || '').toLowerCase().includes(q)) ||
-    String(item.category || '').toLowerCase().includes(q);
-}
-
 async function exportTransferTemplate(format = 'csv', templateId = '') {
   const normalizedFormat = ['csv', 'xlsx'].includes(String(format || '').toLowerCase()) ? String(format).toLowerCase() : 'csv';
   const timestamp = getExportTimestamp();
   const template = (appState.transfers.templates || []).find((entry) => String(entry.id) === String(templateId || ''));
   const locationHelper = getTransferLocationHelperList();
-  const stockById = new Map((appState.transfers.stockItems || []).map((item) => [String(item.id), item]));
-  const validTemplateItems = (template?.items || []).filter((item = {}) => {
-    const stockItem = stockById.get(String(item.stockItemId || item.id || '')) || item;
-    return isTransferEligibleStockItem(stockItem);
-  });
-  const rows = validTemplateItems.length
-    ? validTemplateItems.map((item) => ({
+  const rows = template?.items?.length
+    ? template.items.map((item) => ({
         'Item_ID/SKU': item.sku || item.stockItemId || '',
         Stock_Item: item.stockItemName || '',
         From_Location: '',
@@ -12232,10 +10912,6 @@ async function exportTransferTemplate(format = 'csv', templateId = '') {
   } catch (error) {
     showTransferToast(error.message || 'Could not export bulk transfer template.', 'error');
   }
-}
-
-function slugifyExportName(value = '') {
-  return String(value || 'export').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'export';
 }
 
 function getTransferLocationHelperList() {
@@ -12288,7 +10964,17 @@ function selectAllVisibleTransferTemplateStock() {
   const query = String(appState.transfers.filters?.templateSearch || '').trim().toLowerCase();
   const ids = new Set((current.selectedStockIds || []).map(String));
   (appState.transfers.stockItems || [])
-    .filter((item) => isTransferEligibleStockItem(item) && transferItemMatchesQuery(item, query))
+    .filter((item) => {
+      if (!query) return true;
+      return [
+        item.name,
+        item.category,
+        item.sku,
+        item.SKU,
+        item.code,
+        ...(Array.isArray(item.barcodes) ? item.barcodes : [])
+      ].some((value) => String(value || '').toLowerCase().includes(query));
+    })
     .forEach((item) => ids.add(String(item.id)));
   updateTransferTemplateDraft({ selectedStockIds: [...ids] });
 }
@@ -12324,7 +11010,7 @@ function useTransferTemplateForBulk(templateId = '') {
         barcodes: Array.isArray(stockItem.barcodes) ? stockItem.barcodes : []
       };
     })
-    .filter((item) => item.stockItemId && isTransferEligibleStockItem(stockById.get(String(item.stockItemId)) || item));
+    .filter((item) => item.stockItemId);
 
   const currentDraft = hydrateTransferDraft(appState.transfers.draftTransfer, appState.transfers.locations || [], appState.transfers.sites || []);
   appState.transfers = {
@@ -12349,24 +11035,10 @@ function useTransferTemplateForBulk(templateId = '') {
 }
 
 async function saveTransferTemplateDraft() {
-  // renderApp() replaces the button node while a save is in progress. Without a state guard a
-  // second click (or rapid double-click) can still start another large write before the disabled
-  // replacement is painted, which previously made bulk template saves appear to hang.
-  if (appState.transfers.actionStatus === 'saving-template') return;
-
   const draft = appState.transfers.templateDraft || createEmptyTransferTemplateDraft();
   const selectedIds = new Set((draft.selectedStockIds || []).map(String));
-  const invalidSelected = (appState.transfers.stockItems || [])
-    .filter((item) => selectedIds.has(String(item.id)) && !isTransferEligibleStockItem(item));
-  if (invalidSelected.length) {
-    const message = 'Transfer templates only allow Standard, Non Stock and Manufacturing items.';
-    appState.transfers = { ...appState.transfers, actionError: message };
-    renderApp();
-    showTransferToast(message, 'error');
-    return;
-  }
   const selectedItems = (appState.transfers.stockItems || [])
-    .filter((item) => selectedIds.has(String(item.id)) && isTransferEligibleStockItem(item))
+    .filter((item) => selectedIds.has(String(item.id)))
     .map((item) => ({
       stockItemId: String(item.id),
       stockItemName: item.name || '',
@@ -12374,15 +11046,6 @@ async function saveTransferTemplateDraft() {
       category: item.category || '',
       unit: item.unit || ''
     }));
-
-  // Typing in the template name/notes stores a pending focus snapshot. The first save render can
-  // otherwise restore that text-field focus, after which renderApp() intentionally suppresses the
-  // success render and leaves the user looking at a permanent "Saving..." button even though the
-  // API has committed the template. Release both the live and queued focus before starting.
-  pendingFocusField = null;
-  if (typeof document !== 'undefined' && document.activeElement && typeof document.activeElement.blur === 'function') {
-    document.activeElement.blur();
-  }
 
   appState.transfers = {
     ...appState.transfers,
@@ -12410,13 +11073,6 @@ async function saveTransferTemplateDraft() {
       items: saved.items || selectedItems
     };
     const withoutOld = (appState.transfers.templates || []).filter((t) => String(t.id) !== String(savedTemplate.id));
-    // Force the completion render even if the user clicked back into the name or notes field while
-    // the network request was pending. Otherwise renderApp() will intentionally defer the route
-    // change and the completed save still looks frozen.
-    pendingFocusField = null;
-    if (typeof document !== 'undefined' && document.activeElement && typeof document.activeElement.blur === 'function') {
-      document.activeElement.blur();
-    }
     appState.transfers = {
       ...appState.transfers,
       templates: [...withoutOld, savedTemplate].sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''))),
@@ -12432,19 +11088,12 @@ async function saveTransferTemplateDraft() {
     renderApp();
     showTransferToast('Transfer template saved.', 'success');
   } catch (error) {
-    const message = error.message || 'Could not save transfer template.';
-    // Error feedback must also replace the saving state immediately instead of waiting for blur.
-    pendingFocusField = null;
-    if (typeof document !== 'undefined' && document.activeElement && typeof document.activeElement.blur === 'function') {
-      document.activeElement.blur();
-    }
     appState.transfers = {
       ...appState.transfers,
       actionStatus: '',
-      actionError: message
+      actionError: error.message || 'Could not save transfer template.'
     };
     renderApp();
-    showTransferToast(message, 'error');
   }
 }
 
@@ -12567,12 +11216,11 @@ function parseBulkTransferRows(rows = [], { stockItems = [], locations = [] } = 
     const quantity = Number(String(rawQty || '').replace(',', '.'));
 
     if (!item) errors.push(`Row ${lineNumber}: stock item "${rawItem}" was not found.`);
-    if (item && !isTransferEligibleStockItem(item)) errors.push(`Row ${lineNumber}: "${item.name || rawItem}" cannot be transferred. Transfers only allow Standard, Non Stock and Manufacturing items.`);
     if (!fromLocation) errors.push(`Row ${lineNumber}: from location "${rawFrom}" was not found.`);
     if (!toLocation) errors.push(`Row ${lineNumber}: to location "${rawTo}" was not found.`);
     if (!Number.isFinite(quantity) || quantity <= 0) errors.push(`Row ${lineNumber}: quantity must be greater than zero.`);
     if (fromLocation && toLocation && String(fromLocation.id) === String(toLocation.id)) errors.push(`Row ${lineNumber}: from and to locations must be different.`);
-    if (!item || !isTransferEligibleStockItem(item) || !fromLocation || !toLocation || !Number.isFinite(quantity) || quantity <= 0 || String(fromLocation.id) === String(toLocation.id)) return;
+    if (!item || !fromLocation || !toLocation || !Number.isFinite(quantity) || quantity <= 0 || String(fromLocation.id) === String(toLocation.id)) return;
 
     lines.push({
       stockItemId: String(item.id),
@@ -12644,8 +11292,7 @@ function findStockItemForImport(stockItems = [], value = '') {
       item.itemCode,
       item.stockCode,
       item.name,
-      ...(Array.isArray(item.barcodes) ? item.barcodes : []),
-      ...getTransferItemBarcodeCandidates(item)
+      ...(Array.isArray(item.barcodes) ? item.barcodes : [])
     ];
     return candidates.some((candidate) => normalizeImportLookupKey(candidate) === normalizedNeedle);
   }) || null;
@@ -13801,9 +12448,7 @@ async function saveManufacturingBlueprint() {
         componentType: ''
       }
     };
-    renderApp();
     showManufacturingToast('Manufacturing blueprint saved.', 'success');
-    refreshActiveTabFromApi().catch(() => {});
   } catch (error) {
     appState.manufacturing = {
       ...appState.manufacturing,
@@ -13811,7 +12456,6 @@ async function saveManufacturingBlueprint() {
       actionError: error.message || 'Could not save manufacturing blueprint.'
     };
     renderApp();
-    showManufacturingToast(error.message || 'Could not save manufacturing blueprint.', 'error');
   }
 }
 
@@ -14280,8 +12924,8 @@ async function importManufacturingFile(file) {
 
   try {
     const rows = await parseDataFile(file, { preferredSheetNames: ['Manufacturing_Import'] });
-    const { items, review } = mapManufacturingImportRows(rows, appState.manufacturing.stockItems || []);
-    if (!items.length) throw new Error(formatImportFailure('No valid manufactured item rows were found in this file.', review.errors));
+    const { items, report } = mapManufacturingImportRows(rows, appState.manufacturing.stockItems || []);
+    if (!items.length) throw new Error(formatImportFailure('No valid manufactured item rows were found in this file.', report.errors));
 
     const { importManufacturedItems } = await import('./services/manufacturingService.js');
     const result = await importManufacturedItems(appState.workspace?.id, items);
@@ -14290,16 +12934,16 @@ async function importManufacturingFile(file) {
       actionStatus: '',
       actionError: ''
     };
-    const skippedCount = Number(review.errors.length || 0);
+    const skippedCount = Number(report.errors.length || 0);
     if (skippedCount) {
       showImportNotification({
         moduleLabel: 'Manufacturing Import',
         title: 'Manufacturing Import Needs Attention',
         message: `${result.importedCount || 0} blueprint${Number(result.importedCount || 0) === 1 ? '' : 's'} imported, but ${skippedCount} row${skippedCount === 1 ? '' : 's'} need fixing. Confirm this message, fix the errors, and try again.`,
-        errors: review.errors,
+        errors: report.errors,
         importedCount: result.importedCount || 0,
         skippedCount,
-        totalRows: review.totalRows,
+        totalRows: report.totalRows,
         tone: 'warning',
         confirmLabel: 'Confirm & Fix Errors'
       });
@@ -14420,12 +13064,12 @@ function mapManufacturingImportRows(rows = [], stockItems = []) {
   });
   const existingManufacturedById = new Map((stockItems || []).map((item) => [normalizeImportKey(item.id), item]));
   const groups = new Map();
-  const review = createImportReview(rows);
+  const report = createImportReport(rows);
 
   getImportDataRows(rows).forEach(({ row, rowNumber }) => {
     const rawName = norm(getColumn(row, 'Name', 'Manufactured_Item', 'Manufactured Item', 'Item', 'Product'));
     if (!rawName) {
-      review.errors.push(createImportError('ERR_MISSING_NAME', rowNumber, 'Name is required.'));
+      report.errors.push(createImportError('ERR_MISSING_NAME', rowNumber, 'Name is required.'));
       return;
     }
     const itemType = normalizeManufacturingImportType(getColumn(row, 'Item_Type', 'Item Type', 'Type', 'Specification'));
@@ -14436,7 +13080,7 @@ function mapManufacturingImportRows(rows = [], stockItems = []) {
     const batchYieldRaw = getColumn(row, 'Batch_Yield', 'BatchYield', 'Batch Yield');
     const batchYield = parseImportNumber(batchYieldRaw, 1);
     if (batchYield === null || batchYield <= 0) {
-      review.errors.push(createImportError('ERR_BATCH_YIELD', rowNumber, 'Batch_Yield must be a number greater than zero.'));
+      report.errors.push(createImportError('ERR_BATCH_YIELD', rowNumber, 'Batch_Yield must be a number greater than zero.'));
       return;
     }
     if (!groups.has(name)) {
@@ -14466,21 +13110,21 @@ function mapManufacturingImportRows(rows = [], stockItems = []) {
     if (!componentName) return;
     const component = ingredientByName.get(normalizeImportKey(componentName));
     if (!component) {
-      review.errors.push(createImportError('ERR_COMPONENT_LOOKUP', rowNumber, `Component "${componentName}" was not found in stock items.`));
+      report.errors.push(createImportError('ERR_COMPONENT_LOOKUP', rowNumber, `Component "${componentName}" was not found in stock items.`));
       return;
     }
     const qty = parseImportNumber(getColumn(row, 'Quantity_Needed', 'Quantity', 'Qty', 'Quantity Needed'), null);
     if (qty === null || qty <= 0) {
-      review.errors.push(createImportError('ERR_QUANTITY', rowNumber, 'Quantity_Needed must be a number greater than zero.'));
+      report.errors.push(createImportError('ERR_QUANTITY', rowNumber, 'Quantity_Needed must be a number greater than zero.'));
       return;
     }
     group.recipe.push({ ingId: component.id, qty });
   });
 
   const items = [...groups.values()];
-  review.importedCount = items.length;
-  review.skippedCount = review.errors.length;
-  return { items, review };
+  report.importedCount = items.length;
+  report.skippedCount = report.errors.length;
+  return { items, report };
 }
 
 function normalizeManufacturingImportCategory(itemName = '', value = '') {
@@ -14579,9 +13223,7 @@ function closeStockTakeOverlay() {
       overlay: '',
       openDropdown: '',
       templateSelectionQuery: '',
-      templateListQuery: '',
-      exportTemplateId: '',
-      exportLocationId: ''
+      templateListQuery: ''
     }
   };
   renderApp();
@@ -15338,22 +13980,7 @@ function confirmStockTakeScanCountEntry() {
   const selection = getLineUomSelection(matched, current.selectedUom || matched.unit || 'ea');
   const ratio = Number(selection.ratio || current.uomRatio || 1);
   const baseQuantity = quantity * (Number.isFinite(ratio) && ratio > 0 ? ratio : 1);
-  const countBreakdown = [{
-    key: getStockTakeCameraUomKey(selection.selectedUom || matched.unit || 'ea', ratio),
-    uomName: selection.selectedUom || matched.unit || 'ea',
-    baseUom: selection.baseUom || matched.unit || 'ea',
-    ratio: Number.isFinite(ratio) && ratio > 0 ? ratio : 1,
-    count: quantity,
-    scans: quantity,
-    lastBarcode: current.barcode || ''
-  }];
-  incrementStockTakeCountWithOptions(matched.id, baseQuantity, {
-    focusField: true,
-    setQuery: false,
-    selectedUom: selection.selectedUom || matched.unit || 'ea',
-    uomCounts: countBreakdown,
-    scanBreakdown: countBreakdown
-  });
+  incrementStockTakeCountWithOptions(matched.id, baseQuantity, { focusField: true, setQuery: false });
   appState.stockTake = {
     ...appState.stockTake,
     scanCount: createEmptyStockTakeScanCountDraft()
@@ -15924,6 +14551,23 @@ async function scanStockTakeBarcode(mode = 'focus') {
   }
 }
 
+function restoreSavedStockTakeDraft() {
+  const drafts = appState.stockTake.savedDrafts || [];
+  if (!drafts.length) {
+    showStockTakeToast('No saved stock take draft is available.', 'warning');
+    return;
+  }
+  appState.stockTake = {
+    ...appState.stockTake,
+    filters: {
+      ...appState.stockTake.filters,
+      overlay: 'resume-drafts',
+      openDropdown: ''
+    }
+  };
+  renderApp();
+}
+
 function restoreSpecificStockTakeDraft(draftId = '') {
   const savedDraft = (appState.stockTake.savedDrafts || []).find((entry) => String(entry.id) === String(draftId));
   if (!savedDraft) {
@@ -15965,8 +14609,7 @@ async function discardSpecificStockTakeDraft(draftId = '') {
       savedDrafts: remainingDrafts,
       filters: {
         ...appState.stockTake.filters,
-        overlay: '',
-        openDropdown: ''
+        overlay: remainingDrafts.length ? 'resume-drafts' : ''
       }
     };
     renderApp();
@@ -15978,271 +14621,110 @@ async function discardSpecificStockTakeDraft(draftId = '') {
 }
 
 async function saveStockTakeSessionDraft() {
-  // A count field can remain the active element after a button click in Safari. renderApp()
-  // deliberately skips DOM replacement while a text input is focused, which made a successful
-  // draft save look permanently stuck and also hid any API error. Release both live and queued
-  // focus before starting, and guard against rapid duplicate submissions.
-  if (appState.stockTake.actionStatus === 'saving-draft') return;
-  pendingFocusField = null;
-  if (typeof document !== 'undefined' && document.activeElement && typeof document.activeElement.blur === 'function') {
-    document.activeElement.blur();
-  }
-
-  const hydratedDraft = hydrateStockTakeDraft(appState.stockTake.draftSession, appState.stockTake.locations || []);
-  const draft = {
-    ...hydratedDraft,
-    // Keep one stable id across retries so a response timeout cannot create duplicate drafts.
-    id: String(hydratedDraft.id || makeStableSubmitId('std'))
+  const draft = hydrateStockTakeDraft(appState.stockTake.draftSession, appState.stockTake.locations || []);
+  appState.stockTake = {
+    ...appState.stockTake,
+    actionStatus: 'saving-draft',
+    actionError: ''
   };
-
-  if (!draft.locationId) {
-    const message = 'Choose a stock take location before saving a draft.';
-    appState.stockTake = { ...appState.stockTake, actionError: message };
-    renderApp();
-    showStockTakeToast(message, 'error');
-    return;
-  }
+  renderApp();
 
   try {
-    appState.stockTake = {
-      ...appState.stockTake,
-      draftSession: draft,
-      actionStatus: 'saving-draft',
-      actionError: '',
-      filters: {
-        ...appState.stockTake.filters,
-        openDropdown: ''
-      }
-    };
-    renderApp();
-
     const { saveStockTakeDraftSession } = await import('./services/stockTakeService.js');
-    const savedDraft = await saveStockTakeDraftSession(
-      appState.workspace?.id,
-      appState.user?.uid || appState.user?.id || '',
-      draft
-    );
-    const nextSavedDrafts = [
-      savedDraft,
-      ...(appState.stockTake.savedDrafts || []).filter((entry) => String(entry.id) !== String(savedDraft.id))
-    ].sort((left, right) => String(right.savedAt || '').localeCompare(String(left.savedAt || '')));
-
-    // The user may have clicked back into a field while the request was in flight. Force the
-    // completion render so the active session closes and the Active Sessions table updates now.
-    pendingFocusField = null;
-    if (typeof document !== 'undefined' && document.activeElement && typeof document.activeElement.blur === 'function') {
-      document.activeElement.blur();
-    }
+    const savedDraft = await saveStockTakeDraftSession(appState.workspace?.id, appState.user?.uid || appState.user?.id || '', draft);
     appState.stockTake = {
       ...appState.stockTake,
       actionStatus: '',
       actionError: '',
-      sessionActive: false,
-      savedDrafts: nextSavedDrafts,
-      draftSession: hydrateStockTakeDraft(createEmptyStockTakeDraft(), appState.stockTake.locations || []),
-      sessionSetup: createEmptyStockTakeSessionSetup(),
-      filters: {
-        ...appState.stockTake.filters,
-        overlay: '',
-        openDropdown: '',
-        query: ''
-      }
+      draftSession: hydrateStockTakeDraft(savedDraft, appState.stockTake.locations || [])
     };
-    renderApp();
-    showStockTakeToast('Draft saved to Active Sessions.', 'success');
-    refreshActiveTabFromApi().catch(() => {});
+    showStockTakeToast('Draft saved.', 'success');
   } catch (error) {
-    const message = error?.message || 'Could not save stock take draft.';
-    pendingFocusField = null;
-    if (typeof document !== 'undefined' && document.activeElement && typeof document.activeElement.blur === 'function') {
-      document.activeElement.blur();
-    }
     appState.stockTake = {
       ...appState.stockTake,
       actionStatus: '',
-      actionError: message
+      actionError: error.message || 'Could not save stock take draft.'
     };
     renderApp();
-    showStockTakeToast(message, 'error');
   }
 }
 
-async function exportStockTakeTemplatePdf(templateId, selectedLocationId = '') {
+async function exportStockTakeTemplatePdf(templateId) {
   const template = (appState.stockTake.templates || []).find((entry) => String(entry.id) === String(templateId));
   if (!template) {
     showStockTakeToast('Template could not be found.', 'error');
     return;
   }
 
-  const linkedLocationIds = getStockTakeTemplateLocationIds(template);
-  const exportLocationIds = linkedLocationIds.length ? linkedLocationIds : [appState.stockTake.locations?.[0]?.id || 'main'];
-  const requestedLocationId = String(selectedLocationId || '').trim();
-
-  if (!requestedLocationId && exportLocationIds.length > 1) {
-    openStockTakeTemplateExportLocationPicker(template.id);
-    return;
-  }
-
-  const locationId = requestedLocationId || exportLocationIds[0] || appState.stockTake.locations?.[0]?.id || 'main';
-  if (exportLocationIds.length && !exportLocationIds.map(String).includes(String(locationId))) {
-    showStockTakeToast('Choose a location linked to this template first.', 'warning');
-    openStockTakeTemplateExportLocationPicker(template.id);
-    return;
-  }
-
-  const locationName = getLocationNameById(appState.stockTake.locations || [], locationId, 'Main Store');
+  const locationIds = getStockTakeTemplateLocationIds(template);
+  const exportLocationIds = locationIds.length ? locationIds : [appState.stockTake.locations?.[0]?.id || 'main'];
+  const locationNames = exportLocationIds.map((locationId) => getLocationNameById(appState.stockTake.locations || [], locationId, 'Main Store'));
   const scopedItems = getStockTakeTemplateItems(template, appState.stockTake.stockItems || []);
-  const rows = [['Product Name', 'UOM', 'Count', 'UOM', 'Count', 'UOM', 'Count', 'UOM', 'Count']];
-  let lastCategory = '';
-
-  scopedItems
-    .slice()
-    .sort((left, right) => {
-      const categoryCompare = String(left.category || '').localeCompare(String(right.category || ''));
-      if (categoryCompare !== 0) return categoryCompare;
-      return String(left.name || '').localeCompare(String(right.name || ''));
-    })
-    .forEach((item) => {
-      const category = String(item.category || 'General').trim() || 'General';
-      if (lastCategory !== category) {
-        rows.push([`CATEGORY: ${category}`, '', '', '', '', '', '', '', '']);
+  const rows = [['Location', 'Category', 'Item', 'Base UOM', 'UOM Guide', 'Count']];
+  exportLocationIds.forEach((locationId, locationIndex) => {
+    const locationName = getLocationNameById(appState.stockTake.locations || [], locationId, 'Main Store');
+    let lastCategory = '';
+    scopedItems
+      .slice()
+      .sort((left, right) => {
+        const categoryCompare = String(left.category || '').localeCompare(String(right.category || ''));
+        if (categoryCompare !== 0) return categoryCompare;
+        return String(left.name || '').localeCompare(String(right.name || ''));
+      })
+      .forEach((item) => {
+        const category = String(item.category || 'General').trim() || 'General';
+        if (lastCategory && lastCategory !== category) rows.push(['', '', '', '', '', '']);
         lastCategory = category;
-      }
-      const uomConfigs = normalizeLineUomConfigurations(item.uomConfigurations || item.uomConfig || item.uomConversions).slice(0, 3);
-      const uoms = [
-        String(item.unit || item.baseUom || 'ea').toUpperCase(),
-        uomConfigs[0]?.customUom || '',
-        uomConfigs[1]?.customUom || '',
-        uomConfigs[2]?.customUom || ''
-      ];
-      rows.push([
-        item.name || '',
-        uoms[0], '',
-        uoms[1], '',
-        uoms[2], '',
-        uoms[3], ''
-      ]);
-    });
+        const uomConfigs = normalizeLineUomConfigurations(item.uomConfigurations || item.uomConfig || item.uomConversions).slice(0, 3);
+        let countLines = '______';
+        if (uomConfigs.length > 0) {
+          countLines = `${item.unit || 'ea'}: ______\n` + uomConfigs.map((c) => `${c.customUom}: ______`).join('\n');
+        }
+        rows.push([
+          locationName,
+          category,
+          item.name || '',
+          item.unit || 'ea',
+          formatStockItemUomConfigSummary(item) || `Count in ${item.unit || 'ea'}`,
+          countLines
+        ]);
+      });
+    if (locationIndex < exportLocationIds.length - 1) rows.push(['', '', '', '', '', '']);
+  });
 
   try {
     await exportAoaRows({
       format: 'pdf',
-      filename: `kcp-stock-count-sheet-${slugifyExportName(template.name || 'template')}-${slugifyExportName(locationName)}`,
-      sheetName: 'Stock Count Sheet',
-      title: 'Stock Count Sheet',
-      subtitle: `${template.name || 'Template'} | ${appState.workspace?.siteName || appState.workspace?.name || 'KCP'} | ${locationName} | ${new Date().toLocaleString('en-ZA')}`,
+      filename: `kcp-stocktake-template-${template.name.toLowerCase().replace(/\s+/g, '-')}`,
+      sheetName: 'Stock Take Template',
+      title: template.name,
+      subtitle: `${locationNames.join(', ')} · Printable Count Sheet`,
       rows,
       headerRowIndex: 0,
-      branding: getPdfBranding(),
-      orientation: 'landscape',
-      tableOptions: {
-        theme: 'grid',
-        tableWidth: 'auto',
-        horizontalPageBreak: false,
-        ruleColor: KCP_PDF_THEME.accent,
-        styles: {
-          fontSize: 9,
-          cellPadding: { top: 8, right: 6, bottom: 8, left: 6 },
-          lineWidth: 0.45,
-          lineColor: KCP_PDF_THEME.border,
-          valign: 'middle',
-          minCellHeight: 26,
-          textColor: KCP_PDF_THEME.ink,
-          overflow: 'linebreak'
-        },
-        headStyles: {
-          fillColor: KCP_PDF_THEME.accentDark,
-          textColor: KCP_PDF_THEME.white,
-          fontStyle: 'bold',
-          lineColor: KCP_PDF_THEME.accentDark,
-          minCellHeight: 28
-        },
-        bodyStyles: { fillColor: KCP_PDF_THEME.white },
-        alternateRowStyles: { fillColor: KCP_PDF_THEME.surfaceAlt },
-        margin: { left: 28, right: 28 },
-        columnStyles: {
-          0: { cellWidth: 230, fontStyle: 'bold', halign: 'left' },
-          1: { cellWidth: 65, halign: 'center' },
-          2: { cellWidth: 70, halign: 'center' },
-          3: { cellWidth: 65, halign: 'center' },
-          4: { cellWidth: 70, halign: 'center' },
-          5: { cellWidth: 65, halign: 'center' },
-          6: { cellWidth: 70, halign: 'center' },
-          7: { cellWidth: 65, halign: 'center' },
-          8: { cellWidth: 70, halign: 'center' }
-        },
-        didParseCell: (data) => {
-          const firstCell = String(data.row.raw?.[0] || '');
-          const isCategoryRow = data.section === 'body' && firstCell.startsWith('CATEGORY:');
-          if (isCategoryRow) {
-            data.cell.styles.fontStyle = 'bold';
-            data.cell.styles.fillColor = KCP_PDF_THEME.surfaceStrong;
-            data.cell.styles.textColor = KCP_PDF_THEME.navy;
-            data.cell.styles.minCellHeight = 24;
-            if (data.column.index > 0) data.cell.text = [''];
-          }
-          if (data.section === 'body' && !isCategoryRow && [2, 4, 6, 8].includes(data.column.index)) {
-            data.cell.styles.fillColor = KCP_PDF_THEME.white;
-            data.cell.styles.textColor = KCP_PDF_THEME.ink;
-            data.cell.styles.lineColor = KCP_PDF_THEME.borderStrong;
-            data.cell.styles.minCellHeight = 30;
-          }
-          if (data.section === 'body' && !isCategoryRow && [1, 3, 5, 7].includes(data.column.index)) {
-            data.cell.styles.fontStyle = 'bold';
-            data.cell.styles.textColor = KCP_PDF_THEME.navySoft;
-            data.cell.styles.fillColor = KCP_PDF_THEME.surface;
-          }
-        },
-        didDrawCell: () => {
-          // Keep count cells clean. The grid border provides the writable count area.
-        }
-      }
+      branding: getPdfBranding()
     });
-    updateStockTakeFilters({ overlay: '', exportTemplateId: '', exportLocationId: '' });
     showStockTakeToast(`${template.name} exported as PDF.`, 'success');
   } catch (error) {
     showStockTakeToast(error.message || 'Could not export the stock take template.', 'error');
   }
 }
 
-function openStockTakeTemplateExportLocationPicker(templateId = '') {
-  updateStockTakeFilters({
-    overlay: 'template-export-location',
-    exportTemplateId: String(templateId || ''),
-    exportLocationId: '',
-    openDropdown: ''
-  });
-}
-
-function openStockTakeCountTemplateLocationPicker(format = 'xlsx') {
-  updateStockTakeFilters({ overlay: 'count-template-location', exportFormat: ['csv', 'xlsx'].includes(String(format || '').toLowerCase()) ? String(format).toLowerCase() : 'xlsx', exportLocationId: '', exportTemplateId: '' });
-}
-
-async function exportStockTakeCountTemplate(format = 'csv', locationId = '') {
+async function exportStockTakeCountTemplate(format = 'csv') {
   const normalizedFormat = ['csv', 'xlsx'].includes(String(format || '').toLowerCase()) ? String(format).toLowerCase() : 'csv';
   const timestamp = getExportTimestamp();
   const locations = (appState.stockTake.locations || []).length ? appState.stockTake.locations : [{ id: 'main', name: 'Main Store' }];
-  if (!String(locationId || '').trim()) {
-    openStockTakeCountTemplateLocationPicker(normalizedFormat);
-    return;
-  }
-  const selectedLocation = locations.find((location) => String(location.id) === String(locationId)) || null;
-  if (!selectedLocation) {
-    showStockTakeToast('Please select a count location first.', 'warning');
-    openStockTakeCountTemplateLocationPicker(normalizedFormat);
-    return;
-  }
-  const locationName = selectedLocation.name || selectedLocation.displayName || selectedLocation.locationName || 'Main Store';
   const columns = getStockTakeCountTemplateColumns();
   const rows = [];
-  (appState.stockTake.stockItems || []).filter(isStockTakeCountableItem).forEach((item) => {
-    rows.push(buildStockTakeCountTemplateRow({
-      item,
-      location: selectedLocation,
-      locations,
-      rowNumber: rows.length + 2,
-      format: normalizedFormat
-    }));
+  locations.forEach((location) => {
+    (appState.stockTake.stockItems || []).filter(isStockTakeCountableItem).forEach((item) => {
+      rows.push(buildStockTakeCountTemplateRow({
+        item,
+        location,
+        locations,
+        rowNumber: rows.length + 2,
+        format: normalizedFormat
+      }));
+    });
   });
 
   if (!rows.length) {
@@ -16253,15 +14735,14 @@ async function exportStockTakeCountTemplate(format = 'csv', locationId = '') {
   try {
     await exportObjectRows({
       format: normalizedFormat,
-      filename: `kcp-stock-take-count-template-${slugifyExportName(locationName)}-${timestamp}`,
+      filename: `kcp-stock-take-count-template-${timestamp}`,
       sheetName: 'Stock_Take_Import',
-      title: `Stock Take Count Template - ${locationName}`,
-      subtitle: `Location: ${locationName}. Enter counts only in Base_Count and the custom UOM count columns. Unit columns are labels and should not be edited.`,
+      title: 'Stock Take Count Template',
+      subtitle: 'Enter Base_Count and optional UOM count columns. Total and variance calculate in the base UOM for import review.',
       rows,
       columns,
       branding: getPdfBranding()
     });
-    updateStockTakeFilters({ overlay: '', exportLocationId: '' });
     showStockTakeToast(`Stock take count template exported as ${normalizedFormat.toUpperCase()}.`, 'success');
   } catch (error) {
     showStockTakeToast(error.message || 'Could not export stock take count template.', 'error');
@@ -16273,50 +14754,49 @@ function getStockTakeCountTemplateColumns() {
     'Item_Name',
     'Location',
     'Category',
-    'System',
-    'Base_Unit',
+    'Base_UOM',
     'Base_Count',
-    'Custom_UOM_1_Unit',
-    'Custom_UOM_1_Count',
-    'Custom_UOM_2_Unit',
-    'Custom_UOM_2_Count',
-    'Custom_UOM_3_Unit',
-    'Custom_UOM_3_Count',
+    'UOM1_Name',
+    'UOM1_Qty_Per_Base',
+    'UOM1_Count',
+    'UOM2_Name',
+    'UOM2_Qty_Per_Base',
+    'UOM2_Count',
+    'UOM3_Name',
+    'UOM3_Qty_Per_Base',
+    'UOM3_Count',
+    'Total_Count_Base_UOM',
     'Variance',
-    'Impact_Ex_VAT'
+    'Notes',
+    'Item_ID/SKU',
+    'Location_ID'
   ];
 }
 
 function buildStockTakeCountTemplateRow({ item = {}, location = {}, locations = [], rowNumber = 2, format = 'csv' } = {}) {
   const uomConfigs = normalizeLineUomConfigurations(item.uomConfigurations || item.uomConfig || item.uomConversions).slice(0, 3);
   const systemQty = getLocationStock(item, location.id, locations);
-  const ratio1 = Number(uomConfigs[0]?.ratio || 0) > 0 ? Number(uomConfigs[0].ratio) : 0;
-  const ratio2 = Number(uomConfigs[1]?.ratio || 0) > 0 ? Number(uomConfigs[1].ratio) : 0;
-  const ratio3 = Number(uomConfigs[2]?.ratio || 0) > 0 ? Number(uomConfigs[2].ratio) : 0;
-  const unitCost = Number(item.cost || item.unitCost || 0) || 0;
-  const varianceFormula = `IFERROR((N(F${rowNumber})+(N(H${rowNumber})*${formatFormulaNumber(ratio1)})+(N(J${rowNumber})*${formatFormulaNumber(ratio2)})+(N(L${rowNumber})*${formatFormulaNumber(ratio3)}))-${formatFormulaNumber(systemQty)},0)`;
-  const impactFormula = `IFERROR(M${rowNumber}*${formatFormulaNumber(unitCost)},0)`;
   return {
     Item_Name: item.name || '',
     Location: location.name || location.displayName || 'Main Store',
     Category: item.category || item.inventoryCategory || '',
-    System: `${formatStockTakeNumber(systemQty)} ${item.unit || 'ea'}`,
-    Base_Unit: item.unit || 'ea',
+    Base_UOM: item.unit || 'ea',
     Base_Count: '',
-    Custom_UOM_1_Unit: uomConfigs[0]?.customUom || '',
-    Custom_UOM_1_Count: '',
-    Custom_UOM_2_Unit: uomConfigs[1]?.customUom || '',
-    Custom_UOM_2_Count: '',
-    Custom_UOM_3_Unit: uomConfigs[2]?.customUom || '',
-    Custom_UOM_3_Count: '',
-    Variance: createStockTakeFormulaValue(format, varianceFormula),
-    Impact_Ex_VAT: createStockTakeFormulaValue(format, impactFormula)
+    UOM1_Name: uomConfigs[0]?.customUom || '',
+    UOM1_Qty_Per_Base: uomConfigs[0]?.ratio || '',
+    UOM1_Count: '',
+    UOM2_Name: uomConfigs[1]?.customUom || '',
+    UOM2_Qty_Per_Base: uomConfigs[1]?.ratio || '',
+    UOM2_Count: '',
+    UOM3_Name: uomConfigs[2]?.customUom || '',
+    UOM3_Qty_Per_Base: uomConfigs[2]?.ratio || '',
+    UOM3_Count: '',
+    Total_Count_Base_UOM: createStockTakeFormulaValue(format, `IFERROR(N(E${rowNumber})+(N(G${rowNumber})*N(H${rowNumber}))+(N(J${rowNumber})*N(K${rowNumber}))+(N(M${rowNumber})*N(N${rowNumber})),0)`),
+    Variance: createStockTakeFormulaValue(format, `IFERROR(O${rowNumber}-${systemQty || 0},0)`),
+    Notes: '',
+    'Item_ID/SKU': item.id || item.sku || item.name || '',
+    Location_ID: location.id || ''
   };
-}
-
-function formatFormulaNumber(value = 0) {
-  const number = Number(value || 0);
-  return Number.isFinite(number) ? String(Number(number.toFixed(6))) : '0';
 }
 
 function createStockTakeFormulaValue(format = 'csv', formula = '') {
@@ -16369,8 +14849,7 @@ async function importStockTakeCountTemplate(file) {
         items: group.lines.map((line) => ({
           stockItemId: line.stockItemId,
           shelfCount: line.shelfCount,
-          unit: line.unit,
-          uomCounts: line.uomCounts || {}
+          unit: line.unit
         }))
       });
       if (result?.duplicate || result?.skipped) {
@@ -16443,7 +14922,7 @@ function parseStockTakeCountRows(rows = [], { stockItems = [], locations = [] } 
     const baseCountInput = getImportRowValue(row, ['Base_Count', 'Base Count', 'Base_Units', 'Base Units']);
     const uomInputs = [1, 2, 3].map((slot) => ({
       slot,
-      name: getImportRowValue(row, [`UOM${slot}_Name`, `UOM${slot} Name`, `Custom_UOM_${slot}`, `Custom UOM ${slot}`, `Custom_UOM_${slot}_Unit`, `Custom UOM ${slot} Unit`]),
+      name: getImportRowValue(row, [`UOM${slot}_Name`, `UOM${slot} Name`, `Custom_UOM_${slot}`, `Custom UOM ${slot}`]),
       ratio: getImportRowValue(row, [`UOM${slot}_Qty_Per_Base`, `UOM${slot} Qty Per Base`, `UOM${slot}_Ratio`, `UOM${slot} Ratio`, `Custom_UOM_${slot}_Ratio`, `Custom UOM ${slot} Ratio`]),
       count: getImportRowValue(row, [`UOM${slot}_Count`, `UOM${slot} Count`, `Custom_UOM_${slot}_Count`, `Custom UOM ${slot} Count`])
     }));
@@ -16484,28 +14963,10 @@ function parseStockTakeCountRows(rows = [], { stockItems = [], locations = [] } 
       stockItemName: countableItem.name || '',
       locationId: String(location.id),
       shelfCount,
-      unit: countableItem.unit || 'ea',
-      uomCounts: buildStockTakeImportUomCounts({ baseCountInput, uomInputs, uomConfigs, baseUom: countableItem.unit || 'ea' })
+      unit: countableItem.unit || 'ea'
     });
   });
   return { lines, errors };
-}
-
-
-function buildStockTakeImportUomCounts({ baseCountInput = '', uomInputs = [], uomConfigs = [], baseUom = 'ea' } = {}) {
-  const result = {};
-  if (isImportCellFilled(baseCountInput)) {
-    const baseCount = parseStockTakeImportNumber(baseCountInput);
-    if (Number.isFinite(baseCount) && baseCount >= 0) result.base = baseCount;
-  }
-  (uomInputs || []).forEach((entry = {}) => {
-    if (!isImportCellFilled(entry.count)) return;
-    const count = parseStockTakeImportNumber(entry.count);
-    if (!Number.isFinite(count) || count < 0) return;
-    const name = String(entry.name || uomConfigs?.[Number(entry.slot || 0) - 1]?.customUom || `UOM${entry.slot || ''}` || baseUom).trim();
-    if (name) result[name] = count;
-  });
-  return result;
 }
 
 function calculateStockTakeSplitCount({ baseCountInput = '', uomInputs = [], uomConfigs = [], lineNumber = 0, errors = [] } = {}) {
@@ -16605,7 +15066,6 @@ function updateStockTakeTemplateDraft(updates = {}, options = {}) {
   }
   appState.stockTake = {
     ...appState.stockTake,
-    actionError: '',
     templateDraft: nextDraft
   };
   if (options.render !== false) renderApp();
@@ -16822,30 +15282,6 @@ function refreshStockTakeSessionComputed() {
   }
 }
 
-function stockTakeUomCountMap(value = {}, baseUom = 'ea') {
-  if (!Array.isArray(value)) {
-    return Object.fromEntries(
-      Object.entries(value || {})
-        .map(([key, count]) => [String(key || '').trim(), parseDecimalInputValue(count, 0)])
-        .filter(([key, count]) => key && Number(count) > 0)
-    );
-  }
-
-  const normalizedBaseUom = String(baseUom || 'ea').trim().toLowerCase();
-  return value.reduce((result, row = {}) => {
-    const count = parseDecimalInputValue(row.count ?? row.quantity ?? row.scans, 0);
-    if (!(count > 0)) return result;
-    const ratio = parseDecimalInputValue(row.ratio ?? row.qtyInBase ?? row.qty_in_base ?? row.packSize, 1) || 1;
-    const name = String(row.uomName || row.selectedUom || row.unit || row.key || '').trim();
-    const rawKey = String(row.key || '').trim();
-    const key = rawKey === 'base' || (ratio === 1 && name.toLowerCase() === normalizedBaseUom)
-      ? 'base'
-      : (name || rawKey || 'base');
-    result[key] = (Number(result[key] || 0) || 0) + count;
-    return result;
-  }, {});
-}
-
 function updateStockTakeCount(stockItemId, value, uomKey = 'base') {
   const draft = hydrateStockTakeDraft(appState.stockTake.draftSession, appState.stockTake.locations || []);
   const raw = String(value ?? '').trim();
@@ -16863,7 +15299,7 @@ function updateStockTakeCount(stockItemId, value, uomKey = 'base') {
     uomCounts: {}
   };
 
-  const uomCounts = stockTakeUomCountMap(existingEntry.uomCounts || {}, stockItem.unit || 'ea');
+  const uomCounts = { ...(existingEntry.uomCounts || {}) };
   // Populate 'base' fallback if legacy count exists without detailed breakdown.
   if (existingEntry.shelfCount > 0 && Object.keys(uomCounts).length === 0) {
     uomCounts['base'] = existingEntry.shelfCount;
@@ -16872,7 +15308,7 @@ function updateStockTakeCount(stockItemId, value, uomKey = 'base') {
   if (!raw) {
     delete uomCounts[uomKey];
   } else {
-    const val = parseDecimalInputValue(raw, NaN);
+    const val = Number(raw);
     if (!Number.isFinite(val) || val < 0) return;
     uomCounts[uomKey] = val;
   }
@@ -16916,33 +15352,9 @@ function updateStockTakeCount(stockItemId, value, uomKey = 'base') {
 }
 
 async function saveStockTakeDraft() {
-  const activeElement = document.activeElement;
-  if (activeElement && (activeElement.tagName === 'INPUT' || activeElement.tagName === 'TEXTAREA')) {
-    activeElement.blur?.();
-  }
-
   const draft = hydrateStockTakeDraft(appState.stockTake.draftSession, appState.stockTake.locations || []);
-  const commitDraft = normalizeStockTakeCommitDraft(draft);
-  if (!commitDraft.locationId) {
-    appState.stockTake = {
-      ...appState.stockTake,
-      actionError: 'Choose a stock take location before committing.'
-    };
-    renderApp();
-    return;
-  }
-  if (!(commitDraft.items || []).length) {
-    appState.stockTake = {
-      ...appState.stockTake,
-      actionError: 'Enter at least one shelf count before committing.'
-    };
-    renderApp();
-    return;
-  }
-
   appState.stockTake = {
     ...appState.stockTake,
-    draftSession: commitDraft,
     actionStatus: 'saving',
     actionError: ''
   };
@@ -16950,26 +15362,16 @@ async function saveStockTakeDraft() {
 
   try {
     const { deleteStockTakeDraftSession, saveStockTake } = await import('./services/stockTakeService.js');
-    const result = await saveStockTake(appState.workspace?.id, commitDraft);
-    const committedId = result?.id || commitDraft.id || '';
-    const committedDraft = {
-      ...commitDraft,
-      id: committedId || commitDraft.id,
-      timestamp: new Date().toISOString(),
-      lineCount: (commitDraft.items || []).length
-    };
-    if ((appState.user?.uid || appState.user?.id) && commitDraft.id) {
-      await deleteStockTakeDraftSession(appState.workspace?.id, appState.user?.uid || appState.user?.id || '', commitDraft.id);
+    await saveStockTake(appState.workspace?.id, draft);
+    if (appState.user?.uid || appState.user?.id) {
+      await deleteStockTakeDraftSession(appState.workspace?.id, appState.user?.uid || appState.user?.id || '', draft.id || '');
     }
-    const nextStockItems = applyStockTakeCommitToStockItems(appState.stockTake.stockItems || [], committedDraft);
     appState.stockTake = {
       ...appState.stockTake,
-      stockItems: nextStockItems,
-      stockTakes: [committedDraft, ...(appState.stockTake.stockTakes || []).filter((entry) => String(entry.id || '') !== String(committedDraft.id || ''))],
       actionStatus: '',
       actionError: '',
       sessionActive: false,
-      savedDrafts: (appState.stockTake.savedDrafts || []).filter((entry) => String(entry.id) !== String(commitDraft.id || '')),
+      savedDrafts: (appState.stockTake.savedDrafts || []).filter((entry) => String(entry.id) !== String(draft.id || '')),
       draftSession: hydrateStockTakeDraft(createEmptyStockTakeDraft(), appState.stockTake.locations || []),
       sessionSetup: createEmptyStockTakeSessionSetup(),
       filters: {
@@ -16979,8 +15381,7 @@ async function saveStockTakeDraft() {
         overlay: ''
       }
     };
-    showStockTakeToast(result?.duplicate || result?.skipped ? 'Stock take was already committed.' : 'Stock take committed.', result?.duplicate || result?.skipped ? 'warning' : 'success');
-    refreshActiveTabFromApi().catch(() => {});
+    showStockTakeToast('Stock take committed.', 'success');
   } catch (error) {
     appState.stockTake = {
       ...appState.stockTake,
@@ -16989,72 +15390,6 @@ async function saveStockTakeDraft() {
     };
     renderApp();
   }
-}
-
-function normalizeStockTakeCommitDraft(draft = {}) {
-  const locationId = String(draft.locationId || '').trim();
-  const normalizedItems = (draft.items || [])
-    .map((line = {}) => {
-      const shelfCount = parseDecimalInputValue(line.shelfCount, NaN);
-      return {
-        ...line,
-        stockItemId: String(line.stockItemId || line.itemId || line.ingId || '').trim(),
-        shelfCount,
-        unit: String(line.unit || '').trim(),
-        uomCounts: normalizeCommitUomCounts(line.uomCounts || line.countBreakdown || line.scanBreakdown),
-        scanBreakdown: normalizeCommitUomCounts(line.scanBreakdown || line.countBreakdown || line.uomCounts)
-      };
-    })
-    .filter((line) => line.stockItemId && Number.isFinite(line.shelfCount) && line.shelfCount >= 0);
-
-  return {
-    ...draft,
-    id: String(draft.id || createStableStockTakeCommitId(draft, normalizedItems)).trim(),
-    locationId,
-    locationName: draft.locationName || getLocationNameById(appState.stockTake.locations || [], locationId, 'Main Store'),
-    date: draft.date || todayLocal(),
-    items: normalizedItems
-  };
-}
-
-function normalizeCommitUomCounts(value = {}) {
-  const rows = Array.isArray(value)
-    ? value
-    : Object.entries(value || {}).map(([key, count]) => ({ key, uomName: key === 'base' ? 'base' : key, count, ratio: key === 'base' ? 1 : undefined }));
-  return rows
-    .map((row = {}) => ({
-      ...row,
-      key: String(row.key || row.uomName || row.selectedUom || row.unit || '').trim(),
-      uomName: String(row.uomName || row.selectedUom || row.unit || row.key || '').trim(),
-      count: parseDecimalInputValue(row.count ?? row.quantity ?? row.scans, 0),
-      ratio: parseDecimalInputValue(row.ratio ?? row.qtyInBase ?? row.qty_in_base ?? row.packSize, 1) || 1,
-      baseUom: String(row.baseUom || row.baseUnit || '').trim()
-    }))
-    .filter((row) => row.uomName && Number(row.count || 0) > 0);
-}
-
-function createStableStockTakeCommitId() {
-  return makeStableSubmitId('st');
-}
-
-function applyStockTakeCommitToStockItems(stockItems = [], draft = {}) {
-  const locationId = String(draft.locationId || '').trim();
-  if (!locationId) return stockItems;
-  const countedById = new Map((draft.items || []).map((line) => [String(line.stockItemId), Number(line.shelfCount || 0) || 0]));
-  if (!countedById.size) return stockItems;
-  return (stockItems || []).map((item) => {
-    const itemId = String(item.id || '');
-    if (!countedById.has(itemId)) return item;
-    const nextBalances = { ...(item.balances && typeof item.balances === 'object' ? item.balances : {}) };
-    nextBalances[locationId] = countedById.get(itemId);
-    const nextStock = Object.values(nextBalances).reduce((sum, value) => sum + (Number(value || 0) || 0), 0);
-    return {
-      ...item,
-      balances: nextBalances,
-      stock: nextStock,
-      updatedAt: new Date().toISOString()
-    };
-  });
 }
 
 function dismissStockTakeToast() {
@@ -17607,8 +15942,8 @@ async function saveRoleManagementEditor() {
     await saveWorkspaceRole(appState.workspace.id, {
       name: roleName,
       label,
-      permissions: ensureExplicitDataPermissionSchema(editor.permissions || []),
-      locations: Array.isArray(editor.locations) ? editor.locations : ['all']
+      permissions: editor.permissions || [],
+      locations: editor.locations?.length ? editor.locations : ['all']
     });
     appState.roleManagement = {
       ...appState.roleManagement,
@@ -17778,9 +16113,7 @@ function createCreditNoteLineDetailEntry(line, index) {
     vatEnabled: line.vatEnabled !== false,
     locationId: line.locationId || '',
     locationName: line.locationName || '',
-    sourceIndex: index,
-    originalOrderQty: Number(line.originalOrderQty ?? line.maxReturnQty ?? 0) || 0,
-    maxReturnQty: Number(line.maxReturnQty ?? line.originalOrderQty ?? 0) || 0
+    sourceIndex: index
   };
 }
 
@@ -17940,13 +16273,11 @@ function createDefaultSettingsDraft(seed = {}) {
     siteName: '',
     vatRate: 15,
     tradingTime: '23:59',
-    reportingDayFromHour: 0,
-    reportingDayToHour: 0,
-    tradingDayStartHour: 0,
-    tradingDayStartMinutes: 0,
     uiScale: 'normal',
     logoutTimeout: 30,
     costingMethod: 'last',
+    lowStockEmailFrequency: 'off',
+    lowStockEmailDispatchTime: '08:00',
     yocoCategoryMap: {},
     stockCategoryRoutingMap: {},
     restaurantThemeId: DEFAULT_RESTAURANT_THEME_ID,
@@ -17958,8 +16289,6 @@ function createDefaultSettingsDraft(seed = {}) {
     orgId: '',
     corpId: '',
     viewingOnly: false,
-    stockDepletionEnabled: false,
-    stockDepletionEnabledAt: '',
     ...seed
   });
 }
@@ -18102,30 +16431,15 @@ function getDefaultSiteIdForLocations(sites = [], locations = []) {
     || String((sites || []).find((site) => site.isDefault)?.id || sites?.[0]?.id || '');
 }
 
-function renderApp() {
+function renderApp(options = {}) {
   if (!app) return;
-
-  // Do not mount protected workspace modules until the authenticated user's workspace
-  // role and permissions have resolved. Rendering with the temporary empty access state
-  // causes false "no permission" screens and forces users to leave and re-enter tabs.
-  if (appState.user && appState.workspace && appState.access?.status === 'loading') {
-    const mountedProtectedMain = app.querySelector('[data-app-main]');
-    const canPreserveMountedModule = ['dashboard', 'reporting', 'reporting-scheduling'].includes(appState.route.active)
-      && mountedProtectedMain?.dataset.activeModule === appState.route.active
-      && mountedProtectedMain.dataset.workspaceId === String(appState.workspace.id || '');
-    if (canPreserveMountedModule) {
-      // Access subscriptions can briefly re-enter loading while refreshing. Keep the already
-      // authenticated module mounted instead of replacing the whole app with a boot screen.
-      return;
-    }
-    renderBoot('Loading your workspace permissions...');
-    return;
-  }
+  const force = options.force === true;
   // Never replace the DOM while the user is actively typing in a text field.
   // The silent-update pattern keeps appState in sync; the next render after blur picks it up.
   const _active = document.activeElement;
-  if (_active && _active.tagName === 'SELECT') return;
+  if (!force && _active && _active.tagName === 'SELECT') return;
   if (
+    !force &&
     _active &&
     (_active.tagName === 'INPUT' || _active.tagName === 'TEXTAREA') &&
     _active.type !== 'checkbox' &&
@@ -18141,21 +16455,6 @@ function renderApp() {
     appState.route.active === 'integrations' &&
     window.__KCP_SUPPRESS_INTEGRATIONS_RENDER__ === true
   ) {
-    return;
-  }
-  const mountedMain = app.querySelector('[data-app-main]');
-  if (
-    appState.user &&
-    appState.workspace &&
-    ['dashboard', 'reporting', 'reporting-scheduling'].includes(appState.route.active) &&
-    mountedMain?.dataset.activeModule === appState.route.active &&
-    mountedMain.dataset.workspaceId === String(appState.workspace.id || '') &&
-    mountedMain.dataset.accessRevision === getAccessRenderRevision(appState.access)
-  ) {
-    // Dashboard and Reporting both manage their own async data, filters, charts, and
-    // interaction state. Unrelated background snapshots must not replace their DOM.
-    mountImportNotificationModal();
-    syncAppModalScrollLock();
     return;
   }
   const activeField = captureActiveField() || pendingFocusField;
@@ -18232,6 +16531,11 @@ function renderApp() {
     onWorkspaceSelect: (workspace) => selectWorkspace(workspace),
     onAutoLoginToggle: toggleAutoLoginPreference,
     onThemeToggle: toggleTheme,
+    onDashboardRangeChange: updateDashboardRange,
+    onDashboardRefresh: refreshDashboardDirect,
+    onDashboardChartTab: setDashboardChartTab,
+    onDashboardLocationChange: updateDashboardLocation,
+    onDashboardSiteChange: updateDashboardSite,
     onMenuFilterChange: updateMenuFilters,
     onMenuAction: {
       onSelect: updateMenuSelection,
@@ -18252,26 +16556,6 @@ function renderApp() {
       onCategoryRenameCancel: cancelMenuCategoryRename,
       onCategoryDelete: deleteMenuCategory,
       onOpenRecipe: openRecipeSetupFromMenu,
-      onConfigureModifier: openMenuModifierEditor,
-      onOpenModifierLinks: openMenuModifierLinks,
-      onCloseModifierLinks: closeMenuModifierLinks,
-      onCloseModifier: closeMenuModifierEditor,
-      onSaveModifier: saveMenuModifierRule,
-      onModifierStockRuleChange: updateMenuModifierStockRule,
-      onOpenModifierStockPicker: openMenuModifierStockPicker,
-      onCloseModifierStockPicker: closeMenuModifierStockPicker,
-      onModifierStockPickerSearch: searchMenuModifierStockPicker,
-      onModifierStockPickerSelect: selectMenuModifierStockPicker,
-      onOpenNoteSuggestions: openMenuNoteSuggestions,
-      onCloseNoteSuggestions: closeMenuNoteSuggestions,
-      onRefreshNoteSuggestions: refreshMenuNoteSuggestions,
-      onStartNoteRuleSetup: startMenuNoteRuleSetup,
-      onCancelNoteRuleSetup: cancelMenuNoteRuleSetup,
-      onNoteRuleDraftChange: updateMenuNoteRuleDraft,
-      onSaveNoteRule: saveMenuNoteRule,
-      onIgnoreNoteSuggestion: (noteText) => setMenuNoteSuggestionDisposition(noteText, 'IGNORED'),
-      onRestoreNoteSuggestion: (noteText) => setMenuNoteSuggestionDisposition(noteText, 'SUGGESTED'),
-      onToggleIgnoredNoteSuggestions: toggleMenuIgnoredNoteSuggestions,
 	      onPreserveFocus: preserveFieldFocus,
 	      onConfirmDelete: withPermission('menu', ACTION_PERMISSION_MAP.deleteRecords, confirmMenuDelete, 'You do not have permission to delete menu items.'),
 	      onCancelDelete: cancelMenuDelete,
@@ -18306,21 +16590,6 @@ function renderApp() {
 	      onPickerApply: applyRecipePickerSelection,
 		      onModifierLinkChange: updateRecipeModifierProductLink,
 		      onModifierLinkToggle: toggleRecipeModifierProductLink,
-          onModifierStockRuleChange: updateRecipeModifierStockRule,
-          onOpenModifierStockPicker: openRecipeModifierStockPicker,
-          onCloseModifierStockPicker: closeRecipeModifierStockPicker,
-          onModifierStockPickerSearch: searchRecipeModifierStockPicker,
-          onModifierStockPickerSelect: selectRecipeModifierStockPicker,
-	      onOpenNoteSuggestions: openRecipeNoteSuggestions,
-	      onCloseNoteSuggestions: closeRecipeNoteSuggestions,
-	      onRefreshNoteSuggestions: refreshRecipeNoteSuggestions,
-	      onStartNoteRuleSetup: startRecipeNoteRuleSetup,
-	      onCancelNoteRuleSetup: cancelRecipeNoteRuleSetup,
-	      onNoteRuleDraftChange: updateRecipeNoteRuleDraft,
-	      onSaveNoteRule: saveRecipeNoteRule,
-	      onIgnoreNoteSuggestion: (noteText) => setRecipeNoteSuggestionDisposition(noteText, 'IGNORED'),
-	      onRestoreNoteSuggestion: (noteText) => setRecipeNoteSuggestionDisposition(noteText, 'SUGGESTED'),
-	      onToggleIgnoredNoteSuggestions: toggleRecipeIgnoredNoteSuggestions,
 		      onRecipeSourceStockItemChange: updateRecipeSourceStockItem,
 		      onScanBarcode: scanRecipeIngredientBarcode,
 	      onSave: saveCurrentRecipe,
@@ -18369,11 +16638,7 @@ function renderApp() {
       onCancelDelete: cancelStockDelete,
       onImport: importStockFile,
       onExport: exportStockItems,
-      onLocationCostingExport: exportLocationCostingSheet,
-      onLocationCostingImport: importLocationCostingFile,
-      onLocationCostingConfirm: confirmLocationCostingImport,
-      onLocationCostingCancel: cancelLocationCostingImport,
-      onDismissImportReview: dismissStockImportReview,
+      onDismissImportReport: dismissStockImportReport,
       onDismissToast: dismissStockToast
     },
     onSupplierFilterChange: updateSupplierFilters,
@@ -18398,14 +16663,12 @@ function renderApp() {
       onSelect: updatePurchaseOrderSelection,
       onSelectAll: updateAllPurchaseOrderSelection,
       onNew: () => openPurchaseOrderDraft(null),
-      onCreateFromLowStock: openPurchaseOrderFromReportingLowStock,
       onEdit: openPurchaseOrderDraft,
       onClose: closePurchaseOrderDraft,
       onPreserveFocus: preserveFieldFocus,
       onDraftChange: updatePurchaseOrderDraft,
       onDraftChangeSilent: updatePurchaseOrderDraftSilent,
       onAddLine: addPurchaseOrderLine,
-      onScanBarcode: scanPurchaseOrderBarcode,
       onUpdateLine: updatePurchaseOrderLine,
       onUpdateLineSilent: updatePurchaseOrderLineSilent,
       onRemoveLine: withPermission('purchaseOrders', ACTION_PERMISSION_MAP.deleteRecords, removePurchaseOrderLine, 'You do not have permission to remove purchase order lines.'),
@@ -18496,7 +16759,6 @@ function renderApp() {
       onToggleStockSelection: toggleAdjustmentStockSelection,
       onSelectAllVisibleStock: selectAllVisibleAdjustmentStock,
       onAddSelectedStock: addAdjustmentSelectedStock,
-      onScanBarcode: scanAdjustmentBarcode,
       onEditLine: openAdjustmentLineDetail,
       onLineDetailMetaChange: updateAdjustmentLineDetailMeta,
       onRemoveLine: withPermission('adjustments', ACTION_PERMISSION_MAP.deleteRecords, removeAdjustmentLine, 'You do not have permission to remove adjustment lines.'),
@@ -18519,7 +16781,6 @@ function renderApp() {
       onDraftChange: updateTransferDraft,
       onDraftLocationChange: updateTransferLocation,
       onToggleStockSelection: toggleTransferStockSelection,
-      onScanStockSearch: scanTransferSearch,
       onSelectAllVisibleStock: selectAllVisibleTransferStock,
       onAddSelectedStock: addTransferSelectedStock,
       onLineChange: updateTransferLine,
@@ -18548,6 +16809,7 @@ function renderApp() {
       onOpenBulkScan: openStockTakeBulkScan,
       onOpenTemplateManager: openStockTakeTemplateManager,
       onOpenTemplateEditor: openStockTakeTemplateEditor,
+      onRestoreSavedDraft: restoreSavedStockTakeDraft,
       onDiscardSpecificDraft: discardSpecificStockTakeDraft,
       onCloseOverlay: closeStockTakeOverlay,
       onCloseScanCount: closeStockTakeScanCountModal,
@@ -18559,7 +16821,6 @@ function renderApp() {
       onCancelSession: cancelStockTakeSession,
       onSaveDraftSession: saveStockTakeSessionDraft,
       onExportTemplatePdf: exportStockTakeTemplatePdf,
-      onOpenCountTemplateLocationPicker: openStockTakeCountTemplateLocationPicker,
       onExportCountTemplate: exportStockTakeCountTemplate,
       onImportCountTemplate: importStockTakeCountTemplate,
       onRestoreSpecificDraft: restoreSpecificStockTakeDraft,
@@ -18693,7 +16954,6 @@ function renderApp() {
       onPreserveFocus: preserveFieldFocus,
       onDraftChange: updateSettingsDraft,
       onDraftChangeSilent: updateSettingsDraftSilent,
-      onTaxFieldChangeSilent: updateSettingsTaxFieldSilent,
       onDropdownToggle: toggleSettingsDropdown,
       onOpenStockRoutingModal: openStockRoutingModal,
       onCloseStockRoutingModal: closeStockRoutingModal,
@@ -18709,7 +16969,7 @@ function renderApp() {
       onBackgroundClear: clearRestaurantBackground,
       onSave: saveSettingsDraft,
       onSaveAppearance: saveAppearanceSettingsDraft,
-      onGoLive: confirmGoLiveStockDepletion,
+      onGoLive: goLiveStockDepletion,
       onExportSnapshot: exportSettingsSnapshot,
       onImportSnapshot: importSettingsSnapshot,
       onRequestResetTotals: requestResetStockTotals,
@@ -18723,7 +16983,6 @@ function renderApp() {
   restoreActiveField(activeField);
   restoreScrollSnapshots(scrollSnapshots);
   syncAppModalScrollLock();
-  scheduleAppDropdownPortalRefresh();
   startLiveClock();
   updateLiveClockNodes();
   scheduleDeferredRealtimeSnapshotFlush();
@@ -19021,9 +17280,6 @@ function shouldDeferRealtimeSnapshot() {
 
 function renderBoot(message) {
   if (!app) return;
-  const normalizedMessage = String(message || 'Loading...');
-  const existingMessage = app.querySelector('.kcpBootMessage');
-  if (existingMessage?.textContent === normalizedMessage) return;
   app.innerHTML = `
     <main class="app-boot kcpBoot">
       <div class="kcpBootCard">
@@ -19034,7 +17290,7 @@ function renderBoot(message) {
           <span class="kcpBootOrbit"><i class="kcpBootDot"></i></span>
           <span class="kcpBootMark"><span class="kcpBootMarkText">KCP</span></span>
         </div>
-        <p class="kcpBootMessage">${normalizedMessage}</p>
+        <p class="kcpBootMessage">${message}</p>
       </div>
     </main>
   `;
@@ -19360,11 +17616,60 @@ function cssEscape(value = '') {
   return String(value).replaceAll('\\', '\\\\').replaceAll('"', '\\"');
 }
 
+function renderDashboardOnly() {
+  if (
+    !app ||
+    !appState.user ||
+    !appState.workspace ||
+    appState.route.active !== 'dashboard'
+  ) {
+    renderApp();
+    return;
+  }
+
+  const main = app.querySelector('[data-app-main]');
+  if (!main) {
+    renderApp();
+    return;
+  }
+
+  const activeField = captureActiveField() || pendingFocusField;
+  const scrollSnapshots = captureScrollSnapshots();
+  main.replaceChildren(renderDashboard({
+    state: appState,
+    onThemeToggle: toggleTheme,
+    onDashboardRangeChange: updateDashboardRange,
+    onDashboardRefresh: refreshDashboardDirect,
+    onDashboardChartTab: setDashboardChartTab,
+    onDashboardLocationChange: updateDashboardLocation,
+    onDashboardSiteChange: updateDashboardSite,
+    onNavigate: navigateTo
+  }));
+  restoreActiveField(activeField);
+  restoreScrollSnapshots(scrollSnapshots);
+  startLiveClock();
+  updateLiveClockNodes();
+}
+
 function replaceApp(element) {
   if (!app) return;
-  cleanupAppDropdownPortal();
   app.replaceChildren(element);
   mountGlobalImportLoader();
+}
+
+function cleanupWorkspaceSubscription() {
+  dashboardSubscriptionToken += 1;
+  pendingDashboardSnapshot = null;
+
+  if (dashboardSnapshotRenderTimer) {
+    window.clearTimeout(dashboardSnapshotRenderTimer);
+    dashboardSnapshotRenderTimer = null;
+  }
+
+  if (unsubscribeDashboard) {
+    unsubscribeDashboard();
+    unsubscribeDashboard = null;
+  }
 }
 
 function cleanupAccessSubscription() {
@@ -19486,6 +17791,25 @@ function cleanupManufacturingSubscription() {
 
 
 
+function createDashboardState(status, workspaceId = '') {
+  return {
+    status,
+    workspaceId,
+    metrics: null,
+    loaded: Object.fromEntries(dashboardNodeKeys.map((key) => [key, false])),
+    errors: {},
+    isReady: false,
+    rangeLoading: false,
+    connection: {
+      status: status === 'ready' ? 'live' : status === 'error' ? 'error' : 'syncing',
+      label: status === 'ready' ? 'Live' : status === 'error' ? 'Attention' : 'Syncing',
+      loadedCount: 0,
+      sourceCount: dashboardNodeKeys.length,
+      lastUpdated: ''
+    }
+  };
+}
+
 function createAccessState(status) {
   return {
     status,
@@ -19510,20 +17834,6 @@ function createMenuState(status, filters = {}) {
     items: [],
     modifierItems: [],
     locations: [],
-    ingredients: [],
-    editingModifier: null,
-    modifierStockRuleOpen: false,
-    viewingModifierLinks: null,
-    modifierLinksOpen: false,
-    noteSuggestions: {
-      status: 'idle',
-      items: [],
-      open: false,
-      includeIgnored: false,
-      editingId: '',
-      draft: null,
-      error: ''
-    },
     posIntegration: { active: false, provider: '', label: '' },
     source: '',
     updatedAt: '',
@@ -19549,7 +17859,6 @@ function createMenuState(status, filters = {}) {
       catalogueView: 'products',
       category: '',
       status: '',
-      locationId: '',
       view: 'list',
       page: 1,
       pageSize: 25,
@@ -19564,7 +17873,6 @@ function createRecipeState(status, filters = {}) {
     status,
     items: [],
     ingredients: [],
-    locations: [],
     source: '',
     loaded: {},
     updatedAt: '',
@@ -19585,22 +17893,12 @@ function createRecipeState(status, filters = {}) {
     actionStatus: '',
     actionError: '',
     toast: null,
-    noteSuggestions: {
-      status: 'idle',
-      items: [],
-      open: false,
-      includeIgnored: false,
-      editingId: '',
-      draft: null,
-      error: ''
-    },
     filters: {
       query: '',
       category: '',
       ingredientQuery: '',
       ingredientCategory: '',
       ingredientType: '',
-      locationId: '',
       openDropdown: '',
       categoryDropdownSearch: '',
       ingredientCategoryDropdownSearch: '',
@@ -19627,21 +17925,15 @@ function createStockState(status, filters = {}) {
     confirmDelete: null,
     actionStatus: '',
     actionError: '',
-    importReview: null,
-    locationCostingPreview: null,
+    importReport: null,
     toast: null,
     filters: {
       query: '',
       category: '',
       locationId: '',
-      locationCostingLocationId: '',
-      locationCostingLocationIdDropdownSearch: '',
-      locationCostingPickerKind: '',
-      itemType: '',
       openDropdown: '',
       categoryDropdownSearch: '',
       locationDropdownSearch: '',
-      itemTypeDropdownSearch: '',
       page: 1,
       pageSize: 25,
       ...filters
@@ -19806,7 +18098,6 @@ function createGrvState(status, filters = {}, pendingSourcePoId = '') {
       locationName: 'Main Store',
       notes: '',
       pricesIncludeVat: false,
-      overrideCostPrice: true,
       transportEx: '',
       invoiceDiscountEx: '',
       invoiceTotalEx: '',
@@ -19825,7 +18116,6 @@ function createGrvState(status, filters = {}, pendingSourcePoId = '') {
       calendarCursor: '',
       overlay: '',
       openDropdown: '',
-      headerLocationQuery: '',
       ...filters
     }
   };
@@ -19859,7 +18149,6 @@ function createCreditNoteState(status, filters = {}) {
       calendarCursor: '',
       selectedStockIds: [],
       selectedLineIndexes: [],
-      headerLocationQuery: '',
       ...filters
     }
   };
@@ -20220,21 +18509,6 @@ function getGrvStockItemById(itemId) {
   return (appState.grv.stockItems || []).find((item) => String(item.id) === id) || null;
 }
 
-function getCreditNoteStockItemById(itemId) {
-  const id = String(itemId || '');
-  return (appState.creditNotes.stockItems || []).find((item) => String(item.id) === id) || null;
-}
-
-function isOrderableStockItem(item = {}) {
-  const itemType = getStockItemTypeForFilter(item);
-  return itemType === 'standard' || itemType === 'recipe_source';
-}
-
-function isAdjustmentStockItem(item = {}) {
-  const itemType = getStockItemTypeForFilter(item);
-  return itemType === 'standard' || itemType === 'recipe_source' || itemType === 'manufactured';
-}
-
 function normalizeLineUomConfigurations(value = []) {
   const rows = Array.isArray(value)
     ? value
@@ -20246,8 +18520,7 @@ function normalizeLineUomConfigurations(value = []) {
         baseUom: String(row.baseUom || row.base_uom || row.baseUnit || row.unit || '').trim(),
         customUom: String(row.customUom || row.custom_uom || row.customUnit || row.orderingUom || '').trim(),
         ratio: parseDecimalInputValue(row.ratio ?? row.conversionRatio ?? row.unitsPerCustomUnit ?? row.units_per_custom_unit, 0),
-        barcode: parseBarcodeValues(row.barcode || row.barcodes || row.customBarcode || row.customUomBarcode)[0] || '',
-        isDefaultOrdering: ['true', '1', 'yes', 'on'].includes(String(row.isDefaultOrdering ?? row.defaultOrdering ?? row.is_default_ordering ?? row.defaultOrderUom ?? '').toLowerCase()) || row.isDefaultOrdering === true || row.defaultOrdering === true
+        barcode: parseBarcodeValues(row.barcode || row.barcodes || row.customBarcode || row.customUomBarcode)[0] || ''
       };
     })
     .filter((entry) => entry.customUom && entry.ratio > 0);
@@ -20282,16 +18555,6 @@ function getDefaultLineUomSelection(stockItem = {}, barcode = '') {
       ratio: barcodeMatch.ratio,
       baseUom: barcodeMatch.baseUom || stockItem.unit || 'ea',
       barcode: barcodeMatch.barcode || ''
-    };
-  }
-  const defaultOrderingConfig = normalizeLineUomConfigurations(stockItem.uomConfigurations || stockItem.uomConfig || stockItem.uomConversions)
-    .find((entry) => entry.isDefaultOrdering);
-  if (defaultOrderingConfig) {
-    return {
-      selectedUom: defaultOrderingConfig.customUom,
-      ratio: defaultOrderingConfig.ratio,
-      baseUom: defaultOrderingConfig.baseUom || stockItem.unit || 'ea',
-      barcode: defaultOrderingConfig.barcode || ''
     };
   }
   return getLineUomSelection(stockItem, stockItem.unit || 'ea');
@@ -20336,27 +18599,15 @@ function getFilteredRecipeItems(items, filters = {}) {
 function getFilteredStockItems(items, filters = {}) {
   const query = String(filters.query || '').trim().toLowerCase();
   const locationId = String(filters.locationId || '');
-  const itemTypeFilter = String(filters.itemType || '').trim();
   return (items || []).filter((item) => {
-    const itemType = getStockItemTypeForFilter(item);
     const matchesQuery = !query ||
       String(item.name || '').toLowerCase().includes(query) ||
       String(item.category || '').toLowerCase().includes(query) ||
       matchesBarcodeQuery(item, query);
     const matchesCategory = !filters.category || normalizeStockCategory(item.category) === filters.category;
     const matchesLocation = !locationId || Object.hasOwn(item.balances || {}, locationId);
-    const matchesType = !itemTypeFilter || itemType === itemTypeFilter;
-    return matchesQuery && matchesCategory && matchesLocation && matchesType;
+    return matchesQuery && matchesCategory && matchesLocation;
   });
-}
-
-function getStockItemTypeForFilter(item = {}) {
-  const explicit = String(item.itemType || item.stockItemType || item.specificationType || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
-  const category = String(item.category || '').toLowerCase();
-  if (['sub_recipe', 'subrecipe'].includes(explicit) || item.isSubRecipe === true || category.includes('sub recipe') || category.includes('sub-recipe')) return 'sub_recipe';
-  if (['manufactured', 'prep', 'prepared', 'manufactured_item'].includes(explicit) || item.isManufactured === true || category.includes('manufactured')) return 'manufactured';
-  if (['recipe_source', 'non_stock', 'virtual'].includes(explicit) || category.includes('recipe source') || category.includes('non-stock') || category.includes('non stock') || category.includes('virtual')) return 'recipe_source';
-  return 'standard';
 }
 
 function normalizeStockCategory(value = '') {
@@ -20498,28 +18749,16 @@ function getLocationsAllowedForCurrentRole(locations = []) {
   let permFiltered = list;
   if (roleLocations.length && !roleLocations.includes('all')) {
     const permKeys = new Set(roleLocations.map((entry) => normalizeLocationKey(entry)).filter(Boolean));
-    permFiltered = list.filter((location) => isLocationAllowedByKeys(location, permKeys));
+    const res = list.filter((location) => isLocationAllowedByKeys(location, permKeys));
+    permFiltered = res.length ? res : list;
   }
 
   // User-based filter (physically assigned locations) — takes priority and is MORE restrictive
   const userLocations = appState.access?.currentUserLocations || [];
   if (!userLocations.length) return permFiltered;
   const userKeys = new Set(userLocations.map((entry) => normalizeLocationKey(entry)).filter(Boolean));
-  return permFiltered.filter((location) => isLocationAllowedByKeys(location, userKeys));
-}
-
-function getDefaultSellingLocationId(locations = []) {
-  const list = Array.isArray(locations) ? locations : [];
-  const active = list.filter((location) => location?.active !== false);
-  const isSellingLocation = (location = {}) => {
-    const type = String(location.kind || location.type || location.locationType || 'selling').trim().toLowerCase();
-    return type === 'selling' || type === 'sale' || type === 'sales' || type === '';
-  };
-  const candidates = getLocationsAllowedForCurrentRole((active.length ? active : list).filter(isSellingLocation));
-  const sorted = [...(candidates.length ? candidates : active.length ? active : list)]
-    .filter((location) => String(location.id || location.locationId || '').trim())
-    .sort((a, b) => String(a.displayName || a.name || a.id || '').localeCompare(String(b.displayName || b.name || b.id || '')));
-  return String(sorted[0]?.id || sorted[0]?.locationId || '');
+  const userFiltered = permFiltered.filter((location) => isLocationAllowedByKeys(location, userKeys));
+  return userFiltered.length ? userFiltered : permFiltered;
 }
 
 function isLocationAllowedByKeys(location = {}, allowedKeys = new Set()) {
@@ -20800,36 +19039,7 @@ function showGrvToast(message, type = 'success') {
   }, 4200);
 }
 
-function clearReportingNavigationParameters() {
-  if (typeof window === 'undefined' || !window.history?.replaceState) return;
-  try {
-    const url = new URL(window.location.href);
-    const keys = [
-      'report', 'view', 'from', 'to', 'startDate', 'endDate', 'dateRangeType',
-      'search', 'time', 'locationId', 'category', 'source', 'sourceType',
-      'paymentMethod', 'status', 'receiptNumber', 'menuCategory', 'menuItemId',
-      'inventoryCategory', 'inventoryItemId', 'modifierGroupId', 'modifierType',
-      'modifierName', 'stockDeductionStatus', 'yocoCategory', 'recipeStatus',
-      'riskStatus', 'warningSeverity', 'supplierId', 'itemType', 'onlyCritical',
-      'onlyBelowPar', 'missingSupplier', 'missingCost', 'user', 'action',
-      'entityType', 'entityName'
-    ];
-    keys.forEach((key) => url.searchParams.delete(key));
-    url.searchParams.set('route', 'reporting');
-    window.history.replaceState({}, '', url);
-  } catch (error) {
-    console.warn('[Reporting] Could not reset stale report navigation state:', error);
-  }
-}
-
 function getInitialRoute() {
-  try {
-    const requestedRoute = new URLSearchParams(window.location.search).get('route');
-    if (PERSISTED_ROUTES.includes(requestedRoute)) return requestedRoute;
-  } catch (error) {
-    console.warn('[Route] Could not read route from URL:', error);
-  }
-
   try {
     const storedRoute = localStorage.getItem(ROUTE_STORAGE_KEY);
     if (PERSISTED_ROUTES.includes(storedRoute)) return storedRoute;
@@ -21020,13 +19230,13 @@ function parseCsvRows(text) {
 
 function mapLegacyMenuRows(rows = []) {
   const groups = {};
-  const review = createImportReview(rows);
+  const report = createImportReport(rows);
 
   getImportDataRows(rows).forEach(({ row, rowNumber }) => {
     const pid = norm(getColumn(row, 'ProductID', 'Product_ID', 'ID', 'Id', 'Code', 'SKU'));
     const name = norm(getColumn(row, 'ProductName', 'Product_Name', 'Product Name', 'Name', 'Product'));
     if (!name) {
-      review.errors.push(createImportError('ERR_MISSING_NAME', rowNumber, 'ProductName is required.'));
+      report.errors.push(createImportError('ERR_MISSING_NAME', rowNumber, 'ProductName is required.'));
       return;
     }
     const key = pid || name;
@@ -21050,7 +19260,7 @@ function mapLegacyMenuRows(rows = []) {
       const variantLabel = [v1, v2, v3].filter(Boolean).join(' / ');
 
       if (hasVariants && !variantLabel) {
-        review.errors.push(createImportError('ERR_VARIANT_VALUE', rowNumber, 'Variant value is required because this product has variant rows.'));
+        report.errors.push(createImportError('ERR_VARIANT_VALUE', rowNumber, 'Variant value is required because this product has variant rows.'));
         return null;
       }
 
@@ -21067,7 +19277,7 @@ function mapLegacyMenuRows(rows = []) {
       );
       const sellingPrice = parseImportNumber(priceRaw, 0);
       if (sellingPrice === null || sellingPrice < 0) {
-        review.errors.push(createImportError('ERR_PRICE', rowNumber, 'Selling_Price must be a valid number.'));
+        report.errors.push(createImportError('ERR_PRICE', rowNumber, 'Selling_Price must be a valid number.'));
         return null;
       }
       const name = variantLabel ? `${group.name} (${variantLabel})` : group.name;
@@ -21084,9 +19294,9 @@ function mapLegacyMenuRows(rows = []) {
   });
 
   const items = [...new Map(mapped.map((item) => [item.id, item])).values()];
-  review.importedCount = items.length;
-  review.skippedCount = review.errors.length;
-  return { items, review };
+  report.importedCount = items.length;
+  report.skippedCount = report.errors.length;
+  return { items, report };
 }
 
 function mapLegacyRecipeRows(rows = []) {
@@ -21117,14 +19327,14 @@ function mapLegacyRecipeRows(rows = []) {
   ]).filter(([key]) => key));
   const groups = new Map();
   let missingIngredients = 0;
-  const review = createImportReview(rows);
+  const report = createImportReport(rows);
 
   getImportDataRows(rows).forEach(({ row, rowNumber }) => {
     const productName = norm(getColumn(row, 'Product_Name', 'ProductName', 'Product Name', 'Product', 'Name'));
     const productId = norm(getColumn(row, 'Product_ID', 'Product ID', 'ProductId', 'Menu_Item_ID', 'Menu Item ID', 'MenuItemId', 'Item_ID', 'Item ID'));
     const productSku = norm(getColumn(row, 'SKU', 'Product_SKU', 'Product SKU', 'Code'));
     if (!productName) {
-      review.errors.push(createImportError('ERR_MISSING_PRODUCT', rowNumber, 'Product_Name is required.'));
+      report.errors.push(createImportError('ERR_MISSING_PRODUCT', rowNumber, 'Product_Name is required.'));
       return;
     }
 
@@ -21139,7 +19349,7 @@ function mapLegacyRecipeRows(rows = []) {
       existingMenuBySku.get(normalizeImportKey(productSku)) ||
       existingMenuByName.get(normalizeImportKey(productName));
     if (!existingProduct) {
-      review.errors.push(createImportError('ERR_PRODUCT_LOOKUP', rowNumber, `Menu item "${productName}" was not found. Import the menu item first, then import the recipe.`));
+      report.errors.push(createImportError('ERR_PRODUCT_LOOKUP', rowNumber, `Menu item "${productName}" was not found. Import the menu item first, then import the recipe.`));
       return;
     }
 
@@ -21156,19 +19366,19 @@ function mapLegacyRecipeRows(rows = []) {
     if (category) group.category = category;
 
     if (!ingredientName && !ingredientId) {
-      review.errors.push(createImportError('ERR_MISSING_INGREDIENT', rowNumber, 'Ingredient_Name or Ingredient_ID is required.'));
+      report.errors.push(createImportError('ERR_MISSING_INGREDIENT', rowNumber, 'Ingredient_Name or Ingredient_ID is required.'));
       return;
     }
     const ingredient = ingredientById.get(ingredientId) || ingredientByName.get(ingredientName.toLowerCase());
     if (!ingredient) {
       missingIngredients += 1;
-      review.errors.push(createImportError('ERR_INGREDIENT_LOOKUP', rowNumber, `Ingredient "${ingredientName || ingredientId}" was not found in stock items.`));
+      report.errors.push(createImportError('ERR_INGREDIENT_LOOKUP', rowNumber, `Ingredient "${ingredientName || ingredientId}" was not found in stock items.`));
       return;
     }
 
     const qty = parseImportNumber(qtyRaw, null);
     if (qty === null || qty <= 0) {
-      review.errors.push(createImportError('ERR_QUANTITY', rowNumber, 'Quantity_Needed must be a number greater than zero.'));
+      report.errors.push(createImportError('ERR_QUANTITY', rowNumber, 'Quantity_Needed must be a number greater than zero.'));
       return;
     }
 
@@ -21185,7 +19395,7 @@ function mapLegacyRecipeRows(rows = []) {
     if (uomRaw) {
       const matched = validUoms.find((u) => u.toLowerCase() === uomRaw.toLowerCase());
       if (!matched) {
-        review.errors.push(createImportError('ERR_UOM_INVALID', rowNumber, `UOM "${uomRaw}" is not valid for ${ingredient.name || ingredientName}. Allowed: ${validUoms.join(', ')}.`));
+        report.errors.push(createImportError('ERR_UOM_INVALID', rowNumber, `UOM "${uomRaw}" is not valid for ${ingredient.name || ingredientName}. Allowed: ${validUoms.join(', ')}.`));
         return;
       }
       unit = matched;
@@ -21214,9 +19424,9 @@ function mapLegacyRecipeRows(rows = []) {
     };
   });
 
-  review.importedCount = recipes.length;
-  review.skippedCount = review.errors.length;
-  return { recipes, review, missingIngredients };
+  report.importedCount = recipes.length;
+  report.skippedCount = report.errors.length;
+  return { recipes, report, missingIngredients };
 }
 
 function mapLegacyStockRows(rows = []) {
@@ -21224,12 +19434,8 @@ function mapLegacyStockRows(rows = []) {
     normalizeImportKey(item.id),
     normalizeImportKey(item.sku)
   ]).filter(Boolean));
-  const existingNameKeys = new Set((appState.stock.items || [])
-    .map((item) => normalizeStockItemDuplicateName(item.name))
-    .filter(Boolean));
   const fileKeys = new Set();
-  const fileNameKeys = new Set();
-  const review = {
+  const report = {
     totalRows: rows.length,
     importedCount: 0,
     skippedCount: 0,
@@ -21239,21 +19445,14 @@ function mapLegacyStockRows(rows = []) {
   const items = getImportDataRows(rows).map(({ row, rowNumber }) => {
     let name = norm(getColumn(row, 'Item_Name', 'Item Name', 'Name', 'IngredientName', 'Ingredient'));
     if (!name) {
-      review.errors.push(createImportError('ERR_MISSING_REQ', rowNumber, 'Item_Name is required.'));
+      report.errors.push(createImportError('ERR_MISSING_REQ', rowNumber, 'Item_Name is required.'));
       return null;
     }
 
     const sku = norm(getColumn(row, 'SKU', 'ID', 'Id', 'Code'));
-    const duplicateNameKey = normalizeStockItemDuplicateName(name);
-    if (duplicateNameKey && (fileNameKeys.has(duplicateNameKey) || existingNameKeys.has(duplicateNameKey))) {
-      review.errors.push(createImportError('ERR_DUPLICATE_NAME', rowNumber, `Stock item "${name}" already exists. Stock item names must be unique.`));
-      return null;
-    }
-    if (duplicateNameKey) fileNameKeys.add(duplicateNameKey);
-
     const duplicateKey = normalizeImportKey(sku || name);
     if (duplicateKey && (fileKeys.has(duplicateKey) || (sku && existingKeys.has(duplicateKey)))) {
-      review.skippedCount += 1;
+      report.skippedCount += 1;
       return null;
     }
     if (duplicateKey) fileKeys.add(duplicateKey);
@@ -21262,7 +19461,7 @@ function mapLegacyStockRows(rows = []) {
     // 'Non Stock' is the current label; legacy 'Recipe Source' / 'Non-Stock Item' still accepted.
     const VALID_ITEM_TYPES = ['sub-recipe', 'non stock', 'non-stock', 'recipe source', 'non-stock item', 'non_stock_item', 'non stock item', 'standard', 'manufactured', 'sub_recipe', 'recipe_source'];
     if (itemTypeRaw && !VALID_ITEM_TYPES.includes(itemTypeRaw.toLowerCase())) {
-      review.errors.push(createImportError('ERR_ITEM_TYPE', rowNumber, `Invalid Item_Type "${itemTypeRaw}". Allowed values: Sub-Recipe, Non Stock, Standard, Manufactured.`));
+      report.errors.push(createImportError('ERR_ITEM_TYPE', rowNumber, `Invalid Item_Type "${itemTypeRaw}". Allowed values: Sub-Recipe, Non Stock, Standard, Manufactured.`));
       return null;
     }
     const normalizedItemType = (() => {
@@ -21306,11 +19505,11 @@ function mapLegacyStockRows(rows = []) {
     const vatRaw = norm(getColumn(row, 'VAT_Enabled', 'VAT Enabled', 'VATEnabled', 'Taxable', 'VAT'));
     const vatEnabled = parseStrictBoolean(vatRaw, false);
     if (vatEnabled === null) {
-      review.errors.push(createImportError('ERR_VAT_FORMAT', rowNumber, `Invalid VAT value "${vatRaw}". Use Yes, No, Tax Exempt, Y, N, True, False, 1, or 0.`));
+      report.errors.push(createImportError('ERR_VAT_FORMAT', rowNumber, `Invalid VAT value "${vatRaw}". Use Yes, No, Tax Exempt, Y, N, True, False, 1, or 0.`));
       return null;
     }
     if (!category) {
-      review.errors.push(createImportError('ERR_CAT_MAPPING', rowNumber, 'Category could not be determined.'));
+      report.errors.push(createImportError('ERR_CAT_MAPPING', rowNumber, 'Category could not be determined.'));
       return null;
     }
     // Track_Inventory is retained only as legacy input help. Non-stock items can also hold
@@ -21342,20 +19541,9 @@ function mapLegacyStockRows(rows = []) {
     const batchYieldRaw = getColumn(row, 'Batch_Yield', 'BatchYield', 'Batch Yield');
     const barcode = getColumn(row, 'Barcode', 'Barcodes', 'EAN', 'UPC');
     const baseUnit = norm(getColumn(row, 'Base_UOM', 'Base UOM', 'Unit', 'UOM')) || 'ea';
-    const defaultOrderingUom = norm(getColumn(
-      row,
-      'Default_Ordering_UOM',
-      'Default Ordering UOM',
-      'Default_Order_UOM',
-      'Default Order UOM',
-      'Ordering_UOM',
-      'Ordering UOM',
-      'Purchase_UOM',
-      'Purchase UOM'
-    ));
-    const errorCountBeforeUom = review.errors.length;
-    const uomConfigurations = parseStockImportUomConfigurations(row, baseUnit, rowNumber, review, defaultOrderingUom);
-    if (review.errors.length > errorCountBeforeUom) return null;
+    const errorCountBeforeUom = report.errors.length;
+    const uomConfigurations = parseStockImportUomConfigurations(row, baseUnit, rowNumber, report);
+    if (report.errors.length > errorCountBeforeUom) return null;
     const siteId = norm(getColumn(row, 'Site_ID', 'SiteId', 'siteId'));
     const siteName = norm(getColumn(row, 'Site', 'Site_Name', 'Store', 'Store_Location'));
     const locationId = norm(getColumn(row, 'Location_ID', 'LocationId', 'Stock_Location_ID', 'stockLocationId'));
@@ -21369,14 +19557,14 @@ function mapLegacyStockRows(rows = []) {
     const yieldBatch = parseImportNumber(batchYieldRaw, 1);
     const openingStock = openingStockProvided ? parseImportNumber(openingStockRaw, 0) : 0;
     if ([cost, lowStockThreshold, parLevel, yieldFactor, yieldBatch, openingStock].some((value) => value === null)) {
-      review.errors.push(createImportError('ERR_NUMBER_FORMAT', rowNumber, 'Numeric fields must contain valid numbers.'));
+      report.errors.push(createImportError('ERR_NUMBER_FORMAT', rowNumber, 'Numeric fields must contain valid numbers.'));
       return null;
     }
     if (stockAdjustmentProvided) {
-      review.errors.push(createImportError('WARN_STOCK_ADJUSTMENT_IGNORED', rowNumber, 'Adjustment found but not processed. Please use the Adjustments Tab.'));
+      report.errors.push(createImportError('WARN_STOCK_ADJUSTMENT_IGNORED', rowNumber, 'Adjustment found but not processed. Please use the Adjustments Tab.'));
     }
     if (yieldFactor <= 0 || yieldBatch <= 0) {
-      review.errors.push(createImportError('ERR_YIELD_FORMAT', rowNumber, 'Yield_Percent and Batch_Yield must be greater than zero.'));
+      report.errors.push(createImportError('ERR_YIELD_FORMAT', rowNumber, 'Yield_Percent and Batch_Yield must be greater than zero.'));
       return null;
     }
 
@@ -21415,13 +19603,13 @@ function mapLegacyStockRows(rows = []) {
     };
   }).filter(Boolean);
 
-  review.importedCount = items.length;
-  review.skippedCount += review.errors.filter((entry) => !String(entry.code || '').startsWith('WARN_')).length;
-  return { items, review };
+  report.importedCount = items.length;
+  report.skippedCount += report.errors.filter((entry) => !String(entry.code || '').startsWith('WARN_')).length;
+  return { items, report };
 }
 
-function parseStockImportUomConfigurations(row = {}, baseUnit = 'ea', rowNumber = 0, review = { errors: [] }, defaultOrderingUom = '') {
-  const configurations = [1, 2, 3].map((slot) => {
+function parseStockImportUomConfigurations(row = {}, baseUnit = 'ea', rowNumber = 0, report = { errors: [] }) {
+  return [1, 2, 3].map((slot) => {
     const customUom = norm(getColumn(
       row,
       `UOM_${slot}_Name`,
@@ -21463,47 +19651,30 @@ function parseStockImportUomConfigurations(row = {}, baseUnit = 'ea', rowNumber 
     if (!hasAnyValue) return null;
     const ratio = parseImportNumber(ratioRaw, null);
     if (!customUom || ratio === null || ratio <= 0) {
-      review.errors.push(createImportError('ERR_UOM_CONFIG', rowNumber, `UOM_${slot}_Name needs a matching UOM_${slot}_Qty_In_Base greater than zero.`));
+      report.errors.push(createImportError('ERR_UOM_CONFIG', rowNumber, `UOM_${slot}_Name needs a matching UOM_${slot}_Qty_In_Base greater than zero.`));
       return null;
     }
     return {
       baseUom: baseUnit || 'ea',
       customUom,
       ratio,
-      barcode,
-      isDefaultOrdering: false
+      barcode
     };
   }).filter(Boolean);
-
-  const requestedDefault = String(defaultOrderingUom || '').trim();
-  if (!requestedDefault || requestedDefault.toLowerCase() === String(baseUnit || 'ea').toLowerCase()) {
-    return configurations;
-  }
-  const matchingConfig = configurations.find((config) => config.customUom.toLowerCase() === requestedDefault.toLowerCase());
-  if (!matchingConfig) {
-    review.errors.push(createImportError(
-      'ERR_DEFAULT_ORDERING_UOM',
-      rowNumber,
-      'Default_Ordering_UOM must match the Base_UOM or one of the UOM_1, UOM_2, or UOM_3 names on the same row.'
-    ));
-    return configurations;
-  }
-  matchingConfig.isDefaultOrdering = true;
-  return configurations;
 }
 
 function mapSupplierImportRows(rows = []) {
-  const review = createImportReview(rows);
+  const report = createImportReport(rows);
   const mappedRows = getImportDataRows(rows).map(({ row, rowNumber }) => {
     const name = norm(getColumn(row, 'Supplier_Name', 'Supplier Name', 'Name', 'SupplierName', 'Supplier'));
     if (!name) {
-      review.errors.push(createImportError('ERR_MISSING_NAME', rowNumber, 'Supplier_Name is required.'));
+      report.errors.push(createImportError('ERR_MISSING_NAME', rowNumber, 'Supplier_Name is required.'));
       return null;
     }
     const leadTimeRaw = getColumn(row, 'Lead_Time_Days', 'Lead Time Days', 'Lead_Time', 'Lead Time', 'LeadTime');
     const leadTime = parseImportNumber(leadTimeRaw, 0);
     if (leadTime === null || leadTime < 0) {
-      review.errors.push(createImportError('ERR_LEAD_TIME', rowNumber, 'Lead_Time_Days must be zero or greater.'));
+      report.errors.push(createImportError('ERR_LEAD_TIME', rowNumber, 'Lead_Time_Days must be zero or greater.'));
       return null;
     }
     const email = norm(getColumn(row, 'Email', 'E-mail', 'Email_Address', 'Email Address'));
@@ -21531,9 +19702,9 @@ function mapSupplierImportRows(rows = []) {
       Notes: norm(getColumn(row, 'Notes', 'Note', 'Comments', 'Comment'))
     };
   }).filter(Boolean);
-  review.importedCount = mappedRows.length;
-  review.skippedCount = review.errors.length;
-  return { rows: mappedRows, review };
+  report.importedCount = mappedRows.length;
+  report.skippedCount = report.errors.length;
+  return { rows: mappedRows, report };
 }
 
 function buildSupplierImportAddress(row = {}) {
@@ -21562,7 +19733,7 @@ function createImportError(code, row, message) {
   return { code, row, message };
 }
 
-function createImportReview(rows = []) {
+function createImportReport(rows = []) {
   return {
     totalRows: Array.isArray(rows) ? rows.length : 0,
     importedCount: 0,
@@ -21782,6 +19953,55 @@ function getInitialTheme() {
   return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
 }
 
+function getInitialDashboardRange() {
+  const urlRange = getDashboardRangeFromUrl();
+  if (urlRange) return normalizeDashboardRange(urlRange);
+
+  try {
+    const storedRange = localStorage.getItem(DASHBOARD_RANGE_STORAGE_KEY);
+    if (storedRange) return normalizeDashboardRange(storedRange);
+  } catch (error) {
+    console.warn('[Dashboard] Could not read range preference:', error);
+  }
+
+  return 'today';
+}
+
+function normalizeDashboardRange(range) {
+  const text = String(range || 'today');
+  if (text === 'today') return 'today';
+  if (text === '30') return '30';
+  if (text === '7') return '7';
+
+  const match = text.match(/^custom:(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2})$/);
+  if (!match) return 'today';
+
+  const startDate = match[1] <= match[2] ? match[1] : match[2];
+  const endDate = match[1] <= match[2] ? match[2] : match[1];
+  return `custom:${startDate}:${endDate}`;
+}
+
+function getDashboardRangeFromUrl() {
+
+  try {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('dashboardRange') || '';
+  } catch (error) {
+    console.warn('[Dashboard] Could not read dashboard range from URL:', error);
+    return '';
+  }
+}
+
+function syncDashboardRangeUrl(range) {
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.set('dashboardRange', range);
+    window.history.replaceState({}, '', url);
+  } catch (error) {
+    console.warn('[Dashboard] Could not sync dashboard range to URL:', error);
+  }
+}
+
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme === 'dark' ? 'dark' : 'light';
 }
@@ -21808,7 +20028,7 @@ function updateLiveClockNodes() {
     minute: '2-digit',
     second: '2-digit'
   }).format(now);
-  const tradeDateKey = appState.dashboard?.metrics?.today || getTradeDateKey(now, appState.source?.settings);
+  const tradeDateKey = appState.dashboard.metrics?.today || getTradeDateKey(now, appState.source?.settings);
   const dateText = new Intl.DateTimeFormat('en-ZA', {
     weekday: 'short',
     day: '2-digit',

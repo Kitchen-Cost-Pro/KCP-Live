@@ -1,29 +1,23 @@
-# KCP production API — shared D1 control plane with one SQLite Durable Object per workspace.
+# KCP v2 — per-workspace Durable Objects (SQLite).
+# Points at the NEW Cloudflare account (Adminkitchencostpro@gmail.com's Account). The live `kcp-api`
+# worker is on a DIFFERENT account and is never touched by this config.
 account_id = "cfd7b868a65d660879a7b8597fb15676"
 name = "kcp-api-v2"
 main = "src/index.ts"
 compatibility_date = "2026-05-23"
-
-
-# Resolve shared export dependencies from this Worker package.
-[alias]
-xlsx = "./node_modules/xlsx/xlsx.mjs"
-jspdf = "./node_modules/jspdf/dist/jspdf.es.min.js"
-jspdf-autotable = "./node_modules/jspdf-autotable/dist/jspdf.plugin.autotable.mjs"
 
 # --- Durable Objects: one WorkspaceDO (SQLite) per workspace -------------------------------------
 [[durable_objects.bindings]]
 name = "WORKSPACE"
 class_name = "WorkspaceDO"
 
-[[durable_objects.bindings]]
-name = "YOCO_V2_RATE_GATE"
-class_name = "YocoV2RateGateDO"
-
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["WorkspaceDO"]
 
+# Historical Yoco request-gate class. This migration has already been applied in
+# production; retaining the exact class declaration prevents Wrangler from
+# replaying v1 and ensures the provisioned namespace remains backed by an export.
 [[migrations]]
 tag = "v2-yoco-rate-gate"
 new_sqlite_classes = ["YocoV2RateGateDO"]
@@ -36,6 +30,7 @@ new_sqlite_classes = ["YocoV2RateGateDO"]
 crons = ["*/15 * * * *"]
 
 # --- Central plane: shared D1 for identity / registry / members / cross-tenant coordination ------
+# database_id is a PLACEHOLDER. Set it to the NEW account's D1 id before deploying.
 [[d1_databases]]
 binding = "CENTRAL_DB"
 database_name = "kcp_central"
@@ -43,56 +38,18 @@ database_id = "279a7882-ca9d-4bae-b308-e47fe6d24071"
 
 [vars]
 ENVIRONMENT = "production"
-ALLOWED_ORIGINS = "http://localhost:*,http://127.0.0.1:*,https://kcp-live.pages.dev,https://*.kcp-live.pages.dev"
+ALLOWED_ORIGINS = "http://localhost:5173,http://localhost:5174,http://localhost:5175,http://127.0.0.1:5173,https://kcp-live.pages.dev,https://*.kcp-live.pages.dev"
 ADMIN_BOOTSTRAP_EMAILS = "superuser@yoco.com"
 APP_BASE_URL = "https://kcp-live.pages.dev"
-# Integration callback and webhook base URLs:
+# Point integration callbacks/webhooks at the NEW worker:
 YOCO_WEBHOOK_BASE_URL = "https://kcp-api-v2.adminkitchencostpro.workers.dev"
 GMAIL_OAUTH_REDIRECT_URI = "https://kcp-api-v2.adminkitchencostpro.workers.dev/api/gmail/oauth/callback"
 GDRIVE_OAUTH_REDIRECT_URI = "https://kcp-api-v2.adminkitchencostpro.workers.dev/api/gdrive/oauth/callback"
-# Shared Turnstile public site key for the main and admin login surfaces.
+# Single Turnstile widget (public site key) for BOTH main + admin. Set to the NEW widget's site key.
 TURNSTILE_SITE_KEY = "0x4AAAAAADwZO_so4RnTHBV8"
 ADMIN_TURNSTILE_MODE = "enforce"
 APP_TURNSTILE_MODE = "enforce"
-YOCO_V2_CAPTURE_ENABLED = "all"
-YOCO_V2_QUEUE_ENABLED = "all"
-YOCO_V2_ADMIN_ENABLED = "all"
-YOCO_V2_LIVE_SALE_REPORTING = "all"
-YOCO_V2_LIVE_SALE_STOCK = "all"
-YOCO_V2_LIVE_REFUND_REPORTING = "all"
-YOCO_V2_LIVE_REFUND_STOCK = "all"
-# Pre-launch bypass. While the app is not live, set to "all" (or workspace IDs) to let the
-# YOCO_V2_LIVE_* flags alone enable live consumption, skipping the per-workspace controlled
-YOCO_V2_MAX_ATTEMPTS = "8"
-YOCO_V2_BASE_RETRY_MS = "5000"
-YOCO_V2_MAX_RETRY_MS = "900000"
-YOCO_V2_API_TIMEOUT_MS = "15000"
-# Conservative coordination delay only; this is not a documented Yoco rate limit.
-YOCO_V2_REQUEST_SPACING_MS = "250"
-YOCO_V2_ORDER_CACHE_TTL_MS = "30000"
-YOCO_V2_REFUND_CACHE_TTL_MS = "20000"
-YOCO_V2_METADATA_CACHE_TTL_MS = "60000"
-YOCO_V2_AUTH_FAILURE_THRESHOLD = "2"
-YOCO_V2_RATE_LIMIT_PAUSE_FALLBACK_MS = "30000"
-YOCO_V2_RECONCILIATION_OVERLAP_MINUTES = "120"
-YOCO_V2_RECONCILIATION_LOOKBACK_HOURS = "24"
-# Production secrets are configured with `wrangler secret put`; never store them here.
+# Secrets (wrangler secret put ...) still required on the new account — see .env §2.
 
-# Secrets to configure with `wrangler secret put`:
+# Secrets to set on the new account (wrangler secret put ...):
 #   YOCO_KEY_ENCRYPTION_SECRET, GMAIL_* , GDRIVE_* , TURNSTILE_SECRET_KEY, etc.
-
-# --- Yoco V2 isolated capture and processing queues ----------------------------------------------
-[[queues.producers]]
-binding = "YOCO_V2_EVENTS"
-queue = "kcp-yoco-v2-events"
-
-[[queues.producers]]
-binding = "YOCO_V2_EVENTS_DLQ"
-queue = "kcp-yoco-v2-events-dlq"
-
-[[queues.consumers]]
-queue = "kcp-yoco-v2-events"
-max_batch_size = 10
-max_batch_timeout = 5
-max_retries = 8
-dead_letter_queue = "kcp-yoco-v2-events-dlq"

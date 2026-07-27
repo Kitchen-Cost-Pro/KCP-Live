@@ -2,22 +2,8 @@ import '../styles/stock.css';
 import { renderLoadingPanel } from './LoadingPanel.js';
 import { matchesBarcodeQuery, parseBarcodeValues } from '../utils/barcodes.js';
 import { getLocationStock } from '../utils/stockBalances.js';
-import { resolveLocationUnitCost } from '../utils/stockCostResolver.js';
-import { resolveStockItemSku } from '../utils/stockSku.js';
-import { getAccessibleLocationOptions } from '../services/locationAccess.js';
 
 const defaultUoms = ['ea', 'kg', 'g', 'l', 'ml', 'pack', 'case', 'bottle', 'bag', 'box', 'tray', 'portion', 'batch'];
-
-function getAccessibleStockLocationOptions(locations = [], access = {}) {
-  const options = getAccessibleLocationOptions(locations, access);
-  return options.length ? options : [];
-}
-
-function resolveActiveLocationId(locationId = '', options = []) {
-  const value = String(locationId || '').trim();
-  if (value && options.some((option) => option.value === value)) return value;
-  return String(options[0]?.value || '');
-}
 
 export function renderStockItems({ state, onStockFilterChange, onStockAction = {} } = {}) {
   const stock = state.stock || {};
@@ -29,21 +15,13 @@ export function renderStockItems({ state, onStockFilterChange, onStockAction = {
     openDropdown: '',
     categoryDropdownSearch: '',
     locationDropdownSearch: '',
-    locationCostingLocationId: '',
-    locationCostingLocationIdDropdownSearch: '',
-    locationCostingPickerKind: '',
-    itemType: '',
-    itemTypeDropdownSearch: '',
     page: 1,
     pageSize: 25,
     ...(stock.filters || {})
   };
   const renderItems = dedupeRenderableStockItems(stock.items || []);
-  const locationOptions = getAccessibleStockLocationOptions(stock.locations || [], state.access || {});
-  const activeLocationId = resolveActiveLocationId(filters.locationId, locationOptions);
-  const activeFilters = { ...filters, locationId: activeLocationId };
-  const items = filterStockItems(renderItems, activeFilters, stock.locations || []);
-  const paging = getPaging(items, activeFilters);
+  const items = filterStockItems(renderItems, filters, stock.locations || []);
+  const paging = getPaging(items, filters);
   const pagedItems = items.slice(paging.startIndex, paging.endIndex);
   const categories = getCategories(stock.categories?.length ? stock.categories : renderItems);
   const uoms = getUomOptions(stock);
@@ -52,12 +30,10 @@ export function renderStockItems({ state, onStockFilterChange, onStockAction = {
     { value: '', label: 'All Categories' },
     ...categories.map((category) => ({ value: category, label: category }))
   ];
-  const itemTypeOptions = [
-    { value: '', label: 'All Item Types' },
-    { value: 'standard', label: 'Standard' },
-    { value: 'sub_recipe', label: 'Sub-Recipe' },
-    { value: 'manufactured', label: 'Manufactured' },
-    { value: 'recipe_source', label: 'Non Stock' }
+  const locationOptions = [
+    { value: '', label: 'All Locations (Total)' },
+    ...(stock.locations || [])
+      .map((location) => ({ value: location.id, label: location.displayName || location.name }))
   ];
   const selectedIds = new Set((stock.selectedIds || []).map(String));
   const view = document.createElement('section');
@@ -73,8 +49,7 @@ export function renderStockItems({ state, onStockFilterChange, onStockAction = {
       </div>
       <div class="stockModule__actions">
         <input type="file" accept=".csv,.json,.xlsx,.xls,text/csv,application/json" hidden data-stock-import-input />
-        <input type="file" accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" hidden data-location-costing-import-input />
-        ${renderActionDropdown(filters.openDropdown, stock.actionStatus, selectedIds.size, filters, locationOptions)}
+        ${renderActionDropdown(filters.openDropdown, stock.actionStatus, selectedIds.size)}
         ${selectedIds.size ? renderInlineBulkDelete([...selectedIds], stock.actionStatus) : ''}
         <button type="button" class="stockModule__primary" data-stock-add>
           ${icon('plus')}
@@ -104,28 +79,19 @@ export function renderStockItems({ state, onStockFilterChange, onStockAction = {
       ${renderDropdown({
         id: 'locationId',
         label: 'Location',
-        value: activeLocationId,
+        value: filters.locationId,
         searchValue: filters.locationDropdownSearch,
         openDropdown: filters.openDropdown,
         options: locationOptions
       })}
-      ${renderDropdown({
-        id: 'itemType',
-        label: 'Stock Item Type',
-        value: filters.itemType,
-        searchValue: filters.itemTypeDropdownSearch,
-        openDropdown: filters.openDropdown,
-        options: itemTypeOptions
-      })}
     </section>
 
     ${stock.actionError && !stock.editingItem && !stock.confirmDelete ? renderNotice(stock.actionError, 'error') : ''}
-    ${renderStockBody(stock, items, pagedItems, paging, activeFilters, selectedIds)}
+    ${renderStockBody(stock, items, pagedItems, paging, filters, selectedIds)}
     ${renderStockModal(stock, categories, uoms, stock.locations || [], renderItems)}
     ${renderStockLookupPickerModal(stock, categories, uoms)}
     ${renderStockManagerModal(stock, managerData)}
-    ${renderLocationCostingPickerModal(filters, locationOptions, stock.actionStatus || '')}
-    ${renderImportReviewModal(stock.importReview)}
+    ${renderImportReportModal(stock.importReport)}
     ${renderDeleteDialog(stock)}
     ${renderToast(stock.toast)}
   `;
@@ -177,14 +143,11 @@ function bindStockEvents(view, stock, onStockFilterChange, onStockAction) {
   view.querySelectorAll('[data-stock-dropdown-search]').forEach((input) => {
     input.addEventListener('input', (event) => {
       const query = String(event.target.value || '').trim().toLowerCase();
-      const group = input.dataset.stockDropdownGroup || '';
-      const searchKey = input.dataset.stockDropdownSearch || '';
       input.closest('.stockModule__dropdownMenu')?.querySelectorAll('[data-stock-option]').forEach((button) => {
         const isResetOption = !button.dataset.stockOptionValue;
-        const label = String(button.dataset.stockOptionLabel || button.textContent || '').toLowerCase();
-        button.hidden = (isResetOption && Boolean(query)) || (!isResetOption && Boolean(query) && !label.includes(query));
+        const label = String(button.textContent || '').toLowerCase();
+        button.hidden = !isResetOption && Boolean(query) && !label.includes(query);
       });
-      if (searchKey) onStockFilterChange?.({ [searchKey]: event.target.value, openDropdown: group });
     });
   });
 
@@ -213,45 +176,6 @@ function bindStockEvents(view, stock, onStockFilterChange, onStockAction) {
     const file = event.target.files?.[0];
     if (file) onStockAction.onImport?.(file);
     event.target.value = '';
-  });
-
-  const locationCostingInput = view.querySelector('[data-location-costing-import-input]');
-  view.querySelector('[data-location-costing-import-trigger]')?.addEventListener('click', () => locationCostingInput?.click());
-  locationCostingInput?.addEventListener('change', (event) => {
-    const file = event.target.files?.[0];
-    if (file) onStockAction.onLocationCostingImport?.(file);
-    event.target.value = '';
-  });
-
-  view.querySelectorAll('[data-location-costing-open]').forEach((button) => {
-    button.addEventListener('click', () => {
-      onStockFilterChange?.({
-        locationCostingPickerKind: button.dataset.locationCostingOpen || 'xlsx',
-        locationCostingLocationId: '',
-        locationCostingLocationIdDropdownSearch: '',
-        openDropdown: ''
-      });
-    });
-  });
-
-  view.querySelectorAll('[data-location-costing-picker-close]').forEach((button) => {
-    button.addEventListener('click', () => {
-      onStockFilterChange?.({ locationCostingPickerKind: '', locationCostingLocationIdDropdownSearch: '', openDropdown: '' });
-    });
-  });
-
-  view.querySelectorAll('[data-location-costing-export]').forEach((button) => {
-    button.addEventListener('click', () => {
-      onStockAction.onLocationCostingExport?.(button.dataset.locationCostingExport || 'xlsx');
-    });
-  });
-
-  view.querySelector('[data-location-costing-preview-confirm]')?.addEventListener('click', () => {
-    onStockAction.onLocationCostingConfirm?.();
-  });
-
-  view.querySelector('[data-location-costing-preview-cancel]')?.addEventListener('click', () => {
-    onStockAction.onLocationCostingCancel?.();
   });
 
   view.querySelectorAll('[data-stock-export]').forEach((button) => {
@@ -412,7 +336,6 @@ function bindStockEvents(view, stock, onStockFilterChange, onStockAction) {
     onStockAction.onSave?.({
       id: form.dataset.stockItemId || undefined,
       name: formData.get('name') ?? currentItem.name ?? '',
-      sku: formData.get('sku') ?? currentItem.sku ?? currentItem.SKU ?? '',
       category: formData.get('category') ?? currentItem.category ?? '',
       unit: selectedUnit,
       cost,
@@ -536,30 +459,21 @@ function bindStockEvents(view, stock, onStockFilterChange, onStockAction) {
     onStockAction.onDismissToast?.();
   });
 
-  view.querySelector('[data-stock-import-review-close]')?.addEventListener('click', () => {
-    onStockAction.onDismissImportReview?.();
+  view.querySelector('[data-stock-import-report-close]')?.addEventListener('click', () => {
+    onStockAction.onDismissImportReport?.();
   });
 
   bindStockTooltips(view);
 }
 
 function renderDropdown({ id, label, value, searchValue = '', openDropdown, options }) {
-  const optionList = Array.isArray(options) ? options : [];
-  const activeOption = optionList.find((option) => String(option.value) === String(value)) || optionList[0] || { value: '', label: 'Select' };
+  const activeOption = options.find((option) => String(option.value) === String(value)) || options[0];
   const isOpen = openDropdown === id;
-  const searchKey = id === 'locationId'
-    ? 'locationDropdownSearch'
-    : id === 'locationCostingLocationId'
-      ? 'locationCostingLocationIdDropdownSearch'
-      : id === 'itemType'
-        ? 'itemTypeDropdownSearch'
-        : `${id}DropdownSearch`;
+  const searchKey = id === 'locationId' ? 'locationDropdownSearch' : `${id}DropdownSearch`;
   const query = String(searchValue || '').trim().toLowerCase();
-  const visibleOptions = optionList.filter((option, index) => {
-    const isResetOption = index === 0 && !option.value;
-    if (isResetOption) return !query;
-    return !query || String(option.label || '').toLowerCase().includes(query);
-  });
+  const visibleOptions = options.filter((option, index) => (
+    index === 0 || !query || String(option.label || '').toLowerCase().includes(query)
+  ));
 
   return `
     <div class="stockModule__dropdown ${isOpen ? 'stockModule__dropdown--open' : ''}" data-stock-dropdown-root>
@@ -577,176 +491,22 @@ function renderDropdown({ id, label, value, searchValue = '', openDropdown, opti
           data-stock-dropdown-group="${escapeAttribute(id)}"
         />
         <div class="stockModule__dropdownOptions">
-          ${visibleOptions.length ? visibleOptions.map((option) => `
+          ${visibleOptions.map((option) => `
             <button
               type="button"
               data-stock-option
               data-stock-option-group="${escapeAttribute(id)}"
               data-stock-option-value="${escapeAttribute(option.value)}"
               data-stock-option-search-key="${escapeAttribute(searchKey)}"
-              data-stock-option-label="${escapeAttribute(option.label || '')}"
               class="${String(option.value) === String(value) ? 'is-active' : ''}"
             >
               ${escapeHtml(option.label)}
             </button>
-          `).join('') : '<em class="stockModule__dropdownEmpty">No locations found.</em>'}
+          `).join('')}
         </div>
       </div>
     </div>
   `;
-}
-
-
-function renderLocationCostingPickerModal(filters = {}, locationOptions = [], actionStatus = '') {
-  const kind = String(filters.locationCostingPickerKind || '').toLowerCase();
-  if (!['xlsx', 'pdf'].includes(kind)) return '';
-  const selectedLocation = (locationOptions || []).find((option) => String(option.value) === String(filters.locationCostingLocationId || ''));
-  const isBusy = ['exporting-location-costing', 'importing-location-costing', 'saving-location-costing'].includes(actionStatus);
-  const title = kind === 'pdf' ? 'Location Costing PDF Report' : 'Location Costing XLSX Template';
-  const hint = kind === 'pdf'
-    ? 'Select one location to download a bulk costing report for that location.'
-    : 'Select one location to download the editable costing sheet template. Uploads use the location metadata inside the XLSX file.';
-  return `
-    <div class="stockModule__modalBackdrop stockModule__locationCostingBackdrop" role="presentation">
-      <section class="stockModule__modal stockModule__locationCostingModal" role="dialog" aria-modal="true" aria-labelledby="location-costing-picker-title">
-        <header>
-          <div>
-            <p>Location Costing</p>
-            <h2 id="location-costing-picker-title">${escapeHtml(title)}</h2>
-          </div>
-          <button type="button" class="stockModule__iconButton" data-location-costing-picker-close aria-label="Close">${icon('x')}</button>
-        </header>
-        <div class="stockModule__locationCostingModalBody">
-          <p>${escapeHtml(hint)}</p>
-          <label class="stockModule__locationCostingPickerField">
-            <span>Costing Location</span>
-            ${renderDropdown({
-              id: 'locationCostingLocationId',
-              label: 'Location',
-              value: filters.locationCostingLocationId || '',
-              searchValue: filters.locationCostingLocationIdDropdownSearch || '',
-              openDropdown: filters.openDropdown,
-              options: locationOptions.filter((option) => option.value)
-            })}
-          </label>
-        </div>
-        <footer class="stockModule__locationCostingModalFooter">
-          <button type="button" class="stockModule__secondary" data-location-costing-picker-close>Cancel</button>
-          ${kind === 'xlsx' ? `
-            <button type="button" class="stockModule__primary" data-location-costing-export="xlsx" ${!selectedLocation || isBusy ? 'disabled' : ''}>
-              ${icon('download')}<span>${actionStatus === 'exporting-location-costing' ? 'Exporting...' : 'Download XLSX Template'}</span>
-            </button>
-          ` : `
-            <button type="button" class="stockModule__primary" data-location-costing-export="pdf" ${!selectedLocation || isBusy ? 'disabled' : ''}>
-              ${icon('download')}<span>${actionStatus === 'exporting-location-costing' ? 'Exporting...' : 'Download PDF'}</span>
-            </button>
-          `}
-        </footer>
-      </section>
-    </div>
-  `;
-}
-
-
-function renderLocationCostingSection(stock = {}, locationOptions = [], filters = {}) {
-  const locationValue = filters.locationCostingLocationId || '';
-  const preview = stock.locationCostingPreview || null;
-  const status = stock.actionStatus || '';
-  const selectedLocation = locationOptions.find((option) => String(option.value) === String(locationValue));
-  return `
-    <section class="stockModule__locationCostingCard" aria-label="Location costing import and export">
-      <div class="stockModule__locationCostingIntro">
-        <div>
-          <p class="stockModule__eyebrow">Per Location Costing</p>
-          <h2>Location Costing Import / Export</h2>
-          <p>Export a simple cost sheet for one location, update the New Cost Ex VAT column, then import it back. This only updates costs for the selected location.</p>
-        </div>
-        <span class="stockModule__locationCostingBadge">Separate from stock item import</span>
-      </div>
-      <div class="stockModule__locationCostingControls">
-        ${renderDropdown({
-          id: 'locationCostingLocationId',
-          label: 'Costing Location',
-          value: locationValue,
-          searchValue: filters.locationCostingLocationIdDropdownSearch || '',
-          openDropdown: filters.openDropdown,
-          options: [{ value: '', label: 'Select location' }, ...locationOptions.filter((option) => option.value)]
-        })}
-        <button type="button" class="stockModule__secondary" data-location-costing-export ${!selectedLocation || status === 'exporting-location-costing' ? 'disabled' : ''}>
-          ${icon('download')}
-          <span>${status === 'exporting-location-costing' ? 'Exporting...' : 'Export Location Cost Sheet'}</span>
-        </button>
-        <button type="button" class="stockModule__secondary" data-location-costing-import-trigger ${!selectedLocation || status === 'importing-location-costing' ? 'disabled' : ''}>
-          ${icon('upload')}
-          <span>${status === 'importing-location-costing' ? 'Reading...' : 'Upload Cost Sheet'}</span>
-        </button>
-      </div>
-      ${preview ? renderLocationCostingPreview(preview, status) : ''}
-    </section>
-  `;
-}
-
-function renderLocationCostingPreview(preview = {}, status = '') {
-  const summary = preview.summary || {};
-  const rows = preview.rows || [];
-  const blockingErrors = Number(summary.errors || 0) > 0;
-  const canConfirm = Number(summary.toUpdate || 0) > 0 && !blockingErrors && status !== 'saving-location-costing';
-  return `
-    <div class="stockModule__locationCostingPreview">
-      <div class="stockModule__locationCostingSummary">
-        ${[
-          ['Location', preview.locationName || summary.locationName || 'Selected location'],
-          ['Rows read', summary.totalRows ?? rows.length],
-          ['Matched', summary.matched ?? 0],
-          ['Not matched', summary.notMatched ?? 0],
-          ['Unchanged', summary.unchanged ?? 0],
-          ['To update', summary.toUpdate ?? 0],
-          ['Errors', summary.errors ?? 0]
-        ].map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value))}</strong></div>`).join('')}
-      </div>
-      ${Number(summary.toUpdate || 0) === 0 && !blockingErrors ? '<div class="stockModule__costingEmpty">No changes found.</div>' : ''}
-      <div class="stockModule__costingPreviewTable" role="region" aria-label="Location costing import preview">
-        <table>
-          <thead>
-            <tr>
-              <th>Row</th>
-              <th>Item Name</th>
-              <th>SKU / Barcode</th>
-              <th>Current Cost Ex VAT</th>
-              <th>New Cost Ex VAT</th>
-              <th>Status</th>
-              <th>Error</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${rows.slice(0, 100).map((row) => `
-              <tr class="stockModule__costingRow--${escapeAttribute(row.status || 'ignored')}">
-                <td>${escapeHtml(String(row.rowNumber || ''))}</td>
-                <td>${escapeHtml(row.itemName || '')}</td>
-                <td>${escapeHtml(row.skuBarcode || '')}</td>
-                <td>${escapeHtml(formatNumber(row.currentCostExVat))}</td>
-                <td>${escapeHtml(row.newCostExVat === '' || row.newCostExVat == null ? '' : formatNumber(row.newCostExVat))}</td>
-                <td>${escapeHtml(formatCostingStatus(row.status))}</td>
-                <td>${escapeHtml(row.error || '')}</td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
-        ${rows.length > 100 ? `<p class="stockModule__costingTableNote">Showing first 100 of ${rows.length} rows.</p>` : ''}
-      </div>
-      <div class="stockModule__locationCostingActions">
-        <button type="button" class="stockModule__secondary" data-location-costing-preview-cancel>Cancel</button>
-        <button type="button" class="stockModule__primary" data-location-costing-preview-confirm ${canConfirm ? '' : 'disabled'}>
-          ${status === 'saving-location-costing' ? 'Applying...' : 'Confirm Import'}
-        </button>
-      </div>
-    </div>
-  `;
-}
-
-function formatCostingStatus(status = '') {
-  const map = { update: 'To update', unchanged: 'Unchanged', ignored: 'Ignored', error: 'Error' };
-  return map[status] || status || 'Unknown';
 }
 
 function renderStockBody(stock, items, pagedItems, paging, filters, selectedIds) {
@@ -782,7 +542,7 @@ function renderStockBody(stock, items, pagedItems, paging, filters, selectedIds)
         <label title="Select all visible stock items on this page."><input type="checkbox" data-stock-select-all data-stock-select-all-ids="${escapeAttribute(JSON.stringify(pagedItems.map((item) => item.id)))}" ${allVisibleSelected ? 'checked' : ''} /></label>
         <span>${withInfo('Ingredient', 'Stock item name, barcode details, VAT state, and item type badges.')}</span>
         <span>${withInfo('SKU', 'Stock keeping unit code used for supplier or internal reference.')}</span>
-        <span>${withInfo('Category', 'Inventory category used for filtering, routing, exports, and recipe grouping.')}</span>
+        <span>${withInfo('Category', 'Inventory category used for filtering, routing, reporting, and recipe grouping.')}</span>
         <span>${withInfo('Ex VAT Cost', 'Latest ex-VAT unit cost used for stock valuation and recipe costing.')}</span>
         <span>${withInfo('On Hand', 'Current stock balance for the selected location, shown in the base UOM.')}</span>
         <span>${withInfo('Action', 'Edit or delete this stock item.')}</span>
@@ -806,7 +566,6 @@ function renderStockRow(item, locationId, locations = [], selected = false) {
   const isPhysicalStock = itemType !== 'sub_recipe';
   const isLow = isPhysicalStock && onHand < Number(item.lowStockThreshold || 5);
   const barcodeLabel = parseBarcodeValues(item.barcodes ?? item.barcode ?? item.Barcodes ?? item.Barcode).join(', ') || 'No barcode';
-  const locationCost = resolveLocationUnitCost(item, locationId);
 
   return `
     <article class="stockModule__row ${selected ? 'is-selected' : ''}">
@@ -814,18 +573,18 @@ function renderStockRow(item, locationId, locations = [], selected = false) {
       <div>
         <h2>
           ${escapeHtml(getStockItemDisplayName(item))}
-	          ${itemType === 'sub_recipe' ? '<em class="stockModule__pill stockModule__pill--purple" title="Sub-Recipe: used inside recipes, has no stock-on-hand balance, and cannot be ordered.">Sub-Recipe</em>' : ''}
+	          ${itemType === 'sub_recipe' ? '<em class="stockModule__pill stockModule__pill--purple" title="Sub-Recipe: used as a nested ingredient in other recipes. It can hold stock on hand, but it is excluded from stock counts, low-stock alerts, and routing.">Sub-Recipe</em>' : ''}
 	          ${itemType === 'manufactured' ? '<em class="stockModule__pill stockModule__pill--amber" title="Prep / Manufactured: produced in batches and tracked as its own stock item.">Prep</em>' : ''}
-	          ${itemType === 'recipe_source' ? '<em class="stockModule__pill stockModule__pill--purple" title="Non Stock: separate from Sub-Recipe. It can carry stock on hand and be counted, but it cannot be used as a recipe ingredient.">Non Stock</em>' : ''}
+	          ${itemType === 'recipe_source' ? '<em class="stockModule__pill stockModule__pill--purple" title="Non-stock item — used for packaging and consumables like take-away containers, bags, or wrapping. It can carry stock on hand and be counted, but it cannot be assigned as a recipe ingredient.">Non Stock</em>' : ''}
           ${item.vatEnabled === false ? '<em class="stockModule__pill stockModule__pill--amber">NO VAT</em>' : '<em class="stockModule__pill stockModule__pill--green">VAT</em>'}
           ${isLow ? '<em class="stockModule__pill stockModule__pill--red">LOW</em>' : ''}
         </h2>
         <p>${escapeHtml(barcodeLabel)}</p>
       </div>
-      <span class="stockModule__sku">${escapeHtml(formatStockItemSkuProduct(item))}</span>
+      <span class="stockModule__sku">${escapeHtml(item.sku || item.SKU || item.skuCode || '')}</span>
       <span>${escapeHtml(formatStockCategoryDisplay(item))}</span>
-      <strong>${formatCurrency(locationCost)}</strong>
-      <strong ${isPhysicalStock ? '' : 'title="Sub-Recipe items do not carry stock-on-hand. Their ingredients are depleted when used in recipes."'}>${isPhysicalStock ? `${onHand.toFixed(3)} ${escapeHtml(item.unit || '')}` : '-'}</strong>
+      <strong>${formatCurrency(item.cost)}</strong>
+      <strong ${isPhysicalStock ? '' : 'title="Non-stock item — packaging or consumables like take-away containers. Cost tracked; stock level not counted."'}>${isPhysicalStock ? `${onHand.toFixed(3)} ${escapeHtml(item.unit || '')}` : 'Non-stock'}</strong>
       <div class="stockModule__rowActions">
         ${renderIconButton('edit', 'Edit stock item', `data-stock-edit="${escapeAttribute(item.id)}"`)}
         ${renderIconButton('trash', 'Delete stock item', `data-stock-delete="${escapeAttribute(item.id)}"`)}
@@ -834,25 +593,7 @@ function renderStockRow(item, locationId, locations = [], selected = false) {
   `;
 }
 
-
-function formatStockItemSkuProduct(item = {}) {
-  return getStockItemSku(item);
-}
-
-function getStockItemSku(item = {}) {
-  return resolveStockItemSku(
-    getStockItemDisplayName(item),
-    item.sku,
-    item.SKU,
-    item.skuCode,
-    item.stockCode,
-    item.itemCode,
-    item.customSku,
-    item.code,
-  );
-}
-
-function renderActionDropdown(openDropdown, actionStatus, selectedCount, filters = {}, locationOptions = []) {
+function renderActionDropdown(openDropdown, actionStatus, selectedCount) {
   const isOpen = openDropdown === 'stockActions';
   return `
     <div class="stockModule__dropdown stockModule__actionDropdown ${isOpen ? 'stockModule__dropdown--open' : ''}" data-stock-dropdown-root>
@@ -875,19 +616,6 @@ function renderActionDropdown(openDropdown, actionStatus, selectedCount, filters
         <span class="stockModule__fileDivider">${selectedCount ? `Export Selected (${selectedCount})` : 'Export Visible'}</span>
         <button type="button" data-stock-export="xlsx">${icon('download')}<span>XLSX</span></button>
         <button type="button" data-stock-export="pdf">${icon('download')}<span>PDF</span></button>
-        <span class="stockModule__fileDivider">Location Costing</span>
-        <button type="button" data-location-costing-import-trigger ${actionStatus === 'importing-location-costing' || actionStatus === 'saving-location-costing' ? 'disabled' : ''}>
-          ${icon('upload')}
-          <span>${actionStatus === 'importing-location-costing' || actionStatus === 'saving-location-costing' ? 'Updating Costs' : 'Upload XLSX'}</span>
-        </button>
-        <button type="button" data-location-costing-open="xlsx">
-          ${icon('download')}
-          <span>XLSX Cost Sheet Template</span>
-        </button>
-        <button type="button" data-location-costing-open="pdf">
-          ${icon('download')}
-          <span>PDF Cost Report</span>
-        </button>
       </div>
     </div>
   `;
@@ -954,13 +682,9 @@ function renderStockModal(stock, categories = [], uoms = [], locations = [], sto
             </button>
             <div class="stockModule__sectionBody">
               <div class="stockModule__formGrid">
-              <label>
+              <label class="stockModule__span2">
                 <span>Component Name</span>
                 <input name="name" value="${escapeAttribute(displayName || '')}" data-stock-draft-field="name" required />
-              </label>
-              <label>
-                <span>${withInfo('SKU', 'Editable stock keeping unit used for purchasing, imports, and product references.')}</span>
-                <input name="sku" value="${escapeAttribute(getStockItemSku(item))}" data-stock-draft-field="sku" placeholder="Leave blank to use SKU - Item Name" />
               </label>
               <label>
                 <span>${withInfo('Category', 'Controlled category list built from existing stock items to keep spelling consistent.')}</span>
@@ -1081,19 +805,6 @@ function renderStockModal(stock, categories = [], uoms = [], locations = [], sto
                         ${icon('camera')}
                       </button>
                     </div>
-                  </label>
-                  <label class="stockModule__defaultOrderingUom">
-                    <span>${withInfo('Default ordering UOM', 'Use this custom UOM by default when adding the item to a purchase order, GRV, or credit note. Leave all unticked to use the Base UOM.')}</span>
-                    <span class="stockModule__defaultOrderingUomControl">
-                      <input
-                        type="radio"
-                        name="defaultOrderingUomRow"
-                        value="${rowIndex}"
-                        data-stock-uom-default-ordering
-                        ${row.isDefaultOrdering ? 'checked' : ''}
-                      />
-                      <span>Use by default</span>
-                    </span>
                   </label>
                 </div>
               `).join('')}
@@ -1261,8 +972,8 @@ function readStockRecipeLinesFromForm(form, currentItem = {}) {
 function getEditableUomConfigurationRows(item = {}, fallbackBaseUom = '') {
   const baseUom = String(fallbackBaseUom || item.unit || item.uom || 'ea').trim() || 'ea';
   const configs = normalizeStockUomConfigurations(item.uomConfigurations || item.uomConfig || item.uom_configuration || item.uomConversions || item.uomConversion);
-  const rows = configs.length ? configs : [{ baseUom, customUom: '', ratio: '', barcode: '', isDefaultOrdering: false }];
-  while (rows.length < 3) rows.push({ baseUom, customUom: '', ratio: '', barcode: '', isDefaultOrdering: false });
+  const rows = configs.length ? configs : [{ baseUom, customUom: '', ratio: '', barcode: '' }];
+  while (rows.length < 3) rows.push({ baseUom, customUom: '', ratio: '', barcode: '' });
   return rows.slice(0, 3).map((row) => ({ ...row, baseUom: row.baseUom || baseUom }));
 }
 
@@ -1281,13 +992,11 @@ function readStockUomConfigurationsFromForm(form, item = {}, fallbackBaseUom = '
       const customUom = String(row.querySelector('[data-stock-uom-custom]')?.value || '').trim();
       const ratioValue = String(row.querySelector('[data-stock-uom-ratio]')?.value || '').trim();
       const barcode = String(row.querySelector('[data-stock-uom-barcode]')?.value || '').trim();
-      const isDefaultOrdering = Boolean(row.querySelector('[data-stock-uom-default-ordering]')?.checked);
       return {
         baseUom: baseUom || baseFallback,
         customUom,
         ratio: parseNumber(ratioValue),
-        barcode,
-        isDefaultOrdering
+        barcode
       };
     })
     .filter((row) => row.customUom || row.ratio > 0 || row.barcode);
@@ -1302,8 +1011,7 @@ function normalizeStockUomConfigurations(value) {
       const customUom = String(row.customUom || row.custom_uom || row.customUnit || row.orderingUom || '').trim();
       const ratio = parseNumber(row.ratio ?? row.conversionRatio ?? row.unitsPerCustomUnit ?? row.units_per_custom_unit);
       const barcode = parseBarcodeValues(row.barcode || row.barcodes || row.customBarcode || row.customUomBarcode)[0] || '';
-      const isDefaultOrdering = ['true', '1', 'yes', 'on'].includes(String(row.isDefaultOrdering ?? row.defaultOrdering ?? row.is_default_ordering ?? row.defaultOrderUom ?? '').toLowerCase()) || row.isDefaultOrdering === true || row.defaultOrdering === true;
-      return { baseUom, customUom, ratio, barcode, isDefaultOrdering };
+      return { baseUom, customUom, ratio, barcode };
     })
     .filter((entry) => entry.baseUom || entry.customUom || entry.ratio > 0 || entry.barcode);
 }
@@ -1411,9 +1119,9 @@ function updateRecipePerUnitHints(view) {
 
 const SPEC_CARD_DESCRIPTIONS = {
   standard: 'Tracks physical stock. Use for ingredients, beverages, and any item whose quantity you count and deplete.',
-  sub_recipe: 'A nested component built from other stock items. It can be used inside recipes, but it has no stock-on-hand value and cannot be ordered.',
+  sub_recipe: 'A nested component built from other stock items. Used inside other recipes and may hold stock on hand, but it is excluded from stock counts, low-stock alerts, and routing.',
   manufactured: 'Produced in batches from ingredients. The finished prep item is tracked as its own stock unit.',
-  recipe_source: 'Non Stock is separate from Sub-Recipe. It can hold stock on hand and be counted, but it cannot be used as a recipe ingredient.',
+  recipe_source: 'Non-stock item for packaging and consumables like take-away containers, bags, or wrapping. It may hold stock on hand and be counted, but it cannot be used as a recipe ingredient.',
 };
 
 function renderSpecificationCard(value, title, selectedType) {
@@ -1715,20 +1423,20 @@ function renderNotice(message, tone) {
   return `<div class="stockModule__notice stockModule__notice--${tone}">${escapeHtml(message)}</div>`;
 }
 
-function renderImportReviewModal(review) {
-  if (!review) return '';
-  const errors = Array.isArray(review.errors) ? review.errors : [];
+function renderImportReportModal(report) {
+  if (!report) return '';
+  const errors = Array.isArray(report.errors) ? report.errors : [];
   if (!errors.length) return '';
   const warningCount = errors.filter((entry) => String(entry.code || '').startsWith('WARN_')).length;
-  const skippedCount = Number(review.skippedCount || 0);
+  const skippedCount = Number(report.skippedCount || 0);
   const hasHardErrors = skippedCount > 0 || errors.some((entry) => !String(entry.code || '').startsWith('WARN_'));
   return `
     <div class="stockModule__modalBackdrop" role="presentation">
-      <section class="stockModule__modal stockModule__modal--importReview" role="dialog" aria-modal="true" aria-labelledby="stock-import-review-title">
+      <section class="stockModule__modal stockModule__modal--importReport" role="dialog" aria-modal="true" aria-labelledby="stock-import-report-title">
         <header>
           <div>
             <p>Import Notification</p>
-            <h2 id="stock-import-review-title">${hasHardErrors ? 'Stock Import Needs Attention' : 'Stock Import Notice'}</h2>
+            <h2 id="stock-import-report-title">${hasHardErrors ? 'Stock Import Needs Attention' : 'Stock Import Notice'}</h2>
           </div>
         </header>
         <p class="stockModule__confirmText">
@@ -1736,11 +1444,11 @@ function renderImportReviewModal(review) {
             ? 'Confirm this message, fix the listed rows, and try the import again.'
             : 'Confirm this message before continuing. Stock quantity changes were not processed from the import file.'}
         </p>
-        <div class="stockModule__importReviewSummary">
-          <strong>${Number(review.importedCount || 0)} imported</strong>
-          <span>${skippedCount} skipped · ${warningCount} warning${warningCount === 1 ? '' : 's'} · ${Number(review.totalRows || 0)} rows checked</span>
+        <div class="stockModule__importReportSummary">
+          <strong>${Number(report.importedCount || 0)} imported</strong>
+          <span>${skippedCount} skipped · ${warningCount} warning${warningCount === 1 ? '' : 's'} · ${Number(report.totalRows || 0)} rows checked</span>
         </div>
-        <ul class="stockModule__importReviewList">
+        <ul class="stockModule__importReportList">
           ${errors.map((error) => `
             <li>
               <code>${escapeHtml(error.code || 'ERR_IMPORT')}</code>
@@ -1749,7 +1457,7 @@ function renderImportReviewModal(review) {
           `).join('')}
         </ul>
         <div class="stockModule__modalActions stockModule__modalActions--right">
-          <button type="button" class="stockModule__primary" data-stock-import-review-close>
+          <button type="button" class="stockModule__primary" data-stock-import-report-close>
             <span>${hasHardErrors ? 'Confirm & Fix Errors' : 'Confirm'}</span>
           </button>
         </div>
@@ -1849,24 +1557,24 @@ function filterStockItems(items, filters, locations = []) {
     const matchesQuery = !query ||
 	      String(item.name || '').toLowerCase().includes(query) ||
 	      String(searchName || '').toLowerCase().includes(query) ||
-	      getStockItemSku(item).toLowerCase().includes(query) ||
+	      String(item.sku || item.SKU || item.skuCode || '').toLowerCase().includes(query) ||
 	      (itemType === 'sub_recipe' && ['sub recipe', 'sub-recipe'].some((term) => term.includes(query) || query.includes(term))) ||
 	      (itemType === 'manufactured' && ['prep', 'manufactured'].some((term) => term.includes(query) || query.includes(term))) ||
 	      (itemType === 'recipe_source' && ['recipe source', 'non stock', 'non-stock', 'virtual'].some((term) => term.includes(query) || query.includes(term))) ||
 	      String(item.category || '').toLowerCase().includes(query) ||
       matchesBarcodeQuery(item, query);
     const matchesCategory = !filters.category || getStockCategoryBase(item) === filters.category;
-    const matchesType = !filters.itemType || itemType === filters.itemType;
-    return matchesQuery && matchesCategory && matchesType;
+    return matchesQuery && matchesCategory;
   });
 }
 
 function getStockItemType(item = {}) {
-  const explicit = String(item.itemType || item.stockItemType || item.specificationType || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
-  const category = String(item.category || '').toLowerCase();
-  if (['sub_recipe', 'subrecipe'].includes(explicit) || item.isSubRecipe === true || category.includes('sub recipe') || category.includes('sub-recipe')) return 'sub_recipe';
-  if (['manufactured', 'prep', 'prepared', 'manufactured_item'].includes(explicit) || item.isManufactured === true || category.includes('manufactured')) return 'manufactured';
-  if (['recipe_source', 'non_stock', 'virtual'].includes(explicit) || category.includes('recipe source') || category.includes('non-stock') || category.includes('non stock') || category.includes('virtual')) return 'recipe_source';
+	  const explicit = String(item.itemType || item.stockItemType || item.specificationType || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+	  const category = String(item.category || '').toLowerCase();
+	  if (['recipe_source', 'non_stock', 'virtual'].includes(explicit) || item.isStocked === false || category.includes('recipe source') || category.includes('non-stock') || category.includes('non stock') || category.includes('virtual')) return 'recipe_source';
+	  if (['sub_recipe', 'subrecipe'].includes(explicit) || item.isSubRecipe === true || category.includes('sub recipe') || category.includes('sub-recipe')) return 'sub_recipe';
+  if (['manufactured', 'prep', 'prepared', 'manufactured_item'].includes(explicit) || item.isManufactured === true) return 'manufactured';
+  if (category.includes('manufactured')) return 'manufactured';
   return 'standard';
 }
 
@@ -2142,12 +1850,6 @@ function formatCurrency(value) {
     style: 'currency',
     currency: 'ZAR'
   }).format(Number(value || 0));
-}
-
-function formatNumber(value) {
-  const number = Number(value || 0);
-  if (!Number.isFinite(number)) return '0.00';
-  return number.toLocaleString('en-ZA', { minimumFractionDigits: 2, maximumFractionDigits: 4 });
 }
 
 function icon(name) {

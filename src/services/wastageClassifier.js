@@ -1,5 +1,5 @@
 // Single source of truth for "is this log entry wastage" across the dashboard tile,
-// Adjustments log, and dashboard summaries. Wastage is its own adjustment_type
+// Adjustments log, and Analytics/Ops reports. Wastage is its own adjustment_type
 // ('wastage') on the backend, or carries an explicit wasteReason/waste note. A plain
 // 'remove' with no wasteReason is a manual stock correction, NOT wastage - treating it
 // as wastage previously inflated the dashboard tile and emptied Manual Adjustments.

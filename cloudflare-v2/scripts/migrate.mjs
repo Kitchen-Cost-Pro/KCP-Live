@@ -12,7 +12,7 @@
  *     --new-url https://kcp-api-v2.<subdomain>.workers.dev \
  *     --token <SUPERUSER_BEARER_SESSION_TOKEN> \
  *     [--only ws_abc]        # optional: migrate a single workspace \
- *     [--dry-run]            # read + show counts, write nothing
+ *     [--dry-run]            # read + report counts, write nothing
  *
  * Prereq: you are `wrangler login`'d to the OLD account (reads) and the NEW deployment is live with
  * its central schema applied. Idempotent: rows use INSERT OR REPLACE, so re-runs are safe.
@@ -66,7 +66,7 @@ const TENANT_TABLES = [
   'transfers', 'transfer_lines', 'transfer_templates', 'transfer_template_lines', 'stocktake_templates',
   'stocktake_template_lines', 'stocktake_sessions', 'stocktake_count_lines', 'stocktake_drafts',
   'manufacturing_batches', 'manufacturing_batch_lines', 'credit_notes', 'credit_note_lines',
-  'user_location_permissions', 'audit_events', 'integration_errors',
+  'report_configs', 'user_location_permissions', 'audit_events', 'integration_errors',
   'low_stock_email_settings', 'low_stock_email_runs', 'yoco_connections', 'yoco_categories',
   'yoco_brands', 'yoco_modifier_groups', 'yoco_orders', 'yoco_order_lines', 'yoco_webhook_events',
   'yoco_processed_signatures'
@@ -208,7 +208,7 @@ async function main() {
   }
 
   // --- Tenant plane (per workspace) ---
-  const migrationSummary = [];
+  const report = [];
   for (const ws of workspaces) {
     const tables = {};
     for (const table of TENANT_TABLES) {
@@ -217,13 +217,13 @@ async function main() {
     }
     const total = Object.values(tables).reduce((n, r) => n + r.length, 0);
     const result = await postNew(`/api/admin/migrate/workspace/${encodeURIComponent(ws.id)}`, { tables });
-    migrationSummary.push({ workspace: ws.id, name: ws.name, sourceRows: total, imported: result.counts || {} });
+    report.push({ workspace: ws.id, name: ws.name, sourceRows: total, imported: result.counts || {} });
     console.log(`  workspace ${ws.id} (${ws.name}): ${total} source rows -> imported`);
   }
 
   // --- Reconcile ---
   console.log('\n=== Reconciliation ===');
-  for (const r of migrationSummary) {
+  for (const r of report) {
     const importedTotal = Object.values(r.imported).reduce((n, c) => n + Number(c || 0), 0);
     const ok = DRY || importedTotal === r.sourceRows;
     console.log(`${ok ? 'OK ' : '!! '} ${r.workspace} ${r.name}: source ${r.sourceRows}, imported ${importedTotal}`);

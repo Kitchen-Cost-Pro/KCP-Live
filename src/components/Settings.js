@@ -10,7 +10,6 @@ import {
 export function renderSettings({ state, onSettingsAction = {} } = {}) {
   const settingsState = state.settings || {};
   const draft = settingsState.draft || createDefaultSettings(state);
-  const reportingDayHour = resolveReportingDayHour(draft);
   const workspaceName = state.workspace?.siteName || draft.siteName || 'Workspace';
   const isSaving = settingsState.actionStatus === 'saving';
   const isImporting = settingsState.actionStatus === 'importing';
@@ -63,22 +62,22 @@ export function renderSettings({ state, onSettingsAction = {} } = {}) {
                 <span>Business Profile Name</span>
                 <input type="text" value="${escapeAttribute(draft.siteName || '')}" placeholder="e.g. Main Kitchen" data-settings-field="siteName" data-focus-key="settings-site-name" />
               </label>
-              <div class="settingsFormField settingsFormField--wide settingsReportingHoursField">
-                <span>Reporting Day Hours</span>
-                <div class="settingsReportingHours" role="group" aria-label="Reporting day hours">
-                  <span class="settingsReportingHourLabel">From</span>
-                  <div class="settingsReportingHourControl">
-                    ${renderReportingHourSelector('reportingDayFromHour', reportingDayHour, openDropdown, 'Reporting day starts at')}
-                  </div>
-                  <span class="settingsReportingHoursArrow" aria-hidden="true">→</span>
-                  <span class="settingsReportingHourLabel">To</span>
-                  <div class="settingsReportingHourControl">
-                    ${renderReportingHourSelector('reportingDayToHour', reportingDayHour, openDropdown, 'Reporting day ends at on the next day')}
-                  </div>
-                  <span class="settingsReportingHoursNext">next day</span>
-                </div>
-                <p class="settingsFieldHint">Reports always cover a full 24-hour day. Selecting either hour keeps From and To aligned.</p>
-              </div>
+              <label>
+                <span>Trading Time / End Of Day</span>
+                ${renderTimeSelector('tradingTime', draft.tradingTime || '23:59')}
+              </label>
+              <label>
+                <span>UI Scale</span>
+                ${renderSettingsDropdown({
+                  id: 'uiScale',
+                  selectedValue: draft.uiScale || 'normal',
+                  openDropdown,
+                  options: [
+                    { value: 'normal', label: 'Normal' },
+                    { value: 'large', label: 'Large Text' }
+                  ]
+                })}
+              </label>
               <label>
                 <span>Auto Logout Timeout (Minutes)</span>
                 <input type="text" inputmode="numeric" value="${escapeAttribute(draft.logoutTimeout ?? 30)}" data-settings-field="logoutTimeout" data-focus-key="settings-logout-timeout" />
@@ -95,17 +94,39 @@ export function renderSettings({ state, onSettingsAction = {} } = {}) {
                   ]
                 })}
               </label>
+              <label>
+                <span>Low Stock Summary Email</span>
+                ${renderSettingsDropdown({
+                  id: 'lowStockEmailFrequency',
+                  selectedValue: draft.lowStockEmailFrequency || 'off',
+                  openDropdown,
+                  options: [
+                    { value: 'off', label: 'Off' },
+                    { value: '1_day', label: 'Every 1 Day' },
+                    { value: '2_day', label: 'Every 2 Days' },
+                    { value: '1_week', label: 'Every 1 Week' },
+                    { value: '2_week', label: 'Every 2 Weeks' },
+                    { value: '1_month', label: 'Every 1 Month' }
+                  ]
+                })}
+                <small class="settingsFieldHint">Emails are batched and sent on the selected cadence.</small>
+              </label>
+              <label>
+                <span>Alert Dispatch Time</span>
+                ${renderTimeSelector('lowStockEmailDispatchTime', draft.lowStockEmailDispatchTime || '08:00')}
+                <small class="settingsFieldHint">Send time uses this workspace timezone, defaulting to Africa/Johannesburg.</small>
+              </label>
             </div>
 
             <div class="settingsActions">
-              <button type="button" class="settingsPrimaryButton" data-settings-save="workspace" ${isSaving ? 'disabled' : ''}>
+              <button type="button" class="settingsPrimaryButton" data-settings-save ${isSaving ? 'disabled' : ''}>
                 ${isSaving ? 'Saving...' : 'Save Settings'}
               </button>
             </div>
           </section>
 
-          ${renderGoLivePanel(draft, state, { isSaving })}
-          ${renderCompanyTaxPanel(draft, { isSaving })}
+          ${renderGoLivePanel(draft, state)}
+          ${renderCompanyTaxPanel(draft)}
           ${renderProfileLinkingPanel(draft)}
 
           ${canManageSnapshots ? `
@@ -135,11 +156,11 @@ export function renderSettings({ state, onSettingsAction = {} } = {}) {
 
               <div class="settingsSnapshotNote settingsSnapshotNote--danger">
                 <strong>Super User Reset Tools</strong>
-                <p>Use reporting reset to clear reporting ledger/history data. Use reporting + stock reset when this store also needs all selling-location stock on hand set to zero. Products, recipes, stock items, and item costings are preserved.</p>
+                <p>Use reporting reset to clear dashboard/report history. Use stock reset when this store needs all selling-location stock on hand set to zero. Products, recipes, stock items, and item costings are preserved.</p>
                 <div class="settingsResetActionGrid">
                   <button type="button" class="settingsSecondaryButton settingsSecondaryButton--warning" data-settings-reset-reporting ${isResetting ? 'disabled' : ''}>
                     ${icon('database')}
-                    <span>${isResetting ? 'Resetting...' : 'Reset Reporting'}</span>
+                    <span>${isResetting ? 'Resetting...' : 'Reset Reporting Only'}</span>
                   </button>
                   <button type="button" class="settingsDangerButton" data-settings-reset-reporting-stock ${isResetting ? 'disabled' : ''}>
                     ${icon('trash')}
@@ -165,7 +186,7 @@ export function renderSettings({ state, onSettingsAction = {} } = {}) {
   return view;
 }
 
-function renderGoLivePanel(draft = {}, state = {}, { isSaving = false } = {}) {
+function renderGoLivePanel(draft = {}, state = {}) {
   if (draft.stockDepletionEnabled) {
     return `
       <section class="settingsPanel settingsPanel--goLive">
@@ -181,13 +202,12 @@ function renderGoLivePanel(draft = {}, state = {}, { isSaving = false } = {}) {
     `;
   }
 
-  const readiness = state.settings?.goLiveReadiness || {};
+  const source = state.source || {};
   const checklist = [
-    { label: 'Products', ready: Number(readiness.productCount || 0) > 0 },
-    { label: 'Recipes', ready: Number(readiness.recipeCount || 0) > 0 },
-    { label: 'Locations', ready: Number(readiness.locationCount || 0) > 0 }
+    { label: 'Products', ready: Object.keys(source.products || {}).length > 0 },
+    { label: 'Recipes', ready: Object.keys(source.recipes || {}).length > 0 || (Array.isArray(source.recipes) && source.recipes.length > 0) },
+    { label: 'Locations', ready: (source.locations || []).length > 0 }
   ];
-  const isReady = checklist.every((item) => item.ready);
 
   return `
     <section class="settingsPanel settingsPanel--goLive">
@@ -207,17 +227,14 @@ function renderGoLivePanel(draft = {}, state = {}, { isSaving = false } = {}) {
           </li>
         `).join('')}
       </ul>
-      ${!isReady ? '<p class="settingsFieldHint settingsGoLiveBlockedHint">Complete the checklist before enabling stock depletion.</p>' : ''}
       <div class="settingsActions settingsActions--goLive">
-        <button type="button" class="settingsPrimaryButton settingsGoLiveButton" data-settings-go-live ${!isReady || isSaving ? 'disabled' : ''}>
-          ${isSaving ? 'Going Live...' : 'Go Live'}
-        </button>
+        <button type="button" class="settingsPrimaryButton settingsGoLiveButton" data-settings-go-live>Go Live</button>
       </div>
     </section>
   `;
 }
 
-function renderCompanyTaxPanel(draft = {}, { isSaving = false } = {}) {
+function renderCompanyTaxPanel(draft = {}) {
   const taxInfo = normalizeTaxInfo(draft.companyTaxInfo || {});
   const fields = [
     ['Registered Company Name', 'registeredCompanyName', 'Legal registered entity name'],
@@ -265,12 +282,6 @@ function renderCompanyTaxPanel(draft = {}, { isSaving = false } = {}) {
           </label>
         `).join('')}
       </div>
-
-      <div class="settingsActions settingsActions--legal">
-        <button type="button" class="settingsPrimaryButton" data-settings-save="legal" ${isSaving ? 'disabled' : ''}>
-          ${isSaving ? 'Saving...' : 'Save Legal Details'}
-        </button>
-      </div>
     </section>
   `;
 }
@@ -314,7 +325,7 @@ function renderStockRoutingPanel(draft = {}, state = {}) {
         ${quickLabels.map((label) => `<span>${escapeHtml(label)}</span>`).join('')}
       </div>
 
-      <p class="settingsRoutingMicrocopy">Yoco category mapping remains available for sales routing consistency, but depletion is controlled from stock categories.</p>
+      <p class="settingsRoutingMicrocopy">Yoco category mapping remains available for sales reporting consistency, but depletion is controlled from stock categories.</p>
     </section>
   `;
 }
@@ -350,7 +361,6 @@ function renderStockRoutingModal(draft = {}, state = {}) {
                 <div>
                   <small>Internal Stock Category</small>
                   <strong>${escapeHtml(category.name)}</strong>
-                  ${category.tags?.length ? `<div class="settingsRoutingTags">${category.tags.map((tag) => `<span class="settingsRoutingTag--${escapeAttribute(normalizeSettingsRoutingTagClass(tag))}">${escapeHtml(tag)}</span>`).join('')}</div>` : ''}
                   ${category.itemCount ? `<em>${escapeHtml(String(category.itemCount))} stock items</em>` : ''}
                 </div>
                 <div class="settingsRoutingSelector" role="group" aria-label="Routing label for ${escapeAttribute(category.name)}">
@@ -389,27 +399,13 @@ function getStockCategories(state = {}, draft = {}) {
   const map = new Map();
   loadedCategories.forEach((category) => {
     const name = normalizeStockCategoryName(category.name || category.id || category.rawCategory || '');
-    if (name) map.set(name, { id: name, name, itemCount: Number(category.itemCount || 0) || 0, tags: getSettingsRoutingTags(category.rawCategory || category.name || name) });
+    if (name) map.set(name, { id: name, name, itemCount: Number(category.itemCount || 0) || 0 });
   });
   Object.entries(draft.stockCategoryRoutingMap || {}).forEach(([id]) => {
     const name = normalizeStockCategoryName(id);
-    if (name && !map.has(name)) map.set(name, { id: name, name, itemCount: 0, tags: getSettingsRoutingTags(name) });
+    if (name && !map.has(name)) map.set(name, { id: name, name, itemCount: 0 });
   });
   return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
-}
-
-
-function getSettingsRoutingTags(categoryName = '') {
-  const text = String(categoryName || '').toLowerCase();
-  const tags = [];
-  if (text.includes('prep') || text.includes('manufactur')) tags.push('PREP');
-  if (text.includes('raw') || text.includes('material')) tags.push('RAW');
-  if (!tags.length) tags.push('RAW');
-  return [...new Set(tags)];
-}
-
-function normalizeSettingsRoutingTagClass(tag = '') {
-  return String(tag || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'standard';
 }
 
 function getRoutingLabelForStockCategory(category = {}, categoryMap = {}) {
@@ -520,23 +516,6 @@ function renderAppearancePanel(draft = {}, settingsState = {}) {
             ? `<img src="${escapeAttribute(logoDataUrl)}" alt="Current restaurant logo" />`
             : `<span>KCP</span>`}
         </div>
-      </div>
-
-      <div class="settingsPersonalPreferenceRow">
-        <label>
-          <span>Personal UI Scale</span>
-          ${renderSettingsDropdown({
-            id: 'uiScale',
-            selectedValue: draft.uiScale || 'normal',
-            openDropdown: settingsState.openDropdown || '',
-            options: [
-              { value: 'normal', label: 'Normal' },
-              { value: 'large', label: 'Large Text' }
-            ]
-          })}
-          <small class="settingsFieldHint">Saved only for your user in this workspace.</small>
-        </label>
-        <button type="button" class="settingsPrimaryButton" data-settings-save-appearance>Save My Appearance</button>
       </div>
 
       <div class="settingsAppearanceActions">
@@ -772,8 +751,8 @@ function bindSettingsEvents(view, onSettingsAction, draft = {}, settingsState = 
     } else {
       // Selects, checkboxes: change is safe to re-render (no cursor to disrupt)
       field.addEventListener('change', () => {
-        // Time-part and reporting-hour selects are handled by their dedicated combiners below.
-        if (field.dataset.timePart || field.dataset.reportingHour) return;
+        // Time-part selects are handled by the time-part combiner below
+        if (field.dataset.timePart) return;
         onSettingsAction.onPreserveFocus?.(field);
         onSettingsAction.onDraftChange?.({ [field.dataset.settingsField]: field.value });
       });
@@ -801,7 +780,13 @@ function bindSettingsEvents(view, onSettingsAction, draft = {}, settingsState = 
     const handleTaxChange = () => {
       const key = field.dataset.settingsTaxField || '';
       if (!key) return;
-      onSettingsAction.onTaxFieldChangeSilent?.(key, field.value);
+      onSettingsAction.onPreserveFocus?.(field);
+      onSettingsAction.onDraftChange?.({
+        companyTaxInfo: {
+          ...normalizeTaxInfo(draft.companyTaxInfo || {}),
+          [key]: field.value
+        }
+      });
     };
     field.addEventListener('input', handleTaxChange);
     field.addEventListener('change', handleTaxChange);
@@ -817,20 +802,7 @@ function bindSettingsEvents(view, onSettingsAction, draft = {}, settingsState = 
     button.addEventListener('click', () => {
       const field = button.dataset.settingsOptionField || '';
       const value = button.dataset.settingsOptionValue || '';
-      if (field === 'reportingDayFromHour' || field === 'reportingDayToHour') {
-        const hour = normalizeHourValue(value);
-        const previousHour = (hour + 23) % 24;
-        onSettingsAction.onDraftChange?.({
-          reportingDayFromHour: hour,
-          reportingDayToHour: hour,
-          tradingDayStartHour: hour,
-          tradingDayStartMinutes: hour * 60,
-          // Keep the legacy end-of-day field in sync for older report and snapshot readers.
-          tradingTime: `${String(previousHour).padStart(2, '0')}:59`
-        });
-      } else {
-        onSettingsAction.onDraftChange?.({ [field]: value });
-      }
+      onSettingsAction.onDraftChange?.({ [field]: value });
       onSettingsAction.onDropdownToggle?.('');
     });
   });
@@ -931,29 +903,14 @@ function bindSettingsEvents(view, onSettingsAction, draft = {}, settingsState = 
   });
 
   view.querySelectorAll('[data-settings-save]').forEach((button) => {
-    button.addEventListener('click', () => {
-      const saveScope = button.dataset.settingsSave || 'workspace';
-      if (saveScope === 'legal') {
-        const companyTaxInfo = normalizeTaxInfo(draft.companyTaxInfo || {});
-        view.querySelectorAll('[data-settings-tax-field]').forEach((field) => {
-          const key = field.dataset.settingsTaxField || '';
-          if (key) companyTaxInfo[key] = field.value;
-        });
-        onSettingsAction.onSave?.({
-          draftPatch: { companyTaxInfo },
-          successMessage: 'Legal details saved.',
-          syncSiteName: false
-        });
-        return;
-      }
-      onSettingsAction.onSave?.();
-    });
+    button.addEventListener('click', () => onSettingsAction.onSave?.());
   });
   view.querySelectorAll('[data-settings-save-appearance]').forEach((button) => {
     button.addEventListener('click', () => onSettingsAction.onSaveAppearance?.());
   });
   view.querySelector('[data-settings-go-live]')?.addEventListener('click', () => {
-    onSettingsAction.onGoLive?.();
+    const confirmed = window.confirm('Once live, completed Yoco sales will start depleting stock. Continue?');
+    if (confirmed) onSettingsAction.onGoLive?.();
   });
   view.querySelector('[data-settings-export]')?.addEventListener('click', () => onSettingsAction.onExportSnapshot?.());
   view.querySelector('[data-settings-reset-reporting]')?.addEventListener('click', () => onSettingsAction.onRequestResetTotals?.('reporting'));
@@ -1034,48 +991,31 @@ function normalizeTaxInfo(value = {}) {
   };
 }
 
-function renderReportingHourSelector(fieldKey, value = 0, openDropdown = '', ariaLabel = 'Reporting hour') {
-  const currentHour = normalizeHourValue(value);
-  const options = Array.from({ length: 24 }, (_, hour) => ({
-    value: hour,
-    label: `${String(hour).padStart(2, '0')}:00`
-  }));
-  return renderSettingsDropdown({
-    id: fieldKey,
-    selectedValue: currentHour,
-    openDropdown,
-    options,
-    className: 'settingsReportingHourDropdown',
-    ariaLabel
-  });
+function renderTimeSelector(fieldKey, value = '09:00') {
+  const parts = String(value || '00:00').split(':');
+  const currentHour = Math.min(23, Math.max(0, parseInt(parts[0] || '0', 10)));
+  const currentMinute = Math.min(59, Math.max(0, parseInt(parts[1] || '0', 10)));
+  const hours = Array.from({ length: 24 }, (_, i) => i);
+  const minutes = Array.from({ length: 60 }, (_, i) => i);
+  return `
+    <div class="settingsTimeSelector">
+      <select class="settingsTimePart" data-settings-field="${escapeAttribute(fieldKey)}" data-time-part="hour" data-time-peer="${escapeAttribute(fieldKey)}" aria-label="Hour">
+        ${hours.map((h) => `<option value="${h}" ${h === currentHour ? 'selected' : ''}>${String(h).padStart(2, '0')}</option>`).join('')}
+      </select>
+      <span class="settingsTimeSep">:</span>
+      <select class="settingsTimePart" data-settings-field="${escapeAttribute(fieldKey)}" data-time-part="minute" data-time-peer="${escapeAttribute(fieldKey)}" aria-label="Minute">
+        ${minutes.map((m) => `<option value="${m}" ${m === currentMinute ? 'selected' : ''}>${String(m).padStart(2, '0')}</option>`).join('')}
+      </select>
+    </div>
+  `;
 }
 
-function resolveReportingDayHour(settings = {}) {
-  const direct = settings.reportingDayFromHour
-    ?? settings.reportingFromHour
-    ?? settings.tradingDayStartHour
-    ?? settings.tradeDayStartHour;
-  if (direct !== undefined && direct !== null && direct !== '') return normalizeHourValue(direct);
-  const match = String(settings.tradingTime || settings.tradingEndTime || '23:59').match(/^(\d{1,2}):(\d{2})$/);
-  if (!match) return 0;
-  const endHour = normalizeHourValue(match[1]);
-  const endMinute = Math.max(0, Math.min(59, Number(match[2]) || 0));
-  return Math.ceil((endHour * 60 + endMinute) / 60) % 24;
-}
-
-function normalizeHourValue(value, fallback = 0) {
-  const match = String(value ?? '').trim().match(/^(\d{1,2})(?::\d{2})?$/);
-  const number = match ? Number(match[1]) : Number(value);
-  if (!Number.isFinite(number)) return Math.max(0, Math.min(23, Number(fallback) || 0));
-  return Math.max(0, Math.min(23, Math.round(number)));
-}
-
-function renderSettingsDropdown({ id, selectedValue, options = [], openDropdown = '', className = '', ariaLabel = '' }) {
+function renderSettingsDropdown({ id, selectedValue, options = [], openDropdown = '' }) {
   const selected = options.find((option) => String(option.value) === String(selectedValue));
   const isOpen = openDropdown === id;
   return `
-    <div class="settingsDropdown ${escapeAttribute(className)} ${isOpen ? 'settingsDropdown--open' : ''}" data-settings-dropdown-root>
-      <button type="button" data-settings-dropdown="${escapeAttribute(id)}" aria-expanded="${isOpen}" ${ariaLabel ? `aria-label="${escapeAttribute(ariaLabel)}"` : ''}>
+    <div class="settingsDropdown ${isOpen ? 'settingsDropdown--open' : ''}" data-settings-dropdown-root>
+      <button type="button" data-settings-dropdown="${escapeAttribute(id)}" aria-expanded="${isOpen}">
         <strong>${escapeHtml(selected?.label || 'Select')}</strong>
         ${icon('chevronDown')}
       </button>
@@ -1101,18 +1041,15 @@ function createDefaultSettings(state = {}) {
     vatRate: 15,
     siteName: state.workspace?.siteName || '',
     tradingTime: '23:59',
-    reportingDayFromHour: 0,
-    reportingDayToHour: 0,
-    tradingDayStartHour: 0,
-    tradingDayStartMinutes: 0,
     uiScale: 'normal',
     logoutTimeout: 30,
     costingMethod: 'last',
+    lowStockEmailFrequency: 'off',
+    lowStockEmailDispatchTime: '08:00',
     orgId: '',
     corpId: '',
     viewingOnly: false,
     stockDepletionEnabled: false,
-    stockDepletionEnabledAt: '',
     yocoCategoryMap: {},
     stockCategoryRoutingMap: {},
     yocoStoreLocationsAsStockLocations: false,
@@ -1134,11 +1071,11 @@ function renderResetTotalsDialog(settingsState = {}) {
   const resetMode = typeof settingsState.confirmResetTotals === 'object'
     ? settingsState.confirmResetTotals.mode
     : 'reporting_stock';
-  const includesStock = resetMode === 'reporting_stock' || resetMode === 'dashboard_stock';
-  const title = includesStock ? 'Reset Reporting + Stock On Hand' : 'Reset Reporting';
+  const includesStock = resetMode === 'reporting_stock';
+  const title = includesStock ? 'Reset Reporting + Stock On Hand' : 'Reset Reporting Only';
   const copy = includesStock
-    ? 'This clears reporting ledger/history data and sets stock on hand to zero for every selling location in this profile. Products, recipes, stock item master data, and stock item costings are kept.'
-    : 'This clears reporting ledger/history data, movement history, sales signatures, and operational reporting documents for this profile. Stock on hand, products, recipes, stock item master data, and costings are kept.';
+    ? 'This clears report/dashboard history and sets stock on hand to zero for every selling location in this profile. Products, recipes, stock item master data, and stock item costings are kept.'
+    : 'This clears report/dashboard history, sales signatures, dashboard summaries, and reporting totals for this profile. Stock on hand, products, recipes, stock item master data, and costings are kept.';
   const confirmLabel = includesStock ? 'Reset Reporting and Stock Values' : 'Reset Reporting';
   const typedValue = String(settingsState.confirmResetTotals.confirmText || '');
   const canProceed = typedValue === confirmLabel && settingsState.actionStatus !== 'resetting';

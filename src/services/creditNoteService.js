@@ -33,11 +33,7 @@ export async function fetchCreditNotesWorkspace(workspaceId) {
 
   const [creditNoteResponse, grvState, stockState, supplierState, locationResponse, siteResponse] = await Promise.all([
     callCloudflareWorkspaceRoute(workspaceKey, 'credit-notes', { query: { limit: 500 } }),
-    fetchGrvWorkspace(workspaceKey).catch((error) => ({
-      status: 'ready',
-      receipts: [],
-      historyError: String(error?.message || 'Could not load GRV history.')
-    })),
+    fetchGrvWorkspace(workspaceKey),
     fetchStock(workspaceKey),
     fetchSuppliers(workspaceKey),
     callCloudflareWorkspaceRoute(workspaceKey, 'locations'),
@@ -197,8 +193,6 @@ function normalizeCreditNotePayload(creditNote = {}) {
         baseQuantity: returnedQty * packSize,
         unitCost: parseCreditNoteNumber(item.unitCost ?? item.costEx ?? item.cost ?? item.price, 0) || 0,
         vatEnabled: item.vatEnabled !== false,
-        originalOrderQty: parseCreditNoteNumber(item.originalOrderQty ?? item.maxReturnQty, 0) || 0,
-        maxReturnQty: parseCreditNoteNumber(item.maxReturnQty ?? item.originalOrderQty, 0) || 0,
         locationId: String(item.locationId || creditNote.locationId || '').trim(),
         locationName: String(item.locationName || creditNote.locationName || '').trim()
       };

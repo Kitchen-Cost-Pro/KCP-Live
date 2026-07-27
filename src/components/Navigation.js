@@ -27,15 +27,6 @@ export const navigationGroups = [
   {
     label: 'Analysis',
     items: [
-      {
-        id: 'reporting-suite',
-        label: 'Reporting',
-        icon: 'dashboard',
-        children: [
-          { id: 'reporting', label: 'Reports', icon: 'dashboard' },
-          { id: 'reporting-scheduling', label: 'Scheduling', icon: 'clock' }
-        ]
-      },
       { id: 'integrations', label: 'Integrations', icon: 'plug' },
       { id: 'user-management', label: 'User Management', icon: 'team' },
       { id: 'custom-roles', label: 'Roles', icon: 'shield' }
@@ -81,8 +72,8 @@ export function renderNavigation({
   const canSwitchWorkspace = (workspaceOptions || []).length > 1;
   const view = document.createElement('aside');
   view.className = styles.sidebar;
-  view.dataset.activeSection = activeSection || '';
-  // Stable, non-hashed hook so cross-module CSS can recolor the nav per section.
+  // Stable, non-hashed hook so cross-module CSS (appShell) can recolor the nav
+  // per section (e.g. solid on the Reports tab). CSS-module class names are hashed.
   view.setAttribute('data-app-sidebar', '');
   const logoDataUrl = String(settings.restaurantLogoDataUrl || settings.logoDataUrl || '').trim();
   view.innerHTML = `

@@ -34,8 +34,7 @@ export const exportSchemas = {
     'UOM_2_Barcode',
     'UOM_3_Name',
     'UOM_3_Qty_In_Base',
-    'UOM_3_Barcode',
-    'Default_Ordering_UOM'
+    'UOM_3_Barcode'
   ],
   manufacturing: ['Item_Type', 'Name', 'Category', 'Unit', 'Batch_Yield', 'Component_Name', 'Quantity_Needed'],
   suppliers: [
@@ -149,9 +148,9 @@ function splitSupplierAddressForExport(supplier = {}) {
 function getStockExportItemType(item = {}) {
   const explicit = String(item.itemType || item.stockItemType || item.specificationType || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
   const category = String(item.category || '').toLowerCase();
+  if (['recipe_source', 'non_stock', 'virtual'].includes(explicit) || item.isStocked === false || category.includes('recipe source') || category.includes('non-stock') || category.includes('non stock')) return 'Non Stock';
   if (['sub_recipe', 'subrecipe'].includes(explicit) || item.isSubRecipe === true || category.includes('sub recipe') || category.includes('sub-recipe')) return 'Sub-Recipe';
   if (['manufactured', 'prep', 'prepared', 'manufactured_item'].includes(explicit) || item.isManufactured === true || category.includes('manufactured')) return 'Manufactured';
-  if (['recipe_source', 'non_stock', 'virtual'].includes(explicit) || category.includes('recipe source') || category.includes('non-stock') || category.includes('non stock') || category.includes('virtual')) return 'Non Stock';
   return 'Standard';
 }
 
@@ -168,7 +167,6 @@ export function buildStockRows(items = [], {
         Item_Type: getStockExportItemType(item),
         Category: formatInventoryCategoryForExport(item),
         Base_UOM: item.unit || '',
-        Default_Ordering_UOM: uomConfigs.find((config) => config.isDefaultOrdering)?.customUom || item.unit || '',
         Cost_Ex_VAT: numberText(item.cost, 4),
         VAT_Enabled: item.vatEnabled === false ? 'No' : 'Yes',
         Barcode: Array.isArray(item.barcodes) ? item.barcodes.join(', ') : String(item.barcodes || ''),
@@ -330,7 +328,7 @@ export async function exportObjectRows({
       await downloadWorkbookXlsx(filename, [
         { name: 'Summary', rows: buildSummarySheetAoa(effectiveSummary) },
         {
-          name: sheetName || 'Main Export',
+          name: sheetName || 'Main Report',
           rows: buildMainReportAoa(normalized, columns),
           ...(xlsxOptions.mainSheet || xlsxOptions)
         },
@@ -343,15 +341,7 @@ export async function exportObjectRows({
   }
 
   if (format === 'pdf') {
-    await downloadPdf(filename, {
-      title,
-      subtitle,
-      rows: normalized,
-      columns,
-      summaryRows: effectiveSummary,
-      branding,
-      detailTables: detail.map((sheet) => ({ title: sheet.name, headers: sheet.columns, rows: sheet.rows }))
-    });
+    await downloadPdf(filename, { title, subtitle, rows: normalized, columns, summaryRows: effectiveSummary, branding });
     return;
   }
 
@@ -376,9 +366,9 @@ function normalizeSummaryRows(rows = []) {
     .filter((row) => String(row.label ?? '').trim());
 }
 
-function buildDefaultSummaryRows({ title = 'Export', subtitle = '', rowCount = 0 } = {}) {
+function buildDefaultSummaryRows({ title = 'Report', subtitle = '', rowCount = 0 } = {}) {
   return [
-    { label: 'Export', value: title || 'Export' },
+    { label: 'Report', value: title || 'Report' },
     ...(subtitle ? [{ label: 'Description', value: subtitle }] : []),
     { label: 'Rows', value: rowCount },
     { label: 'Generated', value: new Date().toLocaleString('en-ZA') }
@@ -404,7 +394,7 @@ function buildSeparatedExportAoa(summaryRows = [], rows = [], columns = []) {
   return [
     ...buildSummarySheetAoa(summaryRows),
     [],
-    ['Main Export'],
+    ['Main Report'],
     columns,
     ...rows.map((row) => columns.map((column) => row?.[column] ?? ''))
   ];
@@ -435,7 +425,6 @@ function getTemplateExampleRows(columns = []) {
         Item_Type: TEMPLATE_ACCEPTED_ITEM_TYPE,
         Category: 'Dairy',
         Base_UOM: TEMPLATE_ACCEPTED_BASE_UOM,
-        Default_Ordering_UOM: 'Box',
         Cost_Ex_VAT: '24.50',
         VAT_Enabled: TEMPLATE_ACCEPTED_VAT,
         Barcode: '600000000002',
@@ -461,7 +450,6 @@ function getTemplateExampleRows(columns = []) {
         Item_Type: 'Manufactured',
         Category: 'Meat',
         Base_UOM: TEMPLATE_ACCEPTED_BASE_UOM,
-        Default_Ordering_UOM: 'Tray',
         Cost_Ex_VAT: '85.00',
         VAT_Enabled: TEMPLATE_ACCEPTED_VAT,
         Barcode: '600000000003',
@@ -487,7 +475,6 @@ function getTemplateExampleRows(columns = []) {
         Item_Type: 'Sub-Recipe',
         Category: 'Sauces',
         Base_UOM: 'L',
-        Default_Ordering_UOM: 'L',
         Cost_Ex_VAT: '12.00',
         VAT_Enabled: 'No',
         Barcode: '',
@@ -571,9 +558,7 @@ export async function exportAoaRows({
   subtitle,
   rows,
   headerRowIndex = 8,
-  branding = {},
-  orientation = 'portrait',
-  tableOptions = {}
+  branding = {}
 }) {
   if (format === 'xlsx') {
     await downloadAoaXlsx(filename, rows, sheetName);
@@ -581,7 +566,7 @@ export async function exportAoaRows({
   }
 
   if (format === 'pdf') {
-    await downloadAoaPdf(filename, { title, subtitle, rows, headerRowIndex, branding, orientation, tableOptions });
+    await downloadAoaPdf(filename, { title, subtitle, rows, headerRowIndex, branding });
     return;
   }
 
@@ -705,8 +690,7 @@ function normalizeExportUomConfigurations(value = []) {
       const customUom = String(row.customUom || row.custom_uom || row.customUnit || row.orderingUom || '').trim();
       const ratio = Number(row.ratio ?? row.conversionRatio ?? row.unitsPerCustomUnit ?? row.units_per_custom_unit ?? 0) || 0;
       const barcode = String(row.barcode || row.customBarcode || row.customUomBarcode || '').trim();
-      const isDefaultOrdering = ['true', '1', 'yes', 'on'].includes(String(row.isDefaultOrdering ?? row.defaultOrdering ?? row.is_default_ordering ?? row.defaultOrderUom ?? '').toLowerCase()) || row.isDefaultOrdering === true || row.defaultOrdering === true;
-      return { baseUom, customUom, ratio, barcode, isDefaultOrdering };
+      return { baseUom, customUom, ratio, barcode };
     })
     .filter((entry) => entry.customUom || entry.ratio > 0 || entry.barcode);
 }

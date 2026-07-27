@@ -18,9 +18,6 @@ export function renderStockTake({ state, onStockTakeFilterChange, onStockTakeAct
     templateSelectionQuery: '',
     overlay: '',
     openDropdown: '',
-    exportFormat: 'xlsx',
-    exportLocationId: '',
-    exportTemplateId: '',
     ...stockTake.filters
   };
   const sites = stockTake.sites || [];
@@ -58,8 +55,7 @@ export function renderStockTake({ state, onStockTakeFilterChange, onStockTakeAct
         draftMap,
         locations: stockLocations,
         varianceTotal,
-        actionStatus: stockTake.actionStatus || '',
-        actionError: stockTake.actionError || ''
+        actionStatus: stockTake.actionStatus || ''
       })}
     </div>
 
@@ -73,17 +69,18 @@ export function renderStockTake({ state, onStockTakeFilterChange, onStockTakeAct
       locationOptions,
       stockLocations,
       templateSummary,
-      templateSelectionOptions
+      templateSelectionOptions,
+      savedDrafts
     })}
     ${renderToast(stockTake.toast)}
   `;
 
-  bindStockTakeEvents(view, onStockTakeFilterChange, onStockTakeAction, filters);
+  bindStockTakeEvents(view, onStockTakeFilterChange, onStockTakeAction);
   bindFieldHelpTooltips(view);
   return view;
 }
 
-function bindStockTakeEvents(view, onStockTakeFilterChange, onStockTakeAction, filters = {}) {
+function bindStockTakeEvents(view, onStockTakeFilterChange, onStockTakeAction) {
   view.querySelector('[data-stocktake-open-start]')?.addEventListener('click', () => onStockTakeAction.onOpenStartSession?.());
   view.querySelector('[data-stocktake-open-quick]')?.addEventListener('click', () => onStockTakeAction.onOpenQuickCount?.());
   view.querySelector('[data-stocktake-open-bulk-scan]')?.addEventListener('click', () => onStockTakeAction.onOpenBulkScan?.());
@@ -94,7 +91,7 @@ function bindStockTakeEvents(view, onStockTakeFilterChange, onStockTakeAction, f
   view.querySelectorAll('[data-stocktake-count-template-download]').forEach((button) => {
     button.addEventListener('click', () => {
       onStockTakeFilterChange?.({ openDropdown: '' });
-      onStockTakeAction.onOpenCountTemplateLocationPicker?.(button.dataset.stocktakeCountTemplateDownload || 'csv');
+      onStockTakeAction.onExportCountTemplate?.(button.dataset.stocktakeCountTemplateDownload || 'csv');
     });
   });
   const stockTakeImportInput = view.querySelector('[data-stocktake-count-template-import]');
@@ -107,6 +104,7 @@ function bindStockTakeEvents(view, onStockTakeFilterChange, onStockTakeAction, f
     if (file) onStockTakeAction.onImportCountTemplate?.(file);
     stockTakeImportInput.value = '';
   });
+  view.querySelector('[data-stocktake-resume-draft]')?.addEventListener('click', () => onStockTakeAction.onRestoreSavedDraft?.());
   view.querySelectorAll('[data-stocktake-resume-specific]').forEach((button) => {
     button.addEventListener('click', () => onStockTakeAction.onRestoreSpecificDraft?.(button.dataset.stocktakeResumeSpecific || ''));
   });
@@ -119,16 +117,6 @@ function bindStockTakeEvents(view, onStockTakeFilterChange, onStockTakeAction, f
   view.querySelector('[data-stocktake-scan-count]')?.addEventListener('click', () => onStockTakeAction.onScanCount?.());
   view.querySelectorAll('[data-stocktake-overlay-close]').forEach((button) => {
     button.addEventListener('click', () => onStockTakeAction.onCloseOverlay?.());
-  });
-
-  view.querySelector('[data-stocktake-count-template-confirm]')?.addEventListener('click', (event) => {
-    const selectedLocationId = filters.exportLocationId || event.currentTarget.dataset.stocktakeCountTemplateLocation || '';
-    onStockTakeAction.onExportCountTemplate?.(event.currentTarget.dataset.stocktakeCountTemplateFormat || 'xlsx', selectedLocationId);
-  });
-  view.querySelector('[data-stocktake-template-export-confirm]')?.addEventListener('click', (event) => {
-    const templateId = filters.exportTemplateId || event.currentTarget.dataset.stocktakeTemplateExportId || '';
-    const selectedLocationId = filters.exportLocationId || event.currentTarget.dataset.stocktakeTemplateExportLocation || '';
-    onStockTakeAction.onExportTemplatePdf?.(templateId, selectedLocationId);
   });
   view.querySelector('[data-stocktake-toast-close]')?.addEventListener('click', () => onStockTakeAction.onDismissToast?.());
 
@@ -210,7 +198,6 @@ function bindStockTakeEvents(view, onStockTakeFilterChange, onStockTakeAction, f
 
   view.querySelector('[data-stocktake-template-name]')?.addEventListener('input', (event) => {
     onStockTakeAction.onPreserveFocus?.(event.currentTarget);
-    view.querySelector('.stockTakeNotice')?.remove();
     onStockTakeAction.onUpdateTemplateDraft?.({ name: event.currentTarget.value }, { render: false });
   });
 
@@ -225,16 +212,6 @@ function bindStockTakeEvents(view, onStockTakeFilterChange, onStockTakeAction, f
   view.addEventListener('click', (event) => {
     if (!view.dataset.openDropdown || event.target.closest('[data-stocktake-dropdown-root]')) return;
     onStockTakeFilterChange?.({ openDropdown: '' });
-  });
-
-  view.querySelectorAll('[data-stocktake-dropdown-search]').forEach((input) => {
-    input.addEventListener('input', (event) => {
-      const query = String(event.currentTarget.value || '').trim().toLowerCase();
-      event.currentTarget.closest('.stockTakeDropdownMenu')?.querySelectorAll('[data-stocktake-option]').forEach((button) => {
-        const label = String(button.textContent || '').toLowerCase();
-        button.hidden = Boolean(query) && !label.includes(query);
-      });
-    });
   });
 
   view.querySelectorAll('[data-stocktake-option]').forEach((button) => {
@@ -253,9 +230,6 @@ function bindStockTakeEvents(view, onStockTakeFilterChange, onStockTakeAction, f
         onStockTakeAction.onUpdateTemplateDraft?.({ siteId: value });
       } else if (action === 'template:targetLocation') {
         onStockTakeAction.onUpdateTemplateDraft?.({ targetLocation: value });
-      } else if (action === 'export:locationId') {
-        onStockTakeFilterChange?.({ exportLocationId: value, openDropdown: '' });
-        return;
       }
       onStockTakeFilterChange?.({ openDropdown: '' });
     });
@@ -301,25 +275,6 @@ function bindStockTakeEvents(view, onStockTakeFilterChange, onStockTakeAction, f
   });
 }
 
-
-function getStockTakeLineUomCountValues(current = {}, item = {}) {
-  const counts = current?.uomCounts;
-  if (!Array.isArray(counts)) {
-    return counts && typeof counts === 'object' ? counts : {};
-  }
-  const result = {};
-  const baseUom = String(item.unit || 'ea').trim().toLowerCase();
-  counts.forEach((entry = {}) => {
-    const count = Number(entry.count ?? entry.quantity ?? entry.scans ?? 0) || 0;
-    if (!count) return;
-    const ratio = Number(entry.ratio || 1) || 1;
-    const name = String(entry.uomName || entry.customUom || entry.name || entry.key || '').trim();
-    const key = ratio === 1 && (!name || name.toLowerCase() === baseUom) ? 'base' : name || 'base';
-    result[key] = (Number(result[key] || 0) || 0) + count;
-  });
-  return result;
-}
-
 function renderStockTakePageActions(filters = {}) {
   const isOpen = filters.openDropdown === 'stocktake-actions';
   return `
@@ -351,8 +306,11 @@ function renderStockTakePageActions(filters = {}) {
 }
 
 function renderLaunchpad(savedDrafts = []) {
-  const activeSessions = [...(Array.isArray(savedDrafts) ? savedDrafts : [])]
-    .sort((left, right) => String(right.savedAt || right.date || '').localeCompare(String(left.savedAt || left.date || '')));
+  const hasDrafts = (savedDrafts || []).length > 0;
+  const resumeLabel = (savedDrafts || []).length > 1 ? 'Resume Drafts' : 'Resume Draft';
+  const resumeMeta = (savedDrafts || []).length > 1
+    ? `${savedDrafts.length} saved sessions`
+    : escapeHtml(savedDrafts[0]?.savedAt ? `Saved ${formatDisplayDate(savedDrafts[0].savedAt)}` : 'Continue previous count');
   return `
     <div class="stockTakeHero">
       <div class="stockTakeHeroIcon">${icon('clipboard')}</div>
@@ -362,6 +320,12 @@ function renderLaunchpad(savedDrafts = []) {
         Structure your counts by location, category, or specific item lists.
       </p>
       <div class="stockTakeHeroActions">
+        ${hasDrafts ? `
+          <button type="button" class="stockTakeHeroButton stockTakeHeroButton--resume" data-stocktake-resume-draft>
+            <strong>${escapeHtml(resumeLabel)}</strong>
+            <span>${resumeMeta}</span>
+          </button>
+        ` : ''}
         <button type="button" class="stockTakeHeroButton is-primary" data-stocktake-open-start>
           <strong>Start Session</strong>
           <span>Choose Template</span>
@@ -375,77 +339,11 @@ function renderLaunchpad(savedDrafts = []) {
           <span>Scan Multiple</span>
         </button>
       </div>
-
-      <section class="stockTakeActiveSessions" aria-labelledby="stocktake-active-sessions-title">
-        <header class="stockTakeActiveSessionsHead">
-          <div>
-            <span>Saved Drafts</span>
-            <h3 id="stocktake-active-sessions-title">Active Sessions</h3>
-          </div>
-          <strong>${activeSessions.length} ${activeSessions.length === 1 ? 'session' : 'sessions'}</strong>
-        </header>
-        <div class="stockTakeActiveSessionsTableWrap">
-          <table class="stockTakeActiveSessionsTable">
-            <thead>
-              <tr>
-                <th scope="col">Session Template</th>
-                <th scope="col">Date</th>
-                <th scope="col">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${activeSessions.length ? activeSessions.map((draft) => {
-                const itemCount = Array.isArray(draft.items) ? draft.items.length : 0;
-                const sessionName = draft.templateName || draft.locationName || 'Saved Count';
-                const sessionType = draft.sessionMode === 'template' ? 'Template Session' : 'Quick Count';
-                const dateLabel = formatDisplayDate(draft.date || draft.savedAt || '') || 'Date not set';
-                const savedLabel = draft.savedAt ? `Saved ${formatDisplayDate(draft.savedAt)}` : 'Saved draft';
-                return `
-                  <tr>
-                    <td data-label="Session Template">
-                      <strong>${escapeHtml(sessionName)}</strong>
-                      <span>${escapeHtml(sessionType)} · ${escapeHtml(draft.locationName || 'Main Store')} · ${itemCount} ${itemCount === 1 ? 'line' : 'lines'}</span>
-                    </td>
-                    <td data-label="Date">
-                      <strong>${escapeHtml(dateLabel)}</strong>
-                      <span>${escapeHtml(savedLabel)}</span>
-                    </td>
-                    <td data-label="Actions">
-                      <div class="stockTakeActiveSessionActions">
-                        <button type="button" class="stockTakeActiveSessionAction stockTakeActiveSessionAction--resume" data-stocktake-resume-specific="${escapeAttribute(draft.id || '')}" ${draft.id ? '' : 'disabled'}>
-                          Resume
-                        </button>
-                        <button type="button" class="stockTakeActiveSessionAction stockTakeActiveSessionAction--discard" data-stocktake-discard-draft="${escapeAttribute(draft.id || '')}" ${draft.id ? '' : 'disabled'}>
-                          ${icon('trash')}
-                          <span>Discard</span>
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                `;
-              }).join('') : `
-                <tr class="stockTakeActiveSessionsEmptyRow">
-                  <td colspan="3">
-                    <div class="stockTakeActiveSessionsEmpty">
-                      <strong>No active sessions</strong>
-                      <span>Sessions saved as drafts will appear here immediately.</span>
-                    </div>
-                  </td>
-                </tr>
-              `}
-            </tbody>
-          </table>
-        </div>
-      </section>
     </div>
   `;
 }
 
-function renderActiveSession({ draft, filters, visibleItems, draftMap, locations = [], varianceTotal, actionStatus = '', actionError = '' }) {
-  const actionPending = ['saving', 'saving-draft'].includes(actionStatus);
-  const maxCustomUomColumns = Math.min(3, Math.max(0, ...visibleItems.map((item) => getUomConfigs(item).slice(0, 3).length)));
-  const customHeaders = Array.from({ length: maxCustomUomColumns }, (_, index) => `<th>Custom UOM ${index + 1} Count</th>`).join('');
-  const emptyColspan = 5 + maxCustomUomColumns;
+function renderActiveSession({ draft, filters, visibleItems, draftMap, locations = [], varianceTotal, actionStatus = '' }) {
   return `
     <div class="stockTakeSession">
       <section class="stockTakeSessionCard">
@@ -490,13 +388,12 @@ function renderActiveSession({ draft, filters, visibleItems, draftMap, locations
         </div>
 
         <div class="stockTakeSessionTableWrap" data-scroll-key="stocktake-session-table">
-          <table class="stockTakeTable stockTakeTable--uomColumns">
+          <table class="stockTakeTable">
             <thead>
               <tr>
                 <th>Item</th>
                 <th>System</th>
-                <th>Base Count</th>
-                ${customHeaders}
+                <th>Shelf Count</th>
                 <th>Variance</th>
                 <th>Impact</th>
               </tr>
@@ -506,11 +403,8 @@ function renderActiveSession({ draft, filters, visibleItems, draftMap, locations
                 const current = draftMap.get(String(item.id));
                 const system = getLocationStock(item, draft.locationId, locations);
                 const shelfCount = current?.shelfCount ?? '';
-                const currentUomCounts = getStockTakeLineUomCountValues(current, item);
                 const variance = current ? Number(current.variance || 0) : 0;
                 const impact = current ? Number(current.varianceImpactEx || 0) : 0;
-                const uomConfigs = getUomConfigs(item).slice(0, 3);
-                const baseVal = currentUomCounts.base ?? (current && Object.keys(currentUomCounts || {}).length === 0 ? shelfCount : '');
                 return `
                   <tr>
                     <td>
@@ -519,41 +413,47 @@ function renderActiveSession({ draft, filters, visibleItems, draftMap, locations
                     </td>
                     <td>${formatNumber(system)} ${escapeHtml(item.unit || '')}</td>
                     <td>
-                      <div class="stockTakeCountInput">
-                        <input
-                          type="text"
-                          inputmode="decimal"
-                          value="${escapeAttribute(String(baseVal))}"
-                          data-stocktake-count="${escapeAttribute(item.id)}"
-                          data-stocktake-uom="base"
-                          data-focus-key="stocktake-${escapeAttribute(item.id)}-base"
-                          placeholder="0"
-                        />
-                        <em>${escapeHtml(String(item.unit || 'ea').toLowerCase())}</em>
+                      <div class="stockTakeCountGroup" style="display: flex; flex-direction: column; gap: 6px;">
+                        ${(() => {
+                          const uomConfigs = getUomConfigs(item).slice(0, 3);
+                          const baseVal = current?.uomCounts?.['base'] ?? (current && Object.keys(current.uomCounts || {}).length === 0 ? shelfCount : '');
+                          let html = `
+                            <div class="stockTakeCountInput">
+                              <input
+                                type="text"
+                                inputmode="decimal"
+                                value="${escapeAttribute(String(baseVal))}"
+                                data-stocktake-count="${escapeAttribute(item.id)}"
+                                data-stocktake-uom="base"
+                                data-focus-key="stocktake-${escapeAttribute(item.id)}-base"
+                                placeholder="0"
+                              />
+                              <em>${escapeHtml(String(item.unit || 'ea').toLowerCase())}</em>
+                            </div>
+                          `;
+                          uomConfigs.forEach((cfg) => {
+                            const key = String(cfg.customUom || '').trim();
+                            if (!key) return;
+                            const customVal = current?.uomCounts?.[key] ?? '';
+                            html += `
+                              <div class="stockTakeCountInput" style="margin-top: 4px;">
+                                <input
+                                  type="text"
+                                  inputmode="decimal"
+                                  value="${escapeAttribute(String(customVal))}"
+                                  data-stocktake-count="${escapeAttribute(item.id)}"
+                                  data-stocktake-uom="${escapeAttribute(key)}"
+                                  data-focus-key="stocktake-${escapeAttribute(item.id)}-${escapeAttribute(key)}"
+                                  placeholder="0"
+                                />
+                                <em>${escapeHtml(key.toLowerCase())}</em>
+                              </div>
+                            `;
+                          });
+                          return html;
+                        })()}
                       </div>
                     </td>
-                    ${Array.from({ length: maxCustomUomColumns }, (_, index) => {
-                      const cfg = uomConfigs[index];
-                      const key = String(cfg?.customUom || '').trim();
-                      if (!key) return '<td class="stockTakeTableDash">-</td>';
-                      const customVal = currentUomCounts[key] ?? '';
-                      return `
-                        <td>
-                          <div class="stockTakeCountInput">
-                            <input
-                              type="text"
-                              inputmode="decimal"
-                              value="${escapeAttribute(String(customVal))}"
-                              data-stocktake-count="${escapeAttribute(item.id)}"
-                              data-stocktake-uom="${escapeAttribute(key)}"
-                              data-focus-key="stocktake-${escapeAttribute(item.id)}-${escapeAttribute(key)}"
-                              placeholder="0"
-                            />
-                            <em>${escapeHtml(key.toLowerCase())}</em>
-                          </div>
-                        </td>
-                      `;
-                    }).join('')}
                     <td class="${variance < 0 ? 'is-negative' : variance > 0 ? 'is-positive' : ''}" data-stocktake-variance="${escapeAttribute(item.id)}">
                       ${current ? `${variance > 0 ? '+' : ''}${formatNumber(variance)}` : '-'}
                     </td>
@@ -562,7 +462,7 @@ function renderActiveSession({ draft, filters, visibleItems, draftMap, locations
                     </td>
                   </tr>
                 `;
-              }).join('') || `<tr><td colspan="${emptyColspan}" class="stockTakeTableEmpty">No stock items match this count scope.</td></tr>`}
+              }).join('') || '<tr><td colspan="5" class="stockTakeTableEmpty">No stock items match this count scope.</td></tr>'}
             </tbody>
           </table>
         </div>
@@ -573,17 +473,12 @@ function renderActiveSession({ draft, filters, visibleItems, draftMap, locations
             <div><span>Variance Value</span><strong data-stocktake-variance-total>${formatCurrency(varianceTotal)}</strong></div>
           </div>
           <div class="stockTakeSessionActions">
-            ${actionStatus === 'saving-draft' ? `
-              <p class="stockTakeSessionFeedback" role="status" aria-live="polite">Saving this draft and returning to Active Sessions...</p>
-            ` : actionError ? `
-              <p class="stockTakeSessionFeedback stockTakeSessionFeedback--error" role="alert">${escapeHtml(actionError)}</p>
-            ` : ''}
             ${draft.sessionMode === 'template' ? `
-              <button type="button" class="stockTakeGhost" data-stocktake-save-draft ${draft.locationId && !actionPending ? '' : 'disabled'}>
+              <button type="button" class="stockTakeGhost" data-stocktake-save-draft ${draft.locationId ? '' : 'disabled'}>
                 ${actionStatus === 'saving-draft' ? 'Saving Draft...' : 'Save Draft'}
               </button>
             ` : ''}
-            <button type="button" class="stockTakePrimary" data-stocktake-save ${(draft.items || []).length && !actionPending ? '' : 'disabled'}>
+            <button type="button" class="stockTakePrimary" data-stocktake-save ${(draft.items || []).length && actionStatus !== 'saving' ? '' : 'disabled'}>
               ${actionStatus === 'saving' ? 'Committing...' : 'Commit Stock Take'}
             </button>
           </div>
@@ -593,7 +488,7 @@ function renderActiveSession({ draft, filters, visibleItems, draftMap, locations
   `;
 }
 
-function renderOverlay({ stockTake, filters, scanCount, sessionSetup, templateDraft, siteOptions, locationOptions, stockLocations, templateSummary, templateSelectionOptions }) {
+function renderOverlay({ stockTake, filters, scanCount, sessionSetup, templateDraft, siteOptions, locationOptions, stockLocations, templateSummary, templateSelectionOptions, savedDrafts = [] }) {
   if (!filters.overlay) return '';
   if (filters.overlay === 'scan-count') {
     return renderScanCountOverlay(scanCount);
@@ -660,93 +555,6 @@ function renderOverlay({ stockTake, filters, scanCount, sessionSetup, templateDr
           <footer class="stockTakeOverlayFooter stockTakeOverlayFooter--compact">
             <button type="button" class="stockTakeGhost" data-stocktake-overlay-close>Cancel</button>
             <button type="button" class="stockTakePrimary" data-stocktake-start-session-confirm>Begin Count</button>
-          </footer>
-        </section>
-      </div>
-    `;
-  }
-
-  if (filters.overlay === 'count-template-location') {
-    const exportFormat = ['csv', 'xlsx'].includes(String(filters.exportFormat || '').toLowerCase()) ? String(filters.exportFormat).toLowerCase() : 'xlsx';
-    const exportLocationOptions = (stockLocations.length ? stockLocations : [{ id: 'main', name: 'Main Store' }]).map((location) => ({
-      value: String(location.id || 'main'),
-      label: String(location.name || location.displayName || location.locationName || 'Main Store'),
-      meta: ''
-    }));
-    return `
-      <div class="stockTakeOverlayBackdrop">
-        <section class="stockTakeOverlayCard stockTakeOverlayCard--compact">
-          <header class="stockTakeOverlayHead">
-            <div>
-              <p>Stock Take Excel</p>
-              <h3>Choose Count Location</h3>
-            </div>
-            <button type="button" class="stockTakeOverlayClose" data-stocktake-overlay-close aria-label="Close">${icon('x')}</button>
-          </header>
-          <div class="stockTakeOverlayBody stockTakeOverlayBody--compact">
-            <p class="stockTakeOverlayHint">Search and select the location you want to count. The exported file will only include this location.</p>
-            <label class="stockTakeField">
-              ${renderFieldHelpLabel('Count Location', 'Choose the location this stock count sheet is for.')}
-              ${renderOverlayDropdown({
-                id: 'stocktake-export-location',
-                action: 'export:locationId',
-                selectedValue: filters.exportLocationId || '',
-                fallbackLabel: 'Search and select location',
-                options: exportLocationOptions,
-                openDropdown: filters.openDropdown
-              })}
-            </label>
-          </div>
-          <footer class="stockTakeOverlayFooter stockTakeOverlayFooter--compact">
-            <button type="button" class="stockTakeGhost" data-stocktake-overlay-close>Cancel</button>
-            <button type="button" class="stockTakePrimary" data-stocktake-count-template-confirm data-stocktake-count-template-format="${escapeAttribute(exportFormat)}" data-stocktake-count-template-location="${escapeAttribute(filters.exportLocationId || '')}" ${(filters.exportLocationId || '') ? '' : 'disabled'}>Download ${escapeHtml(exportFormat.toUpperCase())}</button>
-          </footer>
-        </section>
-      </div>
-    `;
-  }
-
-
-  if (filters.overlay === 'template-export-location') {
-    const template = (stockTake.templates || []).find((entry) => String(entry.id) === String(filters.exportTemplateId || ''));
-    const linkedLocationIds = getTemplateLocationIds(template);
-    const exportLocationOptions = (linkedLocationIds.length ? linkedLocationIds : (stockLocations || []).map((location) => location.id))
-      .map((locationId) => {
-        const location = (stockLocations || []).find((entry) => String(entry.id || entry.locationId || '') === String(locationId));
-        return {
-          value: String(locationId || ''),
-          label: String(location?.name || location?.displayName || location?.locationName || locationId || 'Location'),
-          meta: ''
-        };
-      })
-      .filter((option) => option.value);
-    return `
-      <div class="stockTakeOverlayBackdrop">
-        <section class="stockTakeOverlayCard stockTakeOverlayCard--compact">
-          <header class="stockTakeOverlayHead">
-            <div>
-              <p>Stock Count PDF</p>
-              <h3>Choose Template Location</h3>
-            </div>
-            <button type="button" class="stockTakeOverlayClose" data-stocktake-overlay-close aria-label="Close">${icon('x')}</button>
-          </header>
-          <div class="stockTakeOverlayBody stockTakeOverlayBody--compact">
-            <p class="stockTakeOverlayHint">This template is linked to multiple locations. Choose the location for this PDF count sheet.</p>
-            <label class="stockTakeField">
-              ${renderFieldHelpLabel('Template Location', 'Choose the location this PDF stock count sheet should be generated for.')}
-              ${renderOverlayDropdown({
-                id: 'stocktake-template-export-location',
-                action: 'export:locationId',
-                selectedValue: filters.exportLocationId || '',
-                fallbackLabel: 'Search and select location',
-                options: exportLocationOptions,
-                openDropdown: filters.openDropdown
-              })}
-            </label>
-          </div>
-          <footer class="stockTakeOverlayFooter stockTakeOverlayFooter--compact">
-            <button type="button" class="stockTakeGhost" data-stocktake-overlay-close>Cancel</button>
-            <button type="button" class="stockTakePrimary" data-stocktake-template-export-confirm data-stocktake-template-export-id="${escapeAttribute(filters.exportTemplateId || '')}" data-stocktake-template-export-location="${escapeAttribute(filters.exportLocationId || '')}" ${(filters.exportLocationId || '') ? '' : 'disabled'}>Download PDF</button>
           </footer>
         </section>
       </div>
@@ -1010,6 +818,46 @@ function renderOverlay({ stockTake, filters, scanCount, sessionSetup, templateDr
           <footer class="stockTakeOverlayFooter stockTakeOverlayFooter--drawer">
             <button type="button" class="stockTakeGhost" data-stocktake-template-editor-back>Back</button>
             <button type="button" class="stockTakePrimary" data-stocktake-template-save>${templateDraft.id ? 'Update Template' : 'Save Template'}</button>
+          </footer>
+        </section>
+      </div>
+    `;
+  }
+
+  if (filters.overlay === 'resume-drafts') {
+    return `
+      <div class="stockTakeOverlayBackdrop">
+        <section class="stockTakeOverlayCard stockTakeOverlayCard--compact">
+          <header class="stockTakeOverlayHead">
+            <div>
+              <p>Stock Take</p>
+              <h3>Resume Saved Draft</h3>
+            </div>
+            <button type="button" class="stockTakeOverlayClose" data-stocktake-overlay-close aria-label="Close">${icon('x')}</button>
+          </header>
+          <div class="stockTakeOverlayBody">
+            <div class="stockTakeTemplateList">
+              ${(savedDrafts || []).map((draft) => `
+                <article class="stockTakeTemplateCard stockTakeTemplateCard--draft">
+                  <div>
+                    <strong>${escapeHtml(draft.templateName || draft.locationName || 'Saved Count')}</strong>
+                    <span>${escapeHtml(formatDisplayDate(draft.date || draft.savedAt || ''))} · ${(draft.items || []).length} ${(draft.items || []).length === 1 ? 'line' : 'lines'}</span>
+                  </div>
+                  <div class="stockTakeTemplateActions stockTakeTemplateActions--draft">
+                    <span class="stockTakeDraftMeta">${escapeHtml(draft.savedAt ? `Saved ${formatDisplayDate(draft.savedAt)}` : 'Resume')}</span>
+                    <button type="button" class="stockTakeGhost stockTakeGhost--small" data-stocktake-resume-specific="${escapeAttribute(draft.id || '')}">
+                      Resume
+                    </button>
+                    <button type="button" class="stockTakeMiniButton stockTakeMiniButton--danger" data-stocktake-discard-draft="${escapeAttribute(draft.id || '')}" aria-label="Discard draft">
+                      ${icon('trash')}
+                    </button>
+                  </div>
+                </article>
+              `).join('') || '<div class="stockTakeEmptyState">No saved drafts available.</div>'}
+            </div>
+          </div>
+          <footer class="stockTakeOverlayFooter stockTakeOverlayFooter--compact">
+            <button type="button" class="stockTakeGhost" data-stocktake-overlay-close>Close</button>
           </footer>
         </section>
       </div>
@@ -1288,8 +1136,7 @@ function normalizeScanUomConfigurations(value = []) {
       baseUom: String(entry.baseUom || entry.base_uom || entry.baseUnit || '').trim(),
       customUom: String(entry.customUom || entry.custom_uom || entry.customUnit || entry.orderingUom || '').trim(),
       ratio: Number(entry.ratio ?? entry.conversionRatio ?? entry.unitsPerCustomUnit ?? 0) || 0,
-      barcode: String(entry.barcode || entry.customBarcode || entry.customUomBarcode || '').trim(),
-      isDefaultOrdering: ['true', '1', 'yes', 'on'].includes(String(entry.isDefaultOrdering ?? entry.defaultOrdering ?? entry.is_default_ordering ?? entry.defaultOrderUom ?? '').toLowerCase()) || entry.isDefaultOrdering === true || entry.defaultOrdering === true
+      barcode: String(entry.barcode || entry.customBarcode || entry.customUomBarcode || '').trim()
     }))
     .filter((entry) => entry.customUom && entry.ratio > 0);
 }
@@ -1310,21 +1157,17 @@ function renderOverlayDropdown({ id, action, selectedValue, fallbackLabel, optio
         ${icon('chevronDown')}
       </button>
       <div class="stockTakeDropdownMenu">
-        <input type="search" class="stockTakeDropdownSearch" data-stocktake-dropdown-search placeholder="Search..." />
-        <div class="stockTakeDropdownOptions">
-          ${options.map((option) => `
-            <button
-              type="button"
-              data-stocktake-option
-              data-stocktake-option-action="${escapeAttribute(action)}"
-              data-stocktake-option-value="${escapeAttribute(option.value)}"
-              class="${String(option.value) === String(selectedValue) ? 'is-active' : ''}"
-            >
-              <span>${escapeHtml(option.label)}</span>
-              ${option.meta ? `<small>${escapeHtml(option.meta)}</small>` : ''}
-            </button>
-          `).join('')}
-        </div>
+        ${options.map((option) => `
+          <button
+            type="button"
+            data-stocktake-option
+            data-stocktake-option-action="${escapeAttribute(action)}"
+            data-stocktake-option-value="${escapeAttribute(option.value)}"
+            class="${String(option.value) === String(selectedValue) ? 'is-active' : ''}"
+          >
+            ${escapeHtml(option.label)}
+          </button>
+        `).join('')}
       </div>
     </div>
   `;
@@ -1386,7 +1229,7 @@ function toStockTakeLocationOption(location = {}, sites = []) {
   const siteName = location.siteName || site?.name || '';
   return {
     value: location.id,
-    label: location.displayName || location.name || location.locationName || location.id,
+    label: location.displayName || (siteName ? `${siteName} / ${location.name || location.id}` : (location.name || location.id)),
     siteId: String(location.siteId || ''),
     siteName
   };

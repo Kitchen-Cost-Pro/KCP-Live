@@ -81,27 +81,26 @@ export function renderManufacturing({ state, onManufacturingFilterChange, onManu
         ${activeSection === 'production'
           ? renderProductionEvent(manufacturing, productionDraft, filters)
           : `
-            <div class="mfgFilterStack">
-              <div class="mfgFilterBar mfgFilterBar--primary">
-                <div class="mfgFilterBar__search">
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-                  <input
-                    type="search"
-                    value="${escapeAttribute(filters.query || '')}"
-                    placeholder="Search items..."
-                    data-mfg-search
-                  />
-                </div>
-                <select class="mfgFilterBar__select" data-mfg-category-select>
-                  <option value="">All Categories</option>
-                  ${allCategories.map((cat) => `<option value="${escapeAttribute(cat)}" ${categoryFilter === cat ? 'selected' : ''}>${escapeHtml(cat)}</option>`).join('')}
-                </select>
-                ${(filters.query || filters.type || categoryFilter) ? `<button type="button" class="mfgFilterBar__clear" data-mfg-clear-filters>Clear</button>` : ''}
+            <div class="mfgFilterBar">
+              <div class="mfgFilterBar__search">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                <input
+                  type="search"
+                  value="${escapeAttribute(filters.query || '')}"
+                  placeholder="Search items..."
+                  data-mfg-search
+                />
               </div>
-              <div class="mfgTypeSegment mfgTypeSegment--below" role="group" aria-label="Filter manufacturing item type">
-                ${renderTypeFilterButton('manufactured', 'Manufacturing', filters.type || '')}
-                ${renderTypeFilterButton('sub_recipe', 'Sub Recipe', filters.type || '')}
-              </div>
+              <select class="mfgFilterBar__select" data-mfg-type-select>
+                <option value="">All Types</option>
+                <option value="manufactured" ${filters.type === 'manufactured' ? 'selected' : ''}>Prep / Manufactured</option>
+                <option value="sub_recipe" ${filters.type === 'sub_recipe' ? 'selected' : ''}>Sub-Recipes</option>
+              </select>
+              <select class="mfgFilterBar__select" data-mfg-category-select>
+                <option value="">All Categories</option>
+                ${allCategories.map((cat) => `<option value="${escapeAttribute(cat)}" ${categoryFilter === cat ? 'selected' : ''}>${escapeHtml(cat)}</option>`).join('')}
+              </select>
+              ${(filters.query || filters.type || categoryFilter) ? `<button type="button" class="mfgFilterBar__clear" data-mfg-clear-filters>Clear</button>` : ''}
             </div>
 
             <div class="mfgSummaryRow">
@@ -205,10 +204,10 @@ function bindManufacturingEvents(view, onManufacturingFilterChange, onManufactur
     onManufacturingFilterChange?.({ query: event.currentTarget.value, page: 1 });
   });
   view.querySelectorAll('[data-mfg-type-filter]').forEach((button) => {
-    button.addEventListener('click', () => {
-      const nextType = button.classList.contains('is-selected') ? '' : (button.dataset.mfgTypeFilter || '');
-      onManufacturingFilterChange?.({ type: nextType, page: 1 });
-    });
+    button.addEventListener('click', () => onManufacturingFilterChange?.({ type: button.dataset.mfgTypeFilter || '' }));
+  });
+  view.querySelector('[data-mfg-type-select]')?.addEventListener('change', (event) => {
+    onManufacturingFilterChange?.({ type: event.currentTarget.value, page: 1 });
   });
   view.querySelector('[data-mfg-category-select]')?.addEventListener('change', (event) => {
     onManufacturingFilterChange?.({ categoryFilter: event.currentTarget.value, page: 1 });

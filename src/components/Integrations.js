@@ -8,7 +8,8 @@ import {
   startGmailConnection,
   subscribeGmailIntegration,
   subscribeYocoIntegration,
-  syncYocoCatalogue
+  syncYocoCatalogue,
+  syncYocoSales
 } from '../services/integrationService.js';
 
 const INTEGRATIONS = [
@@ -70,7 +71,6 @@ const gmailDrawerState = {
 export function renderIntegrations({ state } = {}) {
   const workspaceName = state?.workspace?.siteName || 'Workspace';
   const workspaceId = state?.workspace?.id || '';
-  const canDisconnectYoco = state?.access?.currentIsKcpSuperUser === true;
   const cachedYocoStatus = getCachedYocoStatus(workspaceId);
   const cachedGmailStatus = getCachedGmailStatus(workspaceId);
   const integrations = getRenderedIntegrations(cachedYocoStatus, cachedGmailStatus);
@@ -129,7 +129,7 @@ export function renderIntegrations({ state } = {}) {
         <span>Clear the search or choose a broader category.</span>
       </div>
 
-      ${renderYocoModal({ canDisconnectYoco })}
+      ${renderYocoModal()}
       ${renderGmailModal()}
     </div>
   `;
@@ -233,13 +233,21 @@ function bindIntegrationEvents(view) {
       const result = await connectYocoIntegration(workspaceId, apiKey);
       if (input) input.value = '';
       setYocoSummary(view, result);
-      setYocoModalStatus(view, 'Yoco connected. Products and locations were synced; historical sales were not imported. New paid sales will deduct after Go Live.', 'success');
+      setYocoModalStatus(view, 'Yoco connected. Run Sync Sales when you need historical orders.', 'success');
+    });
+  });
+
+  view.querySelector('[data-yoco-sync-sales]')?.addEventListener('click', async () => {
+    await runYocoAction(view, 'Syncing Yoco sales...', async () => {
+      const result = await syncYocoSales(view.dataset.workspaceId || '');
+      setYocoSummary(view, result);
+      setYocoModalStatus(view, 'Yoco sales sync complete.', 'success');
     });
   });
 
   view.querySelector('[data-yoco-sync-catalogue]')?.addEventListener('click', async () => {
     await runYocoAction(view, 'Syncing Yoco catalogue...', async () => {
-      const result = await syncYocoCatalogue(view.dataset.workspaceId || '', { resetWebhook: true });
+      const result = await syncYocoCatalogue(view.dataset.workspaceId || '');
       setYocoSummary(view, result);
       setYocoModalStatus(view, 'Yoco catalogue sync complete.', 'success');
     });
@@ -391,7 +399,7 @@ function renderIntegrationCard(item) {
   `;
 }
 
-function renderYocoModal({ canDisconnectYoco = false } = {}) {
+function renderYocoModal() {
   const noticeTone = yocoDrawerState.tone ? ` data-tone="${escapeAttribute(yocoDrawerState.tone)}"` : '';
   return `
     <div class="yocoModalBackdrop" data-yoco-modal ${yocoDrawerState.open ? '' : 'hidden'}>
@@ -445,7 +453,7 @@ function renderYocoModal({ canDisconnectYoco = false } = {}) {
             </article>
             <article>
               <span>Product Modifiers</span>
-              <strong data-yoco-modifier-count>0 modifier options</strong>
+              <strong data-yoco-modifier-count>0 modifiers</strong>
             </article>
             <article>
               <span>Locations</span>
@@ -463,19 +471,18 @@ function renderYocoModal({ canDisconnectYoco = false } = {}) {
               <strong>Run a focused Yoco sync when required.</strong>
             </div>
             <div class="yocoActionRow">
+              <button type="button" class="yocoActionButton" data-yoco-sync-sales>
+                <span class="yocoActionIcon">${icon('receiptText')}</span>
+                <span><strong>Sync Sales</strong><small>Orders and refunds</small></span>
+              </button>
               <button type="button" class="yocoActionButton" data-yoco-sync-catalogue>
                 <span class="yocoActionIcon">${icon('boxes')}</span>
                 <span><strong>Sync Catalogue</strong><small>Menu items and locations</small></span>
               </button>
-              ${canDisconnectYoco ? `
               <button type="button" class="yocoActionButton yocoActionButton--danger" data-yoco-disconnect>
                 <span class="yocoActionIcon">${icon('unlink')}</span>
-                <span><strong>Disconnect</strong><small>Super user action</small></span>
-              </button>` : `
-              <div class="yocoActionLock" title="Only a KCP super user can disconnect this integration.">
-                <span class="yocoActionIcon">${icon('lock')}</span>
-                <span><strong>Connection locked</strong><small>Contact a KCP super user to disconnect or replace the API key.</small></span>
-              </div>`}
+                <span><strong>Disconnect</strong><small>Pause Yoco access</small></span>
+              </button>
             </div>
           </section>
 
@@ -596,7 +603,7 @@ function updateYocoStatus(view, status = {}, options = {}) {
   setText(view, '[data-yoco-live-status]', statusText);
   setText(view, '[data-yoco-last-sync]', formatDateTime(status.lastSyncCompletedAt) || 'Not synced yet');
   setText(view, '[data-yoco-catalogue-count]', `${Number(status.catalogue?.itemsCount || 0)} items`);
-  setText(view, '[data-yoco-modifier-count]', `${Number(status.catalogue?.productModifiersCount || 0)} modifier options`);
+  setText(view, '[data-yoco-modifier-count]', `${Number(status.catalogue?.productModifiersCount || 0)} modifiers`);
   setText(view, '[data-yoco-location-count]', `${Number(status.locations?.count || 0)} locations`);
   setText(view, '[data-yoco-webhook-status]', status.webhook?.enabled ? 'Active' : 'Not active');
   updateYocoCardStatus(view, isActive ? 'Active' : 'Available');
@@ -817,7 +824,7 @@ async function runGmailAction(view, message, task, options = {}) {
 
 function setYocoBusy(view, busy) {
   yocoDrawerState.busy = busy;
-  view.querySelectorAll('[data-yoco-submit], [data-yoco-sync-catalogue], [data-yoco-disconnect]').forEach((button) => {
+  view.querySelectorAll('[data-yoco-submit], [data-yoco-sync-sales], [data-yoco-sync-catalogue], [data-yoco-disconnect]').forEach((button) => {
     button.disabled = busy;
   });
 }
@@ -868,10 +875,7 @@ function renderYocoSummaryEntries(result = {}) {
     ['Products imported', result.productsImported],
     ['Products matched', result.productsMatched],
     ['Modifier groups stored', result.modifierGroupsStored],
-    ['Modifier choices stored', result.modifierOptionsStored ?? result.productModifiersStored],
-    ['Product modifiers', result.productModifiersStored],
-    ['Option modifiers', result.optionModifiersStored],
-    ['Note modifiers', result.noteModifiersStored],
+    ['Product modifiers stored', result.productModifiersStored],
     ['Orders', result.ordersProcessed],
     ['Refunds', result.refundsProcessed],
     ['Missing recipes', result.missingRecipes],

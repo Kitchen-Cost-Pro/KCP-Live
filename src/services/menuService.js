@@ -1,8 +1,6 @@
 import { callCloudflareWorkspaceRoute } from './cloudflareApi.js';
 import { parseBarcodeValues } from '../utils/barcodes.js';
 import { getEffectiveRecipeLines, getRecipeStatus, RECIPE_STATUS } from './recipeStatus.js';
-import { fetchStock } from './stockService.js';
-import { fetchModifierNoteSuggestions } from './recipeService.js';
 
 export async function fetchMenuItems(workspaceId, options = {}) {
   const workspaceKey = requireWorkspace(workspaceId);
@@ -100,13 +98,11 @@ export function subscribeMenuCatalogue(workspaceId, { onSnapshot, onError } = {}
 
   const load = async () => {
     try {
-      const [productResponse, modifierResponse, locationResponse, yocoStatusResponse, stockResponse, noteResponse] = await Promise.all([
+      const [productResponse, modifierResponse, locationResponse, yocoStatusResponse] = await Promise.all([
         callCloudflareWorkspaceRoute(workspaceKey, 'products', { query: { limit: 500 } }),
         callCloudflareWorkspaceRoute(workspaceKey, 'yoco/modifier-recipes', { method: 'GET' }).catch(() => ({ items: [] })),
         callCloudflareWorkspaceRoute(workspaceKey, 'locations'),
-        callCloudflareWorkspaceRoute(workspaceKey, 'yoco/status', { method: 'GET' }).catch(() => null),
-        fetchStock(workspaceKey).catch(() => ({ items: [] })),
-        fetchModifierNoteSuggestions(workspaceKey).catch(() => ({ suggestions: [] }))
+        callCloudflareWorkspaceRoute(workspaceKey, 'yoco/status', { method: 'GET' }).catch(() => null)
       ]);
       if (closed) return;
       const items = sortMenuItems(dedupeMenuItems(filterMainMenuItems(filterActiveMenuItems(hydrateDerivedVariants((productResponse.products || productResponse.items || []).map(normalizeMenuItem))))));
@@ -117,9 +113,7 @@ export function subscribeMenuCatalogue(workspaceId, { onSnapshot, onError } = {}
         source: 'Live catalogue',
         items,
         modifierItems,
-        locations: normalizeLocations(locationResponse.locations || stockResponse.locations || []),
-        ingredients: stockResponse.items || [],
-        noteSuggestions: noteResponse.suggestions || [],
+        locations: normalizeLocations(locationResponse.locations || []),
         posIntegration,
         updatedAt: new Date().toISOString()
       });
@@ -287,9 +281,6 @@ function normalizeMenuModifier(item = {}) {
   const recipeCount = Number(item.recipeCount || item.manualRecipeCount || 0) || 0;
   const linkedRecipeCount = Number(item.linkedProductRecipeCount || 0) || 0;
   const modifierLinkStatus = String(item.modifierLinkStatus || '').toLowerCase();
-  const modifierKind = String(item.modifierKind || (item.isNoteModifier ? 'note' : yocoModifierVariantId ? 'product' : 'option')).trim().toLowerCase() || 'option';
-  const linkedItemIds = Array.isArray(item.linkedItemIds) ? item.linkedItemIds.map(String).filter(Boolean) : [];
-  const linkedItemNames = Array.isArray(item.linkedItemNames) ? item.linkedItemNames.map(String).filter(Boolean) : [];
   const isLinked = modifierLinkStatus === 'linked' ||
     linkedProductIds.length > 0 ||
     linkedProductNames.length > 0 ||
@@ -307,19 +298,13 @@ function normalizeMenuModifier(item = {}) {
     autoLinkedProductName,
     yocoModifierProductName,
     yocoModifierVariantId,
-    modifierKind,
-    isNoteModifier: modifierKind === 'note' || item.isNoteModifier === true,
-    noteSource: modifierKind === 'note' || item.noteSource === true,
-    linkedItemIds,
-    linkedItemNames,
-    linkedItemCount: Number(item.linkedItemCount ?? linkedItemIds.length) || 0,
     modifierLinkStatus: item.modifierLinkStatus || '',
     modifierLinkSource: item.modifierLinkSource || '',
     recipeSource: item.recipeSource || '',
     recipeCount,
     linkedProductRecipeCount: linkedRecipeCount,
-    status: item.stockRule?.actionType ? 'configured' : modifierKind,
-    statusLabel: item.stockRule?.actionType ? 'Configured' : modifierKind === 'note' ? 'Note modifier' : modifierKind === 'product' ? 'Product modifier' : 'Option modifier',
+    status: isLinked ? 'linked' : recipeCount ? 'manual' : 'unlinked',
+    statusLabel: isLinked ? 'Linked' : recipeCount ? 'Manual Recipe' : 'Unlinked',
     archived: item.archived === true || item.deleted === true || item.active === false || String(item.catalogueStatus || '').toLowerCase() === 'archived',
     deleted: item.deleted === true,
     active: item.active !== false,
