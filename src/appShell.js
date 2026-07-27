@@ -16,6 +16,10 @@ import { renderUserManagement } from './components/UserManagement.js';
 import { renderCustomRoles } from './components/CustomRoles.js';
 import { renderSettings } from './components/Settings.js';
 import { renderIntegrations } from './components/Integrations.js';
+import { renderReportingDashboard } from './modules/reporting/index.js';
+import { renderSchedulingPage } from './modules/reporting/scheduling/SchedulingPage.js';
+import { ACTION_PERMISSION_MAP, getAccessRenderRevision, hasPermission, hasSectionAccess, hasSectionDataPermission, isSuperUserRoleName } from './services/roleService.js';
+import { filterLocationsByAccess } from './services/locationAccess.js';
 import styles from './styles/appShell.module.css';
 
 const BROADCAST_DISMISSED_KEY = 'kcp:dismissed-broadcasts:v1';
@@ -23,8 +27,8 @@ const BROADCAST_DISMISSED_KEY = 'kcp:dismissed-broadcasts:v1';
 const moduleContracts = {
   dashboard: {
     title: 'Dashboard',
-    datasource: 'workspaces/{workspaceId}/data/dashboardMetrics and live inventory sources',
-    logic: 'High-level valuation, catalogue, low-stock, and theoretical GP indicators.'
+    datasource: 'Shared reporting engine: Operations, Sales Financial, and Stock Control',
+    logic: 'Live inventory overview derived from reporting-engine outputs only.'
   },
   products: {
     title: 'Menu Catalogue',
@@ -86,10 +90,15 @@ const moduleContracts = {
     datasource: 'workspaces/{workspaceId}/data/logs_mfg',
     logic: 'Sub-recipe costing and prep batch production with ingredient drawdown and yield loss.'
   },
-  'sales-sync': {
-    title: 'Sales Sync',
-    datasource: 'workspaces/{workspaceId}/data/logs_sales and processedSalesSignatures',
-    logic: 'Deduplicated sales import events for stock depletion.'
+  reporting: {
+    title: 'Reporting',
+    datasource: '/api/workspaces/{workspaceId}/reports/detailed-activity via the shared reporting module',
+    logic: 'Reusable reporting shell with shared calculations, warnings, filters, exports, report registry, and stock ledger mapper.'
+  },
+  'reporting-scheduling': {
+    title: 'Reporting Scheduling',
+    datasource: '/api/workspaces/{workspaceId}/report-schedules and report-saved-views',
+    logic: 'Central saved-view, schedule, subscription, export, and email management for existing reports.'
   },
   integrations: {
     title: 'Integrations',
@@ -130,8 +139,6 @@ export function renderAuthenticatedApp({
   onWorkspaceSelect,
   onAutoLoginToggle,
   onThemeToggle,
-  onDashboardRangeChange,
-  onDashboardRefresh,
   onMenuFilterChange,
   onMenuAction,
   onRecipeFilterChange,
@@ -184,14 +191,15 @@ export function renderAuthenticatedApp({
   const main = document.createElement('main');
   main.className = styles.mainPane;
   main.dataset.appMain = '';
+  main.dataset.activeModule = state.route?.active || 'dashboard';
+  main.dataset.workspaceId = String(state.workspace?.id || '');
+  main.dataset.accessRevision = getAccessRenderRevision(state.access);
   main.dataset.scrollKey = 'app-main';
   main.appendChild(renderActiveSection({
     state,
     onNavigate,
     onThemeToggle,
-    onDashboardRangeChange,
-    onDashboardRefresh,
-    onMenuFilterChange,
+        onMenuFilterChange,
     onMenuAction,
     onRecipeFilterChange,
     onRecipeAction,
@@ -223,7 +231,25 @@ export function renderAuthenticatedApp({
 
   const toast = renderShellToast(state);
   shell.append(navigation, main);
-  if (toast) shell.appendChild(toast);
+  if (toast) {
+    toast.querySelector('[data-app-toast-close]')?.addEventListener('click', () => dismissActiveSectionToast(state, {
+      onMenuAction,
+      onRecipeAction,
+      onStockAction,
+      onSupplierAction,
+      onPurchaseOrderAction,
+      onGrvAction,
+      onCreditNoteAction,
+      onAdjustmentAction,
+      onTransferAction,
+      onStockTakeAction,
+      onLocationAction,
+      onManufacturingAction,
+      onUserManagementAction,
+      onRoleManagementAction
+    }));
+    shell.appendChild(toast);
+  }
 
   const lockOverlay = renderWorkspaceLockOverlay(state);
   if (lockOverlay) shell.appendChild(lockOverlay);
@@ -270,8 +296,34 @@ function renderShellToast(state = {}) {
   const node = document.createElement('div');
   node.className = `${styles.appShellToast} ${styles[`appShellToast_${type}`] || ''}`;
   node.setAttribute('role', type === 'error' ? 'alert' : 'status');
-  node.textContent = toast.message;
+  node.innerHTML = `
+    <span class="${styles.appShellToastMessage}"></span>
+    <button type="button" class="${styles.appShellToastClose}" data-app-toast-close aria-label="Dismiss notification">×</button>
+  `;
+  const message = node.querySelector(`.${styles.appShellToastMessage}`);
+  if (message) message.textContent = toast.message;
   return node;
+}
+
+function dismissActiveSectionToast(state = {}, handlers = {}) {
+  const active = state.route?.active;
+  const map = {
+    products: handlers.onMenuAction,
+    recipes: handlers.onRecipeAction,
+    ingredients: handlers.onStockAction,
+    suppliers: handlers.onSupplierAction,
+    'purchase-orders': handlers.onPurchaseOrderAction,
+    grv: handlers.onGrvAction,
+    'credit-note': handlers.onCreditNoteAction,
+    adjustments: handlers.onAdjustmentAction,
+    transfers: handlers.onTransferAction,
+    'stock-count': handlers.onStockTakeAction,
+    locations: handlers.onLocationAction,
+    'mfg-products': handlers.onManufacturingAction,
+    'user-management': handlers.onUserManagementAction,
+    'custom-roles': handlers.onRoleManagementAction
+  };
+  map[active]?.onDismissToast?.();
 }
 
 function getActiveSectionToast(state = {}) {
@@ -441,12 +493,20 @@ function dismissBroadcastItems(items = [], banner) {
   window.setTimeout(() => banner?.remove(), 220);
 }
 
+function readReportingDeepLinkReportId() {
+  if (typeof window === 'undefined') return '';
+  try {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('route') === 'reporting' ? String(params.get('report') || '').trim() : '';
+  } catch {
+    return '';
+  }
+}
+
 function renderActiveSection({
   state,
   onNavigate,
   onThemeToggle,
-  onDashboardRangeChange,
-  onDashboardRefresh,
   onMenuFilterChange,
   onMenuAction,
   onRecipeFilterChange,
@@ -479,27 +539,32 @@ function renderActiveSection({
   const activeSection = state.route?.active || 'dashboard';
 
   if (activeSection === 'dashboard') {
-    return renderDashboard({ state, onThemeToggle, onDashboardRangeChange, onDashboardRefresh, onNavigate });
+    return renderDashboard({
+      state,
+      onNavigate,
+      onStockFilterChange,
+      onThemeToggle
+    });
   }
 
   if (activeSection === 'products') {
-    return renderMenuCatalogue({ state, onFilterChange: onMenuFilterChange, onMenuAction });
+    return renderSectionWithDataPermissions('products', state, restrictSectionDataActions('products', state, onMenuAction), (actions) => renderMenuCatalogue({ state, onFilterChange: onMenuFilterChange, onMenuAction: actions }));
   }
 
   if (activeSection === 'recipes') {
-    return renderRecipes({ state, onRecipeFilterChange, onRecipeAction });
+    return renderSectionWithDataPermissions('recipes', state, restrictSectionDataActions('recipes', state, onRecipeAction), (actions) => renderRecipes({ state, onRecipeFilterChange, onRecipeAction: actions }));
   }
 
   if (activeSection === 'ingredients') {
-    return renderStockItems({ state, onStockFilterChange, onStockAction });
+    return renderSectionWithDataPermissions('ingredients', state, restrictSectionDataActions('ingredients', state, onStockAction), (actions) => renderStockItems({ state, onStockFilterChange, onStockAction: actions }));
   }
 
   if (activeSection === 'suppliers') {
-    return renderSuppliers({ state, onSupplierFilterChange, onSupplierAction });
+    return renderSectionWithDataPermissions('suppliers', state, restrictSectionDataActions('suppliers', state, onSupplierAction), (actions) => renderSuppliers({ state, onSupplierFilterChange, onSupplierAction: actions }));
   }
 
   if (activeSection === 'purchase-orders') {
-    return renderPurchaseOrders({ state, onPurchaseOrderFilterChange, onPurchaseOrderAction });
+    return renderSectionWithDataPermissions('purchase-orders', state, restrictSectionDataActions('purchase-orders', state, onPurchaseOrderAction), (actions) => renderPurchaseOrders({ state, onPurchaseOrderFilterChange, onPurchaseOrderAction: actions }));
   }
 
   if (activeSection === 'grv') {
@@ -515,11 +580,11 @@ function renderActiveSection({
   }
 
   if (activeSection === 'transfers') {
-    return renderTransfers({ state, onTransferFilterChange, onTransferAction });
+    return renderSectionWithDataPermissions('transfers', state, restrictSectionDataActions('transfers', state, onTransferAction), (actions) => renderTransfers({ state, onTransferFilterChange, onTransferAction: actions }));
   }
 
   if (activeSection === 'stock-count') {
-    return renderStockTake({ state, onStockTakeFilterChange, onStockTakeAction });
+    return renderSectionWithDataPermissions('stock-count', state, restrictSectionDataActions('stock-count', state, onStockTakeAction), (actions) => renderStockTake({ state, onStockTakeFilterChange, onStockTakeAction: actions }));
   }
 
   if (activeSection === 'locations') {
@@ -527,7 +592,71 @@ function renderActiveSection({
   }
 
   if (activeSection === 'mfg-products') {
-    return renderManufacturing({ state, onManufacturingFilterChange, onManufacturingAction });
+    return renderSectionWithDataPermissions('mfg-products', state, restrictSectionDataActions('mfg-products', state, onManufacturingAction), (actions) => renderManufacturing({ state, onManufacturingFilterChange, onManufacturingAction: actions }));
+  }
+
+  if (activeSection === 'reporting') {
+    const role = state.access?.currentRole || '';
+    const customRoles = state.access?.customRoles || [];
+    const isSuper = state.access?.currentIsSuperUser === true || state.access?.currentIsKcpSuperUser === true || isSuperUserRoleName(role);
+    return renderReportingDashboard({
+      state,
+      workspaceId: state.workspace?.id || '',
+      // Normal navigation clears stale report parameters and opens the directory. A deliberate
+      // emailed/deep report link is still honoured on the initial reporting route.
+      initialReportId: readReportingDeepLinkReportId(),
+      services: {
+        reportingPermissions: {
+          canExportReports: isSuper || hasSectionDataPermission('reporting', 'export', role, customRoles),
+          locations: filterLocationsByAccess(state.access?.locations || [], state.access || {}),
+          canSavePersonalViews: true,
+          canSaveWorkspaceViews: isSuper || hasPermission(ACTION_PERMISSION_MAP.saveWorkspaceReportViews, role, customRoles)
+        },
+        reportingActions: {
+          openRecipe: (payload = {}) => onMenuAction?.onOpenRecipe?.({ id: payload.menuItemId || payload.itemId || '', itemId: payload.menuItemId || payload.itemId || '', name: payload.menuItemName || payload.itemName || '' }),
+          createPurchaseOrder: (payload = {}) => onPurchaseOrderAction?.onCreateFromLowStock?.(payload),
+          openStockItem: (payload = {}) => {
+            const target = payload.itemName || payload.itemId || '';
+            onStockFilterChange?.({ query: target });
+            onNavigate?.('ingredients');
+          },
+          openMenuItem: (payload = {}) => {
+            const target = payload.itemName || payload.itemId || '';
+            onMenuFilterChange?.({ query: target });
+            onNavigate?.('products');
+          },
+          openSuppliers: (payload = {}) => {
+            onSupplierFilterChange?.({ query: payload.supplierName || payload.itemName || '' });
+            onNavigate?.('suppliers');
+          }
+        }
+      },
+      onRefresh: () => {}
+    });
+  }
+
+
+  if (activeSection === 'reporting-scheduling') {
+    const role = state.access?.currentRole || '';
+    const customRoles = state.access?.customRoles || [];
+    const isSuper = state.access?.currentIsSuperUser === true || state.access?.currentIsKcpSuperUser === true || isSuperUserRoleName(role);
+    const canSchedule = isSuper || hasPermission(ACTION_PERMISSION_MAP.scheduleReports, role, customRoles);
+    const canEmail = isSuper || hasPermission(ACTION_PERMISSION_MAP.emailReports, role, customRoles);
+    const canManageAll = isSuper || hasPermission(ACTION_PERMISSION_MAP.manageReportSchedules, role, customRoles);
+    const canDelete = isSuper || hasPermission(ACTION_PERMISSION_MAP.deleteReportSchedules, role, customRoles);
+    return renderSchedulingPage({
+      workspaceId: state.workspace?.id || '',
+      state,
+      canManage: canSchedule && canEmail,
+      permissions: {
+        canSchedule,
+        canEmail,
+        canManageAll,
+        canDelete,
+        accessStatus: state.access?.status || 'idle',
+        accessError: state.access?.error || ''
+      }
+    });
   }
 
   if (activeSection === 'user-management') {
@@ -543,7 +672,7 @@ function renderActiveSection({
   }
 
   if (activeSection === 'settings' || activeSection === 'settings-business' || activeSection === 'settings-customization') {
-    return renderSettings({ state, onSettingsAction });
+    return renderSectionWithDataPermissions('settings', state, restrictSectionDataActions('settings', state, onSettingsAction), (actions) => renderSettings({ state, onSettingsAction: actions }));
   }
 
   // Clean up portals when navigating away from their sections
@@ -552,6 +681,91 @@ function renderActiveSection({
   document.getElementById('kcp-grv-toast-portal')?.remove();
 
   return renderModuleShell(activeSection, state);
+}
+
+
+const SECTION_DATA_ACTION_CALLBACKS = {
+  products: { import: ['onImport'], export: ['onExport'] },
+  recipes: { import: ['onImport'], export: ['onExport'] },
+  ingredients: {
+    import: ['onImport', 'onLocationCostingImport', 'onLocationCostingConfirm'],
+    export: ['onExport', 'onLocationCostingExport']
+  },
+  suppliers: { import: ['onImport'], export: ['onExport'] },
+  'purchase-orders': { export: ['onExportCsv', 'onExportXlsx', 'onExportPdf'] },
+  transfers: { import: ['onImportTemplate'], export: ['onExportTemplate'] },
+  'stock-count': { import: ['onImportCountTemplate'], export: ['onExportTemplatePdf', 'onExportCountTemplate'] },
+  'mfg-products': { import: ['onImport'], export: ['onExport'] },
+  settings: { import: ['onImportSnapshot'], export: ['onExportSnapshot'] }
+};
+
+const SECTION_DATA_ACTION_SELECTORS = {
+  products: {
+    import: ['[data-menu-import-trigger]', '[data-menu-import-input]'],
+    export: ['[data-menu-export]']
+  },
+  recipes: {
+    import: ['[data-recipe-import-trigger]', '[data-recipe-import-input]'],
+    export: ['[data-recipe-export]', '[data-recipe-platform]']
+  },
+  ingredients: {
+    import: ['[data-stock-import-trigger]', '[data-stock-import-input]', '[data-location-costing-import-trigger]', '[data-location-costing-import-input]', '[data-location-costing-confirm]'],
+    export: ['[data-stock-export]', '[data-location-costing-export]', '[data-location-costing-open]']
+  },
+  suppliers: {
+    import: ['[data-supplier-import-trigger]', '[data-supplier-import-input]'],
+    export: ['[data-supplier-export]']
+  },
+  'purchase-orders': {
+    export: ['[data-po-export]', '[data-po-pdf]']
+  },
+  transfers: {
+    import: ['[data-transfer-template-import-trigger]', '[data-transfer-template-import]'],
+    export: ['[data-transfer-template-download]']
+  },
+  'stock-count': {
+    import: ['[data-stocktake-count-template-import-trigger]', '[data-stocktake-count-template-import]'],
+    export: ['[data-stocktake-count-template-download]', '[data-stocktake-template-export]', '[data-stocktake-template-export-confirm]', '[data-stocktake-count-template-confirm]']
+  },
+  'mfg-products': {
+    import: ['[data-mfg-import-trigger]', '[data-mfg-import-input]'],
+    export: ['[data-mfg-export]', '[data-mfg-platform]']
+  },
+  settings: {
+    import: ['[data-settings-import-trigger]', '[data-settings-import]'],
+    export: ['[data-settings-export]']
+  }
+};
+
+function hasSectionDataAction(state, sectionId, action) {
+  const role = state.access?.currentRole || '';
+  const customRoles = state.access?.customRoles || [];
+  const isSuper = state.access?.currentIsSuperUser === true ||
+    state.access?.currentIsKcpSuperUser === true ||
+    isSuperUserRoleName(role);
+  return isSuper || hasSectionDataPermission(sectionId, action, role, customRoles);
+}
+
+function restrictSectionDataActions(sectionId, state, actionMap = {}) {
+  const restricted = { ...(actionMap || {}) };
+  const callbackGroups = SECTION_DATA_ACTION_CALLBACKS[sectionId] || {};
+  for (const action of ['import', 'export']) {
+    if (hasSectionDataAction(state, sectionId, action)) continue;
+    for (const callbackName of callbackGroups[action] || []) delete restricted[callbackName];
+  }
+  return restricted;
+}
+
+function renderSectionWithDataPermissions(sectionId, state, actionMap, renderer) {
+  const view = renderer(actionMap);
+  const selectors = SECTION_DATA_ACTION_SELECTORS[sectionId] || {};
+  for (const action of ['import', 'export']) {
+    if (hasSectionDataAction(state, sectionId, action)) continue;
+    for (const selector of selectors[action] || []) {
+      view?.querySelectorAll?.(selector)?.forEach((element) => element.remove());
+    }
+  }
+  return view;
 }
 
 function renderModuleShell(sectionId, state) {

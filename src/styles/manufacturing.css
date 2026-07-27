@@ -2550,3 +2550,127 @@
     grid-template-columns: minmax(0, 1fr) 84px;
   }
 }
+
+
+.mfgTypeSegment {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.25rem;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.06);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.mfgTypeSegment button {
+  border: 0;
+  border-radius: 999px;
+  padding: 0.5rem 0.8rem;
+  background: transparent;
+  color: #475569;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.mfgTypeSegment button.is-selected {
+  background: var(--surface-elevated);
+  color: var(--text-main);
+  box-shadow: var(--shadow-soft);
+}
+
+.mfgFilterStack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.mfgFilterBar--primary {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) minmax(180px, 260px) auto;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.mfgTypeSegment--below {
+  justify-content: flex-start;
+  width: fit-content;
+}
+
+@media (max-width: 760px) {
+  .mfgFilterBar--primary {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Improve manufacturing/sub-recipe filter pill contrast on dark toolbar */
+.mfgTypeSegment {
+  background: rgba(8, 17, 31, 0.78);
+  border-color: rgba(92, 158, 255, 0.24);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+}
+
+.mfgTypeSegment button {
+  color: rgba(225, 236, 255, 0.92);
+  background: rgba(19, 35, 58, 0.72);
+  border: 1px solid rgba(96, 132, 190, 0.26);
+}
+
+.mfgTypeSegment button:hover,
+.mfgTypeSegment button:focus-visible {
+  color: #ffffff;
+  border-color: rgba(92, 158, 255, 0.58);
+  background: rgba(31, 63, 107, 0.72);
+}
+
+.mfgTypeSegment button.is-selected {
+  background: rgba(59, 130, 246, 0.28);
+  color: #ffffff;
+  border-color: rgba(92, 158, 255, 0.72);
+  box-shadow: 0 8px 22px rgba(37, 99, 235, 0.18);
+}
+
+
+/* Phase 78: action-menu hover/focus must keep labels visible and clearly identify the target. */
+.manufacturingActionDropdown__menu .manufacturingDropdownOption {
+  position: relative;
+  color: #f2f6ff;
+  transition: transform 140ms ease, border-color 140ms ease, background-color 140ms ease, color 140ms ease, box-shadow 140ms ease;
+}
+
+.manufacturingActionDropdown__menu .manufacturingDropdownOption span {
+  color: inherit;
+  opacity: 1;
+  visibility: visible;
+}
+
+.manufacturingActionDropdown__menu .manufacturingDropdownOption:hover:not(:disabled),
+.manufacturingActionDropdown__menu .manufacturingDropdownOption:focus-visible:not(:disabled) {
+  transform: translateX(2px);
+  border-color: rgba(106, 167, 255, 0.78);
+  background: rgba(44, 78, 126, 0.96);
+  color: #ffffff;
+  box-shadow: inset 3px 0 0 #6aa7ff, 0 8px 18px rgba(0, 0, 0, 0.24);
+  outline: none;
+}
+
+.manufacturingActionDropdown__menu .manufacturingDropdownOption:hover:not(:disabled) svg,
+.manufacturingActionDropdown__menu .manufacturingDropdownOption:focus-visible:not(:disabled) svg {
+  color: #ffffff;
+}
+
+/* Phase 78 hardening: app-wide button hover rules must never blank manufacturing action labels. */
+.manufacturingActionDropdown__menu button.manufacturingDropdownOption:hover:not(:disabled),
+.manufacturingActionDropdown__menu button.manufacturingDropdownOption:focus-visible:not(:disabled) {
+  background-color: rgba(44, 78, 126, 0.98) !important;
+  color: #ffffff !important;
+  opacity: 1 !important;
+}
+
+.manufacturingActionDropdown__menu button.manufacturingDropdownOption:hover:not(:disabled) span,
+.manufacturingActionDropdown__menu button.manufacturingDropdownOption:focus-visible:not(:disabled) span,
+.manufacturingActionDropdown__menu button.manufacturingDropdownOption:hover:not(:disabled) svg,
+.manufacturingActionDropdown__menu button.manufacturingDropdownOption:focus-visible:not(:disabled) svg {
+  color: #ffffff !important;
+  opacity: 1 !important;
+  visibility: visible !important;
+}

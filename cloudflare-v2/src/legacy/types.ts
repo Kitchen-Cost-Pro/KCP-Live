@@ -61,10 +61,37 @@ export interface Env {
   GEMINI_MODEL?: string;
   FIREBASE_PROJECT_ID?: string;
   GROQ_API_KEY?: string;
+
+  YOCO_V2_EVENTS?: Queue<import('../modules/yoco-engine-v2/contracts').YocoV2QueueMessage>;
+  YOCO_V2_EVENTS_DLQ?: Queue<import('../modules/yoco-engine-v2/contracts').YocoV2QueueMessage>;
+  YOCO_V2_RATE_GATE?: DurableObjectNamespace;
+  YOCO_V2_WAIT_UNTIL?: (promise: Promise<unknown>) => void;
+  YOCO_V2_CAPTURE_ENABLED?: string;
+  YOCO_V2_QUEUE_ENABLED?: string;
+  YOCO_V2_ADMIN_ENABLED?: string;
+  YOCO_V2_LIVE_SALE_REPORTING?: string;
+  YOCO_V2_LIVE_SALE_STOCK?: string;
+  YOCO_V2_LIVE_REFUND_REPORTING?: string;
+  YOCO_V2_LIVE_REFUND_STOCK?: string;
+  YOCO_V2_MAX_ATTEMPTS?: string;
+  YOCO_V2_BASE_RETRY_MS?: string;
+  YOCO_V2_MAX_RETRY_MS?: string;
+  YOCO_V2_API_TIMEOUT_MS?: string;
+  YOCO_V2_REQUEST_SPACING_MS?: string;
+  YOCO_V2_ORDER_CACHE_TTL_MS?: string;
+  YOCO_V2_REFUND_CACHE_TTL_MS?: string;
+  YOCO_V2_METADATA_CACHE_TTL_MS?: string;
+  YOCO_V2_AUTH_FAILURE_THRESHOLD?: string;
+  YOCO_V2_RATE_LIMIT_PAUSE_FALLBACK_MS?: string;
+  YOCO_V2_RECONCILIATION_OVERLAP_MINUTES?: string;
+  YOCO_V2_RECONCILIATION_LOOKBACK_HOURS?: string;
 }
 
 export interface AuthContext {
   uid: string;
   email: string;
   token: Record<string, unknown>;
+  systemRole?: 'admin' | 'queue';
+  adminRole?: string;
+  permissions?: string[];
 }

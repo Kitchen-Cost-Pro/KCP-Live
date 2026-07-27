@@ -1124,3 +1124,23 @@
 #view-credit-note .cn-locationOptionEmpty { padding: 0.75rem; text-align: center; font-size: 0.85rem; color: var(--color-text-muted, #94a3b8); }
 /* Line location button – empty state */
 #view-credit-note .cn-lineLocationButton--empty { border-color: rgba(239, 68, 68, 0.5); color: var(--color-text-muted, #94a3b8); }
+
+#view-credit-note .cn-locationSearchShell {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+#view-credit-note .cn-locationSearchShell .cn-input {
+  width: 100%;
+  padding-right: 42px;
+}
+
+#view-credit-note .cn-locationSearchShell > svg {
+  position: absolute;
+  right: 14px;
+  width: 16px;
+  height: 16px;
+  pointer-events: none;
+  color: rgba(255, 255, 255, 0.48);
+}

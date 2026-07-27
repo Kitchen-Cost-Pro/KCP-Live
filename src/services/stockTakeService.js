@@ -32,9 +32,9 @@ export async function fetchStockTakeWorkspace(workspaceId, { draftUserId = '' } 
   const [stockTakeResponse, templateResponse, draftResponse, stockState, locationResponse, siteResponse] = await Promise.all([
     callCloudflareWorkspaceRoute(workspaceKey, 'stock-takes', { query: { limit: 500 } }),
     callCloudflareWorkspaceRoute(workspaceKey, 'stock-take-templates'),
-    String(draftUserId || '').trim()
-      ? callCloudflareWorkspaceRoute(workspaceKey, 'stock-take-drafts', { query: { userId: String(draftUserId).trim() } })
-      : Promise.resolve({ drafts: [] }),
+    callCloudflareWorkspaceRoute(workspaceKey, 'stock-take-drafts', {
+      query: String(draftUserId || '').trim() ? { userId: String(draftUserId).trim() } : undefined
+    }),
     fetchStock(workspaceKey),
     callCloudflareWorkspaceRoute(workspaceKey, 'locations'),
     callCloudflareWorkspaceRoute(workspaceKey, 'site-configuration')
@@ -129,7 +129,6 @@ export async function saveStockTakeDraftSession(workspaceId, userId, payload = {
   const workspaceKey = String(workspaceId || '').trim();
   const uid = String(userId || '').trim();
   if (!workspaceKey) throw new Error('Workspace id is required to save stock take drafts.');
-  if (!uid) throw new Error('User id is required to save stock take drafts.');
 
   const draft = normalizeStockTakePayload(payload);
   if (!draft.locationId) throw new Error('Choose a stock take location before saving a draft.');
@@ -144,7 +143,10 @@ export async function saveStockTakeDraftSession(workspaceId, userId, payload = {
 
   const result = await callCloudflareWorkspaceRoute(workspaceKey, 'stock-take-drafts', {
     method: 'POST',
-    payload: { userId: uid, draft: savedDraft }
+    // The Worker derives the current user from the authenticated session when uid is omitted.
+    payload: uid ? { userId: uid, draft: savedDraft } : { draft: savedDraft },
+    // A dead connection must not leave the count session showing Saving Draft indefinitely.
+    timeoutMs: 15000
   });
   return normalizeStockTakeSavedDraft(result.draft || savedDraft);
 }
@@ -154,9 +156,10 @@ export async function deleteStockTakeDraftSession(workspaceId, userId, draftId =
   const uid = String(userId || '').trim();
   const normalizedDraftId = String(draftId || '').trim();
   if (!workspaceKey) throw new Error('Workspace id is required to delete stock take drafts.');
-  if (!uid) throw new Error('User id is required to delete stock take drafts.');
 
-  const route = `stock-take-drafts/${encodeURIComponent(uid)}${normalizedDraftId ? `/${encodeURIComponent(normalizedDraftId)}` : ''}`;
+  // The Worker ignores this legacy path identity and uses the authenticated session owner.
+  const routeUser = uid || 'current';
+  const route = `stock-take-drafts/${encodeURIComponent(routeUser)}${normalizedDraftId ? `/${encodeURIComponent(normalizedDraftId)}` : ''}`;
   await callCloudflareWorkspaceRoute(workspaceKey, route, { method: 'DELETE' });
 }
 
@@ -214,7 +217,7 @@ function normalizeStockTakeLog(id, item = {}) {
   };
 }
 
-function normalizeStockTakePayload(payload = {}) {
+export function normalizeStockTakePayload(payload = {}) {
   return {
     id: String(payload.id || createId('st')).trim(),
     date: String(payload.date || todayLocal()).trim(),
@@ -230,7 +233,16 @@ function normalizeStockTakePayload(payload = {}) {
     note: String(payload.note || '').trim(),
     items: (payload.items || []).map((item) => ({
       stockItemId: String(item.stockItemId || item.itemId || item.ingId || '').trim(),
+      stockItemName: String(item.stockItemName || item.name || '').trim(),
       shelfCount: Number(item.shelfCount),
+      systemStock: Number(item.systemStock ?? item.expectedQty ?? item.expected ?? 0) || 0,
+      variance: Number(item.variance ?? (Number(item.shelfCount || 0) - Number(item.systemStock ?? 0))) || 0,
+      cost: Number(item.cost ?? item.unitCost ?? 0) || 0,
+      varianceImpactEx: Number(
+        item.varianceImpactEx
+        ?? item.varianceValue
+        ?? (Number(item.variance ?? (Number(item.shelfCount || 0) - Number(item.systemStock ?? 0))) * Number(item.cost ?? item.unitCost ?? 0))
+      ) || 0,
       unit: String(item.unit || '').trim(),
       selectedUom: String(item.selectedUom || '').trim(),
       uomCounts: normalizeStockTakeUomCounts(item.uomCounts || item.countBreakdown || item.scanBreakdown),
@@ -239,16 +251,32 @@ function normalizeStockTakePayload(payload = {}) {
   };
 }
 
-function normalizeStockTakeUomCounts(value) {
-  return toItemArray(value)
+export function normalizeStockTakeUomCounts(value) {
+  const rows = Array.isArray(value)
+    ? value
+    : Object.entries(value || {}).map(([key, rawValue]) => {
+        if (rawValue && typeof rawValue === 'object' && !Array.isArray(rawValue)) {
+          return { key, ...rawValue };
+        }
+        return {
+          key,
+          uomName: key,
+          ratio: key === 'base' ? 1 : undefined,
+          count: rawValue
+        };
+      });
+
+  return rows
     .map((row) => {
+      if (!row || typeof row !== 'object' || Array.isArray(row)) return null;
       const ratio = Number(row.ratio ?? row.qtyInBase ?? row.qty_in_base ?? row.packSize ?? 1);
       const count = Number(row.count ?? row.scannedCount ?? row.qty ?? 0);
-      const uomName = String(row.uomName || row.selectedUom || row.unit || '').trim();
+      const rawKey = String(row.key || '').trim();
+      const uomName = String(row.uomName || row.selectedUom || row.unit || rawKey || '').trim();
       const baseUom = String(row.baseUom || row.baseUnit || '').trim();
       const safeRatio = Number.isFinite(ratio) && ratio > 0 ? ratio : 1;
       return {
-        key: String(row.key || `${uomName.toLowerCase()}::${safeRatio}`).trim(),
+        key: rawKey || `${uomName.toLowerCase()}::${safeRatio}`,
         uomName,
         baseUom,
         ratio: safeRatio,
@@ -257,7 +285,7 @@ function normalizeStockTakeUomCounts(value) {
         lastBarcode: String(row.lastBarcode || row.barcode || '').trim()
       };
     })
-    .filter((row) => row.uomName && row.count > 0);
+    .filter((row) => row && row.uomName && row.count > 0);
 }
 
 function normalizeStockTakeTemplate(id, item = {}) {

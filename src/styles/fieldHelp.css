@@ -5,7 +5,7 @@
 }
 
 .inventoryHelpIcon {
-  /* Grid place-items centering (same technique as the report icons `.analyticsForecastInfo`).
+  /* Grid place-items centering (same technique as compact tooltip icons).
      A fixed box with box-sizing:border-box, line-height:1 and NO padding keeps it a perfect
      circle and centers the glyph both axes. The previous line-height:18px + padding-top:1px on a
      content-box element made it 19px tall (an oval) and pushed the "i" down. */

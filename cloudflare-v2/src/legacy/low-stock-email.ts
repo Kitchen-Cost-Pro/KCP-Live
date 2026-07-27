@@ -1,6 +1,9 @@
 import type { Env } from './types';
 import { getEmailDeliveryConfig } from './admin-routes';
 import { sendEmail } from './email';
+import { lowStockRelevanceSql } from './low-stock-relevance';
+
+const LOW_STOCK_REMINDER_MS = 7 * 24 * 60 * 60 * 1000;
 
 function clean(value: unknown, fallback = '') {
   return String(value ?? fallback).trim();
@@ -33,7 +36,7 @@ function normalizeFrequency(value: unknown) {
   if (['weekly', 'week', '1_week', '1_weeks'].includes(raw)) return '1_week';
   if (['2_week', '2_weeks', 'fortnightly'].includes(raw)) return '2_week';
   if (['monthly', 'month', '1_month', '1_months'].includes(raw)) return '1_month';
-  return 'off';
+  return '1_day';
 }
 
 function intervalMs(frequency: string) {
@@ -75,10 +78,12 @@ function timePartsInZone(date: Date, timeZone: string) {
 function isSendWindow(date: Date, dispatchTime: string, timeZone: string) {
   const [hourText, minuteText] = dispatchTime.split(':');
   const local = timePartsInZone(date, timeZone);
-  // Match hour+minute (not hour-only) so a custom dispatch time only opens a window around
-  // its own configured minute, with a tolerance matching the cron's 15-minute cadence.
-  if (local.hour !== Number(hourText)) return false;
-  return Math.abs(local.minute - Number(minuteText || 0)) < 15;
+  const targetMinutes = Number(hourText) * 60 + Number(minuteText || 0);
+  const localMinutes = local.hour * 60 + local.minute;
+  const directDifference = Math.abs(localMinutes - targetMinutes);
+  // The cron runs every 15 minutes. Use a circular minute-of-day comparison so times such as
+  // 08:55 are still picked up by the 09:00 run and 23:55 is picked up at midnight.
+  return Math.min(directDifference, 1440 - directDifference) < 15;
 }
 
 // The most recent instant `dispatchTime` (in `timeZone`) occurred at/before `now`, stepped back
@@ -235,10 +240,11 @@ async function writeWorkspaceSettingsResult(env: Env, workspaceId: string, rawJs
     ...updates
   };
   await env.DB.prepare(
-    `UPDATE workspace_settings
-        SET raw_json = ?2,
-            updated_at = ?3
-      WHERE workspace_id = ?1`
+    `INSERT INTO workspace_settings (workspace_id, raw_json, updated_at)
+     VALUES (?1, ?2, ?3)
+     ON CONFLICT(workspace_id) DO UPDATE SET
+       raw_json = excluded.raw_json,
+       updated_at = excluded.updated_at`
   ).bind(workspaceId, JSON.stringify(raw), nowIso()).run();
 }
 
@@ -268,13 +274,18 @@ async function recordRun(env: Env, values: {
   ).run();
 }
 
-async function getLowStockRows(env: Env, workspaceId: string) {
-  // Per-LOCATION low-stock rows: a location is low when its own on-hand for an item
-  // is at/below the item threshold. Previously this GROUP BY si.id collapsed every
-  // location into one row (with names concatenated and a 'Main Store' fallback), so
-  // the email never reflected which location was actually short. INNER JOIN on
-  // stock_balances mirrors the on-screen per-location report, which only surfaces an
-  // item at a location where it actually holds a balance.
+async function getLowStockRows(env: Env, workspaceId: string, locationScope: string | string[] = '') {
+  // Per-location low-stock rows, restricted to the caller's resolved location scope.
+  const locationIds = Array.from(new Set((Array.isArray(locationScope) ? locationScope : [locationScope])
+    .map((value) => clean(value))
+    .filter(Boolean)));
+  const binds: unknown[] = [workspaceId];
+  const locationClause = locationIds.length
+    ? ` AND sb.location_id IN (${locationIds.map((id) => {
+        binds.push(id);
+        return `?${binds.length}`;
+      }).join(', ')})`
+    : '';
   const rows = await env.DB.prepare(
     `SELECT
         si.id AS itemId,
@@ -293,12 +304,118 @@ async function getLowStockRows(env: Env, workspaceId: string) {
       WHERE si.workspace_id = ?1
         AND si.active = 1
         AND si.threshold_qty > 0
+        AND ${lowStockRelevanceSql('sb')}
+        ${locationClause}
       GROUP BY si.id, sb.location_id
      HAVING currentStock <= threshold
       ORDER BY locationName ASC, deficitValue DESC, si.name ASC
       LIMIT 500`
-  ).bind(workspaceId).all<Record<string, any>>();
+  ).bind(...binds).all<Record<string, any>>();
   return rows.results || [];
+}
+
+type LowStockAlertState = {
+  stock_item_id?: string;
+  location_id?: string;
+  first_low_at?: string;
+  first_notified_at?: string;
+  last_notified_at?: string;
+  cleared_at?: string;
+};
+
+function lowStockStateKey(itemId: unknown, locationId: unknown) {
+  return `${clean(itemId)}::${clean(locationId)}`;
+}
+
+/**
+ * Reconcile the current relevant low-stock set with notification state and
+ * return only first alerts or seven-day reminders that are due now.
+ */
+async function reconcileLowStockAlerts(
+  env: Env,
+  workspaceId: string,
+  rows: Record<string, any>[],
+  checkedAt: string,
+) {
+  const existing = await env.DB.prepare(
+    `SELECT stock_item_id, location_id, first_low_at, first_notified_at,
+            last_notified_at, cleared_at
+       FROM low_stock_alert_state
+      WHERE workspace_id = ?1`
+  ).bind(workspaceId).all<LowStockAlertState>();
+  const stateByKey = new Map(
+    (existing.results || []).map((state) => [
+      lowStockStateKey(state.stock_item_id, state.location_id),
+      state
+    ])
+  );
+  const currentKeys = new Set(
+    rows.map((row) => lowStockStateKey(row.itemId, row.locationId))
+  );
+
+  // Replenishment and relevance expiry both close the active warning. Balance
+  // triggers handle replenishment immediately; this sweep also handles the
+  // zero-stock, 30-day inactivity expiry and deactivated count templates.
+  await env.DB.prepare(
+    `UPDATE low_stock_alert_state
+        SET cleared_at = ?2,
+            updated_at = ?2
+      WHERE workspace_id = ?1
+        AND cleared_at IS NULL
+        AND (stock_item_id || '::' || location_id) NOT IN (
+          SELECT value FROM json_each(?3)
+        )`
+  ).bind(workspaceId, checkedAt, JSON.stringify([...currentKeys])).run();
+
+  const statements = rows.map((row) => env.DB.prepare(
+    `INSERT INTO low_stock_alert_state
+       (workspace_id, stock_item_id, location_id, first_low_at,
+        first_notified_at, last_notified_at, cleared_at, updated_at)
+     VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL, ?4)
+     ON CONFLICT(workspace_id, stock_item_id, location_id) DO UPDATE SET
+       first_low_at = CASE
+         WHEN low_stock_alert_state.cleared_at IS NOT NULL THEN excluded.first_low_at
+         ELSE low_stock_alert_state.first_low_at
+       END,
+       first_notified_at = CASE
+         WHEN low_stock_alert_state.cleared_at IS NOT NULL THEN NULL
+         ELSE low_stock_alert_state.first_notified_at
+       END,
+       last_notified_at = CASE
+         WHEN low_stock_alert_state.cleared_at IS NOT NULL THEN NULL
+         ELSE low_stock_alert_state.last_notified_at
+       END,
+       cleared_at = NULL,
+       updated_at = excluded.updated_at`
+  ).bind(workspaceId, clean(row.itemId), clean(row.locationId), checkedAt));
+  if (statements.length) await env.DB.batch(statements);
+
+  const nowMs = Date.parse(checkedAt);
+  return rows.filter((row) => {
+    const state = stateByKey.get(lowStockStateKey(row.itemId, row.locationId));
+    if (!state || state.cleared_at) return true;
+    const lastNotified = Date.parse(clean(state.last_notified_at || state.first_notified_at));
+    return !Number.isFinite(lastNotified) ||
+      (Number.isFinite(nowMs) && nowMs - lastNotified >= LOW_STOCK_REMINDER_MS);
+  });
+}
+
+async function markLowStockAlertsNotified(
+  env: Env,
+  workspaceId: string,
+  rows: Record<string, any>[],
+  notifiedAt: string,
+) {
+  if (!rows.length) return;
+  await env.DB.batch(rows.map((row) => env.DB.prepare(
+    `UPDATE low_stock_alert_state
+        SET first_notified_at = COALESCE(first_notified_at, ?4),
+            last_notified_at = ?4,
+            updated_at = ?4
+      WHERE workspace_id = ?1
+        AND stock_item_id = ?2
+        AND location_id = ?3`
+  ).bind(workspaceId, clean(row.itemId), clean(row.locationId), notifiedAt)));
 }
 
 function groupLowStockByLocation(rows: Record<string, any>[]) {
@@ -368,14 +485,8 @@ async function loadWorkspaceLowStockContext(env: Env, workspaceId: string) {
 async function sendWorkspaceLowStockSummary(env: Env, workspace: Record<string, any>, now: Date) {
   const workspaceId = clean(workspace.workspaceId);
   const rawSettings = safeJsonParse<Record<string, any>>(workspace.rawJson, {});
-  if (workspace.enabled !== null && workspace.enabled !== undefined && Number(workspace.enabled) === 0) {
-    return { workspaceId, status: 'disabled' };
-  }
-  const explicitFrequency = rawSettings.lowStockEmailFrequency || workspace.settingsPeriod || workspace.period;
-  const frequency = normalizeFrequency(explicitFrequency);
+  const frequency = '1_day';
   const checkedAt = now.toISOString();
-  if (frequency === 'off') return { workspaceId, status: 'disabled' };
-
   const timeZone = clean(rawSettings.lowStockEmailTimeZone || rawSettings.timeZone || workspace.emailTimezone || workspace.timezone || 'Africa/Johannesburg');
   const dispatchTime = normalizeDispatchTime(rawSettings.lowStockEmailDispatchTime || workspace.settingsTime || workspace.dispatchTime);
   const inWindow = isSendWindow(now, dispatchTime, timeZone);
@@ -386,6 +497,7 @@ async function sendWorkspaceLowStockSummary(env: Env, workspace: Record<string, 
 
   const recipients = await getRecipients(env, workspaceId);
   const rows = await getLowStockRows(env, workspaceId);
+  const dueRows = await reconcileLowStockAlerts(env, workspaceId, rows, checkedAt);
 
   if (!recipients.length) {
     await writeWorkspaceSettingsResult(env, workspaceId, clean(workspace.rawJson), {
@@ -408,19 +520,44 @@ async function sendWorkspaceLowStockSummary(env: Env, workspace: Record<string, 
     return { workspaceId, status: 'no_low_stock', recipients: recipients.length };
   }
 
-  const emailConfig = await getEmailDeliveryConfig(env);
+  if (!dueRows.length) {
+    await writeWorkspaceSettingsResult(env, workspaceId, clean(workspace.rawJson), {
+      lowStockEmailLastCheckedAt: checkedAt,
+      lowStockEmailLastResult: 'no-new-alerts',
+      lowStockEmailLastRecipientCount: recipients.length,
+      lowStockEmailLastLowStockCount: rows.length
+    });
+    await recordRun(env, {
+      workspaceId,
+      scheduledFor: checkedAt,
+      status: 'no-new-alerts',
+      recipientCount: recipients.length,
+      itemCount: rows.length
+    });
+    return {
+      workspaceId,
+      status: 'no_new_alerts',
+      recipients: recipients.length,
+      lowStockCount: rows.length
+    };
+  }
+
+  const emailConfig = await getEmailDeliveryConfig({ ...env, DB: env.CENTRAL_DB } as Env);
   const workspaceName = clean(rawSettings.siteName || workspace.name || workspaceId);
-  const subject = `Low Stock Alert — ${workspaceName} (${rows.length} item${rows.length !== 1 ? 's' : ''})`;
-  const text = buildSummaryText(workspaceName, frequency, rows, checkedAt);
-  const html = buildSummaryHtml(workspaceName, frequency, rows, checkedAt);
+  const subject = `Low Stock Alert — ${workspaceName} (${dueRows.length} item${dueRows.length !== 1 ? 's' : ''})`;
+  const text = buildSummaryText(workspaceName, frequency, dueRows, checkedAt);
+  const html = buildSummaryHtml(workspaceName, frequency, dueRows, checkedAt);
   const delivery = await sendEmail(env, emailConfig, { to: recipients, subject, text, html });
   const status = delivery.sent ? 'sent' : 'email-error';
+  if (delivery.sent) {
+    await markLowStockAlertsNotified(env, workspaceId, dueRows, checkedAt);
+  }
   await writeWorkspaceSettingsResult(env, workspaceId, clean(workspace.rawJson), {
     lowStockEmailLastSentAt: delivery.sent ? checkedAt : rawSettings.lowStockEmailLastSentAt,
     lowStockEmailLastCheckedAt: checkedAt,
     lowStockEmailLastResult: status,
     lowStockEmailLastRecipientCount: recipients.length,
-    lowStockEmailLastLowStockCount: rows.length,
+    lowStockEmailLastLowStockCount: dueRows.length,
     lowStockEmailLastError: delivery.sent ? '' : clean((delivery as any).reason || 'Email delivery failed.')
   });
   await recordRun(env, {
@@ -429,10 +566,10 @@ async function sendWorkspaceLowStockSummary(env: Env, workspace: Record<string, 
     sentAt: delivery.sent ? checkedAt : undefined,
     status,
     recipientCount: recipients.length,
-    itemCount: rows.length,
+    itemCount: dueRows.length,
     errorMessage: delivery.sent ? undefined : clean((delivery as any).reason || 'Email delivery failed.')
   });
-  return { workspaceId, status, recipients: recipients.length, lowStockCount: rows.length };
+  return { workspaceId, status, recipients: recipients.length, lowStockCount: dueRows.length };
 }
 
 // Per-workspace scheduled send (due/window-gated). Runs INSIDE the workspace DO — the front
@@ -459,16 +596,18 @@ export async function sendWorkspaceLowStockNow(env: Env, workspaceId: string) {
   const recipients = await getRecipients(env, workspaceId);
   const rows = await getLowStockRows(env, workspaceId);
   const now = nowIso();
+  await reconcileLowStockAlerts(env, workspaceId, rows, now);
   const workspaceName = clean(rawSettings.siteName || workspace.name || workspaceId);
 
   if (!recipients.length) return { workspaceId, status: 'no_recipients', recipients: 0, lowStockCount: rows.length };
   if (!rows.length) return { workspaceId, status: 'no_low_stock', recipients: recipients.length, lowStockCount: 0 };
 
-  const emailConfig = await getEmailDeliveryConfig(env);
+  const emailConfig = await getEmailDeliveryConfig({ ...env, DB: env.CENTRAL_DB } as Env);
   const subject = `Low Stock Alert — ${workspaceName} (${rows.length} item${rows.length !== 1 ? 's' : ''})`;
   const text = buildSummaryText(workspaceName, 'manual', rows, now);
   const html = buildSummaryHtml(workspaceName, 'manual', rows, now);
   const delivery = await sendEmail(env, emailConfig, { to: recipients, subject, text, html });
+  if (delivery.sent) await markLowStockAlertsNotified(env, workspaceId, rows, now);
 
   await recordRun(env, {
     workspaceId,
@@ -481,4 +620,44 @@ export async function sendWorkspaceLowStockNow(env: Env, workspaceId: string) {
   });
 
   return { workspaceId, status: delivery.sent ? 'sent' : 'email-error', recipients: recipients.length, lowStockCount: rows.length };
+}
+
+
+export async function sendWorkspaceLowStockToUser(
+  env: Env,
+  workspaceId: string,
+  recipient: string,
+  locationScope: string | string[] = '',
+) {
+  const email = clean(recipient).toLowerCase();
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new Error('Your signed-in account does not have a valid email address.');
+  }
+  const workspace = await loadWorkspaceLowStockContext(env, workspaceId);
+  if (!workspace) throw new Error('Workspace not found.');
+  const rawSettings = safeJsonParse<Record<string, any>>(workspace.rawJson, {});
+  const rows = await getLowStockRows(env, workspaceId, locationScope);
+  const generatedAt = nowIso();
+  const workspaceName = clean(rawSettings.siteName || workspace.name || workspaceId);
+  if (!rows.length) {
+    return { workspaceId, status: 'no_low_stock', recipients: 0, lowStockCount: 0 };
+  }
+  const distinctLocations = Array.from(new Set(rows.map((row) => clean(row.locationName)).filter(Boolean)));
+  const locationLabel = distinctLocations.length === 1 ? distinctLocations[0] : '';
+  const subject = `Stock Notifications — ${workspaceName}${locationLabel ? ` · ${locationLabel}` : ''} (${rows.length})`;
+  const emailConfig = await getEmailDeliveryConfig({ ...env, DB: env.CENTRAL_DB } as Env);
+  const text = buildSummaryText(workspaceName, 'manual', rows, generatedAt);
+  const html = buildSummaryHtml(workspaceName, 'manual', rows, generatedAt);
+  const delivery = await sendEmail(env, emailConfig, { to: email, subject, text, html });
+  await recordRun(env, {
+    workspaceId,
+    scheduledFor: generatedAt,
+    sentAt: delivery.sent ? generatedAt : undefined,
+    status: delivery.sent ? 'sent' : 'email-error',
+    recipientCount: 1,
+    itemCount: rows.length,
+    errorMessage: delivery.sent ? undefined : clean((delivery as any).reason || 'Email delivery failed.'),
+  });
+  if (!delivery.sent) throw new Error(clean((delivery as any).reason || 'Email delivery failed.'));
+  return { workspaceId, status: 'sent', recipients: 1, lowStockCount: rows.length, recipient: email };
 }

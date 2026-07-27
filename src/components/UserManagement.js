@@ -31,7 +31,6 @@ export function renderUserManagement({ state, onUserManagementFilterChange, onUs
     : null;
   const canManageUsers = hasPermission(ACTION_PERMISSION_MAP.manageUsers, access.currentRole, access.customRoles || []);
   const canManagePermissions = canManagePermissionSets(access.currentRole, access.currentIsSuperUser);
-  const canAssignLowStockTag = hasPermission(ACTION_PERMISSION_MAP.assignLowStockEmailTag, access.currentRole, access.customRoles || []);
 
   const view = document.createElement('section');
   view.className = 'userMgmtView';
@@ -92,8 +91,8 @@ export function renderUserManagement({ state, onUserManagementFilterChange, onUs
       </div>
     </div>
 
-    ${canManageUsers && userManagement.createModalOpen ? renderCreateModal(draft, visibleRoleOptions, filters, canAssignLowStockTag, canManagePermissions, userManagement.createStep || 1, userManagement.actionError || '', access.locations || [], userManagement.actionStatus || '') : ''}
-    ${editingMember ? renderEditModal(editingMember, visibleRoleOptions, filters, canAssignLowStockTag, canManagePermissions, access.locations || [], userManagement.editTab || 'details', userManagement.actionStatus || '', userManagement.actionError || '') : ''}
+    ${canManageUsers && userManagement.createModalOpen ? renderCreateModal(draft, visibleRoleOptions, filters, canManagePermissions, userManagement.createStep || 1, userManagement.actionError || '', access.locations || [], userManagement.actionStatus || '') : ''}
+    ${editingMember ? renderEditModal(editingMember, visibleRoleOptions, filters, canManagePermissions, access.locations || [], userManagement.editTab || 'details', userManagement.actionStatus || '', userManagement.actionError || '') : ''}
     ${confirmRemove ? renderDeleteDialog(confirmRemove) : ''}
     ${renderToast(userManagement.toast)}
   `;
@@ -250,7 +249,6 @@ function renderMemberRow(member, canManageUsers) {
       <span class="userMgmtBadgeStack">
         <span class="userMgmtStatusBadge userMgmtStatusBadge--${escapeAttribute(member.status || 'active')}">${member.status === 'invited' ? 'Invited' : 'Active'}</span>
         ${member.viewingOnly ? '<span class="userMgmtStatusBadge userMgmtStatusBadge--view">View Only</span>' : ''}
-        ${member.lowStockAlert ? '<span class="userMgmtStatusBadge userMgmtStatusBadge--alert">Low Stock Email</span>' : ''}
       </span>
       <div class="userMgmtRowActions">
         ${canManageUsers ? `
@@ -274,7 +272,7 @@ function renderAddEmployeeButton() {
   `;
 }
 
-function renderCreateModal(draft, roleOptions, filters = {}, canAssignLowStockTag = false, canManagePermissions = false, step = 1, actionError = '', locations = [], actionStatus = '') {
+function renderCreateModal(draft, roleOptions, filters = {}, canManagePermissions = false, step = 1, actionError = '', locations = [], actionStatus = '') {
   if (actionStatus === 'saving' || actionStatus === 'refreshing') {
     const savingMsg = actionStatus === 'refreshing' ? 'Setting up account...' : 'Creating employee...';
     return `
@@ -324,7 +322,6 @@ function renderCreateModal(draft, roleOptions, filters = {}, canAssignLowStockTa
     renderRolePicker({ label: 'Assigned Role', roleOptions, activeRole: draft.role || 'member', dataPrefix: 'user-create', disabled: !canManagePermissions, searchKey: 'createRoleSearch', searchValue: filters.createRoleSearch || '', typeKey: 'createRoleType', typeValue: filters.createRoleType || 'all' }) +
     '<div class="userMgmtSupplementalOptions">' +
     renderAccessModeToggle(draft.viewingOnly) +
-    renderLowStockAlertToggle(draft.lowStockAlert, false, canAssignLowStockTag) +
     '</div>' +
     '<div class="userMgmtModalActions">' +
     '<button type="button" class="userMgmtGhostButton" data-user-prev-step>' + icon('chevronLeft') + '<span>Back</span></button>' +
@@ -364,7 +361,7 @@ function renderCreateModal(draft, roleOptions, filters = {}, canAssignLowStockTa
   `;
 }
 
-function renderEditModal(member, roleOptions, filters = {}, canAssignLowStockTag = false, canManagePermissions = false, locations = [], activeTab = 'details', actionStatus = '', actionError = '') {
+function renderEditModal(member, roleOptions, filters = {}, canManagePermissions = false, locations = [], activeTab = 'details', actionStatus = '', actionError = '') {
   if (actionStatus === 'saving' || actionStatus === 'refreshing') {
     return `
       <div class="userMgmtModalBackdrop">
@@ -442,7 +439,6 @@ function renderEditModal(member, roleOptions, filters = {}, canAssignLowStockTag
     }) +
     '<div class="userMgmtSupplementalOptions">' +
     renderAccessModeToggle(member.viewingOnly, true) +
-    renderLowStockAlertToggle(member.lowStockAlert, true, canAssignLowStockTag) +
     '</div>';
 
   const locationsPanel = renderUserLocationPickerV2(member.allowedLocations || [], locations, true);
@@ -504,25 +500,6 @@ function renderAccessModeToggle(viewingOnly = false, isEdit = false) {
       <span>
         <strong>Viewing Only</strong>
         <small>Allows corporate or franchise visibility without write access to transfers or stock changes.</small>
-      </span>
-    </label>
-  `;
-}
-
-function renderLowStockAlertToggle(lowStockAlert = false, isEdit = false, canAssign = false) {
-  if (!canAssign && !lowStockAlert) return '';
-  return `
-    <label class="userMgmtAccessToggle userMgmtAccessToggle--alert">
-      <input
-        type="checkbox"
-        name="lowStockAlert"
-        ${lowStockAlert ? 'checked' : ''}
-        ${canAssign ? '' : 'disabled'}
-        ${isEdit ? 'data-user-edit-field="lowStockAlert"' : 'data-user-draft-field="lowStockAlert"'}
-      />
-      <span>
-        <strong>Low Stock Alert Tag</strong>
-        <small>${canAssign ? 'Receives scheduled low-stock summary emails with the PDF report attachment for this workspace.' : 'You need the Low Stock Email Tag permission to change this assignment.'}</small>
       </span>
     </label>
   `;
@@ -618,13 +595,13 @@ function renderDeleteDialog(member) {
 
 const ROLE_PICKER_EXAMPLES = [
   { value: 'owner', label: 'Owner', badge: 'System', description: 'Full control over all settings and access.', icon: 'crown', tone: 'blue' },
-  { value: 'admin', label: 'Admin', badge: 'System', description: 'Manage team members, stock, and reports.', icon: 'shield', tone: 'blue' },
+  { value: 'admin', label: 'Admin', badge: 'System', description: 'Manage team members, stock, and workspace operations.', icon: 'shield', tone: 'blue' },
   { value: 'finance-admin', label: 'Finance Admin', badge: 'System', description: 'Manage billing, invoices, and payments.', icon: 'coin', tone: 'green' },
   { value: 'inventory-manager', label: 'Inventory Manager', badge: 'System', description: 'Oversee stock, suppliers, and inventory.', icon: 'box', tone: 'purple' },
   { value: 'operations-manager', label: 'Operations Manager', badge: 'System', description: 'Manage operations and store activities.', icon: 'briefcase', tone: 'amber' },
   { value: 'store-supervisor', label: 'Store Supervisor', badge: 'System', description: 'Supervise store staff and daily tasks.', icon: 'store', tone: 'cyan' },
   { value: 'cashier', label: 'Cashier', badge: 'System', description: 'Process sales and manage transactions.', icon: 'receipt', tone: 'blue' },
-  { value: 'analyst', label: 'Analyst', badge: 'System', description: 'View data and generate reports.', icon: 'chart', tone: 'green' },
+  { value: 'analyst', label: 'Analyst', badge: 'System', description: 'View dashboards and operational data.', icon: 'chart', tone: 'green' },
   { value: 'support', label: 'Support', badge: 'System', description: 'Assist users and resolve issues.', icon: 'headset', tone: 'purple' },
   { value: 'viewer', label: 'Viewer', badge: 'System', description: 'View-only access to most data.', icon: 'eye', tone: 'slate' }
 ];
@@ -790,16 +767,16 @@ function filterRolePickerOptions(roles = [], { search = '', type = 'all' } = {})
 
 function inferRolePermissionPreview(role = {}) {
   const value = String(role.value || '').toLowerCase();
-  if (value.includes('stock') || value.includes('inventory')) return ['Manage stock', 'Manage suppliers', 'View and export reports', 'Manage stock counts'];
-  if (value.includes('report') || value.includes('analyst') || value.includes('viewer')) return ['View dashboard', 'View and export reports', 'View inventory data', 'Read-only access'];
-  if (value.includes('manager') || value.includes('supervisor')) return ['Manage stock', 'View and export reports', 'Manage store activity', 'Review team activity'];
-  return ['View dashboard', 'View assigned reports', 'Use permitted modules', 'Follow assigned access rules'];
+  if (value.includes('stock') || value.includes('inventory')) return ['Manage stock', 'Manage suppliers', 'View and export operational data', 'Manage stock counts'];
+  if (value.includes('analyst') || value.includes('viewer')) return ['View dashboard', 'View and export operational data', 'View inventory data', 'Read-only access'];
+  if (value.includes('manager') || value.includes('supervisor')) return ['Manage stock', 'View and export operational data', 'Manage store activity', 'Review team activity'];
+  return ['View dashboard', 'View assigned operational data', 'Use permitted modules', 'Follow assigned access rules'];
 }
 
 function roleDescriptionFor(label = '', badge = '') {
   const text = String(label || '').toLowerCase();
   if (text.includes('owner')) return 'Full control over all settings and access.';
-  if (text.includes('admin')) return 'Manage team members, stock, and reports.';
+  if (text.includes('admin')) return 'Manage team members, stock, and workspace operations.';
   if (text.includes('manager')) return 'Manage daily operations and team workflows.';
   if (text.includes('viewer')) return 'View-only access to assigned data.';
   if (String(badge || '').toLowerCase().includes('custom')) return 'Custom permission set for this workspace.';

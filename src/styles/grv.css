@@ -1695,6 +1695,15 @@
   color: #fecaca;
 }
 
+#view-grv .grv-drawerNotice {
+  flex: 0 0 auto;
+  padding: 0 28px;
+}
+
+#view-grv .grv-drawerNotice .grv-notice {
+  margin: 0 0 14px;
+}
+
 #view-grv .grv-toast {
   position: fixed;
   right: 24px;
@@ -1944,3 +1953,26 @@
 .grv-locationOption.is-selected { background: rgba(59,130,246,0.12); color: var(--color-accent, #3b82f6); }
 .grv-locationOption.is-selected svg:first-child { opacity: 1; color: var(--color-accent, #3b82f6); }
 .grv-locationOptionEmpty { padding: 0.75rem; text-align: center; font-size: 0.85rem; color: var(--color-text-muted, #94a3b8); }
+
+#view-grv .grv-locationSearchShell {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+#view-grv .grv-locationSearchShell .grv-input {
+  padding-right: 42px;
+}
+
+#view-grv .grv-locationSearchShell > svg {
+  position: absolute;
+  right: 14px;
+  width: 16px;
+  height: 16px;
+  pointer-events: none;
+  color: rgba(255, 255, 255, 0.48);
+}
+
+#view-grv .grv-locationInput {
+  width: 100%;
+}

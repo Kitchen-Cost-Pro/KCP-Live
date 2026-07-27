@@ -259,6 +259,10 @@ function bindPurchaseOrderEvents(view, visibleOrders, filters, onPurchaseOrderFi
     button.addEventListener('click', () => onPurchaseOrderAction.onAddLine?.(button.dataset.poAddStock));
   });
 
+  view.querySelectorAll('[data-po-scan-barcode]').forEach((button) => {
+    button.addEventListener('click', () => onPurchaseOrderAction.onScanBarcode?.());
+  });
+
   view.querySelectorAll('[data-po-line]').forEach((field) => {
     field.addEventListener('input', () => {
       // Silent state sync during typing — renderApp guard prevents DOM replacement mid-keystroke
@@ -307,6 +311,60 @@ function bindPurchaseOrderEvents(view, visibleOrders, filters, onPurchaseOrderFi
   view.querySelector('[data-po-toast-dismiss]')?.addEventListener('click', () => onPurchaseOrderAction.onDismissToast?.());
   view.querySelector('[data-po-gmail-prompt-close]')?.addEventListener('click', () => onPurchaseOrderAction.onDismissGmailPrompt?.());
   view.querySelector('[data-po-gmail-prompt-integrations]')?.addEventListener('click', () => onPurchaseOrderAction.onNavigateToIntegrations?.());
+
+  schedulePurchaseOrderLineDropdownPositioning(view);
+}
+
+function schedulePurchaseOrderLineDropdownPositioning(view) {
+  if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') return;
+
+  const positionMenus = () => {
+    if (!view.isConnected) return;
+    view.querySelectorAll(
+      '.purchaseOrdersModule__lineUom.purchaseOrdersModule__dropdown--open, .purchaseOrdersModule__lineLocation.purchaseOrdersModule__dropdown--open'
+    ).forEach((dropdown) => {
+      const trigger = dropdown.querySelector(':scope > button');
+      const menu = dropdown.querySelector(':scope > .purchaseOrdersModule__dropdownMenu');
+      if (!trigger || !menu) return;
+
+      const triggerRect = trigger.getBoundingClientRect();
+      const viewportPadding = 12;
+      const gap = 8;
+      const availableWidth = Math.max(220, window.innerWidth - (viewportPadding * 2));
+      const width = Math.min(Math.max(triggerRect.width, 220), availableWidth);
+
+      menu.style.width = `${width}px`;
+      menu.style.maxWidth = `${availableWidth}px`;
+      menu.style.left = `${Math.min(
+        Math.max(viewportPadding, triggerRect.left),
+        Math.max(viewportPadding, window.innerWidth - width - viewportPadding)
+      )}px`;
+
+      const menuHeight = Math.min(menu.scrollHeight || 0, Math.max(160, window.innerHeight - (viewportPadding * 2)));
+      const roomAbove = triggerRect.top - viewportPadding;
+      const roomBelow = window.innerHeight - triggerRect.bottom - viewportPadding;
+      const openAbove = roomAbove >= Math.min(menuHeight + gap, 280) || roomAbove > roomBelow;
+      const top = openAbove
+        ? Math.max(viewportPadding, triggerRect.top - menuHeight - gap)
+        : Math.min(window.innerHeight - menuHeight - viewportPadding, triggerRect.bottom + gap);
+
+      menu.style.top = `${Math.max(viewportPadding, top)}px`;
+      menu.style.bottom = 'auto';
+    });
+  };
+
+  const reposition = () => {
+    if (!view.isConnected) {
+      window.removeEventListener('resize', reposition);
+      document.removeEventListener('scroll', reposition, true);
+      return;
+    }
+    window.requestAnimationFrame(positionMenus);
+  };
+
+  window.requestAnimationFrame(positionMenus);
+  window.addEventListener('resize', reposition, { passive: true });
+  document.addEventListener('scroll', reposition, { capture: true, passive: true });
 }
 
 function purchaseOrdersDateFallback(view) {
@@ -434,7 +492,7 @@ function renderPurchaseOrderWorkflow(purchaseOrders, filters) {
     .slice(0, 12);
   const stockMatches = stockItems
     .filter(isPhysicalStockItem)
-    .filter((item) => !lineQuery || String(item.name || '').toLowerCase().includes(lineQuery) || String(item.category || '').toLowerCase().includes(lineQuery))
+    .filter((item) => !lineQuery || String(item.name || '').toLowerCase().includes(lineQuery) || String(item.category || '').toLowerCase().includes(lineQuery) || stockItemHasBarcode(item, lineQuery))
     .slice(0, 12);
   const selectedSupplier = suppliers.find((supplier) => String(supplier.id) === String(draft.supplierId));
 
@@ -543,7 +601,10 @@ function renderStockSelectionPanel({ filters, stockMatches, pendingItems, draft 
     <section class="purchaseOrdersModule__searchPanel">
       <label>
         <span>Add Stock Items</span>
-        <input type="search" value="${escapeAttribute(filters.lineQuery)}" placeholder="Search stock items..." data-po-filter="lineQuery" ${readOnly ? 'disabled' : ''} />
+        <div class="purchaseOrdersModule__searchShell">
+          <input type="search" value="${escapeAttribute(filters.lineQuery)}" placeholder="Search stock items or scan barcode..." data-po-filter="lineQuery" ${readOnly ? 'disabled' : ''} />
+          <button type="button" data-po-scan-barcode aria-label="Scan barcode" title="Scan barcode" ${readOnly ? 'disabled' : ''}>${icon('camera')}</button>
+        </div>
       </label>
       <div class="purchaseOrdersModule__choiceList purchaseOrdersModule__choiceList--stock" data-scroll-key="purchase-order-stock-picker">
         ${stockMatches.map((item) => renderStockChoice(item, pendingItems, readOnly)).join('') || '<p class="purchaseOrdersModule__emptyState">Search for a stock item to add it to this PO.</p>'}
@@ -824,7 +885,10 @@ function renderSelectionStep(draft, filters, stockMatches) {
       <div class="purchaseOrdersModule__builderPanel">
         <label>
           ${renderFieldHelpLabel('Add Stock Items', 'Search the live stock master and add items into this purchase order draft.')}
-          <input type="search" value="${escapeAttribute(filters.lineQuery)}" placeholder="Search stock items..." data-po-filter="lineQuery" />
+          <div class="purchaseOrdersModule__searchShell">
+            <input type="search" value="${escapeAttribute(filters.lineQuery)}" placeholder="Search stock items or scan barcode..." data-po-filter="lineQuery" />
+            <button type="button" data-po-scan-barcode aria-label="Scan barcode" title="Scan barcode">${icon('camera')}</button>
+          </div>
         </label>
         <div class="purchaseOrdersModule__choiceList purchaseOrdersModule__choiceList--stock" data-scroll-key="purchase-order-wizard-stock-list">
           ${stockMatches.map((item) => `
@@ -1117,7 +1181,8 @@ function normalizeUomConfigurations(value = []) {
       baseUom: String(entry.baseUom || entry.base_uom || entry.baseUnit || '').trim(),
       customUom: String(entry.customUom || entry.custom_uom || entry.customUnit || entry.orderingUom || '').trim(),
       ratio: Number(entry.ratio ?? entry.conversionRatio ?? entry.unitsPerCustomUnit ?? 0) || 0,
-      barcode: String(entry.barcode || entry.customBarcode || entry.customUomBarcode || '').trim()
+      barcode: String(entry.barcode || entry.customBarcode || entry.customUomBarcode || '').trim(),
+      isDefaultOrdering: ['true', '1', 'yes', 'on'].includes(String(entry.isDefaultOrdering ?? entry.defaultOrdering ?? entry.is_default_ordering ?? entry.defaultOrderUom ?? '').toLowerCase()) || entry.isDefaultOrdering === true || entry.defaultOrdering === true
     }))
     .filter((entry) => entry.customUom && entry.ratio > 0);
 }
@@ -1189,7 +1254,7 @@ function renderGmailPromptModal(purchaseOrders) {
     <div class="purchaseOrdersModule__modalBackdrop">
       <div class="purchaseOrdersModule__confirm purchaseOrdersModule__confirm--gmail">
         <div class="purchaseOrdersModule__gmailPromptIcon">${icon('send')}</div>
-        <span>Gmail Not Connected</span>
+        <span class="purchaseOrdersModule__gmailPromptEyebrow">Gmail Not Connected</span>
         <h2>Link your Gmail account first</h2>
         <p>To send purchase orders by email, your Gmail account must be connected. Head to Integration Settings to link your account — it only takes a moment.</p>
         <div class="purchaseOrdersModule__modalFooter">
@@ -1299,20 +1364,16 @@ function isPurchaseOrderReadOnly(order = {}) {
 }
 
 function isPhysicalStockItem(item = {}) {
-  if (item.isStocked === false) return false;
-  // Manufactured items and sub recipes are produced in-house, not purchased/received/credited.
+  // Purchase orders can only order Standard and Non Stock items.
+  // Sub-Recipe and Manufactured items are produced internally and must not be ordered.
   if (item.isSubRecipe === true || item.isManufactured === true) return false;
   const type = String(item.itemType || item.stockItemType || item.specificationType || '')
     .trim()
     .toLowerCase()
     .replace(/[\s-]+/g, '_');
-  if (['recipe_source', 'non_stock', 'virtual', 'sub_recipe', 'manufactured'].includes(type)) return false;
+  if (['sub_recipe', 'subrecipe', 'manufactured', 'manufactured_item', 'prep', 'prepared'].includes(type)) return false;
   const category = String(item.category || '').toLowerCase();
-  return !category.includes('recipe source') &&
-    !category.includes('non-stock') &&
-    !category.includes('non stock') &&
-    !category.includes('virtual') &&
-    !category.includes('sub recipe') &&
+  return !category.includes('sub recipe') &&
     !category.includes('sub-recipe') &&
     !category.includes('manufactured');
 }
@@ -1340,6 +1401,7 @@ function parseJson(value) {
 function icon(name) {
   const paths = {
     calendar: '<path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/>',
+    camera: '<path d="M14.5 4h-5L8 6H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-3l-1.5-2Z"/><circle cx="12" cy="12.5" r="3.5"/>',
     check: '<path d="m20 6-11 11-5-5"/>',
     chevron: '<path d="m6 9 6 6 6-6"/>',
     download: '<path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/>',

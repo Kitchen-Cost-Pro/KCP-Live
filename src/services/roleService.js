@@ -12,13 +12,29 @@ export const SECTION_PERMISSION_MAP = {
   'stock-count': 'nav-stock-count',
   locations: 'nav-locations',
   'mfg-products': 'nav-mfg-products',
-  'sales-sync': 'nav-upload',
+  reporting: 'nav-reporting',
+  'reporting-scheduling': 'action-schedule-reports',
   integrations: 'nav-integrations',
   'user-management': 'nav-user-management',
   'custom-roles': 'nav-custom-roles',
   settings: 'nav-settings',
   'settings-business': 'nav-settings',
   'settings-customization': 'nav-settings'
+};
+
+export const DATA_PERMISSION_SCHEMA_MARKER = 'permission-schema-import-export-v1';
+
+export const SECTION_DATA_PERMISSION_MAP = {
+  products: { import: 'action-import-products', export: 'action-export-products' },
+  recipes: { import: 'action-import-recipes', export: 'action-export-recipes' },
+  ingredients: { import: 'action-import-ingredients', export: 'action-export-ingredients' },
+  suppliers: { import: 'action-import-suppliers', export: 'action-export-suppliers' },
+  'purchase-orders': { export: 'action-export-purchase-orders' },
+  transfers: { import: 'action-import-transfers', export: 'action-export-transfers' },
+  'stock-count': { import: 'action-import-stock-count', export: 'action-export-stock-count' },
+  'mfg-products': { import: 'action-import-manufacturing', export: 'action-export-manufacturing' },
+  reporting: { export: 'action-export-reporting' },
+  settings: { import: 'action-import-settings', export: 'action-export-settings' }
 };
 
 export const ACTION_PERMISSION_MAP = {
@@ -29,10 +45,43 @@ export const ACTION_PERMISSION_MAP = {
   manageUsers: 'action-manage-users',
   manageRoles: 'action-manage-roles',
   assignLowStockEmailTag: 'action-assign-low-stock-email-tag',
-  externalTransfers: 'action-external-transfers'
+  externalTransfers: 'action-external-transfers',
+  saveWorkspaceReportViews: 'action-save-workspace-report-views',
+  scheduleReports: 'action-schedule-reports',
+  emailReports: 'action-email-reports',
+  manageReportSchedules: 'action-manage-report-schedules',
+  deleteReportSchedules: 'action-delete-report-schedules',
+  ...Object.fromEntries(Object.entries(SECTION_DATA_PERMISSION_MAP).flatMap(([sectionId, actions]) =>
+    Object.entries(actions).map(([action, permissionId]) => [`${action}:${sectionId}`, permissionId])
+  ))
 };
 
-const FULL_ACTION_PERMISSIONS = Object.values(ACTION_PERMISSION_MAP);
+const FULL_ACTION_PERMISSIONS = [...new Set([
+  ...Object.values(ACTION_PERMISSION_MAP),
+  DATA_PERMISSION_SCHEMA_MARKER
+])];
+
+export function getAccessRenderRevision(access = {}) {
+  const stableList = (values = []) => (Array.isArray(values) ? values : [])
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+    .sort()
+    .join(',');
+  const rolePermissions = stableList(access.roleDefinition?.permissions);
+  const roleLocations = stableList(access.roleDefinition?.locations);
+  const userLocations = stableList(access.currentUserLocations);
+  return [
+    String(access.status || 'idle'),
+    String(access.currentRole || ''),
+    access.currentIsSuperUser === true ? 'super' : 'standard',
+    access.currentIsKcpSuperUser === true ? 'kcp-super' : 'workspace-user',
+    stableList(access.allowedSections),
+    rolePermissions,
+    roleLocations,
+    userLocations,
+    access.currentUserCanAccessExternalTransfers === false ? 'no-external-transfers' : 'external-transfers'
+  ].join('|');
+}
 
 export const DEFAULT_ROLES = [
   {
@@ -53,7 +102,7 @@ export const DEFAULT_ROLES = [
       'nav-stock-count',
       'nav-locations',
       'nav-mfg-products',
-      'nav-upload',
+      'nav-reporting',
       'nav-integrations',
       'nav-user-management',
       'nav-custom-roles',
@@ -80,7 +129,7 @@ export const DEFAULT_ROLES = [
       'nav-stock-count',
       'nav-locations',
       'nav-mfg-products',
-      'nav-upload',
+      'nav-reporting',
       'nav-integrations',
       'nav-user-management',
       'nav-custom-roles',
@@ -107,7 +156,7 @@ export const DEFAULT_ROLES = [
       'nav-stock-count',
       'nav-locations',
       'nav-mfg-products',
-      'nav-upload',
+      'nav-reporting',
       'nav-integrations',
       'nav-user-management',
       'nav-custom-roles',
@@ -134,10 +183,15 @@ export const DEFAULT_ROLES = [
       'nav-stock-count',
       'nav-locations',
       'nav-mfg-products',
-      'nav-upload',
+      'nav-reporting',
       'nav-integrations',
       ACTION_PERMISSION_MAP.editStockTake7Days,
-      ACTION_PERMISSION_MAP.editStockTake30Days
+      ACTION_PERMISSION_MAP.editStockTake30Days,
+      ACTION_PERMISSION_MAP.saveWorkspaceReportViews,
+      ACTION_PERMISSION_MAP.scheduleReports,
+      ACTION_PERMISSION_MAP.emailReports,
+      ACTION_PERMISSION_MAP.manageReportSchedules,
+      ACTION_PERMISSION_MAP.deleteReportSchedules
     ],
     locations: ['all']
   },
@@ -159,7 +213,6 @@ export const DEFAULT_ROLES = [
       'nav-stock-count',
       'nav-locations',
       'nav-mfg-products',
-      'nav-upload',
       'nav-integrations'
     ],
     locations: ['all']
@@ -227,7 +280,7 @@ export function normalizeCustomRoles(value) {
       name: normalizeRoleName(role.name),
       label: String(role.label || role.name || '')
         .trim(),
-      permissions: normalizePermissions(role.permissions),
+      permissions: normalizeRolePermissions(role.permissions),
       locations: normalizeLocations(role.locations)
     }))
     .filter((role) => role.name);
@@ -236,10 +289,11 @@ export function normalizeCustomRoles(value) {
 export function getRoleCatalog(customRoles = []) {
   const normalizedCustoms = normalizeCustomRoles(customRoles);
   const defaults = DEFAULT_ROLES.map((role) => {
+    const baseRole = { ...role, permissions: normalizeRolePermissions(role.permissions) };
     const override = normalizedCustoms.find((entry) => entry.name === role.name);
     return override
-      ? { ...role, ...override, label: override.label || role.label, isPreset: true, isModified: true }
-      : { ...role, isPreset: true, isModified: false };
+      ? { ...baseRole, ...override, label: override.label || role.label, isPreset: true, isModified: true }
+      : { ...baseRole, isPreset: true, isModified: false };
   });
 
   const customsOnly = normalizedCustoms
@@ -259,11 +313,13 @@ export function resolveRoleDefinition(roleName, customRoles = []) {
   const normalized = normalizeRoleName(roleName) || 'member';
   return getRoleCatalog(customRoles).find((role) => role.name === normalized) || {
     ...DEFAULT_ROLES.find((role) => role.name === 'member'),
+    permissions: normalizeRolePermissions(DEFAULT_ROLES.find((role) => role.name === 'member')?.permissions || []),
     label: 'Member'
   };
 }
 
 export function getAllowedSections(roleName, customRoles = []) {
+  if (isSuperUserRoleName(roleName)) return Object.keys(SECTION_PERMISSION_MAP);
   const role = resolveRoleDefinition(roleName, customRoles);
   return Object.entries(SECTION_PERMISSION_MAP)
     .filter(([, permissionId]) => role.permissions.includes(permissionId))
@@ -271,6 +327,7 @@ export function getAllowedSections(roleName, customRoles = []) {
 }
 
 export function hasSectionAccess(sectionId, roleName, customRoles = []) {
+  if (isSuperUserRoleName(roleName)) return true;
   const permissionId = SECTION_PERMISSION_MAP[String(sectionId || '').trim()];
   if (!permissionId) return true;
   const role = resolveRoleDefinition(roleName, customRoles);
@@ -278,12 +335,31 @@ export function hasSectionAccess(sectionId, roleName, customRoles = []) {
 }
 
 export function hasLocationAccess(locationId, roleName, customRoles = []) {
+  if (isSuperUserRoleName(roleName)) return true;
   const role = resolveRoleDefinition(roleName, customRoles);
   if ((role.locations || []).includes('all')) return true;
   return (role.locations || []).includes(String(locationId || '').trim());
 }
 
+export function getSectionDataPermission(sectionId, action) {
+  return SECTION_DATA_PERMISSION_MAP[String(sectionId || '').trim()]?.[String(action || '').trim()] || '';
+}
+
+export function hasSectionDataPermission(sectionId, action, roleName, customRoles = []) {
+  const permissionId = getSectionDataPermission(sectionId, action);
+  if (!permissionId) return false;
+  return hasPermission(permissionId, roleName, customRoles);
+}
+
+export function ensureExplicitDataPermissionSchema(permissions = []) {
+  const normalized = normalizePermissions(permissions);
+  return normalized.includes(DATA_PERMISSION_SCHEMA_MARKER)
+    ? normalized
+    : [...normalized, DATA_PERMISSION_SCHEMA_MARKER];
+}
+
 export function hasPermission(permissionId, roleName, customRoles = []) {
+  if (isSuperUserRoleName(roleName)) return true;
   const cleanPermissionId = String(permissionId || '').trim();
   if (!cleanPermissionId) return true;
   const role = resolveRoleDefinition(roleName, customRoles);
@@ -293,13 +369,13 @@ export function hasPermission(permissionId, roleName, customRoles = []) {
 // The KCP Super User is a hidden system role: it must never appear in any role list/picker and
 // its members must never appear in a workspace team list, for any user (owners/admins included).
 export function isSuperUserRoleName(roleName = '') {
-  return ['super', 'super-user', 'superuser', 'root'].includes(normalizeRoleName(roleName));
+  return ['super', 'super-user', 'superuser', 'root', 'kcp-superuser', 'kcp-super-user'].includes(normalizeRoleName(roleName));
 }
 
 export function canManagePermissionSets(roleName = '', currentIsSuperUser = false) {
   if (currentIsSuperUser === true) return true;
   const normalized = normalizeRoleName(roleName);
-  return ['owner', 'admin', 'super', 'super-user', 'superuser', 'root'].includes(normalized);
+  return ['owner', 'admin', 'super', 'super-user', 'superuser', 'root', 'kcp-superuser', 'kcp-super-user'].includes(normalized);
 }
 
 export function buildRoleOptions(customRoles = []) {
@@ -326,7 +402,7 @@ export function normalizeRoleName(value = '') {
   return String(value || '')
     .trim()
     .toLowerCase()
-    .replace(/\s+/g, '-');
+    .replace(/[_\s]+/g, '-');
 }
 
 function normalizePermissions(value) {
@@ -335,9 +411,26 @@ function normalizePermissions(value) {
     .filter(Boolean))];
 }
 
+function normalizeRolePermissions(value) {
+  const permissions = normalizePermissions(value);
+  const hasExplicitSchema = permissions.includes(DATA_PERMISSION_SCHEMA_MARKER) || permissions.some((permission) =>
+    permission.startsWith('action-import-') || permission.startsWith('action-export-')
+  );
+  if (hasExplicitSchema) return permissions;
+
+  const migrated = new Set(permissions);
+  for (const [sectionId, actions] of Object.entries(SECTION_DATA_PERMISSION_MAP)) {
+    const navigationPermission = SECTION_PERMISSION_MAP[sectionId];
+    if (!navigationPermission || !migrated.has(navigationPermission)) continue;
+    Object.values(actions).forEach((permissionId) => migrated.add(permissionId));
+  }
+  migrated.add(DATA_PERMISSION_SCHEMA_MARKER);
+  return [...migrated];
+}
+
 function normalizeLocations(value) {
-  const list = Array.isArray(value) ? value : [];
-  if (!list.length) return ['all'];
-  const normalized = [...new Set(list.map((entry) => String(entry || '').trim()).filter(Boolean))];
+  if (!Array.isArray(value)) return ['all'];
+  if (!value.length) return [];
+  const normalized = [...new Set(value.map((entry) => String(entry || '').trim()).filter(Boolean))];
   return normalized.includes('all') ? ['all'] : normalized;
 }

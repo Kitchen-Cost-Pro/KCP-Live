@@ -8,10 +8,18 @@ import {
   patchAdminWorkspaceSettings,
   getAdminOrgSites,
   postAdminSaveOrgGroup,
-  postAdminUnlinkOrgSite
+  postAdminUnlinkOrgSite,
+  getAdminAuditLogs,
+  requireAdmin,
+  writeAdminAuditEvent
 } from './legacy/admin-routes';
 import type { AdminTenantSummary } from './legacy/admin-routes';
 import { dispatchCentralRoute } from './legacy/index';
+import { KCP_WORKER_RELEASE, KCP_WORKER_RELEASE_DATE, KCP_REFUND_PIPELINE_VERSION } from './release';
+import { consumeYocoV2QueueBatch } from './modules/yoco-engine-v2/queue-consumer';
+import type { YocoV2QueueDispatchResult, YocoV2QueueMessage } from './modules/yoco-engine-v2/contracts';
+import { permissionsForAdminRole } from './modules/yoco-engine-v2/admin-permissions';
+import { normalizeYocoV2AdminActionPath } from './modules/yoco-engine-v2/admin-route-path';
 
 export { WorkspaceDO } from './workspace-do';
 export { YocoV2RateGateDO } from './yoco-v2-rate-gate-do';
@@ -30,6 +38,107 @@ function centralLegacyEnv(env: Env): LegacyEnv {
  */
 async function dispatchCentral(request: Request, env: Env, url: URL): Promise<Response | null> {
   const lenv = centralLegacyEnv(env);
+
+  // Admin workspace actions are mixed-plane: authentication/auditing live in CENTRAL_DB while
+  // Yoco, stock, webhook and low-stock data live in the workspace Durable Object. Never allow
+  // these routes to fall through to the legacy central dispatcher, where tenant-table queries fail.
+  const adminWorkspaceYocoV2M = url.pathname.match(/^\/api\/admin\/workspaces\/([^/]+)\/yoco-v2\/(.+)$/);
+  if (adminWorkspaceYocoV2M && (request.method === 'GET' || request.method === 'POST' || request.method === 'PATCH')) {
+    const workspaceId = decodeURIComponent(adminWorkspaceYocoV2M[1]);
+    const decodedActionPath = adminWorkspaceYocoV2M[2].split('/').map((segment) => decodeURIComponent(segment)).join('/');
+    const actionPath = normalizeYocoV2AdminActionPath(decodedActionPath);
+    const adminSession = await requireAdmin(request, lenv);
+    const auth = adminAuthContext(adminSession);
+    const response = await forwardToWorkspaceDO(request, env, workspaceId, `yoco-v2/admin/${actionPath}`, auth);
+    if ((request.method === 'POST' || request.method === 'PATCH') && response.ok) {
+      await writeAdminAuditEvent(
+        lenv,
+        { uid: auth.uid, email: auth.email },
+        `yoco-v2.${actionPath.replace(/[^a-z0-9._-]+/gi, '.')}`,
+        workspaceId,
+        { workspaceId, actionPath }
+      );
+    }
+    return response;
+  }
+
+  const adminWorkspaceYocoM = url.pathname.match(/^\/api\/admin\/workspaces\/([^/]+)\/yoco\/([^/]+)$/);
+  if (adminWorkspaceYocoM) {
+    const workspaceId = decodeURIComponent(adminWorkspaceYocoM[1]);
+    const action = decodeURIComponent(adminWorkspaceYocoM[2]);
+    const allowedGetActions = new Set(['status', 'events']);
+    const allowedPostActions = new Set(['connect', 'disconnect', 'sync-catalogue', 'reset-webhook', 'test-webhook']);
+    if ((request.method === 'GET' && allowedGetActions.has(action)) || (request.method === 'POST' && allowedPostActions.has(action))) {
+      const adminSession = await requireAdmin(request, lenv);
+      const auth = adminAuthContext(adminSession);
+      const resource = `admin-yoco/${action}`;
+      const response = await forwardToWorkspaceDO(request, env, workspaceId, resource, auth);
+      if (request.method === 'POST' && response.ok) {
+        await writeAdminAuditEvent(
+          lenv,
+          { uid: auth.uid, email: auth.email },
+          `yoco.${action}`,
+          workspaceId,
+          { workspaceId }
+        );
+      }
+      return response;
+    }
+  }
+
+  const adminWorkspaceActionM = url.pathname.match(/^\/api\/admin\/workspaces\/([^/]+)\/actions\/([^/]+)$/);
+  if (adminWorkspaceActionM && request.method === 'POST') {
+    const workspaceId = decodeURIComponent(adminWorkspaceActionM[1]);
+    const action = decodeURIComponent(adminWorkspaceActionM[2]);
+    if (action === 'send-low-stock-email') {
+      const adminSession = await requireAdmin(request, lenv);
+      const auth = adminAuthContext(adminSession);
+      const response = await forwardToWorkspaceDO(request, env, workspaceId, `admin-action/${action}`, auth);
+      if (response.ok) {
+        await writeAdminAuditEvent(
+          lenv,
+          { uid: auth.uid, email: auth.email },
+          `workspace.${action}`,
+          workspaceId,
+          { workspaceId }
+        );
+      }
+      return response;
+    }
+  }
+
+  // Audit events are split between CENTRAL_DB (admin actions) and each tenant DO (workspace actions).
+  if (request.method === 'GET' && url.pathname === '/api/admin/audit-logs') {
+    return getAdminAuditLogs(request, lenv, async (limit) => {
+      const workspaceRows = await env.CENTRAL_DB.prepare(
+        `SELECT id, name FROM workspaces WHERE status = 'active' ORDER BY id`
+      ).all<{ id: string; name: string }>();
+      const workspaces = workspaceRows.results || [];
+      const results = await fanOutWorkspaceDOs(
+        env,
+        workspaces.map((row) => String(row.id)),
+        'admin-audit-events',
+        { uid: 'admin-audit', email: '' }
+      );
+      const nameMap = new Map(workspaces.map((row) => [String(row.id), String(row.name || row.id)]));
+      return results.flatMap((result) => {
+        const rows = Array.isArray((result.data as any)?.rows) ? (result.data as any).rows : [];
+        return rows.slice(0, limit).map((row: any) => ({
+          ...row,
+          workspace_id: result.workspaceId,
+          workspace_name: nameMap.get(result.workspaceId) || result.workspaceId
+        }));
+      });
+    });
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/admin/maintenance/integrity') {
+    return getAdminIntegrityReport(request, env, lenv);
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/admin/maintenance/repair') {
+    return postAdminIntegrityRepair(request, env, lenv);
+  }
 
   const approveM = url.pathname.match(/^\/api\/admin\/registration-requests\/([^/]+)\/approve$/);
   if (request.method === 'POST' && approveM) {
@@ -109,6 +218,224 @@ async function dispatchCentral(request: Request, env: Env, url: URL): Promise<Re
   }
 
   return dispatchCentralRoute(request, lenv);
+}
+
+function adminAuthContext(adminSession: Awaited<ReturnType<typeof requireAdmin>>): AuthContext {
+  const adminRole = text(adminSession.admin?.role || 'admin');
+  return {
+    uid: text(adminSession.auth?.uid || adminSession.admin?.id || 'admin'),
+    email: text(adminSession.admin?.email || adminSession.auth?.email || ''),
+    systemRole: 'admin',
+    adminRole,
+    permissions: permissionsForAdminRole(adminRole, Boolean(adminSession.admin?.isSuper))
+  };
+}
+
+async function getAdminIntegrityReport(request: Request, env: Env, lenv: LegacyEnv): Promise<Response> {
+  const adminSession = await requireAdmin(request, lenv);
+  if (!adminSession.admin?.isSuper) return json(request, env, { ok: false, error: 'Superuser only.' }, 403);
+
+  const [memberLinks, adminLinks, ownerless, workspaceRows] = await Promise.all([
+    env.CENTRAL_DB.prepare(
+      `SELECT wm.id, wm.workspace_id, wm.email, wm.auth_uid, au.id AS expected_uid
+         FROM workspace_members wm
+         LEFT JOIN app_users au ON lower(au.email) = lower(wm.email)
+        WHERE wm.status = 'active'
+          AND (au.id IS NULL OR wm.auth_uid IS NULL OR wm.auth_uid != au.id)`
+    ).all<any>(),
+    env.CENTRAL_DB.prepare(
+      `SELECT ad.id, ad.email, ad.auth_uid, au.id AS expected_uid
+         FROM admin_users ad
+         LEFT JOIN app_users au ON lower(au.email) = lower(ad.email)
+        WHERE ad.status = 'active'
+          AND (au.id IS NULL OR ad.auth_uid IS NULL OR ad.auth_uid != au.id)`
+    ).all<any>(),
+    env.CENTRAL_DB.prepare(
+      `SELECT w.id, w.name
+         FROM workspaces w
+        WHERE w.status = 'active'
+          AND NOT EXISTS (
+            SELECT 1 FROM workspace_members wm
+             WHERE wm.workspace_id = w.id AND wm.status = 'active' AND wm.role_key = 'owner'
+          )`
+    ).all<any>(),
+    env.CENTRAL_DB.prepare(
+      `SELECT id, name FROM workspaces WHERE status = 'active' ORDER BY id`
+    ).all<{ id: string; name: string }>()
+  ]);
+
+  const workspaces = workspaceRows.results || [];
+  const summaries = await fanOutWorkspaceDOs(
+    env,
+    workspaces.map((row) => String(row.id)),
+    'admin-summary',
+    adminAuthContext(adminSession)
+  );
+  const nameMap = new Map(workspaces.map((row) => [String(row.id), String(row.name || row.id)]));
+  const issues: Array<Record<string, unknown>> = [];
+
+  for (const row of memberLinks.results || []) {
+    issues.push({
+      severity: row.expected_uid ? 'warning' : 'error',
+      code: row.expected_uid ? 'MEMBER_UID_MISMATCH' : 'MEMBER_USER_MISSING',
+      workspaceId: row.workspace_id,
+      email: row.email,
+      message: row.expected_uid
+        ? `Member identity link is stale for ${row.email}.`
+        : `Active workspace member ${row.email} has no app_users record.`
+    });
+  }
+  for (const row of adminLinks.results || []) {
+    issues.push({
+      severity: row.expected_uid ? 'warning' : 'error',
+      code: row.expected_uid ? 'ADMIN_UID_MISMATCH' : 'ADMIN_USER_MISSING',
+      email: row.email,
+      message: row.expected_uid
+        ? `Admin identity link is stale for ${row.email}.`
+        : `Active admin ${row.email} has no app_users record.`
+    });
+  }
+  for (const row of ownerless.results || []) {
+    issues.push({
+      severity: 'error',
+      code: 'WORKSPACE_OWNER_MISSING',
+      workspaceId: row.id,
+      message: `${row.name || row.id} has no active owner membership.`
+    });
+  }
+  for (const result of summaries) {
+    const data = result.data as any;
+    if (!data?.ok) {
+      issues.push({
+        severity: 'error',
+        code: 'TENANT_UNREACHABLE',
+        workspaceId: result.workspaceId,
+        message: `${nameMap.get(result.workspaceId) || result.workspaceId} tenant database did not respond.`
+      });
+      continue;
+    }
+    if (!data.settings?.raw_json) {
+      issues.push({
+        severity: 'warning',
+        code: 'WORKSPACE_SETTINGS_MISSING',
+        workspaceId: result.workspaceId,
+        message: `${nameMap.get(result.workspaceId) || result.workspaceId} has no workspace settings baseline.`
+      });
+    }
+    if (Number(data.metrics?.locationCount || 0) < 1) {
+      issues.push({
+        severity: 'error',
+        code: 'WORKSPACE_LOCATION_MISSING',
+        workspaceId: result.workspaceId,
+        message: `${nameMap.get(result.workspaceId) || result.workspaceId} has no active location.`
+      });
+    }
+  }
+
+  return json(request, env, {
+    ok: true,
+    checkedAt: new Date().toISOString(),
+    workspaceCount: workspaces.length,
+    issueCount: issues.length,
+    issues
+  });
+}
+
+async function postAdminIntegrityRepair(request: Request, env: Env, lenv: LegacyEnv): Promise<Response> {
+  const adminSession = await requireAdmin(request, lenv);
+  if (!adminSession.admin?.isSuper) return json(request, env, { ok: false, error: 'Superuser only.' }, 403);
+  const now = new Date().toISOString();
+
+  const createdUsers = await env.CENTRAL_DB.prepare(
+    `INSERT INTO app_users (id, email, display_name, status, created_at, updated_at)
+     SELECT 'user_' || lower(hex(randomblob(16))), source.email, source.display_name, 'active', ?1, ?1
+       FROM (
+         SELECT lower(email) AS email, COALESCE(NULLIF(display_name, ''), lower(email)) AS display_name
+           FROM admin_users
+          WHERE status = 'active'
+         UNION
+         SELECT lower(email) AS email, COALESCE(NULLIF(display_name, ''), lower(email)) AS display_name
+           FROM workspace_members
+          WHERE status = 'active'
+       ) source
+      WHERE source.email != ''
+        AND NOT EXISTS (SELECT 1 FROM app_users au WHERE lower(au.email) = source.email)`
+  ).bind(now).run();
+
+  const members = await env.CENTRAL_DB.prepare(
+      `UPDATE workspace_members
+          SET auth_uid = (SELECT au.id FROM app_users au WHERE lower(au.email) = lower(workspace_members.email) LIMIT 1),
+              updated_at = ?1
+        WHERE status = 'active'
+          AND EXISTS (SELECT 1 FROM app_users au WHERE lower(au.email) = lower(workspace_members.email))
+          AND (auth_uid IS NULL OR auth_uid != (SELECT au.id FROM app_users au WHERE lower(au.email) = lower(workspace_members.email) LIMIT 1))`
+    ).bind(now).run();
+  const admins = await env.CENTRAL_DB.prepare(
+      `UPDATE admin_users
+          SET auth_uid = (SELECT au.id FROM app_users au WHERE lower(au.email) = lower(admin_users.email) LIMIT 1),
+              updated_at = ?1
+        WHERE status = 'active'
+          AND EXISTS (SELECT 1 FROM app_users au WHERE lower(au.email) = lower(admin_users.email))
+          AND (auth_uid IS NULL OR auth_uid != (SELECT au.id FROM app_users au WHERE lower(au.email) = lower(admin_users.email) LIMIT 1))`
+    ).bind(now).run();
+  const owners = await env.CENTRAL_DB.prepare(
+      `UPDATE workspaces
+          SET owner_uid = (
+                SELECT COALESCE(wm.auth_uid, au.id)
+                  FROM workspace_members wm
+                  LEFT JOIN app_users au ON lower(au.email) = lower(wm.email)
+                 WHERE wm.workspace_id = workspaces.id
+                   AND wm.status = 'active'
+                   AND wm.role_key = 'owner'
+                 ORDER BY wm.created_at
+                 LIMIT 1
+              ),
+              updated_at = ?1
+        WHERE status = 'active'
+          AND EXISTS (
+                SELECT 1 FROM workspace_members wm
+                 WHERE wm.workspace_id = workspaces.id
+                   AND wm.status = 'active'
+                   AND wm.role_key = 'owner'
+              )
+          AND COALESCE(owner_uid, '') != COALESCE((
+                SELECT COALESCE(wm.auth_uid, au.id, '')
+                  FROM workspace_members wm
+                  LEFT JOIN app_users au ON lower(au.email) = lower(wm.email)
+                 WHERE wm.workspace_id = workspaces.id
+                   AND wm.status = 'active'
+                   AND wm.role_key = 'owner'
+                 ORDER BY wm.created_at
+                 LIMIT 1
+              ), '')`
+    ).bind(now).run();
+  const workspaceRows = await env.CENTRAL_DB.prepare(
+    `SELECT id FROM workspaces WHERE status = 'active' ORDER BY id`
+  ).all<{ id: string }>();
+
+  const auth = adminAuthContext(adminSession);
+  const tenantResults = await Promise.all((workspaceRows.results || []).map(async (row) => ({
+    workspaceId: String(row.id),
+    result: await callWorkspaceDO(env, String(row.id), 'admin-action/repair-baseline', auth, 'POST', {})
+  })));
+  const tenantChanges = tenantResults.reduce((sum, row) => sum + Number((row.result as any)?.changes || 0), 0);
+
+  const result = {
+    appUsersCreated: Number(createdUsers.meta?.changes || 0),
+    memberIdentityLinks: Number(members.meta?.changes || 0),
+    adminIdentityLinks: Number(admins.meta?.changes || 0),
+    workspaceOwnerLinks: Number(owners.meta?.changes || 0),
+    tenantBaselines: tenantChanges,
+    tenantFailures: tenantResults.filter((row) => !(row.result as any)?.ok).map((row) => row.workspaceId)
+  };
+  await writeAdminAuditEvent(
+    lenv,
+    { uid: auth.uid, email: auth.email },
+    'maintenance.integrity-repair',
+    'central-and-tenants',
+    result
+  );
+  return json(request, env, { ok: true, repairedAt: now, ...result });
 }
 
 /** Seed a newly-approved workspace's DO with its tenant baseline (settings + default location). */
@@ -239,21 +566,44 @@ async function forwardToWorkspaceDO(
 ): Promise<Response> {
   const id = env.WORKSPACE.idFromName(workspaceId);
   const stub = env.WORKSPACE.get(id);
-  const forwarded = new Request(request.url, {
-    method: request.method,
-    headers: new Headers(request.headers),
-    body: request.method === 'GET' || request.method === 'HEAD' ? undefined : request.body
-  });
-  forwarded.headers.set('x-kcp-workspace', workspaceId);
-  forwarded.headers.set('x-kcp-resource', resource);
-  forwarded.headers.set('x-kcp-auth', JSON.stringify(auth));
+  const headers = new Headers(request.headers);
+  headers.set('x-kcp-workspace', workspaceId);
+  headers.set('x-kcp-resource', resource);
+  headers.set('x-kcp-auth', JSON.stringify(auth));
+
+  // Construct from the Request itself so the runtime tees the body stream. Passing request.body
+  // directly transfers the original stream to the Durable Object; Miniflare/Workers then fails while
+  // draining the outer request after a JSON-reading action (for example Yoco disconnect/connect).
+  const forwarded = new Request(request, { headers });
   return stub.fetch(forwarded);
+}
+
+async function dispatchYocoV2QueueMessage(env: Env, message: YocoV2QueueMessage): Promise<YocoV2QueueDispatchResult> {
+  const workspaceId = String(message.workspace_id || '');
+  if (!workspaceId) return { ok: false, action: 'ack', status: 'FAILED_PERMANENTLY', error: 'Queue message has no workspace_id.' };
+  const stub = env.WORKSPACE.get(env.WORKSPACE.idFromName(workspaceId));
+  const headers = new Headers({ 'content-type': 'application/json' });
+  headers.set('x-kcp-workspace', workspaceId);
+  headers.set('x-kcp-resource', 'yoco-v2/queue/process');
+  headers.set('x-kcp-auth', JSON.stringify({ uid: 'yoco-v2-queue', email: '', systemRole: 'queue' }));
+  const request = new Request(`https://do/api/workspaces/${encodeURIComponent(workspaceId)}/yoco-v2/queue/process`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(message)
+  });
+  const response = await stub.fetch(request);
+  const data = await response.json<YocoV2QueueDispatchResult>().catch(() => ({
+    ok: false,
+    action: response.status >= 500 ? 'retry' : 'ack',
+    error: `V2 queue route returned HTTP ${response.status}.`
+  } as YocoV2QueueDispatchResult));
+  return data;
 }
 
 /**
  * Fan-out primitive: synthesize an internal request to ANY workspace's DO for a given resource and
  * return its parsed JSON. Used by cross-workspace reads (linked-transfer profiles, org/corp
- * consolidated reports, admin overview) that must run in the front Worker where env.WORKSPACE lives.
+ * consolidated overview data, admin overview) that must run in the front Worker where env.WORKSPACE lives.
  */
 async function callWorkspaceDO(
   env: Env,
@@ -671,6 +1021,23 @@ async function cleanupPeerGroupLinks(env: Env, wsId: string): Promise<void> {
   }));
 }
 
+function gmailWorkspaceIdFromOauthState(stateValue: string): string {
+  const raw = text(stateValue);
+  if (!raw || raw.startsWith('system:')) return '';
+  const payload = raw.split('.')[0];
+  if (!payload) return '';
+  try {
+    const base64 = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
+    const binary = atob(padded);
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    const state = JSON.parse(new TextDecoder().decode(bytes)) as { workspaceId?: unknown };
+    return text(state.workspaceId);
+  } catch {
+    return '';
+  }
+}
+
 async function handle(request: Request, env: Env): Promise<Response> {
   if (request.method === 'OPTIONS') {
     return new Response(null, { status: 204, headers: corsHeaders(request, env) });
@@ -682,9 +1049,19 @@ async function handle(request: Request, env: Env): Promise<Response> {
       ok: true,
       service: 'kcp-api-v2',
       environment: env.ENVIRONMENT || 'development',
-      workerRelease: 'phase100-stock-items-query-chunking',
-      workerReleaseDate: '2026-07-27',
-      recipePersistenceVersion: 'dual-store-readback-v1'
+      workerRelease: KCP_WORKER_RELEASE,
+      workerReleaseDate: KCP_WORKER_RELEASE_DATE,
+      refundPipelineVersion: KCP_REFUND_PIPELINE_VERSION
+    });
+  }
+
+  if (request.method === 'GET' && url.pathname === '/api/runtime-version') {
+    return json(request, env, {
+      ok: true,
+      service: 'kcp-api-v2',
+      workerRelease: KCP_WORKER_RELEASE,
+      workerReleaseDate: KCP_WORKER_RELEASE_DATE,
+      refundPipelineVersion: KCP_REFUND_PIPELINE_VERSION
     });
   }
 
@@ -706,19 +1083,39 @@ async function handle(request: Request, env: Env): Promise<Response> {
     return json(request, env, { ok: false, error: 'Unknown migrate route' }, 404);
   }
 
-  // Yoco webhook ingress. Yoco POSTs to /webhooks/yoco/:workspaceId (registered URL). This is a
-  // TENANT operation — it reads yoco_connections + depletes stock via processYocoOrder, all tenant
-  // tables — so it MUST run in the workspace DO. Previously it fell through to the central dispatcher
-  // (env.DB = CENTRAL_DB), where the connection lookup returned nothing and it rejected before
-  // depleting (webhook depletion silently never happened; only manual sync worked). Signature
-  // verification runs inside the DO handler using the tenant-stored webhook_secret.
+  // Sole external Yoco webhook ingress. The tenant DO verifies the signature, captures the immutable
+  // V2 raw event, and publishes identifier-only queue work. No sale, refund, reporting, or stock
+  // business effect executes in the request path.
   const yocoWebhookM = url.pathname.match(/^\/webhooks\/yoco\/([^/]+)$/);
   if (yocoWebhookM && request.method === 'POST') {
     const wsId = decodeURIComponent(yocoWebhookM[1]);
-    const response = await forwardToWorkspaceDO(request, env, wsId, 'yoco-webhook', { uid: 'yoco-webhook', email: '' });
+    const response = await forwardToWorkspaceDO(request, env, wsId, 'yoco-v2/webhook', { uid: 'yoco-webhook', email: '' });
     const headers = new Headers(response.headers);
     for (const [k, v] of Object.entries(corsHeaders(request, env))) headers.set(k, v);
     return new Response(response.body, { status: response.status, headers });
+  }
+
+  // Gmail OAuth returns to a global callback URL, but the connected account is stored in the
+  // workspace Durable Object. Decode only the signed state's routing hint here, then let the tenant
+  // handler verify the HMAC before reading or writing workspace_settings. This prevents the callback
+  // from querying CENTRAL_DB, where tenant tables intentionally do not exist.
+  if (request.method === 'GET' && url.pathname === '/api/gmail/oauth/callback') {
+    const rawState = text(url.searchParams.get('state'));
+    if (!rawState.startsWith('system:')) {
+      const workspaceId = gmailWorkspaceIdFromOauthState(rawState);
+      if (workspaceId) {
+        const response = await forwardToWorkspaceDO(
+          request,
+          env,
+          workspaceId,
+          'gmail-oauth-callback',
+          { uid: 'gmail-oauth-callback', email: '' }
+        );
+        const headers = new Headers(response.headers);
+        for (const [k, v] of Object.entries(corsHeaders(request, env))) headers.set(k, v);
+        return new Response(response.body, { status: response.status, headers });
+      }
+    }
   }
 
   // Central plane — all /api/auth/* + /api/admin/* + security-config etc. run in the front Worker
@@ -766,15 +1163,24 @@ export default {
       return await handle(request, env);
     } catch (cause) {
       console.error('FETCH ERROR:', cause);
-      // Map auth/permission errors thrown by handlers (requireAuth/requireAdmin/scoped) to 401 so the
-      // frontend treats them as "not signed in" rather than a server error. Mirrors legacy behaviour.
+      // Authentication failures are 401. Authenticated users who lack workspace/location access are
+      // 403; treating those as 401 caused report and dashboard permission failures to look like an
+      // expired login and triggered misleading sign-in errors across the app.
       const raw = cause instanceof Error ? cause.message : 'Internal error.';
-      const status = /token|access|permission|denied|sign in|session|expired/i.test(raw) ? 401 : 500;
-      const message = /token|session|expired|access|permission|denied|invalid|required|not found|sign in|password|email/i.test(raw)
+      const status = /permission|denied|no locations are assigned|access to this workspace/i.test(raw)
+        ? 403
+        : /token|sign in|session|expired|missing bearer|authentication/i.test(raw)
+          ? 401
+          : 500;
+      const message = /token|session|expired|access|permission|denied|invalid|required|not found|sign in|password|email|already exists|duplicate|unique/i.test(raw)
         ? raw
         : 'Something went wrong. Please try again.';
       return json(request, env, { ok: false, error: message }, status);
     }
+  },
+
+  async queue(batch: MessageBatch<YocoV2QueueMessage>, env: Env): Promise<void> {
+    await consumeYocoV2QueueBatch(batch, (message) => dispatchYocoV2QueueMessage(env, message));
   },
 
   // Low-stock email cron. The per-workspace stock/settings/run tables are tenant-only, so we
@@ -788,22 +1194,14 @@ export default {
     const ids = (list.results || []).map((r) => String(r.id)).filter(Boolean);
     console.log(`[low-stock-cron] evaluating ${ids.length} active workspaces`);
     await Promise.all(
-      ids.map((id) =>
+      ids.flatMap((id) => [
         callWorkspaceDO(env, id, 'admin-action/low-stock-due', { uid: 'system', email: '' }, 'POST', {})
-          .catch((cause) => { console.error(`[low-stock-cron] ws=${id} failed: ${cause}`); return null; })
-      )
+          .catch((cause) => { console.error(`[low-stock-cron] ws=${id} failed: ${cause}`); return null; }),
+        callWorkspaceDO(env, id, 'admin-action/report-schedules-due', { uid: 'system', email: '' }, 'POST', {})
+          .catch((cause) => { console.error(`[report-schedule-cron] ws=${id} failed: ${cause}`); return null; }),
+        callWorkspaceDO(env, id, 'yoco-v2/reconciliation/scheduled', { uid: 'system', email: '', systemRole: 'queue' }, 'POST', {})
+          .catch((cause) => { console.error(`[yoco-v2-reconciliation-cron] ws=${id} failed: ${cause}`); return null; })
+      ])
     );
-  },
-
-  // Compatibility bridge for the Queue consumer already attached to the
-  // production Worker. The current KCP source has no Queue producer or message
-  // processor, so acknowledging an unknown batch here could silently discard
-  // historical work. Keep messages intact, at a low retry frequency, until the
-  // old consumer is deliberately removed or its original processor is restored.
-  async queue(batch: MessageBatch<unknown>): Promise<void> {
-    console.warn(
-      `[queue-compat] preserving ${batch.messages.length} message(s) from queue "${batch.queue}"`
-    );
-    batch.retryAll({ delaySeconds: 3600 });
   }
 };

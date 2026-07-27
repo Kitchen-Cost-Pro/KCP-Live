@@ -4,6 +4,7 @@ import { bindFieldHelpTooltips, renderFieldHelpLabel } from './fieldHelp.js';
 import { renderLoadingPanel } from './LoadingPanel.js';
 import { getLocationStock } from '../utils/stockBalances.js';
 import { ACTION_PERMISSION_MAP, hasPermission } from '../services/roleService.js';
+import { isTransferEligibleStockItem } from '../services/stockCountEligibility.js';
 
 export function renderTransfers({ state, onTransferFilterChange, onTransferAction = {} } = {}) {
   const transfers = state.transfers || {};
@@ -399,17 +400,12 @@ function renderTransferTemplateBuilder(transfers = {}, filters = {}) {
   const draft = transfers.templateDraft || createEmptyTransferTemplateDraft();
   const query = String(filters.templateSearch || '').trim().toLowerCase();
   const selectedIds = new Set((draft.selectedStockIds || []).map(String));
+  const isSaving = transfers.actionStatus === 'saving-template';
   const stockItems = (transfers.stockItems || [])
+    .filter(isTransferEligibleStockItem)
     .filter((item) => {
       if (!query) return true;
-      return [
-        item.name,
-        item.category,
-        item.sku,
-        item.SKU,
-        item.code,
-        ...(Array.isArray(item.barcodes) ? item.barcodes : [])
-      ].some((value) => String(value || '').toLowerCase().includes(query));
+      return getTransferSearchCandidates(item).some((value) => String(value || '').toLowerCase().includes(query));
     });
 
   return `
@@ -440,8 +436,8 @@ function renderTransferTemplateBuilder(transfers = {}, filters = {}) {
             <strong>${selectedIds.size}</strong>
             <span>selected stock items</span>
           </div>
-          <button type="button" class="transfersPrimary" data-transfer-template-save ${String(draft.name || '').trim() && selectedIds.size ? '' : 'disabled'}>
-            ${transfers.actionStatus === 'saving-template' ? 'Saving...' : 'Save Transfer Template'}
+          <button type="button" class="transfersPrimary" data-transfer-template-save ${String(draft.name || '').trim() && selectedIds.size && !isSaving ? '' : 'disabled'} aria-busy="${isSaving ? 'true' : 'false'}">
+            ${isSaving ? 'Saving...' : 'Save Transfer Template'}
           </button>
         </section>
 
@@ -449,7 +445,10 @@ function renderTransferTemplateBuilder(transfers = {}, filters = {}) {
           <div class="transfersTemplatePickerHead">
             <label class="transfersField">
               ${renderFieldHelpLabel('Stock Items', 'Search and select the stock items to include in this template.')}
-              <input type="search" value="${escapeAttribute(filters.templateSearch || '')}" placeholder="Search stock items..." data-transfer-template-search data-focus-key="transfer-template-search" />
+              <div class="transfersSearchShell">
+                <input type="search" value="${escapeAttribute(filters.templateSearch || '')}" placeholder="Search stock items or barcode..." data-transfer-template-search data-focus-key="transfer-template-search" />
+                <button type="button" class="transfersSearchCamera" data-transfer-template-camera aria-label="Scan barcode for transfer template search">${icon('camera')}</button>
+              </div>
             </label>
             <div class="transfersBulkActions">
               <button type="button" class="transfersMiniAction" data-transfer-template-select-all>Select All Shown</button>
@@ -513,6 +512,10 @@ function bindTransferEvents(view, filters, onTransferFilterChange, onTransferAct
 
   view.querySelector('[data-transfer-template-search]')?.addEventListener('input', (event) => {
     onTransferFilterChange?.({ templateSearch: event.currentTarget.value });
+  });
+
+  view.querySelector('[data-transfer-template-camera]')?.addEventListener('click', () => {
+    onTransferAction.onScanStockSearch?.('template');
   });
 
   view.querySelectorAll('[data-transfer-template-stock]').forEach((checkbox) => {
@@ -591,6 +594,10 @@ function bindTransferEvents(view, filters, onTransferFilterChange, onTransferAct
 
   view.querySelector('[data-transfer-stock-search]')?.addEventListener('input', (event) => {
     onTransferFilterChange?.({ stockSearch: event.target.value });
+  });
+
+  view.querySelector('[data-transfer-stock-camera]')?.addEventListener('click', () => {
+    onTransferAction.onScanStockSearch?.('stock');
   });
 
   view.querySelector('[data-transfer-note]')?.addEventListener('input', (event) => {
@@ -1039,7 +1046,10 @@ function renderStockOverlay(stockItems, filters, selectedStockIds) {
         <div class="transfersOverlayFilters">
           <label class="transfersField">
             ${renderFieldHelpLabel('Search', 'Search stock items available to add into this transfer.')}
-            <input type="search" value="${escapeAttribute(filters.stockSearch || '')}" placeholder="Type name..." data-transfer-stock-search data-focus-key="transfer-stock-search" />
+            <div class="transfersSearchShell">
+              <input type="search" value="${escapeAttribute(filters.stockSearch || '')}" placeholder="Type name or scan barcode..." data-transfer-stock-search data-focus-key="transfer-stock-search" />
+              <button type="button" class="transfersSearchCamera" data-transfer-stock-camera aria-label="Scan barcode for transfer search">${icon('camera')}</button>
+            </div>
           </label>
           <label class="transfersField">
             ${renderFieldHelpLabel('Category', 'Filter transferable stock items by category.')}
@@ -1124,39 +1134,47 @@ function getStockMatches(stockItems = [], query = '', category = '', currentLine
   const q = String(query || '').trim().toLowerCase();
   const currentKeys = new Set((currentLines || []).map((line) => String(line.stockItemId || '')));
   return stockItems
-    .filter(isPhysicalStockItem)
+    .filter(isTransferEligibleStockItem)
     .filter((item) => {
       if (category && String(item.category || '') !== category) return false;
       if (!q) return true;
       return (
         String(item.name || '').toLowerCase().includes(q)
         || String(item.category || '').toLowerCase().includes(q)
-        || (item.barcodes || []).some((barcode) => String(barcode).toLowerCase().includes(q))
+        || getTransferSearchCandidates(item).some((value) => String(value || '').toLowerCase().includes(q))
       );
     })
     .map((item) => ({ ...item, alreadyAdded: currentKeys.has(String(item.id)) }));
 }
 
 function getCategoryOptions(stockItems = []) {
-  return [...new Set(stockItems.filter(isPhysicalStockItem).map((item) => String(item.category || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  return [...new Set(stockItems.filter(isTransferEligibleStockItem).map((item) => String(item.category || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
 }
 
-function isPhysicalStockItem(item = {}) {
-  if (item.isStocked === false) return false;
-  // Sub recipes are made in-house and cannot be transferred between locations.
-  if (item.isSubRecipe === true) return false;
-  const type = String(item.itemType || item.stockItemType || item.specificationType || '')
-    .trim()
-    .toLowerCase()
-    .replace(/[\s-]+/g, '_');
-  if (['recipe_source', 'non_stock', 'virtual', 'sub_recipe'].includes(type)) return false;
-  const category = String(item.category || '').toLowerCase();
-  return !category.includes('recipe source') &&
-    !category.includes('non-stock') &&
-    !category.includes('non stock') &&
-    !category.includes('virtual') &&
-    !category.includes('sub recipe') &&
-    !category.includes('sub-recipe');
+function getTransferSearchCandidates(item = {}) {
+  return [
+    item.id,
+    item.name,
+    item.category,
+    item.sku,
+    item.SKU,
+    item.code,
+    item.itemCode,
+    item.stockCode,
+    item.barcode,
+    ...(Array.isArray(item.barcodes) ? item.barcodes : []),
+    ...getTransferUomBarcodeValues(item)
+  ];
+}
+
+function getTransferUomBarcodeValues(item = {}) {
+  const rows = [
+    ...(Array.isArray(item.uomConfigurations) ? item.uomConfigurations : []),
+    ...(Array.isArray(item.uomConfig) ? item.uomConfig : []),
+    ...(Array.isArray(item.uomConversions) ? item.uomConversions : []),
+    ...(Array.isArray(item.customUnits) ? item.customUnits : [])
+  ];
+  return rows.flatMap((row = {}) => [row.barcode, row.customBarcode, row.customUomBarcode, row.uomBarcode, row.sku]).filter(Boolean);
 }
 
 function normalizeLinkedProfiles(value = []) {
@@ -1382,7 +1400,8 @@ function icon(name) {
     network: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="12" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="m8.7 10.7 6.6-3.4M8.7 13.3l6.6 3.4"/></svg>',
     shuffle: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5"/><path d="M4 20 21 3"/><path d="M21 16v5h-5"/><path d="m15 15 6 6"/><path d="m4 4 5 5"/></svg>',
     upload: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M4 20h16"/></svg>',
-    file: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6v20h12V8z"/><path d="M14 2v6h6"/><path d="M9 13h6"/><path d="M9 17h6"/></svg>'
+    file: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6v20h12V8z"/><path d="M14 2v6h6"/><path d="M9 13h6"/><path d="M9 17h6"/></svg>',
+    camera: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 4h-5L8 6H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-3l-1.5-2Z"/><circle cx="12" cy="13" r="3.5"/></svg>'
   };
   return icons[name] || icons.x;
 }

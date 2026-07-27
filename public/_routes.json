@@ -1,5 +1,5 @@
 {
   "version": 1,
-  "include": ["/api/*", "/admin", "/admin/*", "/assets/stockTakeService-*.js"],
+  "include": ["/api/*", "/assets/stockTakeService-*.js"],
   "exclude": []
 }

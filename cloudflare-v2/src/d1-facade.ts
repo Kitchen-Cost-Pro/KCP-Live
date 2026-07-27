@@ -113,28 +113,189 @@ export class FacadeDatabase {
   execScript(script: string): void {
     for (const raw of splitSqlStatements(script)) {
       const statement = raw.trim();
-      if (statement) this.sql.exec(statement);
+      if (!statement) continue;
+      try {
+        this.sql.exec(statement);
+      } catch (cause) {
+        // Durable Object migrations may be interrupted after one statement in a multi-statement
+        // migration has already committed. On the next request SQLite then reports a duplicate
+        // column for the statement that did succeed, which previously prevented that workspace
+        // from ever completing the remaining migration statements. Treat only this known,
+        // idempotent ALTER TABLE ADD COLUMN case as already applied; every other SQL error remains
+        // fatal so genuine schema problems are never hidden.
+        const message = String((cause as Error)?.message || cause || '');
+        const isAddColumn = /^ALTER\s+TABLE\s+[^\s]+\s+ADD\s+COLUMN\s+/i.test(statement);
+        const isDuplicateColumn = /duplicate column name|already exists/i.test(message);
+        if (isAddColumn && isDuplicateColumn) continue;
+        throw cause;
+      }
     }
   }
 }
 
-/** Split a SQL file into statements on `;`, ignoring `;` inside string literals. */
+/**
+ * Split a SQL script into complete statements.
+ *
+ * Durable Object SQLite accepts one statement per `sql.exec()` call. A plain semicolon splitter is
+ * not sufficient because SQLite trigger bodies contain statement terminators between `BEGIN` and
+ * the trigger's closing `END;`. Keep the complete trigger definition together while still ignoring
+ * semicolons inside quoted values and SQL comments.
+ */
 export function splitSqlStatements(script: string): string[] {
   const statements: string[] = [];
   let current = '';
+  let token = '';
   let inSingle = false;
   let inDouble = false;
+  let inBacktick = false;
+  let inBracket = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+  let isTrigger = false;
+  let triggerBodyStarted = false;
+  let triggerBodyEnded = false;
+  let caseDepth = 0;
+  const leadingTokens: string[] = [];
+
+  const resetStatementState = () => {
+    token = '';
+    isTrigger = false;
+    triggerBodyStarted = false;
+    triggerBodyEnded = false;
+    caseDepth = 0;
+    leadingTokens.length = 0;
+  };
+
+  const flushToken = () => {
+    if (!token) return;
+    const upper = token.toUpperCase();
+    token = '';
+
+    if (!triggerBodyStarted && leadingTokens.length < 4) {
+      leadingTokens.push(upper);
+      const normalized = leadingTokens.filter((value) => value !== 'TEMP' && value !== 'TEMPORARY');
+      isTrigger = normalized[0] === 'CREATE' && normalized[1] === 'TRIGGER';
+    }
+
+    if (!isTrigger) return;
+    if (!triggerBodyStarted && upper === 'BEGIN') {
+      triggerBodyStarted = true;
+      return;
+    }
+    if (!triggerBodyStarted || triggerBodyEnded) return;
+    if (upper === 'CASE') {
+      caseDepth += 1;
+      return;
+    }
+    if (upper === 'END') {
+      if (caseDepth > 0) caseDepth -= 1;
+      else triggerBodyEnded = true;
+    }
+  };
+
+  const finishStatement = () => {
+    const statement = current.trim();
+    if (statement) statements.push(statement);
+    current = '';
+    resetStatementState();
+  };
+
   for (let i = 0; i < script.length; i += 1) {
     const ch = script[i];
-    if (ch === "'" && !inDouble) inSingle = !inSingle;
-    else if (ch === '"' && !inSingle) inDouble = !inDouble;
-    if (ch === ';' && !inSingle && !inDouble) {
-      statements.push(current);
-      current = '';
-    } else {
-      current += ch;
+    const next = script[i + 1] || '';
+    current += ch;
+
+    if (inLineComment) {
+      if (ch === '\n') inLineComment = false;
+      continue;
+    }
+    if (inBlockComment) {
+      if (ch === '*' && next === '/') {
+        current += next;
+        i += 1;
+        inBlockComment = false;
+      }
+      continue;
+    }
+    if (inSingle) {
+      if (ch === "'" && next === "'") {
+        current += next;
+        i += 1;
+      } else if (ch === "'") {
+        inSingle = false;
+      }
+      continue;
+    }
+    if (inDouble) {
+      if (ch === '"' && next === '"') {
+        current += next;
+        i += 1;
+      } else if (ch === '"') {
+        inDouble = false;
+      }
+      continue;
+    }
+    if (inBacktick) {
+      if (ch === '`' && next === '`') {
+        current += next;
+        i += 1;
+      } else if (ch === '`') {
+        inBacktick = false;
+      }
+      continue;
+    }
+    if (inBracket) {
+      if (ch === ']') inBracket = false;
+      continue;
+    }
+
+    if (ch === '-' && next === '-') {
+      flushToken();
+      current += next;
+      i += 1;
+      inLineComment = true;
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      flushToken();
+      current += next;
+      i += 1;
+      inBlockComment = true;
+      continue;
+    }
+    if (ch === "'") {
+      flushToken();
+      inSingle = true;
+      continue;
+    }
+    if (ch === '"') {
+      flushToken();
+      inDouble = true;
+      continue;
+    }
+    if (ch === '`') {
+      flushToken();
+      inBacktick = true;
+      continue;
+    }
+    if (ch === '[') {
+      flushToken();
+      inBracket = true;
+      continue;
+    }
+
+    if (/[A-Za-z0-9_]/.test(ch)) {
+      token += ch;
+      continue;
+    }
+
+    flushToken();
+    if (ch === ';' && (!isTrigger || (triggerBodyStarted && triggerBodyEnded))) {
+      finishStatement();
     }
   }
-  if (current.trim()) statements.push(current);
+
+  flushToken();
+  finishStatement();
   return statements;
 }
