@@ -43,7 +43,7 @@ import {
   sendWorkspaceLowStockDue,
   sendWorkspaceLowStockToUser,
 } from "./low-stock-email";
-import { lowStockRelevanceSql } from "./low-stock-relevance";
+import { lowStockLocationRelevantSql } from "./low-stock-policy";
 import { sendEmail } from "./email";
 import {
   calculateIncomingLocationCost,
@@ -1011,9 +1011,14 @@ function normalizeProductRecipeLines(recipe: unknown[]) {
           line.ingredientId ||
           line.id,
       ),
-      // The recipe editor owns `qty`; `quantity` is retained only as a wire/storage
-      // compatibility alias. Prefer the editor value when both are present.
-      quantity: numberValue(line.qty ?? line.quantity, 0),
+      // `qty` is the field edited by the current recipe UI. Prefer it when
+      // present so an older, stale `quantity` property cannot silently win.
+      quantity: numberValue(
+        line.qty !== undefined && line.qty !== null && text(line.qty) !== ""
+          ? line.qty
+          : line.quantity,
+        0,
+      ),
       unit: text(line.unit || line.uom, "ea") || "ea",
     }))
     .filter((line) => line.stockItemId && line.quantity > 0);
@@ -1030,7 +1035,12 @@ function normalizeStockRecipeLines(recipe: unknown[]) {
           line.ingredientId ||
           line.id,
       ),
-      quantity: numberValue(line.quantity ?? line.qty ?? line.amount, 0),
+      quantity: numberValue(
+        line.qty !== undefined && line.qty !== null && text(line.qty) !== ""
+          ? line.qty
+          : line.quantity ?? line.amount,
+        0,
+      ),
       unit: text(line.unit || line.uom, "ea") || "ea",
     }))
     .filter((line) => line.stockItemId && line.quantity > 0);
@@ -13228,7 +13238,7 @@ export async function getDashboard(
         END), 0) AS stock_value,
         COUNT(DISTINCT CASE
           WHEN sb.quantity <= si.threshold_qty
-           AND ${lowStockRelevanceSql("sb")}
+           AND ${lowStockLocationRelevantSql("si", "sb")}
           THEN sb.stock_item_id
         END) AS low_stock_count
        FROM stock_balances sb
@@ -13536,7 +13546,7 @@ export async function getDashboard(
 	        AND si.active = 1
 	        AND ${STOCKED_ITEM_ALIAS_SQL("si")}
         AND sb.quantity <= si.threshold_qty
-        AND ${lowStockRelevanceSql("sb")}
+        AND ${lowStockLocationRelevantSql("si", "sb")}
       ORDER BY deficitValue DESC, si.name ASC
       LIMIT 100`,
   )
@@ -13778,7 +13788,6 @@ export async function getDashboard(
     insights: {
       ...insightCounts,
       lowStockRows: lowStock,
-      lowStockRelevanceApplied: true,
       pendingExternalTransferRows: [],
       recentActivity: recentActivity.results || [],
     },

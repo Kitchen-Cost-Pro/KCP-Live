@@ -370,7 +370,7 @@ test('REMOVE_INGREDIENT omits the ingredient without writing a reversal movement
   assert.equal(rows.find((row: any) => row.ingredient_item_id === 'beef')?.quantity, -0.2);
 });
 
-test('REPLACE_INGREDIENT deducts only the compatible replacement in the removed base-UOM quantity', async () => {
+test('REPLACE_INGREDIENT deducts only the replacement in the removed numeric quantity', async () => {
   const env = createEnv();
   await upsertModifierRule(env, {
     workspaceId: 'ws_1', ownerId: 'almond_swap',
@@ -450,16 +450,24 @@ test('REPLACE_INGREDIENT supports a larger or smaller replacement quantity multi
   assert.equal(rows.find((row: any) => row.ingredient_item_id === 'almond')?.quantity, -250);
 });
 
-test('an invalid persisted replacement rule fails closed and preserves the original ingredient deduction', async () => {
+test('REPLACE_INGREDIENT allows a replacement stock item with a different base UOM', async () => {
   const env = createEnv();
-  await env.DB.prepare(
-    `INSERT INTO modifier_rules
-      (id, workspace_id, modifier_owner_id, action_type, source_stock_item_id, replacement_stock_item_id, quantity, unit, status)
-     VALUES ('bad_rule', 'ws_1', 'bad_swap', 'REPLACE_INGREDIENT', 'dairy', 'cheese', 1, 'ea', 'active')`
-  ).run();
-  const rows = await proposals(env, canonical({ orderId: 'bad_replace', productId: 'coffee', modifier: modifier('bad_swap') }));
-  assert.equal(rows.find((row: any) => row.ingredient_item_id === 'dairy')?.quantity, -200);
-  assert.equal(rows.some((row: any) => row.warning_code === 'MODIFIER_REPLACEMENT_UOM_INCOMPATIBLE'), true);
+  await upsertModifierRule(env, {
+    workspaceId: 'ws_1', ownerId: 'cheese_swap',
+    rule: {
+      actionType: 'REPLACE_INGREDIENT',
+      sourceStockItemId: 'dairy',
+      replacementStockItemId: 'cheese',
+      quantity: 1.5,
+      menuItemIds: ['coffee'],
+      applyAllMatchingProducts: false
+    }
+  });
+  const rows = await proposals(env, canonical({ orderId: 'cross_uom_replace', productId: 'coffee', modifier: modifier('cheese_swap') }));
+  assert.equal(rows.some((row: any) => row.ingredient_item_id === 'dairy'), false);
+  assert.equal(rows.find((row: any) => row.ingredient_item_id === 'cheese')?.quantity, -300);
+  assert.equal(rows.find((row: any) => row.ingredient_item_id === 'cheese')?.base_uom, 'ea');
+  assert.equal(rows.filter((row: any) => row.warning_code).length, 0);
 });
 
 test('modifier observations are idempotent when the sale payload has no variant id', async () => {

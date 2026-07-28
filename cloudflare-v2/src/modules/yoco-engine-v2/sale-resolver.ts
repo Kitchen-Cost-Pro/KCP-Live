@@ -10,6 +10,7 @@ import { fetchYocoV2Order, YocoV2ApiClientError, type YocoV2ApiClientEnv } from 
 import { appendTimeline, newId, nowIso, type Row } from './repository';
 import { observeModifier, resolveModifierMapping } from '../modifier-engine/rules';
 import { normalizeModifierNote, observeLineNotes } from '../modifier-engine/reliability';
+import { resolveYocoStockLocation } from './location-routing';
 
 const SALE_SCHEMA_VERSION = '1.0.0';
 const FINAL_STATUSES = new Set(['approved', 'captured', 'closed', 'complete', 'completed', 'fulfilled', 'paid', 'settled', 'success', 'successful', 'succeeded', 'partially refunded', 'refunded']);
@@ -43,7 +44,7 @@ export function normalizeYocoV2EventType(value: unknown): string {
 export function isSupportedCompletedSaleEvent(eventType: string): boolean {
   const normalized = normalizeYocoV2EventType(eventType);
   return [
-    'order.completed', 'order.complete', 'order.paid', 'payment.succeeded',
+    'order.completed', 'order.complete', 'order.paid', 'payment.created', 'payment.succeeded',
     'payment.successful', 'payment.completed', 'payment.captured', 'order.updated'
   ].includes(normalized);
 }
@@ -210,14 +211,7 @@ function modifierIdentity(row: Row) {
 }
 
 async function mapLocation(env: Env, workspaceId: string, sourceLocationId: string): Promise<string> {
-  if (!sourceLocationId) return '';
-  const row = await env.DB.prepare(
-    `SELECT id FROM locations
-      WHERE workspace_id = ?1 AND active = 1
-        AND lower(COALESCE(external_provider, '')) = 'yoco'
-        AND external_location_id = ?2 LIMIT 1`
-  ).bind(workspaceId, sourceLocationId).first<Row>();
-  return text(row?.id);
+  return resolveYocoStockLocation(env, workspaceId, sourceLocationId);
 }
 
 async function mapProduct(env: Env, workspaceId: string, sourceProductId: string, sourceVariantId: string): Promise<string> {
@@ -454,6 +448,22 @@ export async function resolveCanonicalYocoSale(env: YocoV2ApiClientEnv, input: R
   const lines: CanonicalSaleLine[] = [];
   for (const [index, line] of orderLines(order).entries()) lines.push(await resolveLine(env, workspaceId, line, index));
   const completed = completedOrder(order);
+  // payment.created is Yoco's earliest documented live device-sale notification.
+  // It can arrive a moment before the order endpoint reflects the final paid
+  // state. Retry instead of permanently recording a non-final sale with no
+  // effects; a later retry or order.completed delivery resolves the same order
+  // and the source-order idempotency keys prevent duplicate reporting/stock.
+  if (eventType === 'payment.created' && !completed) {
+    throw new YocoV2ApiClientError({
+      message: 'Yoco payment was created, but the order is not final yet; live sale processing will retry.',
+      status: 409,
+      category: 'YOCO_TEMPORARY_ERROR',
+      code: 'YOCO_V2_PAYMENT_ORDER_NOT_FINAL_YET',
+      retryable: true,
+      retryAfterSeconds: 5,
+      details: { source_order_id: sourceOrderId, raw_event_type: eventType }
+    });
+  }
   const status = resolutionStatus({ completed, locationId: kcpLocationId, sourceLocationId, lines });
   const financials = deriveYocoFinancialAmounts({
     raw: order,

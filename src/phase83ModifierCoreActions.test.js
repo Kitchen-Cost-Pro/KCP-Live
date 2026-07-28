@@ -16,6 +16,8 @@ test('modifier setup drawer exposes core stock actions, scope and preview', () =
   assert.match(source, /Plain-language preview/);
   assert.match(source, /data-modifier-stock-picker-open/);
   assert.match(source, /data-modifier-stock-replacement-quantity/);
+  assert.match(source, /All active stock items are available/);
+  assert.doesNotMatch(source, /Only stock items with the same base UOM/);
   assert.doesNotMatch(source, /data-modifier-stock-location/);
 });
 

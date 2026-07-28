@@ -71,7 +71,6 @@ import {
   scheduleAppDropdownPortalRefresh
 } from './utils/appDropdownPortal.js';
 import { isStockCountableItem, isTransferEligibleStockItem } from './services/stockCountEligibility.js';
-import { mountCookieConsent } from './cookieConsent.js';
 // Canonical per-location balance resolver (same one the Transfers UI uses to show before/after),
 // so the transfer insufficient-stock validation resolves the source balance identically.
 import { getLocationStock as resolveLocationStock } from './utils/stockBalances.js';
@@ -86,8 +85,51 @@ const PERSISTED_ROUTES = ['dashboard', 'products', 'recipes', 'ingredients', 'su
 const SETTINGS_ROUTES = ['settings', 'settings-business', 'settings-customization'];
 
 installAppDropdownPortalSystem();
-mountCookieConsent();
+mountCookiePolicyNotice();
 
+function mountCookiePolicyNotice() {
+  const storageKey = 'kcp:cookie-consent:v1';
+  if (localStorage.getItem(storageKey)) return;
+
+  const overlay = document.createElement('div');
+  overlay.className = 'cookiePolicy';
+  overlay.setAttribute('role', 'presentation');
+  overlay.innerHTML = `
+    <section class="cookiePolicy__card" role="dialog" aria-modal="true" aria-labelledby="cookie-policy-title">
+      <div class="cookiePolicy__mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="M20.8 13.1A8.8 8.8 0 1 1 10.9 3.2a4.7 4.7 0 0 0 6 6 4.7 4.7 0 0 0 3.9 3.9Z"/>
+          <circle cx="8.5" cy="12.2" r=".7" fill="currentColor" stroke="none"/>
+          <circle cx="12.2" cy="16" r=".7" fill="currentColor" stroke="none"/>
+          <circle cx="7.5" cy="17.2" r=".7" fill="currentColor" stroke="none"/>
+        </svg>
+      </div>
+      <div class="cookiePolicy__copy">
+        <p>Privacy at KCP</p>
+        <h2 id="cookie-policy-title">A quick note about cookies</h2>
+        <span>We use essential cookies to keep you signed in, remember your workspace settings, and keep Kitchen Cost Pro secure.</span>
+        <a href="/privacy.html" target="_blank" rel="noopener">Read our cookie and privacy policy</a>
+      </div>
+      <div class="cookiePolicy__actions">
+        <button type="button" class="cookiePolicy__secondary" data-cookie-essential>Essential only</button>
+        <button type="button" class="cookiePolicy__primary" data-cookie-accept>Accept</button>
+      </div>
+    </section>
+  `;
+
+  const close = (choice) => {
+    localStorage.setItem(storageKey, JSON.stringify({
+      choice,
+      savedAt: new Date().toISOString(),
+    }));
+    overlay.classList.add('is-closing');
+    window.setTimeout(() => overlay.remove(), 180);
+  };
+  overlay.querySelector('[data-cookie-essential]')?.addEventListener('click', () => close('essential'));
+  overlay.querySelector('[data-cookie-accept]')?.addEventListener('click', () => close('accepted'));
+  document.body.appendChild(overlay);
+  overlay.querySelector('[data-cookie-accept]')?.focus();
+}
 
 function showBrandConfirmDialog({
   eyebrow = 'Confirm Action',
@@ -4368,14 +4410,14 @@ function closeRecipeEditor() {
 function updateRecipeLine(index, qty) {
   const nextRecipe = [...(appState.recipes.draftRecipe || [])];
   if (!nextRecipe[index]) return;
-  const normalizedQty = normalizeRecipeQtyInput(qty);
+  const normalizedQuantity = normalizeRecipeQtyInput(qty);
   nextRecipe[index] = {
     ...nextRecipe[index],
-    // Keep the legacy alias in sync while the user edits. Older recipe rows often
-    // contain both fields; leaving `quantity` stale made it win at the API boundary
-    // and caused an apparently successful edit to reload with the old value.
-    qty: normalizedQty,
-    quantity: normalizedQty
+    // Keep both legacy and canonical fields in lockstep. Existing recipe rows
+    // can contain both keys, and a stale `quantity` used to override an edited
+    // `qty` when the payload reached the Worker.
+    qty: normalizedQuantity,
+    quantity: normalizedQuantity
   };
   appState.recipes = {
     ...appState.recipes,
@@ -4509,12 +4551,17 @@ function addRecipeIngredient(ingredientId, qty = 0) {
   const existingIndex = draft.findIndex((line) => String(line.ingId) === id);
   let focusIndex = existingIndex;
   if (existingIndex >= 0) {
+    const nextQuantity = parseDecimalInputValue(
+      draft[existingIndex].qty ?? draft[existingIndex].quantity,
+      0
+    ) + quantity;
     draft[existingIndex] = {
       ...draft[existingIndex],
-      qty: parseDecimalInputValue(draft[existingIndex].qty, 0) + quantity
+      qty: nextQuantity,
+      quantity: nextQuantity
     };
   } else {
-    draft.push({ ingId: id, qty: quantity });
+    draft.push({ ingId: id, stockItemId: id, qty: quantity, quantity });
     focusIndex = draft.length - 1;
   }
 
@@ -5180,6 +5227,16 @@ function getRecipeDeleteToast(productCount = 0, modifierCount = 0) {
 async function saveCurrentRecipe() {
   const item = appState.recipes.editingItem;
   if (!item) return;
+  if (appState.recipes.actionStatus === 'saving') return;
+
+  // Recipe quantity fields preserve focus while the user types. Release both the live
+  // field and its queued focus snapshot before rendering the saving state; otherwise
+  // renderApp() can deliberately suppress the completion render and leave the modal
+  // showing "Saving" even though the API update succeeded.
+  pendingFocusField = null;
+  if (typeof document !== 'undefined' && document.activeElement && typeof document.activeElement.blur === 'function') {
+    document.activeElement.blur();
+  }
 
   appState.recipes = {
     ...appState.recipes,
@@ -5192,6 +5249,12 @@ async function saveCurrentRecipe() {
   try {
     const { updateRecipe } = await import('./services/recipeService.js');
     await updateRecipe(appState.workspace?.id, item, appState.recipes.draftRecipe || []);
+    // Ensure the success render cannot be skipped if focus changed while the request
+    // was pending. This render closes the editor and clears its saving state.
+    pendingFocusField = null;
+    if (typeof document !== 'undefined' && document.activeElement && typeof document.activeElement.blur === 'function') {
+      document.activeElement.blur();
+    }
     appState.recipes = {
       ...appState.recipes,
       editingItem: null,
@@ -5204,24 +5267,21 @@ async function saveCurrentRecipe() {
       actionStatus: '',
       actionError: ''
     };
-    // The API refresh below is intentionally background work. Repaint the successful
-    // state now so a slow or failed catalogue refresh cannot leave the recipe drawer
-    // displaying its stale "Saving" state after the write has already completed.
-    //
-    // This must be a forced repaint: the general renderer deliberately avoids replacing
-    // form DOM while an input retains focus. That protection is useful during editing,
-    // but after a confirmed save it can otherwise preserve the stale open drawer.
-    hideGlobalSaving();
-    renderApp({ forceDomRefresh: true });
     showRecipeToast('Recipe Blueprint Saved.', 'success');
     refreshActiveTabFromApi().catch(() => {});
   } catch (error) {
+    // Failures must also replace the disabled saving state immediately so the user can
+    // correct the recipe and retry without closing or refreshing the module.
+    pendingFocusField = null;
+    if (typeof document !== 'undefined' && document.activeElement && typeof document.activeElement.blur === 'function') {
+      document.activeElement.blur();
+    }
     appState.recipes = {
       ...appState.recipes,
       actionStatus: '',
       actionError: error.message || 'Could not save recipe.'
     };
-    renderApp({ forceDomRefresh: true });
+    renderApp();
   } finally {
     hideGlobalSaving();
   }
@@ -18118,7 +18178,7 @@ function getDefaultSiteIdForLocations(sites = [], locations = []) {
     || String((sites || []).find((site) => site.isDefault)?.id || sites?.[0]?.id || '');
 }
 
-function renderApp({ forceDomRefresh = false } = {}) {
+function renderApp() {
   if (!app) return;
 
   // Do not mount protected workspace modules until the authenticated user's workspace
@@ -18140,9 +18200,8 @@ function renderApp({ forceDomRefresh = false } = {}) {
   // Never replace the DOM while the user is actively typing in a text field.
   // The silent-update pattern keeps appState in sync; the next render after blur picks it up.
   const _active = document.activeElement;
-  if (!forceDomRefresh && _active && _active.tagName === 'SELECT') return;
+  if (_active && _active.tagName === 'SELECT') return;
   if (
-    !forceDomRefresh &&
     _active &&
     (_active.tagName === 'INPUT' || _active.tagName === 'TEXTAREA') &&
     _active.type !== 'checkbox' &&

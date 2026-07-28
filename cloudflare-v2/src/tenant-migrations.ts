@@ -548,72 +548,19 @@ CREATE INDEX IF NOT EXISTS idx_yoco_orders_workspace_refund_financials
   MODIFIER_ENGINE_CORE_ACTIONS_MIGRATION,
   // 30 — Modifier refunds, observation/cutover diagnostics, and exact approved note rules.
   MODIFIER_ENGINE_REFUNDS_RELIABILITY_NOTES_MIGRATION,
-  // 31 — per-item/location low-stock alert lifecycle. Location relevance itself
-  // is derived from the movement/count ledger; this table only records notification
-  // timing. Replenishment clears the warning in the same balance write transaction.
+  // 31 — per-item/location low-stock notification state. Thresholds remain on
+  // stock_items; this table stores alert lifecycle only, never a second threshold.
   `CREATE TABLE IF NOT EXISTS low_stock_alert_state (
   workspace_id TEXT NOT NULL,
-  stock_item_id TEXT NOT NULL REFERENCES stock_items(id) ON DELETE CASCADE,
-  location_id TEXT NOT NULL REFERENCES locations(id) ON DELETE CASCADE,
-  first_low_at TEXT NOT NULL,
-  first_notified_at TEXT,
+  stock_item_id TEXT NOT NULL,
+  location_id TEXT NOT NULL,
+  is_active INTEGER NOT NULL DEFAULT 0,
+  first_low_at TEXT,
   last_notified_at TEXT,
   cleared_at TEXT,
-  updated_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (workspace_id, stock_item_id, location_id)
 );
-CREATE INDEX IF NOT EXISTS idx_low_stock_alert_state_active
-  ON low_stock_alert_state(workspace_id, cleared_at, last_notified_at);
-CREATE TRIGGER IF NOT EXISTS trg_low_stock_alert_clear_on_balance_insert
-AFTER INSERT ON stock_balances
-WHEN NEW.quantity > COALESCE((
-  SELECT threshold_qty
-    FROM stock_items
-   WHERE workspace_id = NEW.workspace_id
-     AND id = NEW.stock_item_id
-), 0)
-BEGIN
-  UPDATE low_stock_alert_state
-     SET cleared_at = datetime('now'),
-         updated_at = datetime('now')
-   WHERE workspace_id = NEW.workspace_id
-     AND stock_item_id = NEW.stock_item_id
-     AND location_id = NEW.location_id
-     AND cleared_at IS NULL;
-END;
-CREATE TRIGGER IF NOT EXISTS trg_low_stock_alert_clear_on_balance_update
-AFTER UPDATE OF quantity ON stock_balances
-WHEN NEW.quantity > COALESCE((
-  SELECT threshold_qty
-    FROM stock_items
-   WHERE workspace_id = NEW.workspace_id
-     AND id = NEW.stock_item_id
-), 0)
-BEGIN
-  UPDATE low_stock_alert_state
-     SET cleared_at = datetime('now'),
-         updated_at = datetime('now')
-   WHERE workspace_id = NEW.workspace_id
-     AND stock_item_id = NEW.stock_item_id
-     AND location_id = NEW.location_id
-     AND cleared_at IS NULL;
-END;
-CREATE TRIGGER IF NOT EXISTS trg_low_stock_alert_clear_on_threshold_update
-AFTER UPDATE OF threshold_qty ON stock_items
-BEGIN
-  UPDATE low_stock_alert_state
-     SET cleared_at = datetime('now'),
-         updated_at = datetime('now')
-   WHERE workspace_id = NEW.workspace_id
-     AND stock_item_id = NEW.id
-     AND cleared_at IS NULL
-     AND EXISTS (
-       SELECT 1
-         FROM stock_balances
-        WHERE workspace_id = NEW.workspace_id
-          AND stock_item_id = NEW.id
-          AND location_id = low_stock_alert_state.location_id
-          AND quantity > NEW.threshold_qty
-     );
-END;`
+CREATE INDEX IF NOT EXISTS idx_low_stock_alert_state_workspace_active
+  ON low_stock_alert_state(workspace_id, is_active, last_notified_at);`
 ];

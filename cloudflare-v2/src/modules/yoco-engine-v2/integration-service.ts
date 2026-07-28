@@ -552,11 +552,19 @@ function subscriptionSecret(subscription: Row) {
   return text(subscription.secret || subscription.webhook_secret || subscription.webhookSecret || subscription.signing_secret || subscription.signingSecret);
 }
 
-// Yoco's business API exposes payment.refunded as the final refund signal. Order
-// Updated is the important second-stage signal because returned_line_items can be
-// attached to the order shortly after the payment refund event. Do not subscribe to
-// the Checkout-only refund.succeeded name on this API.
-const YOCO_WEBHOOK_EVENT_TYPES = ['order.completed', 'order.updated', 'payment.refunded'];
+// Subscribe to both live sale signals documented by the Yoco Business API.
+// payment.created is the earliest device-payment notification and order.completed
+// is the final paid-order signal. Processing is idempotent by source order id, so
+// receiving both cannot double-deduct stock. Order Updated is the important
+// second-stage refund/return signal because returned_line_items can be attached
+// shortly after payment.refunded. Do not subscribe to the Checkout-only
+// refund.succeeded name on this API.
+export const YOCO_WEBHOOK_EVENT_TYPES = [
+  'payment.created',
+  'order.completed',
+  'order.updated',
+  'payment.refunded',
+] as const;
 const WEBHOOK_PREVIOUS_SECRET_GRACE_MS = 24 * 60 * 60 * 1000;
 
 type YocoSyncOptions = { full?: boolean; sinceIso?: string; resetWebhook?: boolean; refundOnly?: boolean };

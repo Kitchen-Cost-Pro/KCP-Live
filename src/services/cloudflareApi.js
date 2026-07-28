@@ -115,7 +115,6 @@ async function executeRequest(url, requestMethod, payload, token, headers, timeo
   const timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
 
   let response;
-  let result = {};
   try {
     response = await fetch(url.toString(), {
       method: requestMethod,
@@ -123,13 +122,6 @@ async function executeRequest(url, requestMethod, payload, token, headers, timeo
       cache: requestMethod === 'GET' ? 'no-store' : 'default',
       body: requestMethod === 'GET' ? undefined : JSON.stringify(payload || {}),
       signal: controller.signal
-    });
-    // Keep the abort timer active until the response body has been consumed. Fetch can
-    // resolve as soon as headers arrive; clearing the timer at that point allowed a
-    // stalled body stream to leave callers in a permanent "saving" state.
-    result = await response.json().catch((error) => {
-      if (error?.name === 'AbortError') throw error;
-      return {};
     });
   } catch (error) {
     if (error?.name === 'AbortError') {
@@ -140,6 +132,7 @@ async function executeRequest(url, requestMethod, payload, token, headers, timeo
     clearTimeout(timeoutId);
   }
 
+  const result = await response.json().catch(() => ({}));
   if (!response.ok || result.ok === false) {
     throw new Error(result.message || result.error || `Live data request failed (${response.status}).`);
   }

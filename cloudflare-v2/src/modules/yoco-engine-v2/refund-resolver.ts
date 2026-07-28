@@ -18,6 +18,7 @@ import {
 } from './api-client';
 import { appendTimeline, newId, nowIso, type Row } from './repository';
 import { normalizeYocoV2EventType } from './sale-resolver';
+import { resolveYocoStockLocation } from './location-routing';
 
 const REFUND_SCHEMA_VERSION = '1.0.0';
 const DAY_MS = 24 * 60 * 60_000;
@@ -484,12 +485,7 @@ function modifierRows(line: Row): Row[] {
 }
 
 async function mapLocation(env: Env, workspaceId: string, sourceLocationId: string): Promise<string> {
-  if (!sourceLocationId) return '';
-  const row = await env.DB.prepare(
-    `SELECT id FROM locations WHERE workspace_id = ?1 AND active = 1
-      AND lower(COALESCE(external_provider, '')) = 'yoco' AND external_location_id = ?2 LIMIT 1`
-  ).bind(workspaceId, sourceLocationId).first<Row>();
-  return text(row?.id);
+  return resolveYocoStockLocation(env, workspaceId, sourceLocationId);
 }
 async function mapProduct(env: Env, workspaceId: string, productId: string, variantId: string): Promise<string> {
   if (!productId && !variantId) return '';

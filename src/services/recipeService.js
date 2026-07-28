@@ -415,14 +415,19 @@ function linkedProductNamesFromValue(value = '') {
   return String(value || '').split(',').map((entry) => entry.trim()).filter(Boolean);
 }
 
-function normalizeRecipeLines(recipe) {
+export function normalizeRecipeLines(recipe) {
   const lines = Array.isArray(recipe) ? recipe : Object.values(recipe || {});
   return lines
     .map((line) => {
-      // `qty` is the canonical editor field. Always derive both outbound aliases
-      // from the same parsed value so stale legacy `quantity` data cannot overwrite
-      // a freshly edited quantity.
-      const quantity = parseDecimal(line?.qty ?? line?.quantity, 0);
+      // The recipe editor writes `qty`; older API rows may also contain
+      // `quantity`. Prefer the actively edited field, then emit one canonical
+      // numeric value under both keys for backwards compatibility.
+      const quantity = parseDecimal(
+        line?.qty !== undefined && line?.qty !== null && String(line.qty).trim() !== ''
+          ? line.qty
+          : line?.quantity,
+        0
+      );
       return {
         ingId: String(line?.ingId || line?.stockItemId || line?.stock_item_id || ''),
         stockItemId: String(line?.stockItemId || line?.stock_item_id || line?.ingId || ''),

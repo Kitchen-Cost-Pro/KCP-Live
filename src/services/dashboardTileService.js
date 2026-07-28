@@ -109,9 +109,7 @@ async function fetchDashboardTiles(workspaceId, { range = '7', siteId = '' } = {
     : stockValue + costOfSales - purchases - manualAdjustments - countVariance + wastage;
   const serverSummary = normalizeMetricMap(dashboardResponse.summary || {});
   const serverInsights = dashboardResponse.insights && typeof dashboardResponse.insights === 'object' ? dashboardResponse.insights : {};
-  const hasRelevantServerRows = serverInsights.lowStockRelevanceApplied === true ||
-    Object.prototype.hasOwnProperty.call(serverInsights, 'lowStockRows');
-  const rawLowStockRows = hasRelevantServerRows
+  const rawLowStockRows = toArray(serverInsights.lowStockRows).length
     ? toArray(serverInsights.lowStockRows)
     : buildLowStockRows(stockItems, locations);
   // Collapse to one row per item (worst deficit) so an item low at several locations

@@ -493,7 +493,7 @@ export async function validateModifierRule(env: Env, input: {
   }
   if (value.actionType === 'REMOVE_INGREDIENT' || value.actionType === 'REPLACE_INGREDIENT') {
     if (!value.sourceStockItemId) throw new ModifierRuleValidationError('Select the ingredient to remove from the base recipe.');
-    const source = await assertEntity(env,
+    await assertEntity(env,
       `SELECT id, unit FROM stock_items WHERE workspace_id = ?1 AND id = ?2 AND active = 1 LIMIT 1`,
       [input.workspaceId, value.sourceStockItemId],
       'The ingredient to remove is missing or inactive.'
@@ -509,14 +509,11 @@ export async function validateModifierRule(env: Env, input: {
       if (value.quantity <= 0) throw new ModifierRuleValidationError('Replacement quantity must be greater than zero.');
       if (!value.replacementStockItemId) throw new ModifierRuleValidationError('Select the replacement ingredient.');
       if (value.replacementStockItemId === value.sourceStockItemId) throw new ModifierRuleValidationError('The replacement ingredient must be different from the original ingredient.');
-      const replacement = await assertEntity(env,
+      await assertEntity(env,
         `SELECT id, unit FROM stock_items WHERE workspace_id = ?1 AND id = ?2 AND active = 1 LIMIT 1`,
         [input.workspaceId, value.replacementStockItemId],
         'The replacement ingredient is missing or inactive.'
       );
-      if (normalize(source.unit) !== normalize(replacement.unit)) {
-        throw new ModifierRuleValidationError(`Replacement UOM is incompatible. ${text(source.unit)} can only be replaced by an item using the same base UOM.`);
-      }
     }
   }
   for (const productId of value.menuItemIds) {

@@ -428,11 +428,10 @@ export async function buildSaleEffectProposals(env: Env, domainEvent: Row, canon
           return;
         }
         const removedQuantity = matching.reduce((sum, proposal) => sum + Math.abs(proposal.quantity), 0);
-        const removedBaseUom = matching.find((proposal) => proposal.baseUom)?.baseUom || '';
         if (actionType === 'REPLACE_INGREDIENT') {
           const replacementId = text(input.rule?.replacement_stock_item_id);
           const replacement = await loadStockItem(env, canonical.workspace_id, replacementId);
-          if (!replacement || normalized(replacement.unit) !== normalized(removedBaseUom)) {
+          if (!replacement) {
             additiveProposals.push({
               sourceLineId: line.source_line_id,
               menuItemId: line.mapped_menu_item_id,
@@ -440,9 +439,9 @@ export async function buildSaleEffectProposals(env: Env, domainEvent: Row, canon
               ingredientItemId: replacementId || `unresolved-replacement:${input.sourceKey}`,
               locationId: canonical.kcp_location_id,
               quantity: 0,
-              baseUom: text(replacement?.unit),
+              baseUom: '',
               unitCost: 0,
-              warningCode: 'MODIFIER_REPLACEMENT_UOM_INCOMPATIBLE',
+              warningCode: 'MODIFIER_REPLACEMENT_ITEM_MISSING',
               resolutionStatus: 'WARNING',
               ruleId: text(input.rule?.id) || undefined,
               ruleVersion: numberValue(input.rule?.version, 0) || undefined,
