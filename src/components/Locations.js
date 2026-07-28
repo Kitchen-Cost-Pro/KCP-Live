@@ -320,7 +320,7 @@ function renderLocationCard(location) {
   const displayName = getLocationDisplayName(location);
   const officialName = getOfficialLocationName(location);
   const showOfficialName = officialName && officialName.toLowerCase() !== displayName.toLowerCase();
-  const typeLabel = isDefault ? 'Main' : (isStorageLocation(location) ? 'Storage' : 'Selling Location');
+  const typeLabel = isStorageLocation(location) ? 'Storage' : 'Selling Location';
   return `
     <article class="locationsSiteCard locationsSiteCard--flat">
       <header class="locationsSiteHead">

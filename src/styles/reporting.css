@@ -605,6 +605,30 @@ button.reportTile:focus-visible {
   background: rgba(255, 255, 255, 0.018);
 }
 
+.reportLocationValue {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.48rem;
+  min-width: 0;
+}
+
+.reportLocationTypePill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.25rem;
+  padding: 0.1rem 0.42rem;
+  border: 1px solid color-mix(in srgb, var(--accent-blue) 42%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent-blue) 13%, transparent);
+  color: var(--accent-blue);
+  font-size: 0.58rem;
+  font-weight: 900;
+  letter-spacing: 0.045em;
+  line-height: 1;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
 .reportTable tbody tr:hover td {
   background: rgba(56, 189, 248, 0.07);
 }
@@ -1119,9 +1143,14 @@ button.reportTile:focus-visible {
   text-overflow: ellipsis;
 }
 
+.reportTable th.is-align-center .reportTable__sort {
+  width: 100%;
+  justify-content: center;
+}
+
 .reportTable td.is-numeric,
 .reportTable tfoot td.is-numeric {
-  text-align: right;
+  text-align: center;
 }
 
 .reportTooltip {

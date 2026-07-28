@@ -21,8 +21,8 @@ export function renderReportTotalsRow(columns = [], totals = {}) {
 }
 
 function resolveColumnAlign(column = {}) {
+  if (isNumericColumn(column)) return 'center';
   if (column.align) return column.align;
-  if (isNumericColumn(column)) return 'right';
   return 'left';
 }
 

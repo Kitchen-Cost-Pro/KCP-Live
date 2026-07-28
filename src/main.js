@@ -95,7 +95,7 @@ function mountCookiePolicyNotice() {
   overlay.className = 'cookiePolicy';
   overlay.setAttribute('role', 'presentation');
   overlay.innerHTML = `
-    <section class="cookiePolicy__card" role="dialog" aria-modal="true" aria-labelledby="cookie-policy-title">
+    <section class="cookiePolicy__card" role="region" aria-labelledby="cookie-policy-title">
       <div class="cookiePolicy__mark" aria-hidden="true">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
           <path d="M20.8 13.1A8.8 8.8 0 1 1 10.9 3.2a4.7 4.7 0 0 0 6 6 4.7 4.7 0 0 0 3.9 3.9Z"/>
@@ -128,7 +128,6 @@ function mountCookiePolicyNotice() {
   overlay.querySelector('[data-cookie-essential]')?.addEventListener('click', () => close('essential'));
   overlay.querySelector('[data-cookie-accept]')?.addEventListener('click', () => close('accepted'));
   document.body.appendChild(overlay);
-  overlay.querySelector('[data-cookie-accept]')?.focus();
 }
 
 function showBrandConfirmDialog({

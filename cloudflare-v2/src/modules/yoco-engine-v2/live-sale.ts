@@ -483,6 +483,8 @@ async function applyStock(
           sourceModifierId: text(actionSnapshot?.source_key) || proposal.modifier_id || null,
           modifierName: text(actionSnapshot?.source_name) || null,
           modifierActionType: text(actionSnapshot?.action_type || snapshot?.modifier_action_type) || null,
+          saleLocationId: input.canonical.kcp_location_id || null,
+          stockRoutingApplied: text(proposal.location_id) !== text(input.canonical.kcp_location_id),
           baseUom: proposal.base_uom,
           source_line_id: proposal.source_line_id,
           menu_item_id: proposal.menu_item_id,

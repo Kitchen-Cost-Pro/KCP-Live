@@ -35,12 +35,21 @@ test('low-stock monitoring has rolling relevance and seven-day state', () => {
   assert.match(migrations, /CREATE TABLE IF NOT EXISTS low_stock_alert_state/);
 });
 
-test('first-visit cookie policy is centered and persisted', () => {
+test('first-visit cookie policy is bottom-centered, non-blocking, and persisted', () => {
   const main = read('src/main.js');
   const styles = read('src/styles/main.css');
   assert.match(main, /mountCookiePolicyNotice\(\)/);
   assert.match(main, /kcp:cookie-consent:v1/);
-  assert.match(styles, /\.cookiePolicy[\s\S]*place-items: center/);
+  assert.doesNotMatch(main, /querySelector\('\[data-cookie-accept\]'\)\?\.focus\(\)/);
+  assert.match(styles, /\.cookiePolicy\s*\{[\s\S]*align-items: flex-end[\s\S]*justify-content: center[\s\S]*pointer-events: none/);
+  assert.match(styles, /\.cookiePolicy__card\s*\{[\s\S]*rgba\(15, 29, 46, 0\.97\)[\s\S]*pointer-events: auto/);
+  assert.doesNotMatch(styles, /\.cookiePolicy\s*\{[^}]*backdrop-filter/);
+});
+
+test('Main Store is labelled as storage while keeping its default badge', () => {
+  const locations = read('src/components/Locations.js');
+  assert.match(locations, /const typeLabel = isStorageLocation\(location\) \? 'Storage' : 'Selling Location'/);
+  assert.match(locations, /Default Location/);
 });
 
 test('Admin Broadcast shows only current queue controls', () => {
