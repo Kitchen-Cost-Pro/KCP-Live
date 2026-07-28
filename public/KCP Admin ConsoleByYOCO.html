@@ -1548,7 +1548,16 @@
                         <textarea id="sys-msg-text" placeholder="Type message here..." class="w-full text-xs bg-black/40 border-white/5 rounded-xl p-3 h-20 focus:border-blue-500/50 transition-all"></textarea>
                         <div class="flex gap-2">
                             <button onclick="broadcastMessage(true)" class="btn-primary flex-1"><i class="fa-solid fa-paper-plane mr-2"></i>Broadcast</button>
-                            <button onclick="broadcastMessage(false)" class="btn-ghost flex-1 text-red-400"><i class="fa-solid fa-trash-can mr-2"></i>Clear</button>
+                            <button onclick="loadBroadcastQueue()" class="btn-ghost flex-1 text-blue-300"><i class="fa-solid fa-arrows-rotate mr-2"></i>Refresh Queue</button>
+                        </div>
+                        <div class="pt-4 border-t border-white/5">
+                            <div class="flex items-center justify-between gap-3 mb-3">
+                                <p class="text-[9px] font-black uppercase tracking-widest text-slate-500">Current / queued messages</p>
+                                <button onclick="broadcastMessage(false)" class="text-[9px] font-black uppercase text-red-400 hover:text-red-300">Stop all</button>
+                            </div>
+                            <div id="broadcast-queue" class="space-y-2">
+                                <p class="text-[10px] text-slate-500">Loading active broadcasts…</p>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -3470,7 +3479,7 @@ function switchTab(tab){
     if (tab === 'logs') fetchAuditLogs();
     if (tab === 'orgs' && !orgManagerLoaded) fetchOrgManagerSites();
     if (tab === 'integrations') renderIntegrationControlTower();
-    if (tab === 'tools') { renderAccentSwatches(); loadSystemGmailStatus(); loadEmailConfig(); }
+    if (tab === 'tools') { renderAccentSwatches(); loadSystemGmailStatus(); loadEmailConfig(); loadBroadcastQueue(); }
     if (tab === 'billing') { renderBillingTable(); fetchAllBillingStatuses(); }
     if (tab === 'invitations') { fetchSignupRequests().then(() => { fetchInvitations().then(renderInvitations); }); }
     // Close mobile sidebar
@@ -5925,18 +5934,18 @@ async function broadcastMessage(active) {
     if (active && !text) { showToast("Enter message text first", "error"); return; }
     
     // Confirmation step
-    const action = active ? 'broadcast this message to ALL active users' : 'clear the current system message';
+    const action = active ? 'broadcast this message to ALL active users' : 'stop and remove all current broadcasts';
     openModal(`
         <div class="text-center space-y-4">
             <div class="w-16 h-16 bg-blue-500/10 rounded-full flex items-center justify-center mx-auto mb-4 border border-blue-500/20">
                 <i class="fa-solid fa-bullhorn text-2xl text-blue-500"></i>
             </div>
-            <h3 class="text-lg font-black uppercase tracking-widest text-white">Confirm ${active ? 'Broadcast' : 'Clear'}</h3>
+            <h3 class="text-lg font-black uppercase tracking-widest text-white">Confirm ${active ? 'Broadcast' : 'Stop All'}</h3>
             <p class="text-xs text-slate-400">Are you sure you want to ${action}?</p>
             ${active ? `<div class="p-3 bg-white/5 border border-white/10 rounded-xl text-left"><p class="text-xs text-white italic">"${text}"</p></div>` : ''}
             <div class="flex gap-3 pt-2">
                 <button onclick="closeModal()" class="flex-1 btn-ghost py-2 text-[10px] font-black uppercase">Cancel</button>
-                <button onclick="executeBroadcast(${active})" class="flex-1 btn-primary py-2 text-[10px] font-black uppercase">${active ? 'Broadcast Now' : 'Clear Message'}</button>
+                <button onclick="executeBroadcast(${active})" class="flex-1 btn-primary py-2 text-[10px] font-black uppercase">${active ? 'Broadcast Now' : 'Stop All'}</button>
             </div>
         </div>
     `);
@@ -5948,16 +5957,89 @@ async function executeBroadcast(active) {
 
     showSync(active ? "Broadcasting..." : "Clearing...");
     try {
-        await callAdminApi('PATCH', '/api/admin/system-settings/broadcast', {
-            message: active ? msgText : '',
-            active: active
-        });
-        showToast(active ? "Message Broadcasted!" : "Message Cleared", "success");
+        await callAdminApi('PATCH', '/api/admin/system-settings/broadcast', active
+            ? { message: msgText, active: true }
+            : { action: 'clear' });
+        showToast(active ? "Message broadcasted!" : "All broadcasts stopped", "success");
         if (!active && document.getElementById('sys-msg-text')) document.getElementById('sys-msg-text').value = '';
+        if (active && document.getElementById('sys-msg-text')) document.getElementById('sys-msg-text').value = '';
+        await loadBroadcastQueue();
     } catch(e) {
         showToast("Broadcast failed: " + e.message, "error");
     } finally {
         hideSync();
+    }
+}
+
+async function loadBroadcastQueue() {
+    const target = document.getElementById('broadcast-queue');
+    if (!target) return;
+    try {
+        const result = await callAdminApi('GET', '/api/admin/system-settings');
+        const items = Array.isArray(result?.broadcast?.items)
+            ? result.broadcast.items.filter(item => item?.enabled && item?.message)
+            : [];
+        if (!items.length) {
+            target.innerHTML = `<div class="p-3 rounded-xl border border-white/5 bg-white/[0.02] text-[10px] text-slate-500">No active or scheduled broadcasts.</div>`;
+            return;
+        }
+        const now = Date.now();
+        target.innerHTML = items.map(item => {
+            const startsAt = Date.parse(item.startsAt || '');
+            const isScheduled = Number.isFinite(startsAt) && startsAt > now;
+            const label = isScheduled ? 'Scheduled' : 'Live';
+            const tone = isScheduled ? 'text-amber-300 bg-amber-500/10 border-amber-500/20' : 'text-emerald-300 bg-emerald-500/10 border-emerald-500/20';
+            return `
+                <article class="p-3 rounded-xl border border-white/10 bg-black/20 space-y-2">
+                    <div class="flex items-center justify-between gap-3">
+                        <span class="px-2 py-1 rounded-full border text-[8px] font-black uppercase tracking-wider ${tone}">${label}</span>
+                        <span class="text-[8px] text-slate-600">${item.createdAt ? new Date(item.createdAt).toLocaleString() : ''}</span>
+                    </div>
+                    <p class="text-[11px] text-slate-200 leading-relaxed">${adminEscapeHtml(item.message)}</p>
+                    <div class="flex justify-end gap-2">
+                        <button type="button" data-broadcast-stop="${adminEscapeHtml(item.id)}" class="px-2.5 py-1.5 rounded-lg border border-amber-500/20 text-[8px] font-black uppercase text-amber-300 hover:bg-amber-500/10">Stop</button>
+                        <button type="button" data-broadcast-delete="${adminEscapeHtml(item.id)}" class="px-2.5 py-1.5 rounded-lg border border-red-500/20 text-[8px] font-black uppercase text-red-300 hover:bg-red-500/10">Delete</button>
+                    </div>
+                </article>
+            `;
+        }).join('');
+        target.querySelectorAll('[data-broadcast-stop]').forEach(button => {
+            button.addEventListener('click', () => updateBroadcastStatus(button.dataset.broadcastStop, false));
+        });
+        target.querySelectorAll('[data-broadcast-delete]').forEach(button => {
+            button.addEventListener('click', () => deleteBroadcast(button.dataset.broadcastDelete));
+        });
+    } catch (e) {
+        target.innerHTML = `<p class="text-[10px] text-red-400">Could not load the broadcast queue.</p>`;
+    }
+}
+
+async function updateBroadcastStatus(id, enabled) {
+    if (!id) return;
+    try {
+        await callAdminApi('PATCH', '/api/admin/system-settings/broadcast', {
+            action: 'status',
+            id,
+            enabled
+        });
+        showToast(enabled ? 'Broadcast resumed.' : 'Broadcast stopped.', 'success');
+        await loadBroadcastQueue();
+    } catch (e) {
+        showToast('Could not change broadcast status: ' + e.message, 'error');
+    }
+}
+
+async function deleteBroadcast(id) {
+    if (!id || !confirm('Delete this active broadcast?')) return;
+    try {
+        await callAdminApi('PATCH', '/api/admin/system-settings/broadcast', {
+            action: 'delete',
+            id
+        });
+        showToast('Broadcast deleted.', 'success');
+        await loadBroadcastQueue();
+    } catch (e) {
+        showToast('Could not delete broadcast: ' + e.message, 'error');
     }
 }
 

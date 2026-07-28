@@ -197,6 +197,19 @@ function renderBodyCell(
 
 function renderCellContent(value, column = {}, row = {}, result = {}) {
   const type = String(column.type || "").toLowerCase();
+  if (isLocationColumn(column) && isStorageReportLocation(value, column, row)) {
+    const label = formatCell(value, column);
+    return `
+      <span class="reportLocationValue">
+        <span>${escapeHtml(label)}</span>
+        <span
+          class="reportLocationTypePill reportLocationTypePill--storage"
+          title="${escapeHtml(`${label} is a storage location, not a selling location`)}"
+          aria-label="Storage location"
+        >Storage</span>
+      </span>
+    `;
+  }
   if (type === "badge") {
     const label = formatCell(value, column);
     const tone =
@@ -220,6 +233,51 @@ function renderCellContent(value, column = {}, row = {}, result = {}) {
     return `<button type="button" class="reportTable__transactionLink" data-report-transaction-id="${escapeHtml(reference)}" data-report-transaction-type="${escapeHtml(identity.entityType)}" data-report-transaction-entity-id="${escapeHtml(identity.entityId)}" aria-label="Open transaction ${escapeHtml(reference)}">${escapeHtml(reference)}</button>`;
   }
   return escapeHtml(formatCell(value, column));
+}
+
+function isLocationColumn(column = {}) {
+  const key = text(column.key).toLowerCase();
+  return [
+    "location",
+    "locationname",
+    "fromlocationname",
+    "tolocationname",
+    "tolocationdisplay",
+  ].includes(key);
+}
+
+export function isStorageReportLocation(value, column = {}, row = {}) {
+  const key = text(column.key).toLowerCase();
+  const prefix = key.startsWith("from")
+    ? "from"
+    : key.startsWith("to")
+      ? "to"
+      : "";
+  const explicitStorageFlag = prefix
+    ? row[`${prefix}LocationIsStorage`] ?? row[`${prefix}IsStorage`]
+    : row.locationIsStorage ?? row.isStorageLocation ?? row.isStorage;
+  if (explicitStorageFlag === true) return true;
+
+  const explicitType = text(
+    prefix
+      ? row[`${prefix}LocationType`] || row[`${prefix}LocationKind`]
+      : row.locationType || row.locationKind,
+  )
+    .trim()
+    .toLowerCase();
+  if (["storage", "stock", "storeroom", "warehouse"].includes(explicitType))
+    return true;
+
+  const normalizedValue = text(value)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+  return (
+    normalizedValue === "mainstore" ||
+    normalizedValue === "mainstorage" ||
+    normalizedValue.endsWith("mainstore") ||
+    normalizedValue.endsWith("mainstorage")
+  );
 }
 
 function resolveTransactionIdentity(row = {}, result = {}, reference = "") {
@@ -475,8 +533,12 @@ function safeNumber(value) {
 }
 
 function resolveColumnAlign(column = {}) {
+  // Keep report values visually anchored beneath their column heading.
+  // Numeric report definitions historically requested right alignment, which
+  // pushed every amount/count to the far edge of wide columns. The shared
+  // table now centres numeric columns consistently across headers and rows.
+  if (isNumericColumn(column)) return "center";
   if (column.align) return column.align;
-  if (isNumericColumn(column)) return "right";
   return "left";
 }
 

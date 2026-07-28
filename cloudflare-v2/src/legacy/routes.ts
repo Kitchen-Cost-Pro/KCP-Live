@@ -43,6 +43,7 @@ import {
   sendWorkspaceLowStockDue,
   sendWorkspaceLowStockToUser,
 } from "./low-stock-email";
+import { lowStockLocationRelevantSql } from "./low-stock-policy";
 import { sendEmail } from "./email";
 import {
   calculateIncomingLocationCost,
@@ -1010,7 +1011,14 @@ function normalizeProductRecipeLines(recipe: unknown[]) {
           line.ingredientId ||
           line.id,
       ),
-      quantity: numberValue(line.quantity ?? line.qty, 0),
+      // `qty` is the field edited by the current recipe UI. Prefer it when
+      // present so an older, stale `quantity` property cannot silently win.
+      quantity: numberValue(
+        line.qty !== undefined && line.qty !== null && text(line.qty) !== ""
+          ? line.qty
+          : line.quantity,
+        0,
+      ),
       unit: text(line.unit || line.uom, "ea") || "ea",
     }))
     .filter((line) => line.stockItemId && line.quantity > 0);
@@ -1027,7 +1035,12 @@ function normalizeStockRecipeLines(recipe: unknown[]) {
           line.ingredientId ||
           line.id,
       ),
-      quantity: numberValue(line.quantity ?? line.qty ?? line.amount, 0),
+      quantity: numberValue(
+        line.qty !== undefined && line.qty !== null && text(line.qty) !== ""
+          ? line.qty
+          : line.quantity ?? line.amount,
+        0,
+      ),
       unit: text(line.unit || line.uom, "ea") || "ea",
     }))
     .filter((line) => line.stockItemId && line.quantity > 0);
@@ -13223,7 +13236,11 @@ export async function getDashboard(
             json_extract(si.raw_json, '$.cost'),
             0)
         END), 0) AS stock_value,
-        COUNT(DISTINCT CASE WHEN sb.quantity <= si.threshold_qty THEN sb.stock_item_id END) AS low_stock_count
+        COUNT(DISTINCT CASE
+          WHEN sb.quantity <= si.threshold_qty
+           AND ${lowStockLocationRelevantSql("si", "sb")}
+          THEN sb.stock_item_id
+        END) AS low_stock_count
        FROM stock_balances sb
        JOIN stock_items si ON si.id = sb.stock_item_id AND si.workspace_id = sb.workspace_id
 	   LEFT JOIN stock_item_location_prices silp
@@ -13529,6 +13546,7 @@ export async function getDashboard(
 	        AND si.active = 1
 	        AND ${STOCKED_ITEM_ALIAS_SQL("si")}
         AND sb.quantity <= si.threshold_qty
+        AND ${lowStockLocationRelevantSql("si", "sb")}
       ORDER BY deficitValue DESC, si.name ASC
       LIMIT 100`,
   )

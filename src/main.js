@@ -85,7 +85,50 @@ const PERSISTED_ROUTES = ['dashboard', 'products', 'recipes', 'ingredients', 'su
 const SETTINGS_ROUTES = ['settings', 'settings-business', 'settings-customization'];
 
 installAppDropdownPortalSystem();
+mountCookiePolicyNotice();
 
+function mountCookiePolicyNotice() {
+  const storageKey = 'kcp:cookie-consent:v1';
+  if (localStorage.getItem(storageKey)) return;
+
+  const overlay = document.createElement('div');
+  overlay.className = 'cookiePolicy';
+  overlay.setAttribute('role', 'presentation');
+  overlay.innerHTML = `
+    <section class="cookiePolicy__card" role="region" aria-labelledby="cookie-policy-title">
+      <div class="cookiePolicy__mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="M20.8 13.1A8.8 8.8 0 1 1 10.9 3.2a4.7 4.7 0 0 0 6 6 4.7 4.7 0 0 0 3.9 3.9Z"/>
+          <circle cx="8.5" cy="12.2" r=".7" fill="currentColor" stroke="none"/>
+          <circle cx="12.2" cy="16" r=".7" fill="currentColor" stroke="none"/>
+          <circle cx="7.5" cy="17.2" r=".7" fill="currentColor" stroke="none"/>
+        </svg>
+      </div>
+      <div class="cookiePolicy__copy">
+        <p>Privacy at KCP</p>
+        <h2 id="cookie-policy-title">A quick note about cookies</h2>
+        <span>We use essential cookies to keep you signed in, remember your workspace settings, and keep Kitchen Cost Pro secure.</span>
+        <a href="/privacy.html" target="_blank" rel="noopener">Read our cookie and privacy policy</a>
+      </div>
+      <div class="cookiePolicy__actions">
+        <button type="button" class="cookiePolicy__secondary" data-cookie-essential>Essential only</button>
+        <button type="button" class="cookiePolicy__primary" data-cookie-accept>Accept</button>
+      </div>
+    </section>
+  `;
+
+  const close = (choice) => {
+    localStorage.setItem(storageKey, JSON.stringify({
+      choice,
+      savedAt: new Date().toISOString(),
+    }));
+    overlay.classList.add('is-closing');
+    window.setTimeout(() => overlay.remove(), 180);
+  };
+  overlay.querySelector('[data-cookie-essential]')?.addEventListener('click', () => close('essential'));
+  overlay.querySelector('[data-cookie-accept]')?.addEventListener('click', () => close('accepted'));
+  document.body.appendChild(overlay);
+}
 
 function showBrandConfirmDialog({
   eyebrow = 'Confirm Action',
@@ -4366,9 +4409,14 @@ function closeRecipeEditor() {
 function updateRecipeLine(index, qty) {
   const nextRecipe = [...(appState.recipes.draftRecipe || [])];
   if (!nextRecipe[index]) return;
+  const normalizedQuantity = normalizeRecipeQtyInput(qty);
   nextRecipe[index] = {
     ...nextRecipe[index],
-    qty: normalizeRecipeQtyInput(qty)
+    // Keep both legacy and canonical fields in lockstep. Existing recipe rows
+    // can contain both keys, and a stale `quantity` used to override an edited
+    // `qty` when the payload reached the Worker.
+    qty: normalizedQuantity,
+    quantity: normalizedQuantity
   };
   appState.recipes = {
     ...appState.recipes,
@@ -4502,12 +4550,17 @@ function addRecipeIngredient(ingredientId, qty = 0) {
   const existingIndex = draft.findIndex((line) => String(line.ingId) === id);
   let focusIndex = existingIndex;
   if (existingIndex >= 0) {
+    const nextQuantity = parseDecimalInputValue(
+      draft[existingIndex].qty ?? draft[existingIndex].quantity,
+      0
+    ) + quantity;
     draft[existingIndex] = {
       ...draft[existingIndex],
-      qty: parseDecimalInputValue(draft[existingIndex].qty, 0) + quantity
+      qty: nextQuantity,
+      quantity: nextQuantity
     };
   } else {
-    draft.push({ ingId: id, qty: quantity });
+    draft.push({ ingId: id, stockItemId: id, qty: quantity, quantity });
     focusIndex = draft.length - 1;
   }
 
@@ -5173,6 +5226,16 @@ function getRecipeDeleteToast(productCount = 0, modifierCount = 0) {
 async function saveCurrentRecipe() {
   const item = appState.recipes.editingItem;
   if (!item) return;
+  if (appState.recipes.actionStatus === 'saving') return;
+
+  // Recipe quantity fields preserve focus while the user types. Release both the live
+  // field and its queued focus snapshot before rendering the saving state; otherwise
+  // renderApp() can deliberately suppress the completion render and leave the modal
+  // showing "Saving" even though the API update succeeded.
+  pendingFocusField = null;
+  if (typeof document !== 'undefined' && document.activeElement && typeof document.activeElement.blur === 'function') {
+    document.activeElement.blur();
+  }
 
   appState.recipes = {
     ...appState.recipes,
@@ -5185,6 +5248,12 @@ async function saveCurrentRecipe() {
   try {
     const { updateRecipe } = await import('./services/recipeService.js');
     await updateRecipe(appState.workspace?.id, item, appState.recipes.draftRecipe || []);
+    // Ensure the success render cannot be skipped if focus changed while the request
+    // was pending. This render closes the editor and clears its saving state.
+    pendingFocusField = null;
+    if (typeof document !== 'undefined' && document.activeElement && typeof document.activeElement.blur === 'function') {
+      document.activeElement.blur();
+    }
     appState.recipes = {
       ...appState.recipes,
       editingItem: null,
@@ -5200,6 +5269,12 @@ async function saveCurrentRecipe() {
     showRecipeToast('Recipe Blueprint Saved.', 'success');
     refreshActiveTabFromApi().catch(() => {});
   } catch (error) {
+    // Failures must also replace the disabled saving state immediately so the user can
+    // correct the recipe and retry without closing or refreshing the module.
+    pendingFocusField = null;
+    if (typeof document !== 'undefined' && document.activeElement && typeof document.activeElement.blur === 'function') {
+      document.activeElement.blur();
+    }
     appState.recipes = {
       ...appState.recipes,
       actionStatus: '',

@@ -547,5 +547,20 @@ CREATE INDEX IF NOT EXISTS idx_yoco_orders_workspace_refund_financials
   // 29 — Modifier engine core actions: additive stock, ingredient removal/replacement, scopes, versions and observations.
   MODIFIER_ENGINE_CORE_ACTIONS_MIGRATION,
   // 30 — Modifier refunds, observation/cutover diagnostics, and exact approved note rules.
-  MODIFIER_ENGINE_REFUNDS_RELIABILITY_NOTES_MIGRATION
+  MODIFIER_ENGINE_REFUNDS_RELIABILITY_NOTES_MIGRATION,
+  // 31 — per-item/location low-stock notification state. Thresholds remain on
+  // stock_items; this table stores alert lifecycle only, never a second threshold.
+  `CREATE TABLE IF NOT EXISTS low_stock_alert_state (
+  workspace_id TEXT NOT NULL,
+  stock_item_id TEXT NOT NULL,
+  location_id TEXT NOT NULL,
+  is_active INTEGER NOT NULL DEFAULT 0,
+  first_low_at TEXT,
+  last_notified_at TEXT,
+  cleared_at TEXT,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (workspace_id, stock_item_id, location_id)
+);
+CREATE INDEX IF NOT EXISTS idx_low_stock_alert_state_workspace_active
+  ON low_stock_alert_state(workspace_id, is_active, last_notified_at);`
 ];

@@ -1,5 +1,5 @@
 .purchaseOrdersModule {
-  --po-list-columns: 34px minmax(150px, 0.9fr) minmax(230px, 1.25fr) minmax(128px, 0.8fr) 72px minmax(120px, 0.72fr) minmax(250px, 1fr);
+  --po-list-columns: 34px minmax(150px, 0.9fr) minmax(230px, 1.25fr) minmax(128px, 0.8fr) 72px minmax(120px, 0.72fr) minmax(340px, 1fr);
   height: 100%;
   display: grid;
   grid-template-rows: auto auto auto minmax(0, 1fr);
@@ -137,8 +137,17 @@
 }
 
 .purchaseOrdersModule__statusAction {
-  min-height: 38px;
+  min-height: 36px;
+  gap: 6px;
+  border-radius: 11px;
+  padding: 0 10px;
+  font-size: 0.66rem;
   background: var(--accent-blue);
+}
+
+.purchaseOrdersModule__statusAction svg {
+  width: 16px;
+  height: 16px;
 }
 
 .purchaseOrdersModule__statusAction--receive {
@@ -411,6 +420,12 @@
 .purchaseOrdersModule__listHead > :last-child,
 .purchaseOrdersModule__rowActions {
   justify-self: end;
+}
+
+.purchaseOrdersModule__rowActions {
+  gap: 8px;
+  align-items: center;
+  white-space: nowrap;
 }
 
 .purchaseOrdersModule__listBody {
@@ -1303,7 +1318,7 @@
 @media (max-width: 1240px) {
   .purchaseOrdersModule__listHead,
   .purchaseOrdersModule__row {
-    grid-template-columns: 34px minmax(120px, 0.7fr) minmax(180px, 1fr) 110px 260px;
+    grid-template-columns: 34px minmax(120px, 0.7fr) minmax(180px, 1fr) 110px minmax(320px, auto);
   }
 
   .purchaseOrdersModule__listHead span:nth-child(5),
@@ -1346,6 +1361,19 @@
 
   .purchaseOrdersModule__row {
     grid-template-columns: 34px 1fr auto;
+  }
+
+  .purchaseOrdersModule__rowActions {
+    gap: 6px;
+  }
+
+  .purchaseOrdersModule__rowActions .purchaseOrdersModule__statusAction {
+    width: 42px;
+    padding: 0;
+  }
+
+  .purchaseOrdersModule__rowActions .purchaseOrdersModule__statusAction span {
+    display: none;
   }
 
   .purchaseOrdersModule__row > span,

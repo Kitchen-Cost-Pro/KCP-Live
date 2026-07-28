@@ -15,6 +15,7 @@ interface IngredientProposal {
   menuItemId?: string;
   modifierId?: string;
   ingredientItemId: string;
+  stockCategory?: string;
   locationId?: string;
   quantity: number;
   baseUom: string;
@@ -69,7 +70,8 @@ async function loadRecipe(env: Env, workspaceId: string, ownerType: string, owne
   ).bind(workspaceId, ownerType, ownerId).first<Row>();
   if (!recipe) return null;
   const lines = await env.DB.prepare(
-    `SELECT line.*, item.name AS stock_item_name, item.item_type, item.unit AS base_unit,
+    `SELECT line.*, item.name AS stock_item_name, item.category AS stock_category,
+            item.item_type, item.unit AS base_unit,
             item.unit_cost, item.raw_json AS stock_item_raw_json, item.is_stocked
        FROM recipe_lines line
        JOIN stock_items item ON item.id = line.stock_item_id AND item.workspace_id = line.workspace_id
@@ -91,9 +93,113 @@ function parseLinkedProductIds(value: unknown): string[] {
 
 async function loadStockItem(env: Env, workspaceId: string, itemId: string): Promise<Row | null> {
   return env.DB.prepare(
-    `SELECT id, name, item_type, unit, unit_cost, raw_json, is_stocked
+    `SELECT id, name, category, item_type, unit, unit_cost, raw_json, is_stocked
        FROM stock_items WHERE workspace_id = ?1 AND id = ?2 AND active = 1 LIMIT 1`
   ).bind(workspaceId, itemId).first<Row>();
+}
+
+function normalizeStockCategory(value: unknown): string {
+  return text(value, 'General')
+    .replace(/\s+-\s+Raw Materials$/i, '')
+    .replace(/\s+-\s+Manufactured$/i, '')
+    .replace(/\s*\(([^)]+)\)\s*-\s*Manufactured$/i, '$1')
+    .trim() || 'General';
+}
+
+function routingKey(value: unknown): string {
+  return normalizeStockCategory(value).toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function routingValue(map: Row, key: string): unknown {
+  const normalizedKey = routingKey(key);
+  if (!normalizedKey) return undefined;
+  const match = Object.entries(map).find(([candidate]) => routingKey(candidate) === normalizedKey);
+  return match?.[1];
+}
+
+function routingLabelForCategory(category: string, settings: Row): string {
+  const categoryMap = objectValue(
+    settings.stockCategoryRoutingMap ||
+    settings.stock_category_routing_map
+  );
+  const mapped = routingValue(categoryMap, category);
+  const entry = objectValue(mapped);
+  return text(
+    entry.routingLabel ||
+    entry.routing_label ||
+    entry.label ||
+    entry.name ||
+    mapped,
+    normalizeStockCategory(category)
+  );
+}
+
+/**
+ * Apply the stock-category routing configured on the location that originated
+ * the sale. The source may be a POS selling location or the storage location
+ * selected by the no-selling-location fallback. Any active selling or storage
+ * location may be the destination. Unmapped categories, explicit Self routes,
+ * and invalid/inactive destinations remain on the resolved source location.
+ *
+ * Routing is deliberately one hop. A destination's own routing map describes
+ * sales originating at that destination; it must not silently reroute a sale
+ * that originated somewhere else or create routing loops.
+ */
+async function applyStockCategoryRouting(
+  env: Env,
+  workspaceId: string,
+  sourceLocationId: string,
+  proposals: IngredientProposal[],
+): Promise<IngredientProposal[]> {
+  if (!sourceLocationId || !proposals.length) return proposals;
+  const [locationRows, settingsRow] = await Promise.all([
+    env.DB.prepare(
+      `SELECT id, name, display_name, external_name, kind, active, is_default, stock_routing_json
+         FROM locations
+        WHERE workspace_id = ?1 AND active = 1`
+    ).bind(workspaceId).all<Row>(),
+    env.DB.prepare(
+      `SELECT raw_json FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`
+    ).bind(workspaceId).first<Row>()
+  ]);
+  const locations = locationRows.results || [];
+  const source = locations.find((location) => text(location.id) === sourceLocationId);
+  if (!source) return proposals;
+
+  const stockRouting = parseJson(source.stock_routing_json);
+  if (!Object.keys(stockRouting).length) return proposals;
+  const activeLocationIds = new Set(locations.map((location) => text(location.id)).filter(Boolean));
+  const settings = parseJson(settingsRow?.raw_json);
+  const itemCache = new Map<string, Promise<Row | null>>();
+  const loadItem = (itemId: string) => {
+    if (!itemCache.has(itemId)) itemCache.set(itemId, loadStockItem(env, workspaceId, itemId));
+    return itemCache.get(itemId)!;
+  };
+
+  return Promise.all(proposals.map(async (proposal) => {
+    if (proposal.warningCode || !proposal.ingredientItemId) return proposal;
+    const category = normalizeStockCategory(proposal.stockCategory);
+    const label = routingLabelForCategory(category, settings);
+    const configuredTarget = text(
+      routingValue(stockRouting, label) ??
+      routingValue(stockRouting, category)
+    );
+    if (
+      !configuredTarget ||
+      normalized(configuredTarget) === 'self' ||
+      configuredTarget === sourceLocationId ||
+      !activeLocationIds.has(configuredTarget)
+    ) return proposal;
+
+    const item = await loadItem(proposal.ingredientItemId);
+    return {
+      ...proposal,
+      locationId: configuredTarget,
+      unitCost: item
+        ? await locationUnitCost(env, workspaceId, configuredTarget, item)
+        : proposal.unitCost
+    };
+  }));
 }
 
 async function loadBaselineModifierRule(
@@ -185,6 +291,7 @@ async function directStockProposal(env: Env, input: {
     menuItemId: input.menuItemId,
     modifierId: input.modifierId,
     ingredientItemId: text(item.id),
+    stockCategory: text(item.category, 'General'),
     locationId: input.locationId,
     quantity: -Math.abs(quantityBase),
     baseUom: text(item.unit, 'ea'),
@@ -265,6 +372,7 @@ async function explodeRecipe(env: Env, input: {
     const requestedQty = Math.abs(numberValue(line.quantity)) * lineMultiplier;
     const stockItem: Row = {
       id: line.stock_item_id,
+      category: line.stock_category,
       item_type: line.item_type,
       unit: line.base_unit,
       unit_cost: line.unit_cost,
@@ -290,6 +398,7 @@ async function explodeRecipe(env: Env, input: {
       menuItemId: input.menuItemId,
       modifierId: input.modifierId,
       ingredientItemId: text(line.stock_item_id),
+      stockCategory: text(line.stock_category, 'General'),
       locationId: input.locationId,
       quantity: -Math.abs(quantityBase),
       baseUom: text(line.base_unit || stockItem.unit, 'ea'),
@@ -428,11 +537,10 @@ export async function buildSaleEffectProposals(env: Env, domainEvent: Row, canon
           return;
         }
         const removedQuantity = matching.reduce((sum, proposal) => sum + Math.abs(proposal.quantity), 0);
-        const removedBaseUom = matching.find((proposal) => proposal.baseUom)?.baseUom || '';
         if (actionType === 'REPLACE_INGREDIENT') {
           const replacementId = text(input.rule?.replacement_stock_item_id);
           const replacement = await loadStockItem(env, canonical.workspace_id, replacementId);
-          if (!replacement || normalized(replacement.unit) !== normalized(removedBaseUom)) {
+          if (!replacement) {
             additiveProposals.push({
               sourceLineId: line.source_line_id,
               menuItemId: line.mapped_menu_item_id,
@@ -440,9 +548,9 @@ export async function buildSaleEffectProposals(env: Env, domainEvent: Row, canon
               ingredientItemId: replacementId || `unresolved-replacement:${input.sourceKey}`,
               locationId: canonical.kcp_location_id,
               quantity: 0,
-              baseUom: text(replacement?.unit),
+              baseUom: '',
               unitCost: 0,
-              warningCode: 'MODIFIER_REPLACEMENT_UOM_INCOMPATIBLE',
+              warningCode: 'MODIFIER_REPLACEMENT_ITEM_MISSING',
               resolutionStatus: 'WARNING',
               ruleId: text(input.rule?.id) || undefined,
               ruleVersion: numberValue(input.rule?.version, 0) || undefined,
@@ -459,6 +567,7 @@ export async function buildSaleEffectProposals(env: Env, domainEvent: Row, canon
             menuItemId: line.mapped_menu_item_id,
             modifierId: input.proposalModifierId,
             ingredientItemId: replacementId,
+            stockCategory: text(replacement.category, 'General'),
             locationId: canonical.kcp_location_id,
             quantity: -Math.abs(removedQuantity * Math.abs(numberValue(input.rule?.quantity, 1))),
             baseUom: text(replacement.unit, 'ea'),
@@ -610,8 +719,16 @@ export async function buildSaleEffectProposals(env: Env, domainEvent: Row, canon
     baselineProposals.push(...baselineBaseProposals, ...baselineAdditiveProposals);
   }
 
-  const aggregatedNew = aggregateProposals(proposals);
-  const aggregatedBaseline = aggregateProposals(baselineProposals);
+  const unroutedNew = aggregateProposals(proposals);
+  const unroutedBaseline = aggregateProposals(baselineProposals);
+  const routedProposals = await applyStockCategoryRouting(
+    env,
+    canonical.workspace_id,
+    canonical.kcp_location_id || '',
+    [...unroutedNew, ...unroutedBaseline]
+  );
+  const aggregatedNew = routedProposals.slice(0, unroutedNew.length);
+  const aggregatedBaseline = routedProposals.slice(unroutedNew.length);
   const aggregated = newEngineIsAuthoritative ? aggregatedNew : aggregatedBaseline;
   const keys: string[] = [];
   const now = nowIso();

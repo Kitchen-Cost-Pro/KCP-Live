@@ -5,6 +5,9 @@ import { recordYocoV2WebhookReceipt, sha256Hex } from './admin-security';
 import { verifyYocoV2WebhookSignature } from './webhook-signature';
 import { KCP_WORKER_RELEASE } from '../../release';
 import type { Row } from './repository';
+import { migrateYocoV2EffectOwnershipForConnection } from './ownership';
+import { processYocoV2QueueMessage } from './processor';
+import { scheduleImmediateYocoV2Processing } from './queue-consumer';
 
 function text(value: unknown, fallback = ''): string {
   return String(value ?? fallback).trim();
@@ -81,8 +84,9 @@ async function recordRejectedReceipt(
 
 /**
  * The sole production Yoco webhook business ingress.
- * It verifies the provider signature, stores an immutable V2 raw event, and publishes identifier-only queue work.
- * It never invokes sale, refund, stock, reporting, retry, or sync logic directly.
+ * It verifies the provider signature, stores an immutable V2 raw event, publishes identifier-only queue work,
+ * and schedules idempotent background processing in the workspace Durable Object. The queue remains the durable
+ * retry lane, so a queue trigger/configuration delay cannot silently block live stock and reporting effects.
  */
 export async function handleYocoV2WebhookIngress(
   request: Request,
@@ -140,6 +144,20 @@ export async function handleYocoV2WebhookIngress(
   }
 
   try {
+    // The legacy Yoco writer has been removed. Workspaces connected before the
+    // V2-only release may still carry historic LEGACY ownership rows, which
+    // makes both live reporting and stock fail closed even though the webhook
+    // is valid. A verified webhook is a safe, idempotent point to self-heal
+    // those existing connections without requiring users to disconnect and
+    // reconnect Yoco. Existing V2 ownership and deliberate pause controls are
+    // left unchanged.
+    await migrateYocoV2EffectOwnershipForConnection(
+      env.DB,
+      workspaceId,
+      `yoco:${workspaceId}`,
+      'yoco-v2-verified-webhook',
+    );
+
     const captured = await captureVerifiedYocoV2Event(env, {
       workspaceId,
       integrationId: `yoco:${workspaceId}`,
@@ -167,12 +185,25 @@ export async function handleYocoV2WebhookIngress(
           SET last_error = '', updated_at = ?2
         WHERE workspace_id = ?1 AND COALESCE(last_error, '') <> ''`
     ).bind(workspaceId, new Date().toISOString()).run().catch(() => undefined);
+    const immediateProcessingScheduled = Boolean(captured.rawEventId) && scheduleImmediateYocoV2Processing(
+      env.YOCO_V2_WAIT_UNTIL,
+      {
+        raw_event_id: String(captured.rawEventId),
+        workspace_id: workspaceId,
+        integration_id: `yoco:${workspaceId}`,
+        event_type: fields.eventType,
+        trace_id: String(captured.traceId || fields.eventId),
+        live_effects: true
+      },
+      (message) => processYocoV2QueueMessage(env, message)
+    );
     return response({
       ok: true,
       status: captured.duplicate ? 'duplicate' : captured.queued ? 'queued' : 'captured',
       engine: 'V2',
       rawEventId: captured.rawEventId,
       traceId: captured.traceId,
+      immediateProcessingScheduled,
       workerRelease: KCP_WORKER_RELEASE
     }, captured.queued || captured.duplicate ? 200 : 202);
   } catch (cause) {

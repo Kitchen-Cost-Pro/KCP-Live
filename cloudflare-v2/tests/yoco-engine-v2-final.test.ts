@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { YOCO_WEBHOOK_EVENT_TYPES } from '../src/modules/yoco-engine-v2/integration-service';
+import { isSupportedCompletedSaleEvent } from '../src/modules/yoco-engine-v2/sale-resolver';
 
 const root = resolve(process.cwd());
 const read = (path: string) => readFileSync(resolve(root, path), 'utf8');
@@ -33,4 +35,11 @@ test('ownership is V2-only and fails closed', () => {
   assert.match(ownership, /'V2'/);
   assert.match(ownership, /YOCO_V2_OWNERSHIP_NOT_READY/);
   assert.doesNotMatch(ownership, /VALUES[^;]*'LEGACY'/s);
+});
+
+test('live webhook coverage includes both documented Yoco device sale signals', () => {
+  assert.ok(YOCO_WEBHOOK_EVENT_TYPES.includes('payment.created'));
+  assert.ok(YOCO_WEBHOOK_EVENT_TYPES.includes('order.completed'));
+  assert.equal(isSupportedCompletedSaleEvent('payment.created'), true);
+  assert.equal(isSupportedCompletedSaleEvent('order.completed'), true);
 });

@@ -415,17 +415,28 @@ function linkedProductNamesFromValue(value = '') {
   return String(value || '').split(',').map((entry) => entry.trim()).filter(Boolean);
 }
 
-function normalizeRecipeLines(recipe) {
+export function normalizeRecipeLines(recipe) {
   const lines = Array.isArray(recipe) ? recipe : Object.values(recipe || {});
   return lines
-    .filter((line) => (line?.ingId || line?.stockItemId || line?.stock_item_id) && parseDecimal(line.qty ?? line.quantity, 0) > 0)
-    .map((line) => ({
-      ingId: String(line.ingId || line.stockItemId || line.stock_item_id),
-      stockItemId: String(line.stockItemId || line.stock_item_id || line.ingId),
-      qty: parseDecimal(line.qty ?? line.quantity, 0),
-      quantity: parseDecimal(line.quantity ?? line.qty, 0),
-      unit: String(line.unit || line.uom || 'ea').trim() || 'ea'
-    }));
+    .map((line) => {
+      // The recipe editor writes `qty`; older API rows may also contain
+      // `quantity`. Prefer the actively edited field, then emit one canonical
+      // numeric value under both keys for backwards compatibility.
+      const quantity = parseDecimal(
+        line?.qty !== undefined && line?.qty !== null && String(line.qty).trim() !== ''
+          ? line.qty
+          : line?.quantity,
+        0
+      );
+      return {
+        ingId: String(line?.ingId || line?.stockItemId || line?.stock_item_id || ''),
+        stockItemId: String(line?.stockItemId || line?.stock_item_id || line?.ingId || ''),
+        qty: quantity,
+        quantity,
+        unit: String(line?.unit || line?.uom || 'ea').trim() || 'ea'
+      };
+    })
+    .filter((line) => line.ingId && line.quantity > 0);
 }
 
 function sortRecipeItems(items) {

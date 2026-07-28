@@ -370,7 +370,7 @@ test('REMOVE_INGREDIENT omits the ingredient without writing a reversal movement
   assert.equal(rows.find((row: any) => row.ingredient_item_id === 'beef')?.quantity, -0.2);
 });
 
-test('REPLACE_INGREDIENT deducts only the compatible replacement in the removed base-UOM quantity', async () => {
+test('REPLACE_INGREDIENT deducts only the replacement in the removed numeric quantity', async () => {
   const env = createEnv();
   await upsertModifierRule(env, {
     workspaceId: 'ws_1', ownerId: 'almond_swap',
@@ -450,16 +450,24 @@ test('REPLACE_INGREDIENT supports a larger or smaller replacement quantity multi
   assert.equal(rows.find((row: any) => row.ingredient_item_id === 'almond')?.quantity, -250);
 });
 
-test('an invalid persisted replacement rule fails closed and preserves the original ingredient deduction', async () => {
+test('REPLACE_INGREDIENT allows a replacement stock item with a different base UOM', async () => {
   const env = createEnv();
-  await env.DB.prepare(
-    `INSERT INTO modifier_rules
-      (id, workspace_id, modifier_owner_id, action_type, source_stock_item_id, replacement_stock_item_id, quantity, unit, status)
-     VALUES ('bad_rule', 'ws_1', 'bad_swap', 'REPLACE_INGREDIENT', 'dairy', 'cheese', 1, 'ea', 'active')`
-  ).run();
-  const rows = await proposals(env, canonical({ orderId: 'bad_replace', productId: 'coffee', modifier: modifier('bad_swap') }));
-  assert.equal(rows.find((row: any) => row.ingredient_item_id === 'dairy')?.quantity, -200);
-  assert.equal(rows.some((row: any) => row.warning_code === 'MODIFIER_REPLACEMENT_UOM_INCOMPATIBLE'), true);
+  await upsertModifierRule(env, {
+    workspaceId: 'ws_1', ownerId: 'cheese_swap',
+    rule: {
+      actionType: 'REPLACE_INGREDIENT',
+      sourceStockItemId: 'dairy',
+      replacementStockItemId: 'cheese',
+      quantity: 1.5,
+      menuItemIds: ['coffee'],
+      applyAllMatchingProducts: false
+    }
+  });
+  const rows = await proposals(env, canonical({ orderId: 'cross_uom_replace', productId: 'coffee', modifier: modifier('cheese_swap') }));
+  assert.equal(rows.some((row: any) => row.ingredient_item_id === 'dairy'), false);
+  assert.equal(rows.find((row: any) => row.ingredient_item_id === 'cheese')?.quantity, -300);
+  assert.equal(rows.find((row: any) => row.ingredient_item_id === 'cheese')?.base_uom, 'ea');
+  assert.equal(rows.filter((row: any) => row.warning_code).length, 0);
 });
 
 test('modifier observations are idempotent when the sale payload has no variant id', async () => {
@@ -664,6 +672,239 @@ test('observation keeps the existing modifier baseline authoritative until live 
   assert.equal(
     rolledBack.find((row: any) => row.modifier_id === 'extra_patty' && row.ingredient_item_id === 'beef')?.quantity,
     -0.2,
+  );
+});
+
+test('no-selling-location fallback routes each stock category from Main Store to its mapped storage location', async () => {
+  const env = createEnv();
+  env.DB.database.exec(`
+    UPDATE locations
+       SET name = 'Main Store',
+           display_name = 'Main Store',
+           kind = 'storage',
+           is_default = 1,
+           external_provider = NULL,
+           external_location_id = NULL,
+           stock_routing_json = '{"Food":"kitchen-store"}'
+     WHERE workspace_id = 'ws_1' AND id = 'loc_1';
+
+    INSERT INTO locations
+      (id, workspace_id, name, display_name, kind, active, is_default, stock_routing_json)
+    VALUES
+      ('kitchen-store', 'ws_1', 'Kitchen Store', 'Kitchen Store', 'storage', 1, 0, '{}');
+
+    UPDATE workspace_settings
+       SET raw_json = '{"stockCategoryRoutingMap":{"Meat":{"stockCategory":"Meat","routingLabel":"Food"}}}'
+     WHERE workspace_id = 'ws_1';
+
+    UPDATE stock_items SET category = 'Meat' WHERE id = 'beef';
+    UPDATE stock_items SET category = 'Dairy' WHERE id = 'cheese';
+
+    INSERT INTO stock_item_location_prices
+      (workspace_id, stock_item_id, location_id, price)
+    VALUES ('ws_1', 'beef', 'kitchen-store', 125);
+  `);
+
+  const sale = canonical({
+    orderId: 'storage_routing',
+    productId: 'burger',
+    modifier: modifier('unused')
+  });
+  sale.source_location_id = undefined;
+  sale.kcp_location_id = 'loc_1';
+  sale.lines[0].modifiers = [];
+
+  const routed = await proposals(env, sale);
+  const beef = routed.find((row: any) => row.ingredient_item_id === 'beef');
+  const cheese = routed.find((row: any) => row.ingredient_item_id === 'cheese');
+
+  assert.equal(beef?.location_id, 'kitchen-store');
+  assert.equal(Number(beef?.unit_cost_ex_vat), 125);
+  assert.equal(cheese?.location_id, 'loc_1');
+});
+
+test('selling locations route categories to storage and selling destinations independently', async () => {
+  const env = createEnv();
+  env.DB.database.exec(`
+    UPDATE locations
+       SET name = 'Front Counter',
+           display_name = 'Front Counter',
+           kind = 'selling',
+           stock_routing_json = '{"Food":"food-store","Dairy":"bar"}'
+     WHERE workspace_id = 'ws_1' AND id = 'loc_1';
+
+    INSERT INTO locations
+      (id, workspace_id, name, display_name, kind, active, is_default, external_provider, external_location_id, stock_routing_json)
+    VALUES
+      ('food-store', 'ws_1', 'Food Store', 'Food Store', 'storage', 1, 0, NULL, NULL, '{}'),
+      ('bar', 'ws_1', 'Bar', 'Bar', 'selling', 1, 0, 'yoco', 'yoco_bar', '{}');
+
+    UPDATE workspace_settings
+       SET raw_json = '{"stockCategoryRoutingMap":{"Meat":{"routingLabel":"Food"},"Dairy":{"routingLabel":"Dairy"}}}'
+     WHERE workspace_id = 'ws_1';
+
+    UPDATE stock_items SET category = 'Meat' WHERE id = 'beef';
+    UPDATE stock_items SET category = 'Dairy' WHERE id = 'cheese';
+
+    INSERT INTO stock_item_location_prices
+      (workspace_id, stock_item_id, location_id, price)
+    VALUES
+      ('ws_1', 'beef', 'food-store', 125),
+      ('ws_1', 'cheese', 'bar', 8);
+  `);
+
+  const sale = canonical({
+    orderId: 'selling_to_mixed_destinations',
+    productId: 'burger',
+    modifier: modifier('unused')
+  });
+  sale.lines[0].modifiers = [];
+
+  const routed = await proposals(env, sale);
+  const beef = routed.find((row: any) => row.ingredient_item_id === 'beef');
+  const cheese = routed.find((row: any) => row.ingredient_item_id === 'cheese');
+
+  assert.equal(beef?.location_id, 'food-store');
+  assert.equal(Number(beef?.unit_cost_ex_vat), 125);
+  assert.equal(cheese?.location_id, 'bar');
+  assert.equal(Number(cheese?.unit_cost_ex_vat), 8);
+});
+
+test('storage sources can route to storage or selling locations without chaining destination mappings', async () => {
+  const env = createEnv();
+  env.DB.database.exec(`
+    UPDATE locations
+       SET name = 'Main Store',
+           display_name = 'Main Store',
+           kind = 'storage',
+           is_default = 1,
+           external_provider = NULL,
+           external_location_id = NULL,
+           stock_routing_json = '{"Food":"kitchen-store","Dairy":"bar"}'
+     WHERE workspace_id = 'ws_1' AND id = 'loc_1';
+
+    INSERT INTO locations
+      (id, workspace_id, name, display_name, kind, active, is_default, external_provider, external_location_id, stock_routing_json)
+    VALUES
+      ('kitchen-store', 'ws_1', 'Kitchen Store', 'Kitchen Store', 'storage', 1, 0, NULL, NULL, '{"Food":"bar"}'),
+      ('bar', 'ws_1', 'Bar', 'Bar', 'selling', 1, 0, 'yoco', 'yoco_bar', '{}');
+
+    UPDATE workspace_settings
+       SET raw_json = '{"stockCategoryRoutingMap":{"Meat":{"routingLabel":"Food"},"Dairy":{"routingLabel":"Dairy"}}}'
+     WHERE workspace_id = 'ws_1';
+
+    UPDATE stock_items SET category = 'Meat' WHERE id = 'beef';
+    UPDATE stock_items SET category = 'Dairy' WHERE id = 'cheese';
+  `);
+
+  const sale = canonical({
+    orderId: 'storage_to_mixed_destinations',
+    productId: 'burger',
+    modifier: modifier('unused')
+  });
+  sale.source_location_id = undefined;
+  sale.kcp_location_id = 'loc_1';
+  sale.lines[0].modifiers = [];
+
+  const routed = await proposals(env, sale);
+  assert.equal(
+    routed.find((row: any) => row.ingredient_item_id === 'beef')?.location_id,
+    'kitchen-store',
+  );
+  assert.equal(
+    routed.find((row: any) => row.ingredient_item_id === 'cheese')?.location_id,
+    'bar',
+  );
+});
+
+test('multiple selling locations use only their own category mappings', async () => {
+  const env = createEnv();
+  env.DB.database.exec(`
+    UPDATE locations
+       SET name = 'Front Counter',
+           display_name = 'Front Counter',
+           kind = 'selling',
+           stock_routing_json = '{"Food":"front-store"}'
+     WHERE workspace_id = 'ws_1' AND id = 'loc_1';
+
+    INSERT INTO locations
+      (id, workspace_id, name, display_name, kind, active, is_default, external_provider, external_location_id, stock_routing_json)
+    VALUES
+      ('back-counter', 'ws_1', 'Back Counter', 'Back Counter', 'selling', 1, 0, 'yoco', 'yoco_back', '{"Food":"back-store"}'),
+      ('front-store', 'ws_1', 'Front Store', 'Front Store', 'storage', 1, 0, NULL, NULL, '{}'),
+      ('back-store', 'ws_1', 'Back Store', 'Back Store', 'storage', 1, 0, NULL, NULL, '{}');
+
+    UPDATE workspace_settings
+       SET raw_json = '{"stockCategoryRoutingMap":{"Meat":{"routingLabel":"Food"}}}'
+     WHERE workspace_id = 'ws_1';
+    UPDATE stock_items SET category = 'Meat' WHERE id = 'beef';
+  `);
+
+  const frontSale = canonical({
+    orderId: 'front_location_mapping',
+    productId: 'burger',
+    modifier: modifier('unused')
+  });
+  frontSale.lines[0].modifiers = [];
+
+  const backSale = canonical({
+    orderId: 'back_location_mapping',
+    productId: 'burger',
+    modifier: modifier('unused')
+  });
+  backSale.source_location_id = 'yoco_back';
+  backSale.kcp_location_id = 'back-counter';
+  backSale.lines[0].modifiers = [];
+
+  const [frontRouted, backRouted] = await Promise.all([
+    proposals(env, frontSale),
+    proposals(env, backSale)
+  ]);
+  assert.equal(
+    frontRouted.find((row: any) => row.ingredient_item_id === 'beef')?.location_id,
+    'front-store',
+  );
+  assert.equal(
+    backRouted.find((row: any) => row.ingredient_item_id === 'beef')?.location_id,
+    'back-store',
+  );
+});
+
+test('self, inactive, missing, and unmapped category routes safely remain at the sale source', async () => {
+  const env = createEnv();
+  env.DB.database.exec(`
+    UPDATE locations
+       SET kind = 'selling',
+           stock_routing_json = '{"Food":"self","Dairy":"inactive-store","Sauces":"missing-store"}'
+     WHERE workspace_id = 'ws_1' AND id = 'loc_1';
+
+    INSERT INTO locations
+      (id, workspace_id, name, display_name, kind, active, is_default, stock_routing_json)
+    VALUES
+      ('inactive-store', 'ws_1', 'Inactive Store', 'Inactive Store', 'storage', 0, 0, '{}');
+
+    UPDATE workspace_settings
+       SET raw_json = '{"stockCategoryRoutingMap":{"Meat":{"routingLabel":"Food"},"Dairy":{"routingLabel":"Dairy"}}}'
+     WHERE workspace_id = 'ws_1';
+    UPDATE stock_items SET category = 'Meat' WHERE id = 'beef';
+    UPDATE stock_items SET category = 'Dairy' WHERE id = 'cheese';
+  `);
+
+  const sale = canonical({
+    orderId: 'safe_mapping_fallbacks',
+    productId: 'burger',
+    modifier: modifier('unused')
+  });
+  sale.lines[0].modifiers = [];
+
+  const routed = await proposals(env, sale);
+  assert.equal(
+    routed.find((row: any) => row.ingredient_item_id === 'beef')?.location_id,
+    'loc_1',
+  );
+  assert.equal(
+    routed.find((row: any) => row.ingredient_item_id === 'cheese')?.location_id,
+    'loc_1',
   );
 });
 

@@ -208,6 +208,29 @@ async function getBroadcastConfig(env: Env) {
   return normalizeBroadcastPayload(await readAdminSetting<Record<string, any>>(env, SYSTEM_BROADCAST_SETTING_KEY, {}));
 }
 
+function isBroadcastItemCurrent(item: ReturnType<typeof normalizeBroadcastItem>, now = Date.now()) {
+  if (!item.enabled || !item.message) return false;
+  const endsAt = Date.parse(item.endsAt);
+  return !Number.isFinite(endsAt) || endsAt >= now;
+}
+
+function currentBroadcastConfig(value: ReturnType<typeof normalizeBroadcastPayload>, now = Date.now()) {
+  const items = (value.items || []).filter((item) => isBroadcastItemCurrent(item, now));
+  const first = items[0];
+  return {
+    enabled: items.some((item) => item.enabled),
+    severity: first?.severity || 'info',
+    gradient: first?.gradient || '',
+    title: first?.title || '',
+    message: first?.message || '',
+    startsAt: first?.startsAt || '',
+    endsAt: first?.endsAt || '',
+    updatedAt: text(value.updatedAt),
+    updatedBy: text(value.updatedBy),
+    items,
+  };
+}
+
 function isBroadcastItemActive(item: ReturnType<typeof normalizeBroadcastItem>, now = Date.now()) {
   if (!item.enabled || !item.message) return false;
   const startsAt = Date.parse(item.startsAt);
@@ -607,7 +630,8 @@ export async function getAdminSystemSettings(request: Request, env: Env) {
   return json(request, env, {
     ok: true,
     emailConfig: await getEmailConfigForClient(env),
-    broadcast: await getBroadcastConfig(env)
+    // Admins need the live/scheduled queue, not expired or stopped history.
+    broadcast: currentBroadcastConfig(await getBroadcastConfig(env))
   });
 }
 
@@ -745,15 +769,12 @@ export async function putAdminSystemBroadcast(request: Request, env: Env) {
   const now = nowIso();
   const requestedAction = text(payload.action).toLowerCase();
 
-  if (requestedAction === 'remove' || requestedAction === 'cancel') {
+  if (requestedAction === 'remove' || requestedAction === 'delete') {
     const removeId = text(payload.id || payload.broadcastId || payload.removeId);
     if (!removeId) return error(request, env, 400, 'Broadcast id is required.');
     const items = (current.items || [])
       .filter((item) => item.message)
-      .map((item) => item.id === removeId
-        ? { ...item, enabled: false, updatedAt: now, updatedBy: adminEmail }
-        : item
-      );
+      .filter((item) => item.id !== removeId);
     const next = normalizeBroadcastPayload({
       enabled: items.some((item) => item.enabled),
       updatedAt: now,
@@ -764,25 +785,49 @@ export async function putAdminSystemBroadcast(request: Request, env: Env) {
     await writeAdminAuditEvent(env, adminAuditActor(adminSession), 'broadcast.remove', removeId, { action: requestedAction });
     return json(request, env, {
       ok: true,
-      broadcast: normalizeBroadcastPayload(saved)
+      broadcast: currentBroadcastConfig(normalizeBroadcastPayload(saved))
+    });
+  }
+
+  if (requestedAction === 'status') {
+    const broadcastId = text(payload.id || payload.broadcastId);
+    if (!broadcastId) return error(request, env, 400, 'Broadcast id is required.');
+    const enabled = Boolean(payload.enabled ?? payload.active);
+    let found = false;
+    const items = (current.items || [])
+      .filter((item) => item.message)
+      .map((item) => {
+        if (item.id !== broadcastId) return item;
+        found = true;
+        return { ...item, enabled, updatedAt: now, updatedBy: adminEmail };
+      });
+    if (!found) return error(request, env, 404, 'Broadcast not found.');
+    const next = normalizeBroadcastPayload({
+      enabled: items.some((item) => item.enabled),
+      updatedAt: now,
+      updatedBy: adminEmail,
+      items,
+    });
+    const saved = await writeAdminSetting(env, SYSTEM_BROADCAST_SETTING_KEY, next, adminEmail);
+    await writeAdminAuditEvent(env, adminAuditActor(adminSession), 'broadcast.status', broadcastId, { enabled });
+    return json(request, env, {
+      ok: true,
+      broadcast: currentBroadcastConfig(normalizeBroadcastPayload(saved)),
     });
   }
 
   if (requestedAction === 'clear' || payload.clear === true) {
-    const items = (current.items || [])
-      .filter((item) => item.message)
-      .map((item) => ({ ...item, enabled: false, updatedAt: now, updatedBy: adminEmail }));
     const next = normalizeBroadcastPayload({
       enabled: false,
       updatedAt: now,
       updatedBy: adminEmail,
-      items
+      items: []
     });
     const saved = await writeAdminSetting(env, SYSTEM_BROADCAST_SETTING_KEY, next, adminEmail);
     await writeAdminAuditEvent(env, adminAuditActor(adminSession), 'broadcast.clear', 'system_broadcast', {});
     return json(request, env, {
       ok: true,
-      broadcast: normalizeBroadcastPayload(saved)
+      broadcast: currentBroadcastConfig(normalizeBroadcastPayload(saved))
     });
   }
 
@@ -800,10 +845,10 @@ export async function putAdminSystemBroadcast(request: Request, env: Env) {
   });
   if (nextItem.enabled && !nextItem.message) return error(request, env, 400, 'Broadcast message is required.');
 
-  const existingItems = (current.items || []).filter((item) => item.message);
+  const existingItems = (current.items || []).filter((item) => isBroadcastItemCurrent(item));
   const items = nextItem.enabled
     ? [nextItem, ...existingItems].slice(0, 8)
-    : existingItems.map((item) => ({ ...item, enabled: false, updatedAt: now, updatedBy: adminEmail }));
+    : existingItems;
   const next = normalizeBroadcastPayload({
     enabled: items.some((item) => item.enabled),
     updatedAt: now,
@@ -818,7 +863,7 @@ export async function putAdminSystemBroadcast(request: Request, env: Env) {
   });
   return json(request, env, {
     ok: true,
-    broadcast: normalizeBroadcastPayload(saved)
+    broadcast: currentBroadcastConfig(normalizeBroadcastPayload(saved))
   });
 }
 

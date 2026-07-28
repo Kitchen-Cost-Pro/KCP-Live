@@ -1506,13 +1506,6 @@ function validateModifierStockRule(rule = {}, recipes = {}, item = {}) {
   if (actionType === 'REPLACE_INGREDIENT' && rule.sourceStockItemId === rule.replacementStockItemId) {
     return 'The replacement ingredient must be different from the original ingredient.';
   }
-  if (actionType === 'REPLACE_INGREDIENT') {
-    const source = (recipes.ingredients || []).find((entry) => String(entry.id) === String(rule.sourceStockItemId));
-    const replacement = (recipes.ingredients || []).find((entry) => String(entry.id) === String(rule.replacementStockItemId));
-    if (source && replacement && normalizeKey(source.unit) !== normalizeKey(replacement.unit)) {
-      return `Replacement UOM is incompatible. ${source.unit || 'The original item'} must be replaced by an item using the same base UOM.`;
-    }
-  }
   if (!rule.applyAllMatchingProducts && !rule.menuItemIds?.length) {
     return 'Select at least one menu item or apply this action to all matching products.';
   }
@@ -1712,7 +1705,6 @@ function renderModifierStockPickerModal({ picker = {}, currentOwnerId = '', item
   if (!picker?.open) return '';
   const mode = String(picker.mode || '');
   const query = String(picker.query || '').trim().toLowerCase();
-  const sourceItem = stockItems.find((entry) => String(entry.id) === String(rule.sourceStockItemId));
   let title = 'Select stock item';
   let candidates = [];
   if (mode === 'recipeTarget') {
@@ -1731,12 +1723,11 @@ function renderModifierStockPickerModal({ picker = {}, currentOwnerId = '', item
     title = 'Select replacement ingredient';
     candidates = stockItems
       .filter((entry) => String(entry.id) !== String(rule.sourceStockItemId || ''))
-      .filter((entry) => !sourceItem || normalizeKey(sourceItem.unit) === normalizeKey(entry.unit))
       .map((entry) => ({ value: String(entry.id), name: entry.name, meta: `${entry.unit || 'ea'} · replacement stock item` }));
   } else {
     candidates = stockItems.map((entry) => ({ value: String(entry.id), name: entry.name, meta: `${entry.unit || 'ea'} · ${entry.category || 'Stock item'}` }));
   }
-  const visible = candidates.filter((entry) => !query || `${entry.name} ${entry.meta}`.toLowerCase().includes(query)).slice(0, 150);
+  const visible = candidates.filter((entry) => !query || `${entry.name} ${entry.meta}`.toLowerCase().includes(query));
   return `
     <div class="recipesModule__modifierPickerBackdrop" data-modifier-stock-picker-backdrop>
       <section class="recipesModule__modifierPicker" role="dialog" aria-modal="true" aria-labelledby="modifier-stock-picker-title">
@@ -1792,6 +1783,7 @@ export function renderModifierStockActionDrawer(item = {}, recipes = {}) {
   const replacementInputValue = sourceProfile.baseQuantity > 0
     ? sourceProfile.baseQuantity * replacementRatio
     : replacementRatio;
+  const replacementUnit = String(replacementItem?.unit || replacementItem?.baseUom || replacementItem?.base_uom || sourceProfile.unit || 'ea');
 
   return `
     <div class="recipesModule__stockRuleBackdrop" data-modifier-stock-backdrop>
@@ -1880,13 +1872,13 @@ export function renderModifierStockActionDrawer(item = {}, recipes = {}) {
                       data-modifier-stock-replacement-quantity
                       data-modifier-stock-source-quantity="${escapeAttribute(sourceProfile.baseQuantity || 0)}"
                     />
-                    <strong>${escapeHtml(sourceProfile.baseQuantity > 0 ? sourceProfile.unit : '× removed amount')}</strong>
+                    <strong>${escapeHtml(sourceProfile.baseQuantity > 0 ? replacementUnit : '× removed amount')}</strong>
                   </div>
                   <small>${sourceProfile.baseQuantity > 0
-                    ? `The base recipe uses ${sourceProfile.baseQuantity} ${sourceProfile.unit}. The replacement defaults to the same quantity but may be increased or reduced.`
+                    ? `The base recipe uses ${sourceProfile.baseQuantity} ${sourceProfile.unit}. The replacement defaults to ${replacementInputValue} ${replacementUnit} but may be increased or reduced.`
                     : 'Linked recipes use different source quantities. Enter a multiplier, where 1 keeps the same amount, 1.5 uses 50% more, and 0.5 uses half.'}</small>
                 </label>
-                <p class="recipesModule__stockRuleHint">Only stock items with the same base UOM are offered as replacements.</p>
+                <p class="recipesModule__stockRuleHint">All active stock items are available. The replacement quantity uses the selected item's base UOM.</p>
               ` : '<p class="recipesModule__stockRuleHint">The action is ignored safely on a linked menu item that does not contain this ingredient. No artificial return movement is written.</p>'}
             </section>
           ` : ''}
