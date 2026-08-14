@@ -236,6 +236,11 @@ let catalogueAutoSyncTimer = null;
 let dataVersionPollTimer = null;
 let dataVersionPollVisibilityHandler = null;
 let lastSeenDataVersion = null;
+// Monotonic guard against out-of-order background stock refreshes. Any in-flight
+// stock fetch that was started BEFORE the most recent local mutation (delete/save)
+// is stale by the time it resolves and must never be allowed to overwrite state —
+// this is what caused deleted items to silently reappear after a live poll landed late.
+let stockMutationToken = 0;
 let _integrationVisibilityHandler = null;
 let _globalSavingOverlay = null;
 let accessSubscriptionToken = 0;
@@ -594,6 +599,11 @@ function hideGlobalSaving() {
 }
 
 function startIntegrationAutoSync() {
+  // NOTE: this client-side timer is now a convenience/fast-path only, for whoever currently has
+  // the app open — it is no longer the sole mechanism for menu/catalogue sync. The Worker's
+  // scheduled() cron (`*/45 * * * *` in wrangler.toml, dispatched to
+  // `admin-action/catalogue-sync-due`) guarantees every connected workspace's catalogue syncs
+  // every 45 minutes regardless of whether any browser tab is open, visible, or focused.
   const runSync = async () => {
     if (!appState.user || !appState.workspace) return;
     if (isUserBusy()) return;
@@ -684,11 +694,16 @@ let stockLiveRefreshInstalled = false;
 async function refreshStockFromDataVersion(workspaceId) {
   if (appState.route.active !== 'ingredients') return;
   if (!workspaceId || appState.workspace?.id !== workspaceId) return;
+  const requestToken = stockMutationToken;
   try {
     clearApiCache();
     const { fetchStock } = await import('./services/stockService.js');
     const stock = await fetchStock(workspaceId);
     if (appState.route.active !== 'ingredients' || appState.workspace?.id !== workspaceId) return;
+    // A delete/save that started AFTER this fetch began bumps the token. If that
+    // happened, this response is stale (it was captured before that mutation) and
+    // must be dropped instead of overwriting the now-correct local state.
+    if (requestToken !== stockMutationToken) return;
     applyRealtimeSnapshot('stock', () => {
       appState.stock = {
         ...appState.stock,
@@ -6026,6 +6041,9 @@ async function saveStockItem(item) {
       cost: Number(item.cost || 0) || 0,
       id: item.id || undefined
     });
+    // Same staleness guard as delete — a save must invalidate any in-flight background
+    // stock fetch so it can't overwrite the freshly-saved state with pre-save data.
+    stockMutationToken += 1;
     appState.stock = {
       ...appState.stock,
       editingItem: null,
@@ -6058,6 +6076,22 @@ function getDuplicateStockItemNameError(item = {}, stockItems = []) {
       .map((id) => id.trim())
       .filter(Boolean)
   );
+
+  // Only block the save if the NAME is actually changing. Some workspaces already have
+  // pre-existing items that share a name but differ by UOM (e.g. imported from a POS
+  // catalogue). Re-checking uniqueness on every save — including saves that only touch
+  // UOM, cost, category, etc. — would permanently block editing those items. Comparing
+  // against the item's own currently-saved name lets those records keep being edited.
+  if (currentIds.size) {
+    const original = (stockItems || []).find((entry = {}) => {
+      const entryIds = String(entry.mergedIds || entry.id || '')
+        .split(',')
+        .map((id) => id.trim())
+        .filter(Boolean);
+      return entryIds.some((id) => currentIds.has(id));
+    });
+    if (original && normalizeStockItemDuplicateName(original.name) === nextKey) return '';
+  }
 
   const duplicate = (stockItems || []).find((entry = {}) => {
     if (normalizeStockItemDuplicateName(entry.name) !== nextKey) return false;
@@ -6342,6 +6376,10 @@ async function confirmStockDelete() {
     } else {
       await deleteMultipleStockItems(appState.workspace?.id, items.map((item) => item.id));
     }
+    // Invalidate any stock fetch that was already in flight before this delete completed —
+    // it captured pre-delete data and would otherwise reintroduce the deleted item when it
+    // resolves (see refreshStockFromDataVersion / applyRealtimeSnapshot).
+    stockMutationToken += 1;
     const deletedIds = new Set(items.map((item) => String(item.id)));
     appState.stock = {
       ...appState.stock,
@@ -11348,6 +11386,29 @@ function clearRestaurantBackground() {
   showSettingsToast('Custom background removed. Save settings to publish it.', 'success');
 }
 
+async function requestVatRegisteredToggle(nextValue) {
+  const draft = appState.settings.draft || createDefaultSettingsDraft();
+  const currentlyRegistered = draft.vatRegistered !== false;
+  if (currentlyRegistered === nextValue) return;
+
+  const vatRate = Number(draft.vatRate ?? 15) || 15;
+  const message = nextValue
+    ? `Switching to VAT Registered will recalculate recipe costs and stock item costs to be ex-VAT (removing ${vatRate}% VAT from currently VAT-inclusive costs). Reports will start showing real VAT values instead of R0.`
+    : `Switching to Not VAT Registered will recalculate recipe costs and stock item costs to be VAT-inclusive (adding ${vatRate}% VAT back into currently ex-VAT costs, since it can no longer be reclaimed). Reports will show R0 VAT going forward.`;
+
+  const confirmed = await showBrandConfirmDialog({
+    eyebrow: 'VAT Registration',
+    title: nextValue ? 'Switch to VAT Registered?' : 'Switch to Not VAT Registered?',
+    message: `${message} This applies to all VAT-enabled stock items and cannot be automatically undone by toggling back (it will recalculate again in the opposite direction).`,
+    confirmLabel: nextValue ? 'Switch to VAT Registered' : 'Switch to Not VAT Registered',
+    cancelLabel: 'Cancel',
+    tone: 'danger'
+  });
+  if (!confirmed) return;
+
+  await saveSettingsDraft({ draftPatch: { vatRegistered: nextValue } });
+}
+
 async function saveSettingsDraft(options = {}) {
   if (settingsDraftRenderTimer) {
     clearTimeout(settingsDraftRenderTimer);
@@ -11381,6 +11442,8 @@ async function saveSettingsDraft(options = {}) {
 
   try {
     const saved = await saveWorkspaceSettings(appState.workspace?.id, draft, { includePersonal: false });
+    const vatRegistrationRecompute = saved.__vatRegistrationRecompute || null;
+    delete saved.__vatRegistrationRecompute;
     appState.settings = {
       ...appState.settings,
       status: 'ready',
@@ -11397,7 +11460,15 @@ async function saveSettingsDraft(options = {}) {
     if (options.syncSiteName !== false && nextSiteName && nextSiteName !== previousSiteName) {
       await syncDefaultWorkspaceSiteName(nextSiteName);
     }
-    showSettingsToast(options.successMessage || 'Settings saved.', 'success');
+    if (vatRegistrationRecompute) {
+      const { itemsRescaled = 0, locationPricesRescaled = 0 } = vatRegistrationRecompute;
+      showSettingsToast(
+        `VAT registration updated. Recalculated costs for ${itemsRescaled} item${itemsRescaled === 1 ? '' : 's'}${locationPricesRescaled ? ` (${locationPricesRescaled} location price${locationPricesRescaled === 1 ? '' : 's'})` : ''}.`,
+        'success'
+      );
+    } else {
+      showSettingsToast(options.successMessage || 'Settings saved.', 'success');
+    }
     return true;
   } catch (error) {
     appState.settings = {
@@ -18783,6 +18854,7 @@ function renderApp() {
       onBackgroundUpload: uploadRestaurantBackground,
       onBackgroundClear: clearRestaurantBackground,
       onSave: saveSettingsDraft,
+      onVatRegisteredToggle: requestVatRegisteredToggle,
       onSaveAppearance: saveAppearanceSettingsDraft,
       onGoLive: confirmGoLiveStockDepletion,
       onExportSnapshot: exportSettingsSnapshot,
@@ -20625,7 +20697,14 @@ function getDefaultGrvLocationId(order = null) {
 }
 
 function getVatRate() {
-  return Number(appState.source?.settings?.vatRate ?? appState.source?.settings?.vatPercentage ?? 15) || 15;
+  // NOTE: this previously read appState.source?.settings, but appState.source is never assigned
+  // anywhere (it stays null for the app's entire lifetime) — so this was silently, permanently
+  // hardcoded to 15% regardless of the workspace's actual configured VAT rate. Read the real,
+  // live settings instead, and respect VAT-registration status: a non-registered workspace never
+  // shows VAT on any live entry-form preview.
+  const settings = appState.settings?.draft || appState.settings?.values || {};
+  if (settings.vatRegistered === false) return 0;
+  return Number(settings.vatRate ?? settings.vatPercentage ?? 15) || 15;
 }
 
 function getPdfBranding() {

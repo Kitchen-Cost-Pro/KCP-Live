@@ -530,7 +530,7 @@ export async function getSalesFinancialReport(
         l.display_name AS location_display_name,
         ${
           tableStatus.workspace_settings
-            ? "COALESCE((SELECT NULLIF(ws.vat_rate, 0) FROM workspace_settings ws WHERE ws.workspace_id = yo.workspace_id ORDER BY datetime(ws.updated_at) DESC LIMIT 1), 15)"
+            ? "COALESCE((SELECT CASE WHEN COALESCE(ws.vat_registered, 1) = 0 THEN 0 ELSE NULLIF(ws.vat_rate, 0) END FROM workspace_settings ws WHERE ws.workspace_id = yo.workspace_id ORDER BY datetime(ws.updated_at) DESC LIMIT 1), 15)"
             : "15"
         } AS vat_rate,
         COUNT(*) OVER() AS __total_rows
@@ -698,7 +698,7 @@ export async function getSaleStockUsageReport(
         p.category AS product_category,
         ${
           tableStatus.workspace_settings
-            ? "COALESCE((SELECT NULLIF(ws.vat_rate, 0) FROM workspace_settings ws WHERE ws.workspace_id = sm.workspace_id ORDER BY datetime(ws.updated_at) DESC LIMIT 1), 15)"
+            ? "COALESCE((SELECT CASE WHEN COALESCE(ws.vat_registered, 1) = 0 THEN 0 ELSE NULLIF(ws.vat_rate, 0) END FROM workspace_settings ws WHERE ws.workspace_id = sm.workspace_id ORDER BY datetime(ws.updated_at) DESC LIMIT 1), 15)"
             : "15"
         } AS vat_rate
        FROM stock_movements sm
@@ -931,7 +931,7 @@ export async function getModifierSalesReport(
         p.raw_json AS product_raw_json,
         ${
           tableStatus.workspace_settings
-            ? "COALESCE((SELECT NULLIF(ws.vat_rate, 0) FROM workspace_settings ws WHERE ws.workspace_id = yol.workspace_id ORDER BY datetime(ws.updated_at) DESC LIMIT 1), 15)"
+            ? "COALESCE((SELECT CASE WHEN COALESCE(ws.vat_registered, 1) = 0 THEN 0 ELSE NULLIF(ws.vat_rate, 0) END FROM workspace_settings ws WHERE ws.workspace_id = yol.workspace_id ORDER BY datetime(ws.updated_at) DESC LIMIT 1), 15)"
             : "15"
         } AS vat_rate
        FROM (
@@ -1269,7 +1269,8 @@ export async function getMenuRecipeHealthReport(
 
   const vatRateRow = tableStatus.workspace_settings
     ? await env.DB.prepare(
-        `SELECT COALESCE(NULLIF(vat_rate, 0), 15) AS vat_rate FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`,
+        `SELECT CASE WHEN COALESCE(vat_registered, 1) = 0 THEN 0 ELSE COALESCE(NULLIF(vat_rate, 0), 15) END AS vat_rate
+           FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`,
       )
         .bind(workspaceId)
         .first<Row>()
@@ -4435,9 +4436,16 @@ function deepValue(source: Row, path: string) {
 }
 
 function calculateVatAmount(gross: number, vatRate: number) {
-  const supplied = numberValue(vatRate, 0);
-  const resolved =
-    supplied > 0 ? supplied : resolveYocoVatRate({}, supplied).value;
+  // A genuine, explicit 0 (a non-VAT-registered workspace) is authoritative and must not be
+  // treated the same as "no rate supplied" — otherwise it would fall through to a fallback rate
+  // and incorrectly show VAT for a business that isn't registered. Check the raw input for
+  // strict equality to 0 BEFORE any coercion: numberValue(null) and numberValue(undefined) both
+  // resolve to 0 too, so coercing first would misclassify a genuinely missing rate as "explicitly
+  // zero" and wrongly suppress the fallback.
+  const isExplicitZero = vatRate === 0 || (vatRate as unknown) === '0';
+  if (isExplicitZero) return 0;
+  const supplied = numberValue(vatRate, NaN);
+  const resolved = supplied > 0 ? supplied : resolveYocoVatRate({}, supplied).value;
   const rate = resolved > 1 ? resolved / 100 : resolved;
   if (!gross || !rate) return 0;
   return roundMoneyNumber(gross - gross / (1 + rate));

@@ -562,5 +562,12 @@ CREATE INDEX IF NOT EXISTS idx_yoco_orders_workspace_refund_financials
   PRIMARY KEY (workspace_id, stock_item_id, location_id)
 );
 CREATE INDEX IF NOT EXISTS idx_low_stock_alert_state_workspace_active
-  ON low_stock_alert_state(workspace_id, is_active, last_notified_at);`
+  ON low_stock_alert_state(workspace_id, is_active, last_notified_at);`,
+  // 32 — VAT-registration status. workspace_settings.vat_rate was already a typed column read
+  // directly by reporting SQL for performance, but the settings-save route only ever wrote the
+  // JSON blob, so a business's configured VAT rate never actually reached reporting (it silently
+  // stayed at the schema default of 15%). This migration adds the typed vat_registered column,
+  // and the save route is fixed alongside it to keep both typed columns in sync with raw_json
+  // going forward, so a business's actual VAT rate and registration status are both honored.
+  `ALTER TABLE workspace_settings ADD COLUMN vat_registered INTEGER NOT NULL DEFAULT 1;`
 ];

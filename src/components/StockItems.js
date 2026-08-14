@@ -120,7 +120,7 @@ export function renderStockItems({ state, onStockFilterChange, onStockAction = {
     </section>
 
     ${stock.actionError && !stock.editingItem && !stock.confirmDelete ? renderNotice(stock.actionError, 'error') : ''}
-    ${renderStockBody(stock, items, pagedItems, paging, activeFilters, selectedIds)}
+    ${renderStockBody(stock, items, pagedItems, paging, activeFilters, selectedIds, state.settings?.values?.vatRegistered !== false)}
     ${renderStockModal(stock, categories, uoms, stock.locations || [], renderItems)}
     ${renderStockLookupPickerModal(stock, categories, uoms)}
     ${renderStockManagerModal(stock, managerData)}
@@ -749,7 +749,7 @@ function formatCostingStatus(status = '') {
   return map[status] || status || 'Unknown';
 }
 
-function renderStockBody(stock, items, pagedItems, paging, filters, selectedIds) {
+function renderStockBody(stock, items, pagedItems, paging, filters, selectedIds, vatRegistered = true) {
   if (stock.status === 'loading') {
     return renderLoadingPanel('Loading stock items', 'Fetching inventory, costs, categories, UOMs, and location balances.');
   }
@@ -787,7 +787,7 @@ function renderStockBody(stock, items, pagedItems, paging, filters, selectedIds)
         <span>${withInfo('On Hand', 'Current stock balance for the selected location, shown in the base UOM.')}</span>
         <span>${withInfo('Action', 'Edit or delete this stock item.')}</span>
       </div>
-      ${pagedItems.map((item) => renderStockRow(item, filters.locationId, stock.locations || [], selectedIds.has(String(item.id)))).join('')}
+      ${pagedItems.map((item) => renderStockRow(item, filters.locationId, stock.locations || [], selectedIds.has(String(item.id)), vatRegistered)).join('')}
       <div class="stockModule__tableFooter">
         <span>${paging.total ? `${paging.startIndex + 1}-${paging.endIndex}` : '0'} of ${paging.total} items</span>
         <div class="stockModule__pager" aria-label="Pagination">
@@ -800,13 +800,21 @@ function renderStockBody(stock, items, pagedItems, paging, filters, selectedIds)
   `;
 }
 
-function renderStockRow(item, locationId, locations = [], selected = false) {
+function renderStockRow(item, locationId, locations = [], selected = false, vatRegistered = true) {
   const onHand = locationId ? getLocationStock(item, locationId, locations) : Number(item.stock || 0);
   const itemType = getStockItemType(item);
   const isPhysicalStock = itemType !== 'sub_recipe';
   const isLow = isPhysicalStock && onHand < Number(item.lowStockThreshold || 5);
   const barcodeLabel = parseBarcodeValues(item.barcodes ?? item.barcode ?? item.Barcodes ?? item.Barcode).join(', ') || 'No barcode';
   const locationCost = resolveLocationUnitCost(item, locationId);
+  // When the business is not VAT registered, no item ever actually carries VAT regardless of its
+  // own per-item flag — showing "VAT" on an item would misleadingly imply VAT is being charged.
+  const itemCarriesVat = vatRegistered && item.vatEnabled !== false;
+  const vatPillTitle = !vatRegistered
+    ? 'Workspace is not VAT registered — no VAT is applied to any item, and this cost is treated as VAT-inclusive.'
+    : itemCarriesVat
+      ? 'This item carries VAT. Its stored cost is treated as ex-VAT.'
+      : 'This item is VAT-exempt.';
 
   return `
     <article class="stockModule__row ${selected ? 'is-selected' : ''}">
@@ -817,7 +825,7 @@ function renderStockRow(item, locationId, locations = [], selected = false) {
 	          ${itemType === 'sub_recipe' ? '<em class="stockModule__pill stockModule__pill--purple" title="Sub-Recipe: used inside recipes, has no stock-on-hand balance, and cannot be ordered.">Sub-Recipe</em>' : ''}
 	          ${itemType === 'manufactured' ? '<em class="stockModule__pill stockModule__pill--amber" title="Prep / Manufactured: produced in batches and tracked as its own stock item.">Prep</em>' : ''}
 	          ${itemType === 'recipe_source' ? '<em class="stockModule__pill stockModule__pill--purple" title="Non Stock: separate from Sub-Recipe. It can carry stock on hand and be counted, but it cannot be used as a recipe ingredient.">Non Stock</em>' : ''}
-          ${item.vatEnabled === false ? '<em class="stockModule__pill stockModule__pill--amber">NO VAT</em>' : '<em class="stockModule__pill stockModule__pill--green">VAT</em>'}
+          <em class="stockModule__pill ${itemCarriesVat ? 'stockModule__pill--green' : 'stockModule__pill--amber'}" title="${escapeAttribute(vatPillTitle)}">${itemCarriesVat ? 'With VAT' : 'Without VAT'}</em>
           ${isLow ? '<em class="stockModule__pill stockModule__pill--red">LOW</em>' : ''}
         </h2>
         <p>${escapeHtml(barcodeLabel)}</p>
@@ -923,7 +931,11 @@ function renderStockModal(stock, categories = [], uoms = [], locations = [], sto
   const confirmedLookups = item.__confirmedLookups || {};
   const itemType = getStockItemType(item);
   const displayName = getStockItemDisplayName(item);
-	  const isRecipeBackedItem = ['sub_recipe', 'manufactured', 'recipe_source'].includes(itemType);
+	  // Non Stock ("recipe_source") items are simple purchased items with no bill-of-materials —
+	  // they are stocked/counted as-is, not assembled from other ingredients — so they must not be
+	  // treated as "recipe-backed" like Sub-Recipe/Manufactured items. Showing an ingredients screen
+	  // for them (and requiring one to save) was the source of the "Non Stock" recipe-assignment bug.
+	  const isRecipeBackedItem = ['sub_recipe', 'manufactured'].includes(itemType);
   const recipe = normalizeStockRecipe(item.recipe);
   const showRecipeScreen = Boolean(item.__recipeScreenOpen && isRecipeBackedItem);
   const barcodeInputValue = parseBarcodeValues(item.barcodes ?? item.barcode ?? item.Barcodes ?? item.Barcode).join(', ');

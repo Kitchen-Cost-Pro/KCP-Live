@@ -29,6 +29,12 @@ interface RecipeLineRow extends Row {
   unit?: string;
 }
 
+interface UomConfiguration {
+  customUom?: string;
+  custom_uom?: string;
+  ratio?: number | string;
+}
+
 interface DepletionLine {
   stockItem: StockItemRow;
   quantity: number;
@@ -66,6 +72,28 @@ function normalizeText(value: unknown) {
   return text(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
+// A recipe line's `unit` may be a custom UOM configured on the stock item (e.g. "box" where
+// 1 box = 12 base units), not the item's base unit. Deduction must convert the recorded line
+// quantity into the item's base unit before it is ever written to stock_balances/stock_movements,
+// or usage is silently under/over-deducted by whatever the ratio happens to be. This mirrors the
+// ratio lookup the frontend already applies for cost preview (getIngredientUomRatio in
+// Recipes.js) — that logic was never mirrored here, which is what let base-unit deductions go out
+// unconverted.
+function resolveUomRatio(stockItem: StockItemRow, lineUnit: string): number {
+  const baseUnit = text(stockItem.unit, 'ea').toLowerCase();
+  const requestedUnit = text(lineUnit).toLowerCase();
+  if (!requestedUnit || requestedUnit === baseUnit) return 1;
+
+  const rawJson = objectValue(stockItem.raw_json);
+  const configs = Array.isArray(rawJson.uomConfigurations) ? (rawJson.uomConfigurations as UomConfiguration[]) : [];
+  const match = configs.find((cfg) => {
+    const customUom = text(cfg.customUom || cfg.custom_uom).toLowerCase();
+    return customUom && customUom === requestedUnit;
+  });
+  const ratio = match ? numberValue(match.ratio, 0) : 0;
+  return ratio > 0 ? ratio : 1;
+}
+
 function stockItemType(item: StockItemRow) {
   const rawJson = objectValue(item.raw_json);
   const isSub = item.is_sub_recipe === 1 || item.is_sub_recipe === 'true' || item.is_sub_recipe === true ||
@@ -100,7 +128,10 @@ function expandRecipeLines(
     const stockItem = stockItemsById.get(stockItemId);
     if (!stockItem) continue;
 
-    const quantity = numberValue(line.quantity, 0) * multiplier;
+    // Convert the recipe line's recorded quantity (which may be in a custom UOM, e.g. "1 box")
+    // into the stock item's base unit (e.g. "12 ea") before it's used for depletion.
+    const uomRatio = resolveUomRatio(stockItem, text(line.unit));
+    const quantity = numberValue(line.quantity, 0) * uomRatio * multiplier;
     if (stockItemType(stockItem) === 'sub_recipe' && !seen.has(stockItemId)) {
       const nestedRecipe = recipeFor('stock_item', stockItemId, recipes);
       if (nestedRecipe) {

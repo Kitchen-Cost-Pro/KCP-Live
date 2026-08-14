@@ -497,8 +497,8 @@ function renderPurchaseOrderWorkflow(purchaseOrders, filters) {
   const selectedSupplier = suppliers.find((supplier) => String(supplier.id) === String(draft.supplierId));
 
   const modal = draft.inputMode === 'input'
-    ? renderQuantityInputModal({ draft, filters, sites, locations, actionStatus: purchaseOrders.actionStatus, error: purchaseOrders.actionError })
-    : renderSelectionBuilderModal({ draft, filters, stockMatches, sites, locations, selectedSupplier, error: purchaseOrders.actionError });
+    ? renderQuantityInputModal({ state, draft, filters, sites, locations, actionStatus: purchaseOrders.actionStatus, error: purchaseOrders.actionError })
+    : renderSelectionBuilderModal({ state, draft, filters, stockMatches, sites, locations, selectedSupplier, error: purchaseOrders.actionError });
 
   return `
     ${modal}
@@ -511,7 +511,7 @@ function renderPurchaseOrderWorkflow(purchaseOrders, filters) {
   `;
 }
 
-function renderSelectionBuilderModal({ draft, filters, stockMatches, sites, locations, selectedSupplier, error }) {
+function renderSelectionBuilderModal({ state, draft, filters, stockMatches, sites, locations, selectedSupplier, error }) {
   const pendingItems = draft.items || [];
   const hasSupplier = Boolean(draft.supplierId);
   return `
@@ -654,9 +654,9 @@ function renderStockChoice(item, pendingItems = [], disabled = false) {
   `;
 }
 
-function renderQuantityInputModal({ draft, filters, sites, locations, actionStatus, error }) {
+function renderQuantityInputModal({ state, draft, filters, sites, locations, actionStatus, error }) {
   const subtotal = totalOrderValue(draft);
-  const vat = subtotal * 0.15;
+  const vat = subtotal * getVatRate(state);
   const total = subtotal + vat;
   return `
     <div class="purchaseOrdersModule__modalBackdrop">
@@ -777,7 +777,7 @@ function renderOrderModal(purchaseOrders, filters) {
 	    .filter((item) => !lineQuery || String(item.name || '').toLowerCase().includes(lineQuery) || String(item.category || '').toLowerCase().includes(lineQuery) || stockItemHasBarcode(item, lineQuery))
 	    .slice(0, 10);
   const subtotal = totalOrderValue(draft);
-  const vat = subtotal * 0.15;
+  const vat = subtotal * getVatRate(state);
   const total = subtotal + vat;
 
   return `
@@ -1308,6 +1308,16 @@ function filterOrders(items, filters) {
 
 function totalOrderValue(order) {
   return (order.items || []).reduce((sum, line) => sum + Number(line.qty || 0) * getPositivePackSize(line.packSize) * Number(line.unitCost || 0), 0);
+}
+
+// This preview previously used a hardcoded 15% with no settings lookup at all, so it always
+// showed the wrong VAT for any workspace on a different rate, and would keep showing VAT even
+// for a business that is not VAT registered. Reads the same live settings location used
+// elsewhere in the app and returns 0 when the workspace is not VAT registered.
+function getVatRate(state) {
+  const settings = state?.settings?.draft || state?.settings?.values || {};
+  if (settings.vatRegistered === false) return 0;
+  return (Number(settings.vatRate ?? settings.vatPercentage ?? 15) || 15) / 100;
 }
 
 function getPositivePackSize(value) {

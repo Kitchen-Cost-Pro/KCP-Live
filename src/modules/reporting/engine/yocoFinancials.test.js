@@ -176,18 +176,7 @@ test('known Checkout scalar fields are converted from cents without magnitude gu
   assert.equal(result.discountAmount, 12);
 });
 
-test('zero or missing workspace VAT rate falls back to 15 percent for taxable Yoco sales', () => {
-  const zeroConfigured = deriveYocoFinancialAmounts({
-    persistedTotal: 560,
-    configuredVatRate: 0,
-    raw: {}
-  });
-  assert.equal(zeroConfigured.vatRate, 15);
-  assert.equal(zeroConfigured.vatAmount, 73.04);
-  assert.equal(zeroConfigured.netAmount, 486.96);
-  assert.equal(zeroConfigured.diagnostics.vatRateSource, 'default');
-  assert.ok(zeroConfigured.issues.some((issue) => issue.code === 'yoco-vat-rate-fallback-applied'));
-
+test('missing workspace VAT rate falls back to 15 percent for taxable Yoco sales', () => {
   const missingConfigured = deriveYocoFinancialAmounts({
     persistedTotal: 140,
     configuredVatRate: null,
@@ -198,10 +187,26 @@ test('zero or missing workspace VAT rate falls back to 15 percent for taxable Yo
   assert.equal(missingConfigured.netAmount, 121.74);
 });
 
+test('an explicit zero configured VAT rate (business not VAT registered) is authoritative and never falls back', () => {
+  // A workspace that is explicitly not VAT registered configures a rate of exactly 0. This must
+  // never be treated the same as "no rate configured" — it must not fall back to the 15% default,
+  // and it must not be overridden even when Yoco's own payload reports a positive tax amount,
+  // since a non-registered business does not charge or reclaim VAT at all.
+  const zeroConfigured = deriveYocoFinancialAmounts({
+    persistedTotal: 560,
+    configuredVatRate: 0,
+    raw: {}
+  });
+  assert.equal(zeroConfigured.vatRate, 0);
+  assert.equal(zeroConfigured.vatAmount, 0);
+  assert.equal(zeroConfigured.netAmount, 560);
+  assert.equal(zeroConfigured.diagnostics.vatRateSource, 'workspace-not-registered');
+});
+
 test('explicit Yoco zero-rated markers still override the default VAT fallback', () => {
   const result = deriveYocoFinancialAmounts({
     persistedTotal: 560,
-    configuredVatRate: 0,
+    configuredVatRate: 15,
     raw: { tax_status: 'zero-rated', amounts: { tax_amount: { amount: 0, currency: 'ZAR' } } }
   });
   assert.equal(result.vatRate, 15);

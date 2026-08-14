@@ -32,8 +32,11 @@ new_sqlite_classes = ["YocoV2RateGateDO"]
 # (every 15 minutes; per-workspace frequency/send-window/dedupe logic lives in
 # src/legacy/low-stock-email.ts, so this just needs to fire often enough to hit each
 # workspace's configured send window).
+# --- Menu/catalogue sync cron: every 45 minutes, independent of any browser tab being open -------
+# (previously this only ran client-side on a 15-minute timer while a tab stayed open, visible, and
+# focused, so it silently stopped syncing whenever staff closed or backgrounded the app).
 [triggers]
-crons = ["*/15 * * * *"]
+crons = ["*/15 * * * *", "*/45 * * * *"]
 
 # --- Central plane: shared D1 for identity / registry / members / cross-tenant coordination ------
 [[d1_databases]]

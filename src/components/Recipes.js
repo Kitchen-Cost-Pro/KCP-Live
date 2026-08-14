@@ -2169,10 +2169,25 @@ function renderRecipeLine(line, index, ingredients, options = {}) {
   const ingredient = ingredients.find((item) => String(item.id) === String(line.ingId));
   const readOnly = options.readOnly === true;
   if (!ingredient) {
+    // The ingredient is no longer in the active stock list. Rather than the item never having
+    // existed, this is almost always because the stock item was deleted after being used here —
+    // the backend still tells us its last-known name/unit (and whether it's deactivated vs. truly
+    // gone) via `line.name`/`line.active`, so surface that instead of a bare internal id.
+    // Keep the same column count/structure as a normal row (name+detail, qty, uom, cost, remove)
+    // so this doesn't blow up the recipesModule__line grid layout.
+    const lastKnownName = String(line.name || '').trim();
+    const reason = lastKnownName
+      ? (line.active === false ? `${lastKnownName} was deleted` : `${lastKnownName} is no longer available`)
+      : 'This ingredient no longer exists';
     return `
-      <article class="recipesModule__line">
-        <strong>Missing ingredient</strong>
-        <span>${escapeHtml(line.ingId)}</span>
+      <article class="recipesModule__line recipesModule__line--missing">
+        <div>
+          <strong>${escapeHtml(lastKnownName || 'Missing ingredient')}</strong>
+          <span>${escapeHtml(reason)}</span>
+        </div>
+        <span class="recipesModule__lineUomStatic">&mdash;</span>
+        <span class="recipesModule__lineUomStatic">${escapeHtml(String(line.unit || '').toUpperCase())}</span>
+        <strong>&mdash;</strong>
         ${readOnly ? '<span></span>' : `<button type="button" data-recipe-line-remove="${index}" aria-label="Remove missing ingredient">${icon('trash')}</button>`}
       </article>
     `;

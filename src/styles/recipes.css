@@ -1130,6 +1130,15 @@
   box-shadow: none;
 }
 
+.recipesModule__line--missing {
+  background: var(--surface-warning-subtle, rgba(217, 119, 6, 0.08));
+  border: 1px dashed var(--border-warning, rgba(217, 119, 6, 0.35));
+}
+
+.recipesModule__line--missing strong {
+  color: var(--text-warning, #b45309);
+}
+
 /* Custom UOM dropdown — shared between recipe lines and picker */
 .uomDropdown {
   position: relative;

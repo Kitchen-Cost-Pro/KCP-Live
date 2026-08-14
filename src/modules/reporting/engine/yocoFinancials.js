@@ -249,7 +249,7 @@ export function deriveYocoFinancialAmounts({
     issues.push({ code: 'yoco-gross-net-vat-mismatch', level: 'critical', message: isRefund ? 'Yoco refund does not reconcile to the reversed net amount plus VAT.' : 'Yoco gross amount does not reconcile to net amount plus VAT.' });
   }
   if (vatRateResolution.fallbackApplied && (grossAmount > 0 || refundAmount > 0) && !explicitZeroRated) {
-    issues.push({ code: 'yoco-vat-rate-fallback-applied', level: 'warning', message: 'The workspace VAT rate was missing or zero; reporting used the default South African VAT rate of 15%.' });
+    issues.push({ code: 'yoco-vat-rate-fallback-applied', level: 'warning', message: 'The workspace VAT rate was not configured; reporting used the default South African VAT rate of 15%.' });
   }
   if (!isRefund && taxResolution.path && !explicitTaxPlausible && grossAmount > 0 && normalizedVatRate > 0) {
     issues.push({ code: 'yoco-tax-fallback-applied', level: 'info', message: 'The Yoco tax value was missing, zero without a zero-rated marker, or invalid; VAT was calculated from the VAT-inclusive bill value.' });
@@ -300,6 +300,17 @@ export function deriveYocoFinancialAmounts({
 
 export function resolveYocoVatRate(raw = {}, configuredVatRate = DEFAULT_YOCO_VAT_RATE) {
   const configuredValue = safeNumber(configuredVatRate, NaN);
+  // An explicit, deliberate 0 (a business that is not VAT registered) is authoritative and must
+  // never be overridden by Yoco's own reported tax data or the hardcoded default rate — otherwise
+  // a non-registered business would still show VAT on reports whenever Yoco's payload happened to
+  // carry a tax figure. Only a missing/NaN value falls through to the lookup chain below.
+  // IMPORTANT: check the raw parameter for strict equality to 0 before any coercion — `Number(null)`
+  // and `Number('')` both equal 0 in JS, so coercing first would misclassify a genuinely missing
+  // rate (null/undefined/'') as "explicitly zero" and wrongly suppress the 15% fallback below.
+  const isExplicitZero = configuredVatRate === 0 || configuredVatRate === '0';
+  if (isExplicitZero) {
+    return { value: 0, source: 'workspace-not-registered', configuredValue: 0, fallbackApplied: false };
+  }
   if (normalizeVatRate(configuredValue) > 0) {
     return { value: configuredValue, source: 'workspace', configuredValue, fallbackApplied: false };
   }

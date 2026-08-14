@@ -1172,7 +1172,13 @@ export default {
         : /token|sign in|session|expired|missing bearer|authentication/i.test(raw)
           ? 401
           : 500;
-      const message = /token|session|expired|access|permission|denied|invalid|required|not found|sign in|password|email|already exists|duplicate|unique/i.test(raw)
+      // Deliberate validation errors thrown by route handlers (e.g. "X cannot be assigned as a
+      // recipe ingredient.", "A stock item named X already exists.") are safe and useful to show
+      // verbatim. The previous keyword list was too narrow and silently replaced clear, specific
+      // validation messages with a useless generic one, hiding the real (and actionable) reason.
+      // The denylist guards against ever surfacing a raw runtime/DB exception incidentally.
+      const looksLikeInternalException = /sqlite|d1_error|TypeError:|ReferenceError:|SyntaxError:|RangeError:|at Object\.|at async|stack trace|\bundefined is not\b/i.test(raw);
+      const message = !looksLikeInternalException && /token|session|expired|access|permission|denied|invalid|required|not found|sign in|password|email|already exists|duplicate|unique|cannot be|must be|not allowed|not permitted|is not configured|could not|non-stock item|no longer/i.test(raw)
         ? raw
         : 'Something went wrong. Please try again.';
       return json(request, env, { ok: false, error: message }, status);
@@ -1193,6 +1199,7 @@ export default {
     ).all<{ id: string }>();
     const ids = (list.results || []).map((r) => String(r.id)).filter(Boolean);
     console.log(`[low-stock-cron] evaluating ${ids.length} active workspaces`);
+    const isCatalogueSyncTick = _event.cron === '*/45 * * * *';
     await Promise.all(
       ids.flatMap((id) => [
         callWorkspaceDO(env, id, 'admin-action/low-stock-due', { uid: 'system', email: '' }, 'POST', {})
@@ -1200,7 +1207,13 @@ export default {
         callWorkspaceDO(env, id, 'admin-action/report-schedules-due', { uid: 'system', email: '' }, 'POST', {})
           .catch((cause) => { console.error(`[report-schedule-cron] ws=${id} failed: ${cause}`); return null; }),
         callWorkspaceDO(env, id, 'yoco-v2/reconciliation/scheduled', { uid: 'system', email: '', systemRole: 'queue' }, 'POST', {})
-          .catch((cause) => { console.error(`[yoco-v2-reconciliation-cron] ws=${id} failed: ${cause}`); return null; })
+          .catch((cause) => { console.error(`[yoco-v2-reconciliation-cron] ws=${id} failed: ${cause}`); return null; }),
+        // Menu/catalogue sync only needs to run on the 45-minute schedule, not every 15 minutes
+        // alongside the other jobs above — this guard keeps it from firing 3x as often as intended.
+        isCatalogueSyncTick
+          ? callWorkspaceDO(env, id, 'admin-action/catalogue-sync-due', { uid: 'system', email: '' }, 'POST', {})
+              .catch((cause) => { console.error(`[catalogue-sync-cron] ws=${id} failed: ${cause}`); return null; })
+          : Promise.resolve(null)
       ])
     );
   }

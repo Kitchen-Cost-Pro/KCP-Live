@@ -238,6 +238,71 @@
   letter-spacing: 0;
 }
 
+.settingsVatRegisteredField {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.settingsToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  width: fit-content;
+}
+
+.settingsToggle input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+}
+
+.settingsToggle__track {
+  position: relative;
+  width: 40px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--surface-tertiary, #d1d5db);
+  transition: background 0.15s ease;
+  flex-shrink: 0;
+}
+
+.settingsToggle__track::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: transform 0.15s ease;
+}
+
+.settingsToggle input[type="checkbox"]:checked + .settingsToggle__track {
+  background: var(--accent, #16a34a);
+}
+
+.settingsToggle input[type="checkbox"]:checked + .settingsToggle__track::after {
+  transform: translateX(18px);
+}
+
+.settingsToggle input[type="checkbox"]:focus-visible + .settingsToggle__track {
+  outline: 2px solid var(--accent, #16a34a);
+  outline-offset: 2px;
+}
+
+.settingsToggle__label {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
 .settingsGoLiveChecklist {
   display: flex;
   flex-direction: column;

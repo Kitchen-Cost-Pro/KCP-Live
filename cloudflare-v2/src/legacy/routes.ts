@@ -47,6 +47,7 @@ import { lowStockLocationRelevantSql } from "./low-stock-policy";
 import { sendEmail } from "./email";
 import {
   calculateIncomingLocationCost,
+  getWorkspaceEffectiveVatRate,
   getWorkspaceInventoryCostingMethod,
   resolveLocationUnitCost,
   upsertLocationCostStatement,
@@ -670,7 +671,7 @@ async function saveStockItem(
   const allowStockBalanceUpdate = options.allowStockBalanceUpdate !== false;
 
   const existing = await env.DB.prepare(
-    `SELECT id
+    `SELECT id, name
        FROM stock_items
       WHERE workspace_id = ?1
         AND active = 1
@@ -678,27 +679,39 @@ async function saveStockItem(
       LIMIT 1`,
   )
     .bind(workspaceId, item.id)
-    .first<{ id: string }>();
+    .first<{ id: string; name: string }>();
 
-  const duplicateRows = await env.DB.prepare(
-    `SELECT id, name
-       FROM stock_items
-      WHERE workspace_id = ?1
-        AND active = 1`,
-  )
-    .bind(workspaceId)
-    .all<{ id: string; name: string }>();
-  const nextNameKey = normalizeStockItemDuplicateName(item.name);
-  const duplicateName = (duplicateRows.results || []).find(
-    (row) =>
-      normalizeStockItemDuplicateName(row.name) === nextNameKey &&
-      text(row.id) !== item.id,
-  );
+  // Only enforce name-uniqueness when the name is actually changing. Some workspaces
+  // already carry pre-existing stock items that share a name but differ by unit (e.g.
+  // imported from a POS catalogue before this rule existed). Re-running a full-workspace
+  // uniqueness check on every save — including saves that only change UOM, cost, category,
+  // etc. — permanently blocks editing those items even though the edit has nothing to do
+  // with the name collision. Gating on an actual name change lets existing records keep
+  // being edited while still preventing a brand-new collision from being introduced.
+  const nameIsChanging =
+    !existing || normalizeStockItemDuplicateName(existing.name) !== normalizeStockItemDuplicateName(item.name);
 
-  if (duplicateName?.id) {
-    throw new Error(
-      `A stock item named "${item.name}" already exists. Stock item names must be unique.`,
+  if (nameIsChanging) {
+    const duplicateRows = await env.DB.prepare(
+      `SELECT id, name
+         FROM stock_items
+        WHERE workspace_id = ?1
+          AND active = 1`,
+    )
+      .bind(workspaceId)
+      .all<{ id: string; name: string }>();
+    const nextNameKey = normalizeStockItemDuplicateName(item.name);
+    const duplicateName = (duplicateRows.results || []).find(
+      (row) =>
+        normalizeStockItemDuplicateName(row.name) === nextNameKey &&
+        text(row.id) !== item.id,
     );
+
+    if (duplicateName?.id) {
+      throw new Error(
+        `A stock item named "${item.name}" already exists. Stock item names must be unique.`,
+      );
+    }
   }
 
   const stockItemId = existing?.id || item.id;
@@ -1346,16 +1359,11 @@ async function saveStockItemRecipe(
   raw: Record<string, unknown>,
   item: ReturnType<typeof normalizeStockItemPayload>,
 ) {
-  if (
-    ![
-      "manufactured",
-      "sub_recipe",
-      "recipe_source",
-      "non_stock",
-      "virtual",
-    ].includes(item.itemType)
-  )
-    return;
+  // Non Stock ("recipe_source"/"non_stock") and "virtual" items are simple purchased items
+  // with no bill-of-materials — they are not assembled from other ingredients — so they must
+  // never get a persisted recipe/BOM here. Only Sub-Recipe and Manufactured items are actually
+  // built from ingredients.
+  if (!["manufactured", "sub_recipe"].includes(item.itemType)) return;
 
   const recipeLines = normalizeStockRecipeLines(arrayValue(raw.recipe));
   await assertRecipeIngredientIdsAllowed(env, workspaceId, recipeLines);
@@ -2680,13 +2688,20 @@ export async function patchAdminWorkspaceSettingsDO(
   const merged = { ...existing, ...nextPayload } as Record<string, unknown>;
   for (const key of deleteKeys) delete merged[key];
   await env.DB.prepare(
-    `INSERT INTO workspace_settings (workspace_id, raw_json, updated_at)
-     VALUES (?1, ?2, datetime('now'))
+    `INSERT INTO workspace_settings (workspace_id, raw_json, vat_rate, vat_registered, updated_at)
+     VALUES (?1, ?2, ?3, ?4, datetime('now'))
      ON CONFLICT(workspace_id) DO UPDATE SET
        raw_json = excluded.raw_json,
+       vat_rate = excluded.vat_rate,
+       vat_registered = excluded.vat_registered,
        updated_at = excluded.updated_at`,
   )
-    .bind(workspaceId, JSON.stringify(merged))
+    .bind(
+      workspaceId,
+      JSON.stringify(merged),
+      numberValue(merged.vatRate, 15),
+      merged.vatRegistered === false ? 0 : 1,
+    )
     .run();
   return json(request, env, { ok: true, settings: merged });
 }
@@ -3999,19 +4014,53 @@ export async function patchWorkspaceSettingsRoute(
     .bind(workspaceId)
     .first<{ raw_json: string }>();
   const current = objectValue(jsonParse(currentRow?.raw_json));
-  const next = {
+  const next: Record<string, unknown> = {
     ...current,
     ...incoming,
     updatedAt: nowIso(),
   };
-  await env.DB.batch([
+
+  // Default to VAT-registered so existing workspaces (which have always had VAT calculated
+  // in reports/costing up to now) see no behavior change until they explicitly flip this off.
+  const wasVatRegistered = current.vatRegistered !== false;
+  const isVatRegistered = next.vatRegistered !== false;
+  let vatRegistrationRecompute: { itemsRescaled: number; locationPricesRescaled: number } | null = null;
+
+  // Only recompute when the caller actually sent `vatRegistered` and it's genuinely changing —
+  // never re-trigger this on unrelated settings saves that happen to echo the current value back.
+  if (
+    Object.prototype.hasOwnProperty.call(incoming, "vatRegistered") &&
+    wasVatRegistered !== isVatRegistered
+  ) {
+    const vatRate = numberValue(next.vatRate, 15) / 100;
+    // Registered -> Not registered: stored costs were ex-VAT and must become VAT-inclusive
+    // (a non-registered business cannot reclaim input VAT, so the full amount paid is a real cost).
+    // Not registered -> Registered: stored costs were VAT-inclusive and must become ex-VAT
+    // (a registered business reclaims input VAT, so it is not part of the item's true cost).
+    const factor = isVatRegistered ? 1 / (1 + vatRate) : 1 + vatRate;
+    vatRegistrationRecompute = await rescaleCostsForVatRegistrationChange(
+      env,
+      workspaceId,
+      factor,
+    );
+  }
+
+  const statements: DbStatementLike[] = [
     env.DB.prepare(
-      `INSERT INTO workspace_settings (workspace_id, raw_json, updated_at)
-       VALUES (?1, ?2, ?3)
+      `INSERT INTO workspace_settings (workspace_id, raw_json, vat_rate, vat_registered, updated_at)
+       VALUES (?1, ?2, ?3, ?4, ?5)
        ON CONFLICT(workspace_id) DO UPDATE SET
         raw_json = excluded.raw_json,
+        vat_rate = excluded.vat_rate,
+        vat_registered = excluded.vat_registered,
         updated_at = excluded.updated_at`,
-    ).bind(workspaceId, JSON.stringify(next), next.updatedAt),
+    ).bind(
+      workspaceId,
+      JSON.stringify(next),
+      numberValue(next.vatRate, 15),
+      isVatRegistered ? 1 : 0,
+      next.updatedAt,
+    ),
     env.DB.prepare(
       `INSERT INTO audit_events (id, workspace_id, actor_uid, event_type, entity_type, entity_id, after_json, created_at)
        VALUES (?1, ?2, ?3, 'workspace_settings_saved', 'workspace_settings', ?2, ?4, ?5)`,
@@ -4022,8 +4071,89 @@ export async function patchWorkspaceSettingsRoute(
       JSON.stringify(next),
       next.updatedAt,
     ),
+  ];
+  if (vatRegistrationRecompute) {
+    statements.push(
+      env.DB.prepare(
+        `INSERT INTO audit_events (id, workspace_id, actor_uid, event_type, entity_type, entity_id, before_json, after_json, created_at)
+         VALUES (?1, ?2, ?3, 'vat_registration_cost_recompute', 'workspace_settings', ?2, ?4, ?5, ?6)`,
+      ).bind(
+        id("audit"),
+        workspaceId,
+        auth.uid,
+        JSON.stringify({ vatRegistered: wasVatRegistered }),
+        JSON.stringify({ vatRegistered: isVatRegistered, ...vatRegistrationRecompute }),
+        next.updatedAt,
+      ),
+    );
+  }
+  await env.DB.batch(statements);
+  return json(request, env, {
+    ok: true,
+    settings: next,
+    vatRegistrationRecompute,
+  });
+}
+
+/**
+ * Rescale every VAT-enabled stock item's cost (master unit_cost and any per-location override)
+ * by `factor` when the workspace's VAT-registration status changes. Only VAT-enabled items are
+ * touched — VAT-exempt items' costs are unaffected by the business's registration status. This
+ * is a one-time, best-effort reinterpretation of currently-stored costs under the new convention;
+ * it cannot retroactively re-derive costs from original GRV line data, so it assumes the entire
+ * stored cost for a VAT-enabled item was VAT-bearing at the workspace's current VAT rate.
+ */
+async function rescaleCostsForVatRegistrationChange(
+  env: Env,
+  workspaceId: string,
+  factor: number,
+): Promise<{ itemsRescaled: number; locationPricesRescaled: number }> {
+  const now = nowIso();
+  const [itemCount, locationPriceCount] = await Promise.all([
+    env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM stock_items WHERE workspace_id = ?1 AND active = 1 AND vat_enabled = 1`,
+    )
+      .bind(workspaceId)
+      .first<{ n: number }>(),
+    env.DB.prepare(
+      `SELECT COUNT(*) AS n
+         FROM stock_item_location_prices silp
+         JOIN stock_items si
+           ON si.id = silp.stock_item_id
+          AND si.workspace_id = silp.workspace_id
+        WHERE silp.workspace_id = ?1
+          AND si.active = 1
+          AND si.vat_enabled = 1`,
+    )
+      .bind(workspaceId)
+      .first<{ n: number }>(),
   ]);
-  return json(request, env, { ok: true, settings: next });
+
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE stock_items
+          SET unit_cost = ROUND(unit_cost * ?2, 4),
+              updated_at = ?3
+        WHERE workspace_id = ?1
+          AND active = 1
+          AND vat_enabled = 1`,
+    ).bind(workspaceId, factor, now),
+    env.DB.prepare(
+      `UPDATE stock_item_location_prices
+          SET price = ROUND(price * ?2, 4),
+              updated_at = ?3
+        WHERE workspace_id = ?1
+          AND stock_item_id IN (
+            SELECT id FROM stock_items
+             WHERE workspace_id = ?1 AND active = 1 AND vat_enabled = 1
+          )`,
+    ).bind(workspaceId, factor, now),
+  ]);
+
+  return {
+    itemsRescaled: Number(itemCount?.n || 0),
+    locationPricesRescaled: Number(locationPriceCount?.n || 0),
+  };
 }
 
 function normalizeMemberRow(row: Record<string, unknown>) {
@@ -4998,7 +5128,7 @@ export async function getProducts(
       .bind(workspaceId)
       .all(),
     env.DB.prepare(
-      `SELECT id, name, category, item_type, is_stocked, unit, unit_cost, raw_json
+      `SELECT id, name, category, item_type, is_stocked, unit, unit_cost, active, raw_json
 	         FROM stock_items
 	        WHERE workspace_id = ?1`,
     )
@@ -5122,13 +5252,22 @@ export async function getProducts(
     );
     const recipe = recipeByProduct.get(productId);
     const recipeLines = recipe
-      ? (linesByRecipe.get(text(recipe.id)) || []).map((line) => ({
-          ingId: text(line.stock_item_id),
-          stockItemId: text(line.stock_item_id),
-          qty: numberValue(line.quantity, 0),
-          quantity: numberValue(line.quantity, 0),
-          unit: text(line.unit, "ea") || "ea",
-        }))
+      ? (linesByRecipe.get(text(recipe.id)) || []).map((line) => {
+          const stockItemId = text(line.stock_item_id);
+          const stockItem = stockItemsById.get(stockItemId) || null;
+          // Include name/active even when the stock item has been deleted (soft-deleted rows
+          // stay in stockItemsById since that query is not filtered to active=1) so the UI can
+          // show "<Name> (deleted)" instead of a bare id it has to guess about.
+          return {
+            ingId: stockItemId,
+            stockItemId,
+            qty: numberValue(line.quantity, 0),
+            quantity: numberValue(line.quantity, 0),
+            unit: text(line.unit, "ea") || "ea",
+            name: text(stockItem?.name),
+            active: stockItem ? Number(stockItem.active ?? 1) !== 0 : false,
+          };
+        })
       : [];
     const recipeSourceStockItemId = text(
       row.recipe_source_stock_item_id ||
@@ -5142,19 +5281,25 @@ export async function getProducts(
       ? recipeByStockItem.get(recipeSourceStockItemId) || null
       : null;
     const recipeSourceRecipeLines = recipeSourceRecipe
-      ? (linesByRecipe.get(text(recipeSourceRecipe.id)) || []).map((line) => ({
-          ingId: text(line.stock_item_id),
-          stockItemId: text(line.stock_item_id),
-          qty: numberValue(line.quantity, 0),
-          quantity: numberValue(line.quantity, 0),
-          unit:
-            text(
-              line.unit ||
-                recipeSourceRecipe.yield_unit ||
-                recipeSourceStockItem?.unit,
-              "ea",
-            ) || "ea",
-        }))
+      ? (linesByRecipe.get(text(recipeSourceRecipe.id)) || []).map((line) => {
+          const stockItemId = text(line.stock_item_id);
+          const stockItem = stockItemsById.get(stockItemId) || null;
+          return {
+            ingId: stockItemId,
+            stockItemId,
+            qty: numberValue(line.quantity, 0),
+            quantity: numberValue(line.quantity, 0),
+            unit:
+              text(
+                line.unit ||
+                  recipeSourceRecipe.yield_unit ||
+                  recipeSourceStockItem?.unit,
+                "ea",
+              ) || "ea",
+            name: text(stockItem?.name),
+            active: stockItem ? Number(stockItem.active ?? 1) !== 0 : false,
+          };
+        })
       : [];
     const effectiveRecipeLines = recipeLines.length
       ? recipeLines
@@ -7310,7 +7455,7 @@ export async function postStockUomAction(
   return json(request, env, { ok: true });
 }
 
-function normalizePurchaseOrderPayload(raw: Record<string, unknown>) {
+function normalizePurchaseOrderPayload(raw: Record<string, unknown>, vatRate = 0.15) {
   const order = objectValue(raw.order || raw);
   const orderId = text(order.id) || id("po");
   const date =
@@ -7394,7 +7539,7 @@ function normalizePurchaseOrderPayload(raw: Record<string, unknown>) {
     (sum, line) => sum + numberValue(line.lineTotalEx, 0),
     0,
   );
-  const totalVat = numberValue(order.totalVat, totalEx * 0.15);
+  const totalVat = numberValue(order.totalVat, totalEx * vatRate);
   const totalInc = numberValue(order.totalInc, totalEx + totalVat);
   const status = text(order.status, "draft")
     .toLowerCase()
@@ -7559,8 +7704,10 @@ export async function postPurchaseOrder(
     workspaceId,
     "nav-purchase-orders",
   );
+  const workspaceVatRate = await getWorkspaceEffectiveVatRate(env, workspaceId);
   const payload = normalizePurchaseOrderPayload(
     await readJson<Record<string, unknown>>(request),
+    workspaceVatRate,
   );
   if (!payload.supplierId)
     return error(
@@ -7685,7 +7832,7 @@ export async function postPurchaseOrder(
     const qty = numberValue(line.qty ?? line.quantity, 0);
     const unitPrice = numberValue(line.unitCost, 0);
     const totalEx = qty * numberValue(line.packSize, 1) * unitPrice;
-    const totalVat = totalEx * 0.15;
+    const totalVat = totalEx * workspaceVatRate;
     const lineKey =
       text(line.id || line.stockItemId || `line_${index}`)
         .replace(/[^a-zA-Z0-9_-]+/g, "_")
@@ -7829,7 +7976,7 @@ export async function postPurchaseOrderBulkDelete(
   return json(request, env, { ok: true, deleted: ids.length });
 }
 
-function normalizeGoodsReceiptPayload(raw: Record<string, unknown>) {
+function normalizeGoodsReceiptPayload(raw: Record<string, unknown>, vatRate = 0.15) {
   const receipt = objectValue(raw.receipt || raw);
   const receiptId = text(receipt.id) || id("grv");
   const date =
@@ -7906,7 +8053,7 @@ function normalizeGoodsReceiptPayload(raw: Record<string, unknown>) {
     (sum, line) => sum + numberValue(line.lineTotalEx, 0),
     0,
   );
-  const totalVat = numberValue(receipt.totalVat, totalEx * 0.15);
+  const totalVat = numberValue(receipt.totalVat, totalEx * vatRate);
   const totalInc = numberValue(receipt.totalInc, totalEx + totalVat);
   const timestamp = date.length <= 10 ? `${date}T00:00:00.000Z` : date;
   const normalized = {
@@ -8219,8 +8366,10 @@ export async function postGoodsReceipt(
 ) {
   await scoped(request, env, auth, workspaceId);
   await assertWorkspacePermission(env, auth, workspaceId, "nav-grv");
+  const workspaceVatRate = await getWorkspaceEffectiveVatRate(env, workspaceId);
   const payload = normalizeGoodsReceiptPayload(
     await readJson<Record<string, unknown>>(request),
+    workspaceVatRate,
   );
   if (!payload.normalized.items.length)
     return error(request, env, 400, "Add at least one received stock item.");
@@ -8387,7 +8536,7 @@ export async function postGoodsReceipt(
       incomingUnitCost: unitCost,
     });
     const totalEx = numberValue(line.lineTotalEx, quantity * unitCost);
-    const totalVat = totalEx * 0.15;
+    const totalVat = totalEx * workspaceVatRate;
     const metadata = JSON.stringify({
       before,
       after: before + quantity,
@@ -15569,6 +15718,41 @@ export async function postYocoSyncCatalogue(
     resetWebhook: payload.resetWebhook === true,
   });
   return json(request, env, { ok: true, ...result });
+}
+
+// Internal scheduler-only route (called from the Worker's `scheduled()` cron fan-out, never from
+// the browser). Menu/catalogue sync previously ran ONLY client-side, tied to a browser tab being
+// open, visible, and focused — it stopped the moment staff closed the tab, switched apps, or
+// minimized the window, and even while running it fired every 15 minutes rather than the intended
+// 45. This gives every connected workspace a guaranteed background sync regardless of whether
+// anyone has the app open, matching the cadence configured in wrangler.toml.
+export async function postRunDueCatalogueSync(
+  request: Request,
+  env: Env,
+  auth: AuthContext,
+  workspaceId: string,
+) {
+  if (auth.uid !== "system")
+    return error(request, env, 403, "Internal scheduler route.");
+  const connection = await env.DB.prepare(
+    `SELECT connection_active FROM yoco_connections WHERE workspace_id = ?1 LIMIT 1`,
+  )
+    .bind(workspaceId)
+    .first<{ connection_active: number }>();
+  if (!connection || Number(connection.connection_active) !== 1) {
+    return json(request, env, { ok: true, skipped: "not_connected" });
+  }
+  try {
+    const result = await syncYocoCatalogue(env, workspaceId, {
+      resetWebhook: false,
+    });
+    return json(request, env, { ok: true, ...result });
+  } catch (cause) {
+    return json(request, env, {
+      ok: false,
+      error: cause instanceof Error ? cause.message : "Catalogue sync failed.",
+    });
+  }
 }
 
 // Sale, refund, retry, and webhook business processing moved permanently to yoco-engine-v2.

@@ -50,6 +50,24 @@ export async function getWorkspaceInventoryCostingMethod(env: Env, workspaceId: 
   );
 }
 
+/**
+ * Effective VAT rate (as a fraction, e.g. 0.15) to use for GRV/PO ex-VAT extraction and other
+ * costing math. Returns exactly 0 when the workspace is not VAT registered, regardless of the
+ * configured percentage — a non-registered business never adds/reclaims VAT on its costs.
+ */
+export async function getWorkspaceEffectiveVatRate(env: Env, workspaceId: string): Promise<number> {
+  const row = await env.DB.prepare(
+    `SELECT vat_rate, vat_registered
+       FROM workspace_settings
+      WHERE workspace_id = ?1
+      LIMIT 1`
+  ).bind(workspaceId).first<{ vat_rate?: number; vat_registered?: number }>();
+  if (!row) return 0.15;
+  if (Number(row.vat_registered ?? 1) === 0) return 0;
+  const percent = numberValue(row.vat_rate, 15);
+  return (percent > 0 ? percent : 15) / 100;
+}
+
 /** Master-item fallback used only when no location-specific price row exists. */
 export function fallbackStockItemUnitCost(item: Row | null | undefined, fallback = 0) {
   if (!item) return numberValue(fallback, 0);
