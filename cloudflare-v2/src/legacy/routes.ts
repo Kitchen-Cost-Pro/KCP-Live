@@ -238,6 +238,13 @@ function normalizeItemType(value: unknown, fallback = "raw") {
   );
 }
 
+const AUTO_GENERATED_STOCK_CATEGORY_LABELS = new Set([
+  "general - sub recipe",
+  "general - manufactured",
+  "general - non stock",
+  "general - raw materials",
+]);
+
 function isNonStockItemType(itemType: string) {
   return ["non_stock", "recipe_source", "virtual"].includes(
     normalizeItemType(itemType),
@@ -264,22 +271,25 @@ function deriveStockItemType(merged: Record<string, unknown>): string {
           : ""),
     "",
   );
-  const category = text(merged.category).toLowerCase();
-  if (
-    ["sub_recipe", "subrecipe"].includes(explicit) ||
-    category.includes("sub recipe") ||
-    category.includes("sub-recipe")
-  )
-    return "sub_recipe";
-  if (
-    ["manufactured", "prep", "prepared", "manufactured_item"].includes(
-      explicit,
-    ) ||
-    category.includes("manufactured")
-  )
+  // An explicit itemType is authoritative and must never be overridden by the item's category
+  // text. Previously, category-text matching ("General - Non Stock", "General - Sub Recipe", etc.)
+  // was checked with EQUAL priority to an explicit itemType, via an OR condition — so switching an
+  // item's type back (e.g. Non Stock -> Raw) silently failed to persist whenever the category
+  // string hadn't also been reset, because the stale category text kept re-deriving the OLD type
+  // on every subsequent save. Category-text inference now only runs when there is no explicit
+  // type at all (legacy data saved before the itemType field existed).
+  if (["sub_recipe", "subrecipe"].includes(explicit)) return "sub_recipe";
+  if (["manufactured", "prep", "prepared", "manufactured_item"].includes(explicit))
     return "manufactured";
+  if (["recipe_source", "non_stock", "virtual"].includes(explicit))
+    return "recipe_source";
+  if (explicit) return "raw";
+
+  const category = text(merged.category).toLowerCase();
+  if (category.includes("sub recipe") || category.includes("sub-recipe"))
+    return "sub_recipe";
+  if (category.includes("manufactured")) return "manufactured";
   if (
-    ["recipe_source", "non_stock", "virtual"].includes(explicit) ||
     category.includes("recipe source") ||
     category.includes("non-stock") ||
     category.includes("non stock") ||
@@ -507,8 +517,7 @@ function normalizeStockItemPayload(raw: Record<string, unknown>) {
   const merged = { ...rawJson, ...raw };
   const name = text(merged.name || merged.ingredientName);
   const itemType = deriveStockItemType(merged);
-  const category = text(
-    merged.category,
+  const defaultCategoryForType =
     itemType === "sub_recipe"
       ? "General - Sub Recipe"
       : itemType === "manufactured"
@@ -517,8 +526,18 @@ function normalizeStockItemPayload(raw: Record<string, unknown>) {
             itemType === "virtual" ||
             itemType === "non_stock"
           ? "General - Non Stock"
-          : "General - Raw Materials",
-  );
+          : "General - Raw Materials";
+  const existingCategory = text(merged.category);
+  // If the category is empty, use the default label for the (possibly just-changed) type. If the
+  // category is one of the system's own auto-generated labels — left over from a PREVIOUS item
+  // type, e.g. "General - Non Stock" after switching an item back to Raw — replace it with the
+  // correct label for the current type instead of leaving a stale, mismatched category behind.
+  // Any genuinely custom category the person typed themselves is always preserved untouched.
+  const category = !existingCategory
+    ? defaultCategoryForType
+    : AUTO_GENERATED_STOCK_CATEGORY_LABELS.has(existingCategory.toLowerCase())
+      ? defaultCategoryForType
+      : existingCategory;
   const explicitStocked = merged.isStocked ?? merged.is_stocked;
   const isStocked = ["sub_recipe", "subrecipe", "virtual"].includes(itemType)
     ? 0
@@ -1064,33 +1083,15 @@ async function assertRecipeIngredientIdsAllowed(
   workspaceId: string,
   recipeLines: Array<{ stockItemId: string }>,
 ) {
-  const ids = [
-    ...new Set(
-      recipeLines.map((line) => text(line.stockItemId)).filter(Boolean),
-    ),
-  ];
-  if (!ids.length) return;
-  const placeholders = ids.map((_, index) => `?${index + 2}`).join(", ");
-  const rows = await env.DB.prepare(
-    `SELECT id, name, item_type, raw_json
-       FROM stock_items
-      WHERE workspace_id = ?1
-        AND id IN (${placeholders})`,
-  )
-    .bind(workspaceId, ...ids)
-    .all<Record<string, unknown>>();
-  const disallowed = (rows.results || []).find((row) => {
-    const itemType = normalizeItemType(
-      row.item_type || objectValue(jsonParse(row.raw_json)).itemType,
-      "raw",
-    );
-    return ["recipe_source", "non_stock", "virtual"].includes(itemType);
-  });
-  if (disallowed) {
-    throw new Error(
-      `${text(disallowed.name || disallowed.id)} is a non-stock item and cannot be assigned as a recipe ingredient.`,
-    );
-  }
+  // Non Stock items ("recipe_source"/"non_stock"/"virtual") are simple purchased items with a
+  // real unit cost — condiments, packaging, garnishes, etc. — and are legitimate to cost into a
+  // recipe or product just like any other stock item. They only differ from a standard item in
+  // that they don't get their own bill-of-materials (see saveStockItemRecipe). Previously this
+  // function hard-blocked them from being used as an ingredient anywhere, which had no real
+  // technical justification (they have a valid unit_cost like any other item) and was a recurring
+  // point of friction. The only thing still worth guarding against is an actual circular
+  // reference, which callers already prevent via their own sub-recipe ownership checks.
+  return;
 }
 
 async function saveProductRecipe(

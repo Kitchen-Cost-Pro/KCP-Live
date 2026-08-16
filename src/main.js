@@ -4460,7 +4460,12 @@ function updateRecipeLineUom(index, unit) {
 function removeRecipeLine(index) {
   const line = appState.recipes.draftRecipe?.[index];
   if (!line) return;
-  const ingredient = (appState.recipes.ingredients || []).find((item) => String(item.id) === String(line.ingId));
+  const targetId = String(line.ingId || '').trim();
+  const ingredient = (appState.recipes.ingredients || []).find((item) => {
+    if (String(item.id) === targetId) return true;
+    const mergedIds = String(item.mergedIds || '').split(',').map((v) => v.trim()).filter(Boolean);
+    return mergedIds.includes(targetId);
+  });
 
   appState.recipes = {
     ...appState.recipes,

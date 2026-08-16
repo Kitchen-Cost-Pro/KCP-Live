@@ -2024,7 +2024,7 @@ function renderRecipePickerModal(draftRecipe, recipes, filters) {
   const ingredientCategories = getCategories(ingredients);
   const selectedIds = new Set((recipes.pickerSelectedIds || []).map(String));
   const selectedIngredients = [...selectedIds]
-    .map((id) => ingredients.find((ingredient) => String(ingredient.id) === id))
+    .map((id) => findIngredientById(ingredients, id))
     .filter(Boolean)
     .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
   const isQuantityStep = recipes.pickerStep === 'quantity';
@@ -2166,7 +2166,7 @@ function getIngredientUomRatio(ingredient, selectedUnit) {
 }
 
 function renderRecipeLine(line, index, ingredients, options = {}) {
-  const ingredient = ingredients.find((item) => String(item.id) === String(line.ingId));
+  const ingredient = findIngredientById(ingredients, line.ingId);
   const readOnly = options.readOnly === true;
   if (!ingredient) {
     // The ingredient is no longer in the active stock list. Rather than the item never having
@@ -2544,10 +2544,10 @@ function renderNoteRuleEditor(suggestion = {}, draft = {}, menuItems = [], ingre
   const needsSource = ['REMOVE_INGREDIENT', 'REPLACE_INGREDIENT'].includes(actionType);
   const needsReplacement = actionType === 'REPLACE_INGREDIENT';
   const needsQuantity = ['ADD_RECIPE', 'ADD_STOCK_ITEM'].includes(actionType);
-  const sourceIngredient = ingredients.find((item) => String(item.id) === String(draft.sourceStockItemId || ''));
-  const targetIngredient = ingredients.find((item) => String(item.id) === String(draft.targetOwnerId || ''));
+  const sourceIngredient = findIngredientById(ingredients, draft.sourceStockItemId);
+  const targetIngredient = findIngredientById(ingredients, draft.targetOwnerId);
   const targetRecipe = menuItems.find((item) => String(item.id) === String(draft.targetOwnerId || ''));
-  const replacementIngredient = ingredients.find((item) => String(item.id) === String(draft.replacementStockItemId || ''));
+  const replacementIngredient = findIngredientById(ingredients, draft.replacementStockItemId);
   const preview = actionType === 'ADD_RECIPE'
     ? `Deduct ${Number(draft.quantity || 1)} × ${targetRecipe?.name || 'selected recipe'}`
     : actionType === 'ADD_STOCK_ITEM'
@@ -2824,9 +2824,29 @@ function filterIngredients(ingredients, filters, draftRecipe) {
     .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
 }
 
+// Client-side dedup (dedupeStockItems in stockService.js) can merge two stock items that share a
+// name/category/unit into a single displayed entry, keeping one "primary" id and recording the
+// other id(s) in `mergedIds`. A saved recipe line can still reference the id that got merged away
+// — a plain `.id` match then fails even though the ingredient is clearly present in the list (just
+// under a different primary id), which is exactly what made a real ingredient look "missing" and
+// made the recipe screen's ingredient list look inconsistent with the Stock Items tab. Every
+// ingredient lookup by id must check `mergedIds` too, not just `.id`.
+function findIngredientById(ingredients = [], targetId) {
+  const id = String(targetId ?? '').trim();
+  if (!id) return null;
+  return ingredients.find((entry) => {
+    if (String(entry?.id ?? '') === id) return true;
+    const mergedIds = String(entry?.mergedIds || '')
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean);
+    return mergedIds.includes(id);
+  }) || null;
+}
+
 function calculateRecipeCost(recipe, ingredients, activeLocationId = '') {
   return (recipe || []).reduce((sum, line) => {
-    const ingredient = ingredients.find((item) => String(item.id) === String(line.ingId));
+    const ingredient = findIngredientById(ingredients, line.ingId);
     if (!ingredient) return sum;
     const yieldPct = ingredient.yieldFactor && ingredient.yieldFactor > 0 ? ingredient.yieldFactor / 100 : 1;
     const uomRatio = getIngredientUomRatio(ingredient, line.unit);

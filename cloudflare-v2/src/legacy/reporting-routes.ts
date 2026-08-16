@@ -3032,6 +3032,35 @@ function convertMenuRecipeQty({ qty, fromUom, toUom, stockRawJson }: Row) {
   if (a && b && a[0] === b[0])
     return { qty: quantity * (a[1] / b[1]), factor: a[1] / b[1] };
   const raw = parseJson(stockRawJson);
+  // The UOM builder saves custom UOM ratios under `uomConfigurations` with shape
+  // { baseUom, customUom, ratio } (see normalizeUomConfigurations) — NOT `uomConversions` with a
+  // { from, to, factor } shape. This function previously only ever checked `uomConversions`, a
+  // field nothing in the app actually writes, so a configured custom UOM ratio could never be
+  // found here and every custom-UOM recipe line was permanently flagged as "missing conversion"
+  // regardless of what was set up. Check the real field (with legacy aliases kept as a fallback
+  // for any older data shaped the other way) and match on the correct property names.
+  const configuredUoms = Array.isArray(raw.uomConfigurations)
+    ? raw.uomConfigurations
+    : Array.isArray(raw.uomConfig)
+      ? raw.uomConfig
+      : Array.isArray(raw.uoms)
+        ? raw.uoms
+        : Array.isArray(raw.customUoms)
+          ? raw.customUoms
+          : [];
+  const configMatch = configuredUoms.find(
+    (conversion: Row) =>
+      normalizeUomForReport(conversion.customUom || conversion.custom_uom || conversion.customUnit) === from &&
+      (normalizeUomForReport(conversion.baseUom || conversion.base_uom || conversion.baseUnit) === to ||
+        !normalizeUomForReport(conversion.baseUom || conversion.base_uom || conversion.baseUnit)),
+  );
+  if (configMatch) {
+    const factor = numberValue(
+      configMatch.ratio ?? configMatch.conversionRatio ?? configMatch.unitsPerCustomUnit ?? configMatch.units_per_custom_unit,
+      0,
+    );
+    if (factor) return { qty: quantity * factor, factor };
+  }
   const conversions = Array.isArray(raw.uomConversions)
     ? raw.uomConversions
     : [];
