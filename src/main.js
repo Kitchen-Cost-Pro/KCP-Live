@@ -234,6 +234,11 @@ let systemBroadcastRefreshTimer = null;
 let integrationAutoSyncTimer = null;
 let catalogueAutoSyncTimer = null;
 let dataVersionPollTimer = null;
+// Consecutive data-version poll failures. Used to back off the poll interval so a struggling or
+// backed-off backend (e.g. a Durable Object waiting out a migration circuit-breaker) isn't
+// hammered at full 15-second cadence forever, from every open browser tab, on every workspace —
+// that amplification is exactly what turned one backend issue into a much bigger one previously.
+let dataVersionPollFailures = 0;
 let dataVersionPollVisibilityHandler = null;
 let lastSeenDataVersion = null;
 // Monotonic guard against out-of-order background stock refreshes. Any in-flight
@@ -738,6 +743,7 @@ function startDataVersionPoll() {
     if (!workspaceId) return;
     try {
       const response = await callCloudflareWorkspaceRoute(workspaceId, 'data-version', { query: { t: Date.now() } });
+      dataVersionPollFailures = 0;
       const version = String(response?.version ?? '');
       // First observation establishes the baseline without refetching.
       if (lastSeenDataVersion === null) {
@@ -752,14 +758,22 @@ function startDataVersionPoll() {
           detail: { workspaceId, version }
         }));
       }
-    } catch { /* silent — a failed poll should never disrupt the app */ }
+    } catch {
+      // Back off on repeated failures rather than retrying at full cadence indefinitely — see
+      // currentPollInterval() below.
+      dataVersionPollFailures = Math.min(dataVersionPollFailures + 1, 8);
+    }
   };
 
-  const currentPollInterval = () => (
-    appState.route.active === 'ingredients'
+  const currentPollInterval = () => {
+    const base = appState.route.active === 'ingredients'
       ? STOCK_DATA_VERSION_POLL_INTERVAL_MS
-      : DATA_VERSION_POLL_INTERVAL_MS
-  );
+      : DATA_VERSION_POLL_INTERVAL_MS;
+    if (!dataVersionPollFailures) return base;
+    // Exponential backoff, capped at 5 minutes: 1 failure -> 2x, 2 -> 4x, ... so a struggling
+    // backend gets breathing room instead of being retried every 15 seconds from every open tab.
+    return Math.min(base * (2 ** dataVersionPollFailures), 5 * 60 * 1000);
+  };
   const startTimer = () => {
     if (dataVersionPollTimer) window.clearTimeout(dataVersionPollTimer);
     const scheduleNext = () => {

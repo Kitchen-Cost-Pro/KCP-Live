@@ -569,5 +569,10 @@ CREATE INDEX IF NOT EXISTS idx_low_stock_alert_state_workspace_active
   // stayed at the schema default of 15%). This migration adds the typed vat_registered column,
   // and the save route is fixed alongside it to keep both typed columns in sync with raw_json
   // going forward, so a business's actual VAT rate and registration status are both honored.
+  //
+  // Safe to leave in place even while write quota is constrained: WorkspaceDO.migrate() now
+  // backs off and keeps serving on the existing schema if this fails, instead of crashing the
+  // whole workspace. It will finish applying itself automatically the next time it's attempted
+  // after quota headroom returns — no manual re-deploy needed.
   `ALTER TABLE workspace_settings ADD COLUMN vat_registered INTEGER NOT NULL DEFAULT 1;`
 ];

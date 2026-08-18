@@ -1,0 +1,58 @@
+name: Deploy Cloudflare Worker
+
+# Assumes this repo's root contains the `cloudflare-v2/` folder (the Worker package) as a
+# subdirectory, matching the KCP-Live-Development project layout. Adjust `working-directory`
+# below if your repo root IS the cloudflare-v2 folder itself.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "cloudflare-v2/**"
+      - ".github/workflows/deploy-worker.yml"
+  # Lets you trigger a deploy manually from the Actions tab without needing a new commit.
+  workflow_dispatch: {}
+
+# Prevent two deploys from racing each other if pushes land close together.
+concurrency:
+  group: deploy-worker-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Typecheck, test, and deploy
+    runs-on: ubuntu-latest
+    environment: production
+    defaults:
+      run:
+        working-directory: cloudflare-v2
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: cloudflare-v2/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Run tests
+        run: npm test
+
+      - name: Deploy to Cloudflare Workers
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: cloudflare-v2
+          wranglerVersion: "4.110.0"
+          command: deploy

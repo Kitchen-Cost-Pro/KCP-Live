@@ -449,6 +449,15 @@ export async function getSalesFinancialReport(
   const tableStatus: Record<string, boolean> = {};
   for (const table of requiredTables)
     tableStatus[table] = await tableExists(env, table);
+  // Checking the TABLE exists is not enough for vat_registered specifically — workspace_settings
+  // has existed for a long time, so tableStatus.workspace_settings is already true on any
+  // workspace whose vat_registered column migration simply hasn't finished applying yet (e.g.
+  // still working through the migration circuit-breaker's backoff). Referencing the column in SQL
+  // before it exists throws "no such column", which is exactly what caused sales-financial (and
+  // the other reports below) to 500 for a workspace mid-migration. Gate on the column directly.
+  const vatRegisteredColumnAvailable =
+    tableStatus.workspace_settings &&
+    (await tableHasColumns(env, "workspace_settings", ["vat_registered"]));
   if (!tableStatus.yoco_orders) {
     return json(request, env, {
       rows: [],
@@ -529,9 +538,11 @@ export async function getSalesFinancialReport(
         l.name AS location_name,
         l.display_name AS location_display_name,
         ${
-          tableStatus.workspace_settings
+          vatRegisteredColumnAvailable
             ? "COALESCE((SELECT CASE WHEN COALESCE(ws.vat_registered, 1) = 0 THEN 0 ELSE NULLIF(ws.vat_rate, 0) END FROM workspace_settings ws WHERE ws.workspace_id = yo.workspace_id ORDER BY datetime(ws.updated_at) DESC LIMIT 1), 15)"
-            : "15"
+            : tableStatus.workspace_settings
+              ? "COALESCE((SELECT NULLIF(ws.vat_rate, 0) FROM workspace_settings ws WHERE ws.workspace_id = yo.workspace_id ORDER BY datetime(ws.updated_at) DESC LIMIT 1), 15)"
+              : "15"
         } AS vat_rate,
         COUNT(*) OVER() AS __total_rows
        FROM canonical_yoco_orders yo
@@ -620,6 +631,10 @@ export async function getSaleStockUsageReport(
   const tableStatus: Record<string, boolean> = {};
   for (const table of requiredTables)
     tableStatus[table] = await tableExists(env, table);
+  // See getSalesFinancialReport for why this can't just check tableStatus.workspace_settings.
+  const vatRegisteredColumnAvailable =
+    tableStatus.workspace_settings &&
+    (await tableHasColumns(env, "workspace_settings", ["vat_registered"]));
   if (!tableStatus.stock_movements) {
     return json(request, env, {
       rows: [],
@@ -697,9 +712,11 @@ export async function getSaleStockUsageReport(
         p.name AS product_name,
         p.category AS product_category,
         ${
-          tableStatus.workspace_settings
+          vatRegisteredColumnAvailable
             ? "COALESCE((SELECT CASE WHEN COALESCE(ws.vat_registered, 1) = 0 THEN 0 ELSE NULLIF(ws.vat_rate, 0) END FROM workspace_settings ws WHERE ws.workspace_id = sm.workspace_id ORDER BY datetime(ws.updated_at) DESC LIMIT 1), 15)"
-            : "15"
+            : tableStatus.workspace_settings
+              ? "COALESCE((SELECT NULLIF(ws.vat_rate, 0) FROM workspace_settings ws WHERE ws.workspace_id = sm.workspace_id ORDER BY datetime(ws.updated_at) DESC LIMIT 1), 15)"
+              : "15"
         } AS vat_rate
        FROM stock_movements sm
        LEFT JOIN stock_items si ON si.id = sm.stock_item_id AND si.workspace_id = sm.workspace_id
@@ -868,6 +885,10 @@ export async function getModifierSalesReport(
   const tableStatus: Record<string, boolean> = {};
   for (const table of requiredTables)
     tableStatus[table] = await tableExists(env, table);
+  // See getSalesFinancialReport for why this can't just check tableStatus.workspace_settings.
+  const vatRegisteredColumnAvailable =
+    tableStatus.workspace_settings &&
+    (await tableHasColumns(env, "workspace_settings", ["vat_registered"]));
   if (!tableStatus.yoco_orders || !tableStatus.yoco_order_lines) {
     return json(request, env, {
       rows: [],
@@ -930,9 +951,11 @@ export async function getModifierSalesReport(
         p.yoco_variant_id,
         p.raw_json AS product_raw_json,
         ${
-          tableStatus.workspace_settings
+          vatRegisteredColumnAvailable
             ? "COALESCE((SELECT CASE WHEN COALESCE(ws.vat_registered, 1) = 0 THEN 0 ELSE NULLIF(ws.vat_rate, 0) END FROM workspace_settings ws WHERE ws.workspace_id = yol.workspace_id ORDER BY datetime(ws.updated_at) DESC LIMIT 1), 15)"
-            : "15"
+            : tableStatus.workspace_settings
+              ? "COALESCE((SELECT NULLIF(ws.vat_rate, 0) FROM workspace_settings ws WHERE ws.workspace_id = yol.workspace_id ORDER BY datetime(ws.updated_at) DESC LIMIT 1), 15)"
+              : "15"
         } AS vat_rate
        FROM (
          SELECT * FROM (
@@ -1268,12 +1291,20 @@ export async function getMenuRecipeHealthReport(
   }
 
   const vatRateRow = tableStatus.workspace_settings
-    ? await env.DB.prepare(
-        `SELECT CASE WHEN COALESCE(vat_registered, 1) = 0 THEN 0 ELSE COALESCE(NULLIF(vat_rate, 0), 15) END AS vat_rate
-           FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`,
-      )
-        .bind(workspaceId)
-        .first<Row>()
+    ? await (async () => {
+        // See getSalesFinancialReport for why table existence alone isn't enough to safely
+        // reference vat_registered — it can still be mid-migration on this workspace.
+        const hasVatRegisteredColumn = await tableHasColumns(env, "workspace_settings", ["vat_registered"]);
+        return env.DB.prepare(
+          hasVatRegisteredColumn
+            ? `SELECT CASE WHEN COALESCE(vat_registered, 1) = 0 THEN 0 ELSE COALESCE(NULLIF(vat_rate, 0), 15) END AS vat_rate
+                 FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`
+            : `SELECT COALESCE(NULLIF(vat_rate, 0), 15) AS vat_rate
+                 FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`,
+        )
+          .bind(workspaceId)
+          .first<Row>();
+      })()
     : null;
   const vatRate = numberValue(vatRateRow?.vat_rate, 15);
 
