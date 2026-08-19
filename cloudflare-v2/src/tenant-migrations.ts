@@ -1,5 +1,5 @@
 import { TENANT_SCHEMA_SQL } from './tenant-schema.generated';
-import { YOCO_V2_FOUNDATION_MIGRATION, YOCO_V2_SALE_SHADOW_MIGRATION, YOCO_V2_REFUND_RECONCILIATION_MIGRATION, YOCO_V2_CONTROLLED_CUTOVER_MIGRATION, YOCO_V2_REFUND_CONTROLLED_CUTOVER_MIGRATION, YOCO_V2_LEGACY_SHUTDOWN_MIGRATION, YOCO_V2_ADMIN_CONTROL_CENTRE_MIGRATION } from './modules/yoco-engine-v2/migrations';
+import { YOCO_V2_FOUNDATION_MIGRATION, YOCO_V2_SALE_SHADOW_MIGRATION, YOCO_V2_REFUND_RECONCILIATION_MIGRATION, YOCO_V2_CONTROLLED_CUTOVER_MIGRATION, YOCO_V2_REFUND_CONTROLLED_CUTOVER_MIGRATION, YOCO_V2_LEGACY_SHUTDOWN_MIGRATION, YOCO_V2_ADMIN_CONTROL_CENTRE_MIGRATION, YOCO_V2_RECONCILIATION_BACKOFF_MIGRATION } from './modules/yoco-engine-v2/migrations';
 import { MODIFIER_ENGINE_CORE_ACTIONS_MIGRATION, MODIFIER_ENGINE_REFUNDS_RELIABILITY_NOTES_MIGRATION } from './modules/modifier-engine/migrations';
 
 /**
@@ -574,5 +574,9 @@ CREATE INDEX IF NOT EXISTS idx_low_stock_alert_state_workspace_active
   // backs off and keeps serving on the existing schema if this fails, instead of crashing the
   // whole workspace. It will finish applying itself automatically the next time it's attempted
   // after quota headroom returns — no manual re-deploy needed.
-  `ALTER TABLE workspace_settings ADD COLUMN vat_registered INTEGER NOT NULL DEFAULT 1;`
+  `ALTER TABLE workspace_settings ADD COLUMN vat_registered INTEGER NOT NULL DEFAULT 1;`,
+  // 33 — scheduled-reconciliation failure backoff + cross-run finding dedupe. Fixes the runaway
+  // 15-minute deep-scan loop that consumed the entire daily Durable Object write allowance on
+  // workspaces that had never gone live. See the migration body for the full root cause.
+  YOCO_V2_RECONCILIATION_BACKOFF_MIGRATION
 ];

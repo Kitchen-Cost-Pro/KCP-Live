@@ -16,6 +16,7 @@ import {
   YOCO_V2_REFUND_RECONCILIATION_MIGRATION,
   YOCO_V2_REFUND_CONTROLLED_CUTOVER_MIGRATION,
   YOCO_V2_SALE_SHADOW_MIGRATION,
+  YOCO_V2_RECONCILIATION_BACKOFF_MIGRATION,
 } from "../src/modules/yoco-engine-v2/migrations";
 import {
   refundLookupUpdatedWindow,
@@ -26,7 +27,10 @@ import {
   buildRefundReportingProposal,
   buildRefundStockProposals,
 } from "../src/modules/yoco-engine-v2/refund-effect-proposals";
-import { runYocoV2Reconciliation } from "../src/modules/yoco-engine-v2/reconciliation";
+import {
+  runYocoV2Reconciliation,
+  runScheduledYocoV2Reconciliation,
+} from "../src/modules/yoco-engine-v2/reconciliation";
 import { processYocoV2QueueMessage } from "../src/modules/yoco-engine-v2/processor";
 import { yocoV2FeatureFlags } from "../src/modules/yoco-engine-v2/config";
 import { MODIFIER_ENGINE_REFUNDS_RELIABILITY_NOTES_MIGRATION } from "../src/modules/modifier-engine/migrations";
@@ -156,6 +160,7 @@ function createDb() {
   db.database.exec(YOCO_V2_REFUND_RECONCILIATION_MIGRATION);
   db.database.exec(YOCO_V2_REFUND_CONTROLLED_CUTOVER_MIGRATION);
   db.database.exec(MODIFIER_ENGINE_REFUNDS_RELIABILITY_NOTES_MIGRATION);
+  db.database.exec(YOCO_V2_RECONCILIATION_BACKOFF_MIGRATION);
   return db;
 }
 
@@ -1655,4 +1660,136 @@ test("reconciliation reports unresolved mappings without scanning retired legacy
   assert.equal(types.has("UNRESOLVED_MAPPING"), true);
   assert.equal(types.has("LEGACY_ONLY_EFFECT"), false);
   assert.equal(types.has("V2_ONLY_SOURCE_ACTIVITY"), false);
+});
+
+// --- Scheduled-reconciliation write-storm regressions --------------------------------------------
+// These cover the defect that consumed an entire day's Durable Object row-write allowance overnight
+// with no client traffic: a failing run never recorded that it had run, so `dailyDue` stayed true
+// and every 15-minute cron tick re-ran the full deep scan forever.
+
+test("scheduled reconciliation skips a workspace that has not gone live and writes nothing", async () => {
+  const data = fixture("single-line-partial-refund");
+  const db = createDb();
+  seedCore(db);
+  // Deliberately NO configureApiKey(): no yoco_connections row at all, i.e. never went live.
+  const env = envFor(db, fixtureGate(data, { listOrders: [], listRefunds: [] }));
+
+  const result = await runScheduledYocoV2Reconciliation(
+    env,
+    "ws_1",
+    "integration_1",
+    new Date("2026-07-15T02:00:00.000Z"),
+  );
+
+  assert.equal(result, null);
+  // The critical assertion: not a single row written. The old code created reconciliation state, a
+  // RUNNING run row and a FAILED update on every tick for workspaces like this.
+  assert.equal(
+    (db.database.prepare(`SELECT COUNT(*) AS n FROM yoco_v2_reconciliation_state`).get() as any).n,
+    0,
+  );
+  assert.equal(
+    (db.database.prepare(`SELECT COUNT(*) AS n FROM yoco_v2_reconciliation_runs`).get() as any).n,
+    0,
+  );
+});
+
+test("scheduled reconciliation stays skipped while a connection is present but not activated", async () => {
+  const data = fixture("single-line-partial-refund");
+  const db = createDb();
+  seedCore(db);
+  const encrypted = await encryptTextWithSecret("secret", "sk_live_never_log");
+  // Connected credentials, but Go Live never flipped connection_active.
+  db.database
+    .prepare(
+      `INSERT INTO yoco_connections (workspace_id, status, api_key_encrypted, connection_active) VALUES (?, 'connected', ?, 0)`,
+    )
+    .run("ws_1", encrypted);
+  const env = envFor(db, fixtureGate(data, { listOrders: [], listRefunds: [] }));
+
+  assert.equal(
+    await runScheduledYocoV2Reconciliation(env, "ws_1", "integration_1", new Date("2026-07-15T02:00:00.000Z")),
+    null,
+  );
+  assert.equal(
+    (db.database.prepare(`SELECT COUNT(*) AS n FROM yoco_v2_reconciliation_runs`).get() as any).n,
+    0,
+  );
+});
+
+test("a failing scheduled run records the attempt and backs off instead of re-running every tick", async () => {
+  const data = fixture("single-line-partial-refund");
+  const db = createDb();
+  seedCore(db);
+  await configureApiKey(db);
+  const rateLimited = gateResponse({ message: "limited" }, 429, "RATE_LIMITED");
+  const failingEnv = envFor(db, fixtureGate(data, { failLists: rateLimited }));
+
+  // 02:00 — first tick fails.
+  await assert.rejects(
+    runScheduledYocoV2Reconciliation(failingEnv, "ws_1", "integration_1", new Date("2026-07-15T02:00:00.000Z")),
+  );
+  const afterFirst = db.database
+    .prepare(`SELECT last_daily_run_at, consecutive_failures, next_retry_at FROM yoco_v2_reconciliation_state`)
+    .get() as any;
+  // The attempt is stamped even though the run threw — this is what breaks the loop.
+  assert.ok(afterFirst.last_daily_run_at, "expected the failed attempt to stamp last_daily_run_at");
+  assert.equal(Number(afterFirst.consecutive_failures), 1);
+  assert.ok(afterFirst.next_retry_at, "expected a backoff deadline to be recorded");
+  const runsAfterFirst = (
+    db.database.prepare(`SELECT COUNT(*) AS n FROM yoco_v2_reconciliation_runs`).get() as any
+  ).n;
+  assert.equal(runsAfterFirst, 1);
+
+  // 02:15 — the very next cron tick. Previously this re-ran the whole deep scan.
+  assert.equal(
+    await runScheduledYocoV2Reconciliation(failingEnv, "ws_1", "integration_1", new Date("2026-07-15T02:15:00.000Z")),
+    null,
+  );
+  assert.equal(
+    (db.database.prepare(`SELECT COUNT(*) AS n FROM yoco_v2_reconciliation_runs`).get() as any).n,
+    runsAfterFirst,
+    "a tick inside the backoff window must not start another run",
+  );
+
+  // Past the 15-minute backoff, it is allowed to try again — and a success clears the counters.
+  const okEnv = envFor(db, fixtureGate(data, { listOrders: [], listRefunds: [] }));
+  await runScheduledYocoV2Reconciliation(okEnv, "ws_1", "integration_1", new Date("2026-07-15T04:00:00.000Z"));
+  const afterRecovery = db.database
+    .prepare(`SELECT consecutive_failures, next_retry_at FROM yoco_v2_reconciliation_state`)
+    .get() as any;
+  assert.equal(Number(afterRecovery.consecutive_failures), 0);
+  assert.equal(afterRecovery.next_retry_at, null);
+});
+
+test("a repeated finding updates one row instead of appending a new one per run", async () => {
+  const db = createDb();
+  seedCore(db);
+  const insertFinding = (runIdValue: string, at: string) =>
+    db.database
+      .prepare(
+        `INSERT INTO yoco_v2_reconciliation_findings
+          (id, reconciliation_run_id, workspace_id, integration_id, source_entity_type,
+           source_entity_id, finding_type, severity, status, details_json, repair_action,
+           repaired_at, created_at, last_seen_at, last_run_id, occurrence_count)
+         VALUES (?1, ?2, 'ws_1', 'integration_1', 'ORDER', 'order_1', 'UNRESOLVED_MAPPING',
+                 'MEDIUM', 'OPEN', '{}', NULL, NULL, ?3, ?3, ?2, 1)
+         ON CONFLICT(workspace_id, integration_id, finding_type, source_entity_type, source_entity_id)
+         DO UPDATE SET last_seen_at = excluded.last_seen_at,
+                       last_run_id = excluded.last_run_id,
+                       occurrence_count = yoco_v2_reconciliation_findings.occurrence_count + 1`,
+      )
+      .run(`finding_${runIdValue}`, runIdValue, at);
+
+  insertFinding("run_1", "2026-07-15T02:00:00.000Z");
+  insertFinding("run_2", "2026-07-15T02:15:00.000Z");
+  insertFinding("run_3", "2026-07-15T02:30:00.000Z");
+
+  const rows = db.database
+    .prepare(`SELECT occurrence_count, last_run_id, last_seen_at FROM yoco_v2_reconciliation_findings`)
+    .all() as any[];
+  assert.equal(rows.length, 1, "three sightings of one issue must not create three rows");
+  assert.equal(Number(rows[0].occurrence_count), 3);
+  assert.equal(rows[0].last_run_id, "run_3");
+  assert.equal(rows[0].last_seen_at, "2026-07-15T02:30:00.000Z");
 });

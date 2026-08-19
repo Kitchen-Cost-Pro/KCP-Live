@@ -27,6 +27,28 @@ export function structuredYocoV2Log(entry: YocoV2LogEntry): void {
   console.log(JSON.stringify({ component: 'kcp-yoco-engine-v2', timestamp: nowIso(), ...entry }));
 }
 
+/**
+ * Persist a diagnostic only when it carries signal, but ALWAYS emit the structured console line.
+ *
+ * `integration_logs` lives in the workspace's Durable Object SQLite, so every routine
+ * success row consumes the tenant's daily row-write allowance. The high-volume caller is the Yoco
+ * API client, which logged one row per outbound request — up to ~50 per reconciliation page sweep,
+ * none of which anyone reads when the call simply succeeded. Failures, retries and rate-limiting
+ * still persist, because those are what operators actually go looking for after the fact.
+ *
+ * The console line is free (it goes to Workers logs, not tenant storage), so observability of
+ * successful calls is preserved in `wrangler tail` and the dashboard regardless.
+ */
+export async function recordYocoV2DiagnosticIfNotable(db: DbLike, entry: YocoV2LogEntry): Promise<void> {
+  const routineSuccess = !entry.error_category
+    && ['OK', 'SUCCESS', 'CACHED', 'NOT_MODIFIED'].includes(String(entry.status || '').toUpperCase());
+  if (routineSuccess) {
+    structuredYocoV2Log(entry);
+    return;
+  }
+  await recordYocoV2Diagnostic(db, entry);
+}
+
 export async function recordYocoV2Diagnostic(db: DbLike, entry: YocoV2LogEntry): Promise<void> {
   structuredYocoV2Log(entry);
   try {
