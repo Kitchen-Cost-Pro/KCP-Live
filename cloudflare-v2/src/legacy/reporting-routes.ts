@@ -3079,18 +3079,34 @@ function convertMenuRecipeQty({ qty, fromUom, toUom, stockRawJson }: Row) {
         : Array.isArray(raw.customUoms)
           ? raw.customUoms
           : [];
-  const configMatch = configuredUoms.find(
-    (conversion: Row) =>
-      normalizeUomForReport(conversion.customUom || conversion.custom_uom || conversion.customUnit) === from &&
-      (normalizeUomForReport(conversion.baseUom || conversion.base_uom || conversion.baseUnit) === to ||
-        !normalizeUomForReport(conversion.baseUom || conversion.base_uom || conversion.baseUnit)),
-  );
-  if (configMatch) {
-    const factor = numberValue(
-      configMatch.ratio ?? configMatch.conversionRatio ?? configMatch.unitsPerCustomUnit ?? configMatch.units_per_custom_unit,
+  const entryCustom = (conversion: Row) =>
+    normalizeUomForReport(conversion.customUom || conversion.custom_uom || conversion.customUnit);
+  const entryBase = (conversion: Row) =>
+    normalizeUomForReport(conversion.baseUom || conversion.base_uom || conversion.baseUnit);
+  const entryRatio = (conversion: Row) =>
+    numberValue(
+      conversion.ratio ?? conversion.conversionRatio ?? conversion.unitsPerCustomUnit ?? conversion.units_per_custom_unit,
       0,
     );
+
+  const configMatch = configuredUoms.find(
+    (conversion: Row) => entryCustom(conversion) === from && (entryBase(conversion) === to || !entryBase(conversion)),
+  );
+  if (configMatch) {
+    const factor = entryRatio(configMatch);
     if (factor) return { qty: quantity * factor, factor };
+  }
+
+  // A configured ratio describes both directions. `ratio` is base units per ONE custom unit, so the
+  // custom -> base direction is the ratio and base -> custom is its reciprocal. Without this inverse
+  // lookup a recipe line written in the base UOM against an item stocked in a custom one was still
+  // reported as a missing conversion even though the ratio was set up in the UOM builder.
+  const inverseMatch = configuredUoms.find(
+    (conversion: Row) => entryBase(conversion) === from && entryCustom(conversion) === to && entryRatio(conversion) > 0,
+  );
+  if (inverseMatch) {
+    const factor = 1 / entryRatio(inverseMatch);
+    return { qty: quantity * factor, factor };
   }
   const conversions = Array.isArray(raw.uomConversions)
     ? raw.uomConversions

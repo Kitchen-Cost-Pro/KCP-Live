@@ -263,15 +263,26 @@ function findExplicitConversionFactor({ from, to, stockItem = {}, recipeData = {
     ...toArray(stockItem.uomConfigurations),
     ...toArray(rawJsonUomConfigurations)
   ];
+  const entryCustom = (entry) => normalizeUom(entry.customUom || entry.custom_uom || entry.customUnit);
+  const entryBase = (entry) => normalizeUom(entry.baseUom || entry.base_uom || entry.baseUnit);
+  const entryRatio = (entry) => safeNumber(entry.ratio ?? entry.conversionRatio ?? entry.unitsPerCustomUnit ?? entry.units_per_custom_unit, 0);
+
   const configMatch = configuredUoms.find((entry) =>
-    normalizeUom(entry.customUom || entry.custom_uom || entry.customUnit) === from &&
-    (normalizeUom(entry.baseUom || entry.base_uom || entry.baseUnit) === to ||
-      !normalizeUom(entry.baseUom || entry.base_uom || entry.baseUnit))
+    entryCustom(entry) === from && (entryBase(entry) === to || !entryBase(entry))
   );
   if (configMatch) {
-    const factor = safeNumber(configMatch.ratio ?? configMatch.conversionRatio ?? configMatch.unitsPerCustomUnit ?? configMatch.units_per_custom_unit, 0);
+    const factor = entryRatio(configMatch);
     if (factor) return factor;
   }
+
+  // A configured ratio describes both directions. `ratio` is base units per ONE custom unit, so the
+  // custom -> base direction is the ratio and base -> custom is its reciprocal. Without this inverse
+  // lookup a recipe line written in the base UOM against an item stocked in a custom one was still
+  // reported as a missing conversion even though the ratio was set up in the UOM builder.
+  const inverseMatch = configuredUoms.find((entry) =>
+    entryBase(entry) === from && entryCustom(entry) === to && entryRatio(entry) > 0
+  );
+  if (inverseMatch) return 1 / entryRatio(inverseMatch);
 
   const conversions = [
     ...toArray(recipeData.uomConversions),

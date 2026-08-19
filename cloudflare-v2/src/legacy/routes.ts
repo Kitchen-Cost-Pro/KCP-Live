@@ -689,11 +689,16 @@ async function saveStockItem(
   if (!item.name) throw new Error("Stock item name is required.");
   const allowStockBalanceUpdate = options.allowStockBalanceUpdate !== false;
 
+  // Deliberately NOT filtered to active = 1. Deletion is a soft delete (active = 0), so filtering
+  // here made a save against a deleted id look like a brand-new item: `nameIsChanging` became true
+  // and the uniqueness scan below then rejected the save with "a stock item named X already exists"
+  // even though the only thing it collided with was the item's own former name. The duplicate scan
+  // itself still considers active rows only, so a deleted item's name never blocks a genuinely new
+  // one.
   const existing = await env.DB.prepare(
     `SELECT id, name
        FROM stock_items
       WHERE workspace_id = ?1
-        AND active = 1
         AND id = ?2
       LIMIT 1`,
   )
