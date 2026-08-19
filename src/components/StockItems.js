@@ -5,6 +5,7 @@ import { getLocationStock } from '../utils/stockBalances.js';
 import { resolveLocationUnitCost } from '../utils/stockCostResolver.js';
 import { resolveStockItemSku } from '../utils/stockSku.js';
 import { getAccessibleLocationOptions } from '../services/locationAccess.js';
+import { deriveStockItemType, stripStockCategoryTypeSuffix } from '../utils/stockItemType.js';
 
 const defaultUoms = ['ea', 'kg', 'g', 'l', 'ml', 'pack', 'case', 'bottle', 'bag', 'box', 'tray', 'portion', 'batch'];
 
@@ -1873,13 +1874,11 @@ function filterStockItems(items, filters, locations = []) {
   });
 }
 
+// Shared canonical derivation — see src/utils/stockItemType.js. This surface has always treated a
+// 'virtual' item as Non Stock, so the fine-grained type is collapsed here.
 function getStockItemType(item = {}) {
-  const explicit = String(item.itemType || item.stockItemType || item.specificationType || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
-  const category = String(item.category || '').toLowerCase();
-  if (['sub_recipe', 'subrecipe'].includes(explicit) || item.isSubRecipe === true || category.includes('sub recipe') || category.includes('sub-recipe')) return 'sub_recipe';
-  if (['manufactured', 'prep', 'prepared', 'manufactured_item'].includes(explicit) || item.isManufactured === true || category.includes('manufactured')) return 'manufactured';
-  if (['recipe_source', 'non_stock', 'virtual'].includes(explicit) || category.includes('recipe source') || category.includes('non-stock') || category.includes('non stock') || category.includes('virtual')) return 'recipe_source';
-  return 'standard';
+  const type = deriveStockItemType(item);
+  return type === 'virtual' ? 'recipe_source' : type;
 }
 
 function getStockItemDisplayName(item = {}) {
@@ -1998,10 +1997,10 @@ function normalizeLookupOption(value = '') {
   return String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
+// Strips every type marker, not just Raw Materials/Manufactured — a category can carry more than
+// one accumulated marker, and leaving "- Non Stock" behind kept re-deriving the wrong item type.
 function stripCategorySuffix(value = '') {
-  return String(value)
-    .replace(' - Raw Materials', '')
-    .replace(' - Manufactured', '');
+  return stripStockCategoryTypeSuffix(value);
 }
 
 function getStockCategoryBase(item = {}) {

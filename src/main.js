@@ -71,6 +71,7 @@ import {
   scheduleAppDropdownPortalRefresh
 } from './utils/appDropdownPortal.js';
 import { isStockCountableItem, isTransferEligibleStockItem } from './services/stockCountEligibility.js';
+import { deriveStockItemType } from './utils/stockItemType.js';
 // Canonical per-location balance resolver (same one the Transfers UI uses to show before/after),
 // so the transfer insufficient-stock validation resolves the source balance identically.
 import { getLocationStock as resolveLocationStock } from './utils/stockBalances.js';
@@ -6389,17 +6390,30 @@ async function confirmStockDelete() {
   renderApp();
 
   try {
-    const { deleteStockItem, deleteMultipleStockItems } = await import('./services/stockService.js');
-    if (items.length === 1) {
-      await deleteStockItem(appState.workspace?.id, items[0].id);
+    const { deleteStockItem, deleteMultipleStockItems, resolveStockItemPersistedIds } = await import('./services/stockService.js');
+    // A displayed row can stand for several database rows: dedupeStockItems merges items sharing
+    // name+category+unit and keeps the group in `mergedIds`. Deleting only the primary id left the
+    // siblings active, so the next refresh rebuilt the merged row and the item reappeared. Delete
+    // every id the row represents.
+    const targetIds = [...new Set(items.flatMap((item) => resolveStockItemPersistedIds(item)))];
+    if (!targetIds.length) {
+      appState.stock = { ...appState.stock, confirmDelete: null, actionStatus: '', actionError: '' };
+      renderApp();
+      showStockToast('Selected stock items could not be found.', 'error');
+      return;
+    }
+    if (targetIds.length === 1) {
+      await deleteStockItem(appState.workspace?.id, targetIds[0]);
     } else {
-      await deleteMultipleStockItems(appState.workspace?.id, items.map((item) => item.id));
+      await deleteMultipleStockItems(appState.workspace?.id, targetIds);
     }
     // Invalidate any stock fetch that was already in flight before this delete completed —
     // it captured pre-delete data and would otherwise reintroduce the deleted item when it
     // resolves (see refreshStockFromDataVersion / applyRealtimeSnapshot).
     stockMutationToken += 1;
-    const deletedIds = new Set(items.map((item) => String(item.id)));
+    // Prune local state by every deleted id AND by the visible row ids, since merged rows are keyed
+    // in state by their primary id.
+    const deletedIds = new Set([...targetIds, ...items.map((item) => String(item.id))].map(String));
     appState.stock = {
       ...appState.stock,
       items: removeRowsByIds(appState.stock.items, deletedIds),
@@ -20516,13 +20530,11 @@ function getFilteredStockItems(items, filters = {}) {
   });
 }
 
+// Shared canonical derivation — see src/utils/stockItemType.js. Filtering has always grouped
+// 'virtual' with Non Stock, so the fine-grained type is collapsed here.
 function getStockItemTypeForFilter(item = {}) {
-  const explicit = String(item.itemType || item.stockItemType || item.specificationType || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
-  const category = String(item.category || '').toLowerCase();
-  if (['sub_recipe', 'subrecipe'].includes(explicit) || item.isSubRecipe === true || category.includes('sub recipe') || category.includes('sub-recipe')) return 'sub_recipe';
-  if (['manufactured', 'prep', 'prepared', 'manufactured_item'].includes(explicit) || item.isManufactured === true || category.includes('manufactured')) return 'manufactured';
-  if (['recipe_source', 'non_stock', 'virtual'].includes(explicit) || category.includes('recipe source') || category.includes('non-stock') || category.includes('non stock') || category.includes('virtual')) return 'recipe_source';
-  return 'standard';
+  const type = deriveStockItemType(item);
+  return type === 'virtual' ? 'recipe_source' : type;
 }
 
 function normalizeStockCategory(value = '') {

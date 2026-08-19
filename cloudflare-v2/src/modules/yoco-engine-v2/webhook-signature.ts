@@ -29,6 +29,27 @@ function base64SecretBytes(value: string): Uint8Array | null {
   }
 }
 
+/**
+ * Normalise a stored signing secret to the Standard Webhooks `whsec_<base64>` form.
+ *
+ * Verification below fails closed on any secret without the prefix — it cannot know how to decode
+ * one — so a secret stored without it makes every delivery unverifiable. Yoco does not always
+ * include the prefix on the value it returns, which is what left the integration permanently
+ * reporting "signature cannot be verified".
+ *
+ * Only a value that actually looks like the bare base64 body is prefixed. Anything else is returned
+ * untouched so it still fails closed and stays visible as a misconfiguration, rather than being
+ * reshaped into a plausible-looking secret that would fail in a more confusing way.
+ */
+export function normalizeStandardWebhookSecret(secret: unknown): string {
+  const value = text(secret);
+  if (!value || value.startsWith('whsec_')) return value;
+  return /^[A-Za-z0-9+/_-]+={0,2}$/.test(value) ? `whsec_${value}` : value;
+}
+
+// Intentionally strict: the verifier itself only accepts an explicitly prefixed secret, so a
+// malformed one fails closed here rather than being guessed at during verification. Callers
+// normalise with normalizeStandardWebhookSecret when they load a secret from storage.
 function standardWebhookSecret(secret: string): Uint8Array | null {
   const value = text(secret);
   if (!value.startsWith('whsec_')) return null;

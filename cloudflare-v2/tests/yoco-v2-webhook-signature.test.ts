@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createHmac, randomBytes } from 'node:crypto';
-import { verifyYocoV2WebhookSignature } from '../src/modules/yoco-engine-v2/webhook-signature';
+import { verifyYocoV2WebhookSignature, normalizeStandardWebhookSecret } from '../src/modules/yoco-engine-v2/webhook-signature';
 
 // Independently reproduce the Yoco / Standard Webhooks (Svix) signing scheme so this is a
 // true round-trip against the verifier: signature = base64(HMAC-SHA256(rawKey, `id.ts.body`)),
@@ -117,4 +117,50 @@ test('rejects when signature/id/timestamp headers are absent', async () => {
   const secret = `whsec_${rawKey.toString('base64')}`;
 
   assert.equal(await verifyYocoV2WebhookSignature(body, new Headers(), secret), false);
+});
+
+// --- Stored-secret normalisation ----------------------------------------------------------------
+// Yoco does not always include the `whsec_` prefix on the signing secret it returns. The verifier
+// fails closed on a secret without it, so an unprefixed stored secret made every delivery
+// unverifiable — the "API signature cannot be verified" symptom. Secrets are normalised where they
+// enter the system and again where they are read, so existing connections are repaired without
+// anyone having to disconnect and reconnect Yoco.
+
+test('a bare base64 secret is normalised to the whsec_ form', () => {
+  const rawKey = randomBytes(24);
+  const bare = rawKey.toString('base64');
+  assert.equal(normalizeStandardWebhookSecret(bare), `whsec_${bare}`);
+});
+
+test('an already-prefixed secret is left exactly as it is', () => {
+  const secret = `whsec_${randomBytes(24).toString('base64')}`;
+  assert.equal(normalizeStandardWebhookSecret(secret), secret);
+});
+
+test('a secret that is not base64 is passed through so it still fails closed', () => {
+  // Reshaping this into `whsec_...` would invent a secret and fail in a more confusing way; leaving
+  // it alone keeps the misconfiguration visible.
+  assert.equal(normalizeStandardWebhookSecret('not a secret!'), 'not a secret!');
+  assert.equal(normalizeStandardWebhookSecret(''), '');
+  assert.equal(normalizeStandardWebhookSecret(null), '');
+});
+
+test('a delivery verifies once an unprefixed stored secret is normalised', async () => {
+  const rawKey = randomBytes(32);
+  const body = JSON.stringify({ type: 'order.completed', data: { order: { id: 'order_1' } } });
+  const { headers } = buildSignedWebhook({
+    body,
+    webhookId: 'msg_normalised',
+    timestampSeconds: freshTimestamp(),
+    rawKey,
+  });
+  const storedWithoutPrefix = rawKey.toString('base64');
+
+  // This is the regression: the raw stored value cannot verify...
+  assert.equal(await verifyYocoV2WebhookSignature(body, headers, storedWithoutPrefix), false);
+  // ...but the value as the ingress now loads it does.
+  assert.equal(
+    await verifyYocoV2WebhookSignature(body, headers, normalizeStandardWebhookSecret(storedWithoutPrefix)),
+    true,
+  );
 });

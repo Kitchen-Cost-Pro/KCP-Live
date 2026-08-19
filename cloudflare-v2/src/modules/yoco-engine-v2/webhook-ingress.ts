@@ -2,7 +2,7 @@ import type { AuthContext } from '../../legacy/types';
 import type { YocoV2QueueEnv } from './capture';
 import { captureVerifiedYocoV2Event } from './capture';
 import { recordYocoV2WebhookReceipt, sha256Hex } from './admin-security';
-import { verifyYocoV2WebhookSignature } from './webhook-signature';
+import { verifyYocoV2WebhookSignature, normalizeStandardWebhookSecret } from './webhook-signature';
 import { KCP_WORKER_RELEASE } from '../../release';
 import type { Row } from './repository';
 import { migrateYocoV2EffectOwnershipForConnection } from './ownership';
@@ -39,9 +39,13 @@ function eventFields(payload: Row, headers: Headers): { eventType: string; event
   return { eventType: eventType || 'unknown', eventId, sourceReference };
 }
 
+// Normalise on read as well as on write: secrets stored before the write-side normalisation existed
+// are still sitting in yoco_connections without the `whsec_` prefix, and the verifier fails closed on
+// those — so every delivery for an already-connected workspace stayed unverifiable. Doing it here
+// repairs existing connections without requiring anyone to disconnect and reconnect Yoco.
 function activeWebhookSecrets(connection: Row | null): string[] {
-  const secrets = [text(connection?.webhook_secret)];
-  const previousSecret = text(connection?.webhook_previous_secret);
+  const secrets = [normalizeStandardWebhookSecret(connection?.webhook_secret)];
+  const previousSecret = normalizeStandardWebhookSecret(connection?.webhook_previous_secret);
   const previousUntil = Date.parse(text(connection?.webhook_previous_until));
   if (previousSecret && Number.isFinite(previousUntil) && previousUntil > Date.now()) secrets.push(previousSecret);
   return secrets.filter(Boolean);

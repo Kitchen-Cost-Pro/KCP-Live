@@ -20,6 +20,7 @@ import {
   validateYocoConnection
 } from './catalog-client';
 import { recordIntegrationLog, runLoggedIntegrationOperation } from '../../legacy/integration-log';
+import { normalizeStandardWebhookSecret } from './webhook-signature';
 import {
   assertAllYocoEffectsOwnedByV2,
   migrateYocoV2EffectOwnershipForConnection,
@@ -548,8 +549,21 @@ function subscriptionId(subscription: Row) {
   return text(subscription.id || subscription.subscription_id || subscription.subscriptionId || subscription.webhook_id || subscription.webhookId);
 }
 
+/**
+ * Read the signing secret from a Yoco webhook subscription, normalised to the Standard Webhooks
+ * `whsec_<base64>` form the verifier requires.
+ *
+ * `verifyYocoV2WebhookSignature` fails closed on any secret without the `whsec_` prefix — it cannot
+ * know how to decode it — and a stored secret is skipped entirely, so verification returns false for
+ * every delivery. Yoco does not always include the prefix on the value it hands back, which left the
+ * integration permanently reporting "signature cannot be verified". Add the prefix here, at the one
+ * place secrets enter the system, rather than loosening the verifier: signature checking stays
+ * fail-closed, which is the property worth keeping.
+ */
 function subscriptionSecret(subscription: Row) {
-  return text(subscription.secret || subscription.webhook_secret || subscription.webhookSecret || subscription.signing_secret || subscription.signingSecret);
+  return normalizeStandardWebhookSecret(
+    subscription.secret || subscription.webhook_secret || subscription.webhookSecret || subscription.signing_secret || subscription.signingSecret,
+  );
 }
 
 // Subscribe to both live sale signals documented by the Yoco Business API.
