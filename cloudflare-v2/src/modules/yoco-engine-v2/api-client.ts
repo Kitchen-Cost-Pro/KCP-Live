@@ -9,7 +9,7 @@ import type {
 } from './contracts';
 import { yocoV2ApiConfig } from './config';
 import { newId, nowIso, type Row } from './repository';
-import { recordYocoV2Diagnostic } from './observability';
+import { recordYocoV2Diagnostic, recordYocoV2DiagnosticIfNotable } from './observability';
 
 const DEFAULT_YOCO_BASE_URL = 'https://api.yoco.com';
 
@@ -264,7 +264,7 @@ export async function executeYocoV2ApiRequest<T = unknown>(env: YocoV2ApiClientE
   }
 
   await recordApiRequest(env, input, requestId, startedAt, gate);
-  await recordYocoV2Diagnostic(env.DB, {
+  await recordYocoV2DiagnosticIfNotable(env.DB, {
     trace_id: input.traceId,
     raw_event_id: input.rawEventId,
     workspace_id: input.workspaceId,
