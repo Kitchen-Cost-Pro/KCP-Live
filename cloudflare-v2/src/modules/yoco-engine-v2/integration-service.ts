@@ -20,6 +20,7 @@ import {
   validateYocoConnection
 } from './catalog-client';
 import { recordIntegrationLog, runLoggedIntegrationOperation } from '../../legacy/integration-log';
+import { normalizeStandardWebhookSecret } from './webhook-signature';
 import {
   assertAllYocoEffectsOwnedByV2,
   migrateYocoV2EffectOwnershipForConnection,
@@ -43,6 +44,49 @@ function id(prefix: string) {
 
 function jsonString(value: unknown) {
   return JSON.stringify(value || {});
+}
+
+/**
+ * Append-only audit trail for admin/system-triggered Yoco actions, surfaced in the Webhook
+ * Health dashboard's "View Audit Trail" action. Failure to write this must never break the
+ * caller's actual operation, so it's fire-and-forget with its own try/catch.
+ */
+async function recordYocoV2AdminAction(
+  env: Env,
+  workspaceId: string,
+  integrationId: string,
+  details: {
+    action: string;
+    targetType: string;
+    targetId: string;
+    status: 'completed' | 'failed';
+    resultingState?: unknown;
+    reason?: string;
+  },
+) {
+  try {
+    const actionId = id('yoco_v2_admin_action');
+    const timestamp = nowIso();
+    await env.DB.prepare(
+      `INSERT INTO yoco_v2_admin_actions
+        (id, workspace_id, integration_id, actor_uid, actor_email, action, target_type, target_id,
+         idempotency_key, previous_state_json, resulting_state_json, reason, status, trace_id, created_at, completed_at)
+       VALUES (?1, ?2, ?3, 'system', '', ?4, ?5, ?6, ?1, '{}', ?7, ?8, ?9, ?1, ?10, ?10)`,
+    ).bind(
+      actionId,
+      workspaceId,
+      integrationId,
+      details.action,
+      details.targetType,
+      details.targetId,
+      jsonString(details.resultingState),
+      details.reason || '',
+      details.status,
+      timestamp,
+    ).run();
+  } catch {
+    // Audit-trail write failure must never mask the underlying operation's own result.
+  }
 }
 
 function jsonParse(value: unknown): Row {
@@ -548,8 +592,21 @@ function subscriptionId(subscription: Row) {
   return text(subscription.id || subscription.subscription_id || subscription.subscriptionId || subscription.webhook_id || subscription.webhookId);
 }
 
+/**
+ * Read the signing secret from a Yoco webhook subscription, normalised to the Standard Webhooks
+ * `whsec_<base64>` form the verifier requires.
+ *
+ * `verifyYocoV2WebhookSignature` fails closed on any secret without the `whsec_` prefix — it cannot
+ * know how to decode it — and a stored secret is skipped entirely, so verification returns false for
+ * every delivery. Yoco does not always include the prefix on the value it hands back, which left the
+ * integration permanently reporting "signature cannot be verified". Add the prefix here, at the one
+ * place secrets enter the system, rather than loosening the verifier: signature checking stays
+ * fail-closed, which is the property worth keeping.
+ */
 function subscriptionSecret(subscription: Row) {
-  return text(subscription.secret || subscription.webhook_secret || subscription.webhookSecret || subscription.signing_secret || subscription.signingSecret);
+  return normalizeStandardWebhookSecret(
+    subscription.secret || subscription.webhook_secret || subscription.webhookSecret || subscription.signing_secret || subscription.signingSecret,
+  );
 }
 
 // Subscribe to both live sale signals documented by the Yoco Business API.
@@ -669,31 +726,6 @@ function isKcpWebhookSubscription(subscription: Row, webhookId: string, webhookU
       || nameValue.includes('kcp')
     )
   );
-}
-
-
-function planYocoWebhookCleanup(
-  subscriptions: Row[],
-  options: { webhookId?: string; webhookUrl?: string; preserveIds?: string[] } = {},
-) {
-  const webhookId = text(options.webhookId);
-  const webhookUrl = text(options.webhookUrl);
-  const preserveIds = new Set((options.preserveIds || []).map((value) => text(value)).filter(Boolean));
-  const pendingIds = subscriptions
-    .filter((subscription) => isKcpWebhookSubscription(subscription, webhookId, webhookUrl))
-    .map(subscriptionId)
-    .filter((idValue) => idValue && !preserveIds.has(idValue));
-  return {
-    deletedCount: 0,
-    deletedIds: [] as string[],
-    failedCount: pendingIds.length,
-    failedIds: pendingIds,
-    failures: [] as string[],
-    rateLimitedCount: 0,
-    retryAfterMs: 0,
-    cleanupPending: pendingIds.length > 0,
-    ignoredSubscriptionCount: Math.max(0, subscriptions.length - pendingIds.length),
-  };
 }
 
 async function deleteYocoWebhookSubscriptions(
@@ -891,19 +923,30 @@ export async function connectYoco(
           && webhookSubscriptionMatches(storedSubscription, storedWebhookId, webhookUrl)
         ) {
           webhookReused = true;
-          deletionResult = planYocoWebhookCleanup(subscriptions, {
+          deletionResult = await deleteYocoWebhookSubscriptions(env, workspaceId, cleanKey, {
+            subscriptions,
             webhookId: storedWebhookId,
             webhookUrl,
             preserveIds: [storedWebhookId],
+            paceMs: 900,
           });
           webhookCleanupWarning = deletionResult.failedCount
-            ? `${deletionResult.failedCount} stale Yoco webhook subscription(s) are scheduled for automatic cleanup.`
+            ? `${deletionResult.failedCount} stale Yoco webhook subscription(s) could not be deleted and remain active.`
             : '';
+          if (deletionResult.failedCount) {
+            await recordYocoV2AdminAction(env, workspaceId, integrationId, {
+              action: 'webhook.duplicate_cleanup_failed',
+              targetType: 'yoco_webhook_subscription',
+              targetId: storedWebhookId,
+              status: 'failed',
+              resultingState: deletionResult,
+            });
+          }
           await recordIntegrationLog(env, workspaceId, {
             operation: 'yoco.webhook.reuse_subscription',
             status: deletionResult.failedCount ? 'warning' : 'success',
             message: deletionResult.failedCount
-              ? `Reused the healthy live webhook. ${deletionResult.failedCount} duplicate subscription(s) were scheduled for the automatic 15-minute cleanup.`
+              ? `Reused the healthy live webhook. ${deletionResult.failedCount} duplicate subscription(s) could not be deleted (see admin actions) and remain active until the next reconcile sweep.`
               : 'Reused the healthy live webhook. No duplicate Yoco subscriptions were found.',
             details: deletionResult,
             correlationId,
@@ -920,25 +963,36 @@ export async function connectYoco(
         }
 
         if (!discoveryError) {
-          deletionResult = planYocoWebhookCleanup(subscriptions, {
+          deletionResult = await deleteYocoWebhookSubscriptions(env, workspaceId, cleanKey, {
+            subscriptions,
             webhookId: storedWebhookId,
             webhookUrl,
             preserveIds: [createdId],
+            paceMs: 900,
           });
           webhookCleanupWarning = deletionResult.failedCount
-            ? `${deletionResult.failedCount} stale Yoco webhook subscription(s) are scheduled for automatic cleanup.`
+            ? `${deletionResult.failedCount} stale Yoco webhook subscription(s) could not be deleted and remain active.`
             : '';
+          if (deletionResult.failedCount) {
+            await recordYocoV2AdminAction(env, workspaceId, integrationId, {
+              action: 'webhook.duplicate_cleanup_failed',
+              targetType: 'yoco_webhook_subscription',
+              targetId: createdId,
+              status: 'failed',
+              resultingState: deletionResult,
+            });
+          }
           await recordIntegrationLog(env, workspaceId, {
             operation: 'yoco.webhook.cleanup_scheduled',
             status: deletionResult.failedCount ? 'warning' : 'success',
             message: deletionResult.failedCount
-              ? `The new live webhook is ready. ${deletionResult.failedCount} stale subscription(s) were scheduled for automatic cleanup instead of blocking connection on Yoco rate limits.`
+              ? `The new live webhook is ready. ${deletionResult.failedCount} stale subscription(s) could not be deleted (see admin actions) and remain active until the next reconcile sweep.`
               : 'The new live webhook is ready. No stale Yoco subscriptions were found.',
             details: deletionResult,
             correlationId,
           });
         } else {
-          webhookCleanupWarning = 'Existing Yoco subscription cleanup was deferred because the subscription list was rate limited.';
+          webhookCleanupWarning = 'Existing Yoco subscription cleanup was deferred because the subscription list could not be retrieved.';
         }
 
         return { webhookId: createdId, webhookSecret: createdSecret, webhookUrl };
@@ -1124,16 +1178,27 @@ export async function resetYocoWebhook(env: Env, workspaceId: string, apiKeyOver
           ignoredSubscriptionCount: 0,
         };
         if (!discoveryError) {
-          deletionResult = planYocoWebhookCleanup(subscriptions, {
+          deletionResult = await deleteYocoWebhookSubscriptions(env, workspaceId, apiKey, {
+            subscriptions,
             webhookId: previousWebhookId,
             webhookUrl,
             preserveIds: [webhookId],
+            paceMs: 900,
           });
+          if (deletionResult.failedCount) {
+            await recordYocoV2AdminAction(env, workspaceId, `yoco:${workspaceId}`, {
+              action: 'webhook.duplicate_cleanup_failed',
+              targetType: 'yoco_webhook_subscription',
+              targetId: webhookId,
+              status: 'failed',
+              resultingState: deletionResult,
+            });
+          }
           await recordIntegrationLog(env, workspaceId, {
             operation: 'yoco.webhook.cleanup_scheduled',
             status: deletionResult.failedCount ? 'warning' : 'success',
             message: deletionResult.failedCount
-              ? `Replacement webhook is live. ${deletionResult.failedCount} stale subscription(s) were scheduled for automatic cleanup instead of blocking the reset on Yoco rate limits.`
+              ? `Replacement webhook is live. ${deletionResult.failedCount} stale subscription(s) could not be deleted (see admin actions) and remain active until the next reconcile sweep.`
               : 'Replacement webhook is live. No stale Yoco subscriptions were found.',
             details: deletionResult,
             correlationId,
@@ -1274,6 +1339,71 @@ async function prepareYocoWebhookForSync(
       error: message,
     };
   }
+}
+
+/** Read-only remote subscription count for the Workspace Health dashboard — never mutates anything. */
+export async function countActiveYocoWebhookSubscriptions(env: Env, workspaceId: string): Promise<{ count: number; error?: string }> {
+  const connection = await getYocoConnection(env, workspaceId);
+  const encrypted = text(connection?.api_key_encrypted);
+  if (!encrypted) return { count: 0 };
+  try {
+    const apiKey = await decryptText(env, encrypted);
+    const webhookId = text(connection?.webhook_id);
+    const webhookUrl = text(connection?.webhook_url) || expectedWebhookUrl(env, workspaceId);
+    const subscriptions = await listWebhookSubscriptions(env, workspaceId, apiKey) as Row[];
+    const count = subscriptions.filter((subscription) => isKcpWebhookSubscription(subscription, webhookId, webhookUrl)).length;
+    return { count };
+  } catch (caught) {
+    return { count: 0, error: caught instanceof Error ? caught.message : String(caught) };
+  }
+}
+
+/**
+ * Defense-in-depth backstop for the "exactly 1 active subscription" invariant. connect/reset
+ * already delete stale subscriptions inline, but a delete can be rate-limited and never retried
+ * within that request. This re-lists remote subscriptions and, if more than one KCP-tagged
+ * subscription exists, deletes every one except the currently stored/healthy webhook_id.
+ *
+ * Not yet wired to a cron — crons are deliberately disabled account-wide pending the unrelated
+ * fixes CRON_BACKUP_RESTORE.md requires first. Callable on demand (admin route) until then.
+ */
+export async function reconcileYocoWebhookSubscription(env: Env, workspaceId: string) {
+  const connection = await getYocoConnection(env, workspaceId);
+  const encrypted = text(connection?.api_key_encrypted);
+  if (!connection || !encrypted || connection.status === 'disconnected') {
+    return { ok: true, skipped: true, reason: 'not_connected', extraSubscriptionsFound: 0 };
+  }
+
+  const apiKey = await decryptText(env, encrypted);
+  const webhookUrl = text(connection.webhook_url) || expectedWebhookUrl(env, workspaceId);
+  const storedWebhookId = text(connection.webhook_id);
+
+  const subscriptions = await listWebhookSubscriptions(env, workspaceId, apiKey) as Row[];
+  const kcpSubscriptions = subscriptions.filter((subscription) => isKcpWebhookSubscription(subscription, storedWebhookId, webhookUrl));
+  if (kcpSubscriptions.length <= 1) {
+    return { ok: true, skipped: false, extraSubscriptionsFound: 0 };
+  }
+
+  const preserveId = kcpSubscriptions.some((subscription) => subscriptionId(subscription) === storedWebhookId)
+    ? storedWebhookId
+    : subscriptionId(kcpSubscriptions[0]);
+  const result = await deleteYocoWebhookSubscriptions(env, workspaceId, apiKey, {
+    subscriptions,
+    webhookId: preserveId,
+    webhookUrl,
+    preserveIds: [preserveId],
+    paceMs: 900,
+  });
+
+  await recordYocoV2AdminAction(env, workspaceId, `yoco:${workspaceId}`, {
+    action: result.failedCount ? 'webhook.reconcile_sweep_partial' : 'webhook.reconcile_sweep_cleaned',
+    targetType: 'yoco_workspace',
+    targetId: workspaceId,
+    status: result.failedCount ? 'failed' : 'completed',
+    resultingState: result,
+  });
+
+  return { ok: true, skipped: false, extraSubscriptionsFound: kcpSubscriptions.length - 1, ...result };
 }
 
 export async function disconnectYoco(env: Env, workspaceId: string) {

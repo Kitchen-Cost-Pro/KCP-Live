@@ -4,9 +4,9 @@ import type {
   YocoV2QueueMessage,
 } from "./contracts";
 import {
-  getRefundEffectRuntime,
-  type RefundEffectRuntime,
-} from "./refund-cutover";
+  getEffectRuntime,
+  type EffectRuntime,
+} from "./effect-gate";
 import { sha256Hex } from "./identity";
 import { appendTimeline, newId, nowIso, type Row } from "./repository";
 
@@ -42,7 +42,7 @@ async function stableId(prefix: string, value: string): Promise<string> {
 async function applyReporting(
   env: Env,
   input: {
-    runtime: RefundEffectRuntime;
+    runtime: EffectRuntime;
     domainEvent: Row;
     canonical: CanonicalSaleRefundedEvent;
     rawEvent: Row;
@@ -252,7 +252,7 @@ async function loadReturnCapacity(
 async function applyStock(
   env: Env,
   input: {
-    runtime: RefundEffectRuntime;
+    runtime: EffectRuntime;
     domainEvent: Row;
     canonical: CanonicalSaleRefundedEvent;
     rawEvent: Row;
@@ -639,13 +639,13 @@ export async function applyControlledLiveRefundEffects(
       `YOCO_V2_LIVE_REFUND_CURRENCY_UNSUPPORTED:${input.canonical.currency}`,
     );
   const [reportingRuntime, stockRuntime] = await Promise.all([
-    getRefundEffectRuntime(
+    getEffectRuntime(
       env,
       input.canonical.workspace_id,
       input.canonical.integration_id,
       "REFUND_REPORTING",
     ),
-    getRefundEffectRuntime(
+    getEffectRuntime(
       env,
       input.canonical.workspace_id,
       input.canonical.integration_id,

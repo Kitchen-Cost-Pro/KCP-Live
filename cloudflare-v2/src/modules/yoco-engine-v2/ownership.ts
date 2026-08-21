@@ -97,25 +97,8 @@ function effectControlStatement(
   cutoverAt: string,
   actorId: string,
 ): DbStatementLike {
-  if (effectType === 'SALE_REPORTING' || effectType === 'SALE_STOCK') {
-    return db.prepare(
-      `INSERT INTO yoco_v2_effect_controls
-        (workspace_id, integration_id, effect_type, feature_enabled, consumption_paused,
-         pause_reason, cutover_at, activated_by, updated_at, updated_by)
-       VALUES (?1, ?2, ?3, 1, 0, NULL, ?4, ?5, ?4, ?5)
-       ON CONFLICT(workspace_id, integration_id, effect_type) DO UPDATE SET
-         feature_enabled = 1,
-         consumption_paused = 0,
-         pause_reason = NULL,
-         cutover_at = excluded.cutover_at,
-         activated_by = excluded.activated_by,
-         updated_at = excluded.updated_at,
-         updated_by = excluded.updated_by`,
-    ).bind(workspaceId, integrationId, effectType, cutoverAt, actorId);
-  }
-
   return db.prepare(
-    `INSERT INTO yoco_v2_refund_effect_controls
+    `INSERT INTO yoco_v2_effect_gate
       (workspace_id, integration_id, effect_type, feature_enabled, consumption_paused,
        pause_reason, cutover_at, activated_by, updated_at, updated_by)
      VALUES (?1, ?2, ?3, 1, 0, NULL, ?4, ?5, ?4, ?5)

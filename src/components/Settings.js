@@ -11,6 +11,7 @@ export function renderSettings({ state, onSettingsAction = {} } = {}) {
   const settingsState = state.settings || {};
   const draft = settingsState.draft || createDefaultSettings(state);
   const reportingDayHour = resolveReportingDayHour(draft);
+  const vatRegistered = draft.vatRegistered !== false;
   const workspaceName = state.workspace?.siteName || draft.siteName || 'Workspace';
   const isSaving = settingsState.actionStatus === 'saving';
   const isImporting = settingsState.actionStatus === 'importing';
@@ -59,6 +60,17 @@ export function renderSettings({ state, onSettingsAction = {} } = {}) {
                 <span>VAT Rate %</span>
                 <input type="text" inputmode="decimal" value="${escapeAttribute(draft.vatRate ?? 15)}" data-settings-field="vatRate" data-focus-key="settings-vat-rate" />
               </label>
+              <div class="settingsFormField settingsVatRegisteredField">
+                <span>VAT Registration</span>
+                <label class="settingsToggle">
+                  <input type="checkbox" data-settings-vat-registered-toggle ${vatRegistered !== false ? 'checked' : ''} />
+                  <span class="settingsToggle__track" aria-hidden="true"></span>
+                  <span class="settingsToggle__label">${vatRegistered !== false ? 'VAT Registered' : 'Not VAT Registered'}</span>
+                </label>
+                <p class="settingsFieldHint">${vatRegistered !== false
+                  ? 'Reports and recipe costs show VAT (ex-VAT recipe costs, VAT column reflects real values).'
+                  : 'Reports show R0 VAT and recipe costs are treated as VAT-inclusive of what was actually paid.'}</p>
+              </div>
               <label>
                 <span>Business Profile Name</span>
                 <input type="text" value="${escapeAttribute(draft.siteName || '')}" placeholder="e.g. Main Kitchen" data-settings-field="siteName" data-focus-key="settings-site-name" />
@@ -762,6 +774,17 @@ function getColorThemePreviewStyle(theme = {}) {
 }
 
 function bindSettingsEvents(view, onSettingsAction, draft = {}, settingsState = {}) {
+  view.querySelectorAll('[data-settings-vat-registered-toggle]').forEach((field) => {
+    field.addEventListener('change', () => {
+      const nextValue = field.checked;
+      // Revert the visual toggle immediately — the actual state only changes once the person
+      // confirms in the dialog (see requestVatRegisteredToggle in main.js), since this
+      // recalculates recipe costs and GRV VAT handling across the whole workspace.
+      field.checked = !nextValue;
+      onSettingsAction.onVatRegisteredToggle?.(nextValue);
+    });
+  });
+
   view.querySelectorAll('[data-settings-field]').forEach((field) => {
     const isTextLike = field.tagName === 'INPUT' && field.type !== 'checkbox' && field.type !== 'radio';
     if (isTextLike) {

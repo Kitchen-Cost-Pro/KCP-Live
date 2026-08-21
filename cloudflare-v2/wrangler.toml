@@ -20,6 +20,10 @@ class_name = "WorkspaceDO"
 name = "YOCO_V2_RATE_GATE"
 class_name = "YocoV2RateGateDO"
 
+[[durable_objects.bindings]]
+name = "YOCO_V2_WRITE_BUDGET"
+class_name = "YocoV2WriteBudgetDO"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["WorkspaceDO"]
@@ -28,12 +32,15 @@ new_sqlite_classes = ["WorkspaceDO"]
 tag = "v2-yoco-rate-gate"
 new_sqlite_classes = ["YocoV2RateGateDO"]
 
-# --- Low stock email cron: mirrors the old Firebase `sendLowStockSummaryEmails` schedule ---------
-# (every 15 minutes; per-workspace frequency/send-window/dedupe logic lives in
-# src/legacy/low-stock-email.ts, so this just needs to fire often enough to hit each
-# workspace's configured send window).
+[[migrations]]
+tag = "v3-yoco-write-budget"
+new_sqlite_classes = ["YocoV2WriteBudgetDO"]
+
+# --- Cron triggers: TEMPORARILY DISABLED for DO read/write investigation (2026-08-20) -------------
+# See CRON_BACKUP_RESTORE.md in this directory for what fired here, why it was removed, and the
+# exact steps to restore it once the DO read/write root cause is confirmed fixed.
 [triggers]
-crons = ["*/15 * * * *"]
+crons = []
 
 # --- Central plane: shared D1 for identity / registry / members / cross-tenant coordination ------
 [[d1_databases]]
@@ -76,6 +83,11 @@ YOCO_V2_AUTH_FAILURE_THRESHOLD = "2"
 YOCO_V2_RATE_LIMIT_PAUSE_FALLBACK_MS = "30000"
 YOCO_V2_RECONCILIATION_OVERLAP_MINUTES = "120"
 YOCO_V2_RECONCILIATION_LOOKBACK_HOURS = "24"
+# Deliberately below Cloudflare's real 100,000 writes/day account-wide cap — other work (admin
+# actions, reporting, other crons) shares that same cap, so this leaves headroom rather than
+# racing the real ceiling.
+YOCO_V2_WRITE_BUDGET_DAILY_CAP = "90000"
+YOCO_V2_WRITE_BUDGET_SOFT_WARN_RATIO = "0.8"
 # Production secrets are configured with `wrangler secret put`; never store them here.
 
 # Secrets to configure with `wrangler secret put`:

@@ -1,5 +1,5 @@
 import { TENANT_SCHEMA_SQL } from './tenant-schema.generated';
-import { YOCO_V2_FOUNDATION_MIGRATION, YOCO_V2_SALE_SHADOW_MIGRATION, YOCO_V2_REFUND_RECONCILIATION_MIGRATION, YOCO_V2_CONTROLLED_CUTOVER_MIGRATION, YOCO_V2_REFUND_CONTROLLED_CUTOVER_MIGRATION, YOCO_V2_LEGACY_SHUTDOWN_MIGRATION, YOCO_V2_ADMIN_CONTROL_CENTRE_MIGRATION } from './modules/yoco-engine-v2/migrations';
+import { YOCO_V2_FOUNDATION_MIGRATION, YOCO_V2_SALE_SHADOW_MIGRATION, YOCO_V2_REFUND_RECONCILIATION_MIGRATION, YOCO_V2_CONTROLLED_CUTOVER_MIGRATION, YOCO_V2_REFUND_CONTROLLED_CUTOVER_MIGRATION, YOCO_V2_LEGACY_SHUTDOWN_MIGRATION, YOCO_V2_ADMIN_CONTROL_CENTRE_MIGRATION, YOCO_V2_RECONCILIATION_BACKOFF_MIGRATION, YOCO_V2_EFFECT_GATE_MIGRATION } from './modules/yoco-engine-v2/migrations';
 import { MODIFIER_ENGINE_CORE_ACTIONS_MIGRATION, MODIFIER_ENGINE_REFUNDS_RELIABILITY_NOTES_MIGRATION } from './modules/modifier-engine/migrations';
 
 /**
@@ -562,5 +562,29 @@ CREATE INDEX IF NOT EXISTS idx_yoco_orders_workspace_refund_financials
   PRIMARY KEY (workspace_id, stock_item_id, location_id)
 );
 CREATE INDEX IF NOT EXISTS idx_low_stock_alert_state_workspace_active
-  ON low_stock_alert_state(workspace_id, is_active, last_notified_at);`
+  ON low_stock_alert_state(workspace_id, is_active, last_notified_at);`,
+  // 32 — VAT-registration status. workspace_settings.vat_rate was already a typed column read
+  // directly by reporting SQL for performance, but the settings-save route only ever wrote the
+  // JSON blob, so a business's configured VAT rate never actually reached reporting (it silently
+  // stayed at the schema default of 15%). This migration adds the typed vat_registered column,
+  // and the save route is fixed alongside it to keep both typed columns in sync with raw_json
+  // going forward, so a business's actual VAT rate and registration status are both honored.
+  //
+  // Safe to leave in place even while write quota is constrained: WorkspaceDO.migrate() now
+  // backs off and keeps serving on the existing schema if this fails, instead of crashing the
+  // whole workspace. It will finish applying itself automatically the next time it's attempted
+  // after quota headroom returns — no manual re-deploy needed.
+  `ALTER TABLE workspace_settings ADD COLUMN vat_registered INTEGER NOT NULL DEFAULT 1;`,
+  // 33 — scheduled-reconciliation failure backoff + cross-run finding dedupe. Fixes the runaway
+  // 15-minute deep-scan loop that consumed the entire daily Durable Object write allowance on
+  // workspaces that had never gone live. See the migration body for the full root cause.
+  YOCO_V2_RECONCILIATION_BACKOFF_MIGRATION,
+  // 34 — drop the legacy V1 webhook event log. Shadow-mode comparison against yoco-engine-v2
+  // is over and the cutover is complete; all webhook capture/observability now lives in
+  // yoco_v2_webhook_receipts. No code reads or writes this table anymore (see legacy/routes.ts).
+  `DROP TABLE IF EXISTS yoco_webhook_events;`,
+  // 35 — Phase V2 14: unify the sale and refund effect-control tables into one yoco_v2_effect_gate
+  // table (see migration body). Collapses cutover.ts/refund-cutover.ts's duplicated runtime gate
+  // logic into a single effect-gate.ts module.
+  YOCO_V2_EFFECT_GATE_MIGRATION
 ];

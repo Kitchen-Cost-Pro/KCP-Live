@@ -3,6 +3,7 @@ import { DEFAULT_STOCK_LOCATION_ID, normalizeSites, normalizeStockLocations } fr
 import { parseBarcodeValues } from '../utils/barcodes.js';
 import { resolveBalanceKey } from '../utils/stockBalances.js';
 import { resolveStockItemSku } from '../utils/stockSku.js';
+import { deriveStockItemType, stripStockCategoryTypeSuffix } from '../utils/stockItemType.js';
 
 const DEFAULT_UOMS = ['ea', 'kg', 'g', 'l', 'ml', 'pack', 'case', 'bottle', 'bag', 'box', 'tray', 'portion', 'batch'];
 const MANUFACTURED_CATEGORY = 'Manufactured';
@@ -117,6 +118,24 @@ export async function upsertStockItem(workspaceId, item = {}) {
     method: item.id ? 'PATCH' : 'POST',
     payload: { item: payload }
   });
+}
+
+/**
+ * Every database id a displayed stock row actually stands for.
+ *
+ * `dedupeStockItems` collapses rows that share name+category+unit into ONE visible row, keeping the
+ * primary's `id` and recording the whole group in `mergedIds`. Anything that mutates a row therefore
+ * has to act on the full group: deleting only `id` left the siblings active, and the next refresh
+ * rebuilt the merged row from them — which is exactly why deleted items "came back".
+ */
+export function resolveStockItemPersistedIds(item = {}) {
+  const merged = String(item.mergedIds || '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const primary = String(item.id || '').trim();
+  // Primary first so the caller's single-delete path targets the row the user actually clicked.
+  return [...new Set(primary ? [primary, ...merged] : merged)];
 }
 
 export async function deleteStockItem(workspaceId, itemId) {
@@ -612,7 +631,11 @@ function normalizeStockPayload(item = {}) {
 	  const isSubRecipe = itemType === 'sub_recipe';
 	  const isManufactured = itemType === 'manufactured';
 	  const isRecipeSource = itemType === 'recipe_source';
-	  let category = String(item.category || '').trim();
+	  // Strip any type marker the previous save appended before deriving the new one. Without this the
+	  // markers accumulate ("General - Non Stock - Raw Materials") and the stale text keeps the item
+	  // pinned to its old type on every subsequent save, which is why converting a Non Stock item back
+	  // to a normal stock item never stuck.
+	  let category = stripStockCategoryTypeSuffix(item.category);
   const name = String(item.name || '').replace(/\s+-\s+Manufactured$/i, '').replace(/\s+-\s+Manufacturing$/i, '').trim();
   const hasStock = Object.prototype.hasOwnProperty.call(item, 'stock') && item.stock !== undefined && item.stock !== null && item.stock !== '';
 
@@ -621,8 +644,11 @@ function normalizeStockPayload(item = {}) {
 	  } else if (isManufactured) {
 	    category = normalizeManufacturedCategory(name, category);
 	  } else if (isRecipeSource) {
-	    category = category && /recipe source|non[-\s]?stock|virtual/i.test(category) ? category : `${category || 'General'} - Non Stock`;
-	  } else if (!isManufactured && category && !category.toLowerCase().includes('raw materials')) {
+	    // The `includes` guards keep a user whose own base category happens to BE the marker word
+	    // ("Raw Materials", "Non Stock") from getting it appended twice — stripping only removes a
+	    // marker that follows a " - " separator, so a bare one survives by design.
+	    category = /non[-\s]?stock/i.test(category) ? category : `${category || 'General'} - Non Stock`;
+	  } else if (category && !category.toLowerCase().includes('raw materials')) {
 	    category += ' - Raw Materials';
 	  }
 
@@ -644,7 +670,12 @@ function normalizeStockPayload(item = {}) {
     yieldFactor: Number(item.yieldFactor || 100),
     yieldBatch: parseDecimal(item.yieldBatch, 1),
     uomConfigurations: normalizeUomConfigurations(item.uomConfigurations || item.uomConfig || item.uom_configuration || item.uomConversions || item.uomConversion),
-	    recipe: ['sub_recipe', 'manufactured', 'recipe_source'].includes(itemType)
+	    // Non Stock ("recipe_source") items are simple purchased items with no bill-of-materials —
+	    // they are counted as-is, not assembled from other ingredients. The editor already refuses to
+	    // show them an ingredients screen (see isRecipeBackedItem in StockItems.js); carrying a recipe
+	    // for them here too meant the two layers disagreed, and a Non Stock item kept being treated as
+	    // recipe-backed downstream.
+	    recipe: ['sub_recipe', 'manufactured'].includes(itemType)
 	      ? normalizeStockRecipe(item.recipe)
 	      : [],
 	    itemType,
@@ -690,34 +721,12 @@ function normalizeSubRecipeCategory(category = '') {
   return `${raw || 'General'} - Sub Recipe`;
 }
 
+// Delegates to the shared canonical derivation. This module treats 'virtual' as a Non Stock
+// ("recipe_source") item, which is the behaviour it has always had, so the fine-grained type is
+// collapsed here rather than in the shared helper (stock-count eligibility needs the distinction).
 function normalizeStockItemType(item = {}) {
-  const explicit = String(item.itemType || item.stockItemType || item.specificationType || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
-  const category = String(item.category || '').toLowerCase();
-  if (
-    ['sub_recipe', 'subrecipe'].includes(explicit) ||
-    parseBooleanFlag(item.isSubRecipe ?? item.SubRecipe, false) ||
-    category.includes('sub recipe') ||
-    category.includes('sub-recipe')
-  ) {
-    return 'sub_recipe';
-  }
-  if (
-    ['manufactured', 'prep', 'prepared', 'manufactured_item'].includes(explicit) ||
-    parseBooleanFlag(item.isManufactured ?? item.Manufactured ?? item.manufactured ?? item.MFG, false) ||
-    category.includes('manufactured')
-  ) {
-    return 'manufactured';
-  }
-  if (
-    ['recipe_source', 'non_stock', 'virtual'].includes(explicit) ||
-    category.includes('recipe source') ||
-    category.includes('non-stock') ||
-    category.includes('non stock') ||
-    category.includes('virtual')
-  ) {
-    return 'recipe_source';
-  }
-  return 'standard';
+  const type = deriveStockItemType(item);
+  return type === 'virtual' ? 'recipe_source' : type;
 }
 
 function normalizeStockRecipe(value = []) {

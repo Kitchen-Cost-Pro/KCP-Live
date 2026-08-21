@@ -252,6 +252,38 @@ function findExplicitConversionFactor({ from, to, stockItem = {}, recipeData = {
   const lineRatio = safeNumber(stockItem?.uomRatio ?? stockItem?.uom_ratio, 0);
   if (lineRatio && normalizeUom(stockItem?.unit || stockItem?.uom) === from && normalizeUom(stockItem?.baseUom || stockItem?.base_uom) === to) return lineRatio;
 
+  // The UOM builder saves custom UOM ratios under `uomConfigurations` with shape
+  // { baseUom, customUom, ratio } (see normalizeUomConfigurations on the backend) — NOT
+  // `uomConversions` with a { from, to, factor } shape. This previously only ever checked
+  // `uomConversions`, a field nothing in the app actually writes, so a configured custom UOM
+  // ratio could never be found and every custom-UOM recipe line was flagged as a missing
+  // conversion regardless of what was actually set up.
+  const rawJsonUomConfigurations = parseJson(stockItem.raw_json || stockItem.raw || '{}').uomConfigurations;
+  const configuredUoms = [
+    ...toArray(stockItem.uomConfigurations),
+    ...toArray(rawJsonUomConfigurations)
+  ];
+  const entryCustom = (entry) => normalizeUom(entry.customUom || entry.custom_uom || entry.customUnit);
+  const entryBase = (entry) => normalizeUom(entry.baseUom || entry.base_uom || entry.baseUnit);
+  const entryRatio = (entry) => safeNumber(entry.ratio ?? entry.conversionRatio ?? entry.unitsPerCustomUnit ?? entry.units_per_custom_unit, 0);
+
+  const configMatch = configuredUoms.find((entry) =>
+    entryCustom(entry) === from && (entryBase(entry) === to || !entryBase(entry))
+  );
+  if (configMatch) {
+    const factor = entryRatio(configMatch);
+    if (factor) return factor;
+  }
+
+  // A configured ratio describes both directions. `ratio` is base units per ONE custom unit, so the
+  // custom -> base direction is the ratio and base -> custom is its reciprocal. Without this inverse
+  // lookup a recipe line written in the base UOM against an item stocked in a custom one was still
+  // reported as a missing conversion even though the ratio was set up in the UOM builder.
+  const inverseMatch = configuredUoms.find((entry) =>
+    entryBase(entry) === from && entryCustom(entry) === to && entryRatio(entry) > 0
+  );
+  if (inverseMatch) return 1 / entryRatio(inverseMatch);
+
   const conversions = [
     ...toArray(recipeData.uomConversions),
     ...toArray(stockItem.uomConversions),

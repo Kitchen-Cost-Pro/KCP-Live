@@ -3,16 +3,28 @@ import { yocoV2FeatureFlags } from './config';
 import type { YocoV2EffectType } from './contracts';
 import { nowIso, type Row } from './repository';
 
-export type RefundEffectType = Extract<YocoV2EffectType, 'REFUND_REPORTING' | 'REFUND_STOCK'>;
-
 function text(value: unknown): string { return String(value ?? '').trim(); }
 function enabled(value: unknown, fallback = true): boolean {
   if (value == null || value === '') return fallback;
   return Number(value) === 1;
 }
 
-export interface RefundEffectRuntime {
-  effectType: RefundEffectType;
+function environmentEnabledFor(env: Env, workspaceId: string, effectType: YocoV2EffectType): boolean {
+  const flags = yocoV2FeatureFlags(env, workspaceId);
+  switch (effectType) {
+    case 'SALE_REPORTING': return flags.yoco_v2_live_sale_reporting;
+    case 'SALE_STOCK': return flags.yoco_v2_live_sale_stock;
+    case 'REFUND_REPORTING': return flags.yoco_v2_live_refund_reporting;
+    case 'REFUND_STOCK': return flags.yoco_v2_live_refund_stock;
+  }
+}
+
+function disabledReasonPrefix(effectType: YocoV2EffectType): string {
+  return effectType.startsWith('REFUND_') ? 'REFUND_' : '';
+}
+
+export interface EffectRuntime {
+  effectType: YocoV2EffectType;
   workspaceId: string;
   integrationId: string;
   environmentEnabled: boolean;
@@ -25,12 +37,12 @@ export interface RefundEffectRuntime {
   reason: string;
 }
 
-export async function getRefundEffectRuntime(
+export async function getEffectRuntime(
   env: Env,
   workspaceId: string,
   integrationId: string,
-  effectType: RefundEffectType,
-): Promise<RefundEffectRuntime> {
+  effectType: YocoV2EffectType,
+): Promise<EffectRuntime> {
   const [ownership, control] = await Promise.all([
     env.DB.prepare(
       `SELECT engine_version, enabled FROM integration_effect_ownership
@@ -38,22 +50,20 @@ export async function getRefundEffectRuntime(
     ).bind(workspaceId, effectType).first<Row>(),
     env.DB.prepare(
       `SELECT feature_enabled, consumption_paused, cutover_at, activated_by
-         FROM yoco_v2_refund_effect_controls
+         FROM yoco_v2_effect_gate
         WHERE workspace_id = ?1 AND integration_id = ?2 AND effect_type = ?3 LIMIT 1`,
     ).bind(workspaceId, integrationId, effectType).first<Row>(),
   ]);
-  const flags = yocoV2FeatureFlags(env, workspaceId);
-  const environmentEnabled = effectType === 'REFUND_REPORTING'
-    ? flags.yoco_v2_live_refund_reporting
-    : flags.yoco_v2_live_refund_stock;
+  const environmentEnabled = environmentEnabledFor(env, workspaceId, effectType);
   const ownerIsV2 = text(ownership?.engine_version).toUpperCase() === 'V2' && enabled(ownership?.enabled, false);
   const featureEnabled = enabled(control?.feature_enabled, true);
   const paused = enabled(control?.consumption_paused, false);
   const canConsume = environmentEnabled && ownerIsV2 && featureEnabled && !paused;
-  const reason = !environmentEnabled ? 'REFUND_ENVIRONMENT_FEATURE_FLAG_DISABLED'
-    : !ownerIsV2 ? 'REFUND_EFFECT_OWNERSHIP_NOT_V2'
-      : !featureEnabled ? 'REFUND_WORKSPACE_EFFECT_DISABLED'
-        : paused ? 'V2_REFUND_CONSUMPTION_PAUSED'
+  const prefix = disabledReasonPrefix(effectType);
+  const reason = !environmentEnabled ? `${prefix}ENVIRONMENT_FEATURE_FLAG_DISABLED`
+    : !ownerIsV2 ? `${prefix}EFFECT_OWNERSHIP_NOT_V2`
+      : !featureEnabled ? `${prefix}WORKSPACE_EFFECT_DISABLED`
+        : paused ? `V2_${prefix}CONSUMPTION_PAUSED`
           : 'ACTIVE';
   return {
     effectType, workspaceId, integrationId, environmentEnabled, ownerIsV2, featureEnabled, paused,
@@ -63,34 +73,34 @@ export async function getRefundEffectRuntime(
   };
 }
 
-export async function pauseRefundEffect(env: Env, input: {
-  workspaceId: string; integrationId: string; effectType: RefundEffectType; actorId: string; reason?: string;
+export async function pauseEffect(env: Env, input: {
+  workspaceId: string; integrationId: string; effectType: YocoV2EffectType; actorId: string; reason?: string;
 }): Promise<Row> {
   const now = nowIso();
   await env.DB.prepare(
-    `INSERT INTO yoco_v2_refund_effect_controls
+    `INSERT INTO yoco_v2_effect_gate
       (workspace_id, integration_id, effect_type, feature_enabled, consumption_paused, pause_reason, cutover_at, activated_by, updated_at, updated_by)
      VALUES (?1, ?2, ?3, 1, 1, ?4, ?5, ?6, ?5, ?6)
      ON CONFLICT(workspace_id, integration_id, effect_type) DO UPDATE SET
-       consumption_paused=1, pause_reason=excluded.pause_reason, updated_at=excluded.updated_at, updated_by=excluded.updated_by`,
+       consumption_paused = 1, pause_reason = excluded.pause_reason, updated_at = excluded.updated_at, updated_by = excluded.updated_by`,
   ).bind(input.workspaceId, input.integrationId, input.effectType, input.reason || 'Paused by administrator.', now, input.actorId).run();
   return (await env.DB.prepare(
-    `SELECT * FROM yoco_v2_refund_effect_controls WHERE workspace_id=?1 AND integration_id=?2 AND effect_type=?3`,
+    `SELECT * FROM yoco_v2_effect_gate WHERE workspace_id=?1 AND integration_id=?2 AND effect_type=?3`,
   ).bind(input.workspaceId, input.integrationId, input.effectType).first<Row>()) || {};
 }
 
-export async function resumeRefundEffect(env: Env, input: {
-  workspaceId: string; integrationId: string; effectType: RefundEffectType; actorId: string;
+export async function resumeEffect(env: Env, input: {
+  workspaceId: string; integrationId: string; effectType: YocoV2EffectType; actorId: string;
 }): Promise<Row> {
   const now = nowIso();
   await env.DB.prepare(
-    `INSERT INTO yoco_v2_refund_effect_controls
+    `INSERT INTO yoco_v2_effect_gate
       (workspace_id, integration_id, effect_type, feature_enabled, consumption_paused, cutover_at, activated_by, updated_at, updated_by)
      VALUES (?1, ?2, ?3, 1, 0, ?4, ?5, ?4, ?5)
      ON CONFLICT(workspace_id, integration_id, effect_type) DO UPDATE SET
        feature_enabled=1, consumption_paused=0, pause_reason=NULL, updated_at=excluded.updated_at, updated_by=excluded.updated_by`,
   ).bind(input.workspaceId, input.integrationId, input.effectType, now, input.actorId).run();
   return (await env.DB.prepare(
-    `SELECT * FROM yoco_v2_refund_effect_controls WHERE workspace_id=?1 AND integration_id=?2 AND effect_type=?3`,
+    `SELECT * FROM yoco_v2_effect_gate WHERE workspace_id=?1 AND integration_id=?2 AND effect_type=?3`,
   ).bind(input.workspaceId, input.integrationId, input.effectType).first<Row>()) || {};
 }

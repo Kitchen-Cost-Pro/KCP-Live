@@ -105,12 +105,31 @@ async function addFinding(env: Env, input: {
   repaired?: boolean;
 }): Promise<void> {
   const now = nowIso();
+  // Idempotent per FINDING, not per run. The table's original UNIQUE constraint included
+  // reconciliation_run_id and every run mints a fresh run id, so `INSERT OR IGNORE` could only
+  // dedupe within a single run: the same unresolved entity was re-inserted as a new row on every
+  // 15-minute tick, forever. Uniqueness now keys on the finding identity
+  // (ux_yoco_v2_reconciliation_findings_entity), so a recurrence updates one row rather than
+  // appending another — the difference between a bounded table and unbounded write growth.
   await env.DB.prepare(
-    `INSERT OR IGNORE INTO yoco_v2_reconciliation_findings
+    `INSERT INTO yoco_v2_reconciliation_findings
       (id, reconciliation_run_id, workspace_id, integration_id, source_entity_type,
        source_entity_id, finding_type, severity, status, details_json, repair_action,
-       repaired_at, created_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)`
+       repaired_at, created_at, last_seen_at, last_run_id, occurrence_count)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13, ?2, 1)
+     ON CONFLICT(workspace_id, integration_id, finding_type, source_entity_type, source_entity_id)
+     DO UPDATE SET
+       last_seen_at = excluded.last_seen_at,
+       last_run_id = excluded.last_run_id,
+       occurrence_count = yoco_v2_reconciliation_findings.occurrence_count + 1,
+       severity = excluded.severity,
+       details_json = excluded.details_json,
+       repair_action = excluded.repair_action,
+       -- A finding that has since been repaired must not be dragged back to OPEN by a later
+       -- sighting, and a still-open one must not be silently marked repaired.
+       status = CASE WHEN excluded.status = 'REPAIRED' THEN 'REPAIRED'
+                     ELSE yoco_v2_reconciliation_findings.status END,
+       repaired_at = COALESCE(yoco_v2_reconciliation_findings.repaired_at, excluded.repaired_at)`
   ).bind(newId('yoco_v2_reconciliation_finding'), input.runId, input.workspaceId, input.integrationId,
     input.entityType, input.entityId, input.findingType, input.severity, input.repaired ? 'REPAIRED' : 'OPEN',
     JSON.stringify(input.details || {}), input.repairAction || null, input.repaired ? now : null, now).run();
@@ -295,25 +314,112 @@ export async function runYocoV2Reconciliation(env: YocoV2ApiClientEnv, workspace
   return (await env.DB.prepare(`SELECT * FROM yoco_v2_reconciliation_runs WHERE id = ?1`).bind(runId).first<Row>()) || { id: runId };
 }
 
+/**
+ * Has this workspace gone live on Yoco?
+ *
+ * Scheduled reconciliation exists to catch sales the webhook missed, so it is meaningless before a
+ * business has connected Yoco and gone live — there are no sales to reconcile. Read via the same
+ * `connection_active` gate `postRunDueCatalogueSync` already uses, and deliberately WITHOUT
+ * `ensureState`, so a workspace that has never gone live costs zero writes per tick instead of an
+ * upsert, a run row, diagnostics and a failed-run update every 15 minutes.
+ *
+ * Returns the Go Live boundary (`sales_baseline_at`) when live, or null when not.
+ */
+async function goLiveBoundary(env: Env, workspaceId: string): Promise<{ baselineAt: string } | null> {
+  // Only `status` and `connection_active` are read here: both are guaranteed by the base
+  // yoco_connections definition in schema-repair. `sales_baseline_at` arrived in a later migration,
+  // so it is read separately and tolerated as absent — a workspace whose migration is still pending
+  // must not have this gate throw on every cron tick, which is precisely the failure shape that
+  // produced the original write storm.
+  const connection = await env.DB.prepare(
+    `SELECT status, connection_active FROM yoco_connections WHERE workspace_id = ?1 LIMIT 1`
+  ).bind(workspaceId).first<Row>();
+  if (!connection) return null;
+  const live = numberValue(connection.connection_active) === 1 && text(connection.status) === 'connected';
+  if (!live) return null;
+
+  let baselineAt = '';
+  try {
+    const baseline = await env.DB.prepare(
+      `SELECT sales_baseline_at FROM yoco_connections WHERE workspace_id = ?1 LIMIT 1`
+    ).bind(workspaceId).first<Row>();
+    baselineAt = text(baseline?.sales_baseline_at);
+  } catch {
+    // Column not present yet — fall back to the plain lookback window below.
+  }
+  return { baselineAt };
+}
+
+const RECONCILIATION_MAX_BACKOFF_MS = 6 * 60 * 60_000;
+
 export async function runScheduledYocoV2Reconciliation(env: YocoV2ApiClientEnv, workspaceId: string, integrationId: string, at = new Date()): Promise<Row | null> {
+  // Gate 1 — Go Live. Cheapest check first, and the one that matters most: a workspace that has
+  // not gone live does no reconciliation at all, and pays a single indexed SELECT per tick.
+  const goLive = await goLiveBoundary(env, workspaceId);
+  if (!goLive) return null;
+
   const state = await ensureState(env, workspaceId, integrationId);
   if (numberValue(state.paused) === 1) return null;
   const now = at.getTime();
+
+  // Gate 2 — failure backoff. Without this, any persistently failing run (expired API key, Yoco
+  // outage, pagination hitting its page ceiling) retried on every single cron tick forever.
+  const nextRetryAt = Date.parse(text(state.next_retry_at));
+  if (Number.isFinite(nextRetryAt) && now < nextRetryAt) return null;
+
   const lastHourly = Date.parse(text(state.last_hourly_run_at));
   const lastDaily = Date.parse(text(state.last_daily_run_at));
   const dailyDue = !Number.isFinite(lastDaily) || now - lastDaily >= 24 * 60 * 60_000;
   const hourlyDue = !Number.isFinite(lastHourly) || now - lastHourly >= 60 * 60_000;
   if (!dailyDue && !hourlyDue) return null;
+
+  // Never scan back past Go Live — before that boundary there is nothing this workspace considers
+  // its own history, so a 7-day deep window on a freshly-live workspace would page through
+  // (and write findings for) orders that predate it.
+  const deepStartMs = now - 7 * 24 * 60 * 60_000;
+  // Compare as instants, never as strings: sales_baseline_at may have been written by SQLite's
+  // datetime('now') as "2026-07-15 02:00:00" rather than an ISO instant, and " " sorts before "T",
+  // so a lexical comparison would silently decide the baseline is older than it is.
+  const baselineMs = Date.parse(goLive.baselineAt.includes('T') ? goLive.baselineAt : goLive.baselineAt.replace(' ', 'T') + 'Z');
+  const windowStart = new Date(Number.isFinite(baselineMs) ? Math.max(deepStartMs, baselineMs) : deepStartMs).toISOString();
   const options: ReconciliationRunOptions = dailyDue
-    ? { deep: true, windowStart: new Date(now - 7 * 24 * 60 * 60_000).toISOString(), windowEnd: at.toISOString() }
+    ? { deep: true, windowStart, windowEnd: at.toISOString() }
     : { windowEnd: at.toISOString() };
-  const run = await runYocoV2Reconciliation(env, workspaceId, integrationId, options);
+
+  // Record the ATTEMPT before running it. This is the fix for the write storm: the previous code
+  // stamped these columns only after runYocoV2Reconciliation returned, and that function re-throws
+  // on failure — so a failing run never recorded that it ran, `dailyDue` stayed true forever, and
+  // every 15-minute tick re-ran the full deep scan indefinitely.
+  const attemptAt = at.toISOString();
   await env.DB.prepare(
-    `UPDATE yoco_v2_reconciliation_state SET last_hourly_run_at = ?3,
+    `UPDATE yoco_v2_reconciliation_state SET last_attempt_at = ?3, last_hourly_run_at = ?3,
       last_daily_run_at = CASE WHEN ?4 = 1 THEN ?3 ELSE last_daily_run_at END, updated_at = ?3
       WHERE workspace_id = ?1 AND integration_id = ?2`
-  ).bind(workspaceId, integrationId, at.toISOString(), dailyDue ? 1 : 0).run();
-  return run;
+  ).bind(workspaceId, integrationId, attemptAt, dailyDue ? 1 : 0).run();
+
+  try {
+    const run = await runYocoV2Reconciliation(env, workspaceId, integrationId, options);
+    if (numberValue(state.consecutive_failures) > 0 || text(state.next_retry_at)) {
+      await env.DB.prepare(
+        `UPDATE yoco_v2_reconciliation_state SET consecutive_failures = 0, next_retry_at = NULL,
+          last_failure_reason = NULL, updated_at = ?3 WHERE workspace_id = ?1 AND integration_id = ?2`
+      ).bind(workspaceId, integrationId, nowIso()).run();
+    }
+    return run;
+  } catch (cause) {
+    // Exponential backoff, capped: 15min, 30min, 1h, 2h, 4h, 6h. The attempt stamp above already
+    // landed, so even if this bookkeeping write fails the run can no longer loop every tick.
+    const failures = numberValue(state.consecutive_failures) + 1;
+    const backoffMs = Math.min(RECONCILIATION_MAX_BACKOFF_MS, 15 * 60_000 * 2 ** (failures - 1));
+    const reason = cause instanceof Error ? cause.message : String(cause);
+    await env.DB.prepare(
+      `UPDATE yoco_v2_reconciliation_state SET consecutive_failures = ?3, next_retry_at = ?4,
+        last_failure_reason = ?5, updated_at = ?6 WHERE workspace_id = ?1 AND integration_id = ?2`
+    ).bind(workspaceId, integrationId, failures, new Date(now + backoffMs).toISOString(), reason.slice(0, 500), nowIso())
+      .run()
+      .catch(() => null);
+    throw cause;
+  }
 }
 
 export async function setYocoV2ReconciliationPause(env: Env, workspaceId: string, integrationId: string, paused: boolean, reason = ''): Promise<Row> {

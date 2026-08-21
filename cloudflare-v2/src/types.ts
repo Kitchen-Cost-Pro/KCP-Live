@@ -8,11 +8,13 @@ export interface Env {
   CENTRAL_DB: D1Database;
   WORKSPACE: DurableObjectNamespace;
   YOCO_V2_RATE_GATE: DurableObjectNamespace;
+  YOCO_V2_WRITE_BUDGET?: DurableObjectNamespace;
 
   ENVIRONMENT?: string;
   ALLOWED_ORIGINS?: string;
   APP_BASE_URL?: string;
   YOCO_API_BASE_URL?: string;
+  YOCO_V2_WRITE_BUDGET_DAILY_CAP?: string;
   ADMIN_BOOTSTRAP_EMAILS?: string;
 
   // Secrets (set on the new account) — mirror ../cloudflare/src/types.ts as domains are ported.

@@ -25,8 +25,6 @@ import {
   listYocoModifierGroups,
   actionableYocoModifierGroup,
   syncYocoCatalogue,
-  resetYocoWebhook,
-  testYocoWebhook,
 } from "../modules/yoco-engine-v2/integration-service";
 import {
   decryptTextWithSecret,
@@ -47,6 +45,7 @@ import { lowStockLocationRelevantSql } from "./low-stock-policy";
 import { sendEmail } from "./email";
 import {
   calculateIncomingLocationCost,
+  getWorkspaceEffectiveVatRate,
   getWorkspaceInventoryCostingMethod,
   resolveLocationUnitCost,
   upsertLocationCostStatement,
@@ -237,6 +236,13 @@ function normalizeItemType(value: unknown, fallback = "raw") {
   );
 }
 
+const AUTO_GENERATED_STOCK_CATEGORY_LABELS = new Set([
+  "general - sub recipe",
+  "general - manufactured",
+  "general - non stock",
+  "general - raw materials",
+]);
+
 function isNonStockItemType(itemType: string) {
   return ["non_stock", "recipe_source", "virtual"].includes(
     normalizeItemType(itemType),
@@ -263,22 +269,25 @@ function deriveStockItemType(merged: Record<string, unknown>): string {
           : ""),
     "",
   );
-  const category = text(merged.category).toLowerCase();
-  if (
-    ["sub_recipe", "subrecipe"].includes(explicit) ||
-    category.includes("sub recipe") ||
-    category.includes("sub-recipe")
-  )
-    return "sub_recipe";
-  if (
-    ["manufactured", "prep", "prepared", "manufactured_item"].includes(
-      explicit,
-    ) ||
-    category.includes("manufactured")
-  )
+  // An explicit itemType is authoritative and must never be overridden by the item's category
+  // text. Previously, category-text matching ("General - Non Stock", "General - Sub Recipe", etc.)
+  // was checked with EQUAL priority to an explicit itemType, via an OR condition — so switching an
+  // item's type back (e.g. Non Stock -> Raw) silently failed to persist whenever the category
+  // string hadn't also been reset, because the stale category text kept re-deriving the OLD type
+  // on every subsequent save. Category-text inference now only runs when there is no explicit
+  // type at all (legacy data saved before the itemType field existed).
+  if (["sub_recipe", "subrecipe"].includes(explicit)) return "sub_recipe";
+  if (["manufactured", "prep", "prepared", "manufactured_item"].includes(explicit))
     return "manufactured";
+  if (["recipe_source", "non_stock", "virtual"].includes(explicit))
+    return "recipe_source";
+  if (explicit) return "raw";
+
+  const category = text(merged.category).toLowerCase();
+  if (category.includes("sub recipe") || category.includes("sub-recipe"))
+    return "sub_recipe";
+  if (category.includes("manufactured")) return "manufactured";
   if (
-    ["recipe_source", "non_stock", "virtual"].includes(explicit) ||
     category.includes("recipe source") ||
     category.includes("non-stock") ||
     category.includes("non stock") ||
@@ -506,8 +515,7 @@ function normalizeStockItemPayload(raw: Record<string, unknown>) {
   const merged = { ...rawJson, ...raw };
   const name = text(merged.name || merged.ingredientName);
   const itemType = deriveStockItemType(merged);
-  const category = text(
-    merged.category,
+  const defaultCategoryForType =
     itemType === "sub_recipe"
       ? "General - Sub Recipe"
       : itemType === "manufactured"
@@ -516,8 +524,18 @@ function normalizeStockItemPayload(raw: Record<string, unknown>) {
             itemType === "virtual" ||
             itemType === "non_stock"
           ? "General - Non Stock"
-          : "General - Raw Materials",
-  );
+          : "General - Raw Materials";
+  const existingCategory = text(merged.category);
+  // If the category is empty, use the default label for the (possibly just-changed) type. If the
+  // category is one of the system's own auto-generated labels — left over from a PREVIOUS item
+  // type, e.g. "General - Non Stock" after switching an item back to Raw — replace it with the
+  // correct label for the current type instead of leaving a stale, mismatched category behind.
+  // Any genuinely custom category the person typed themselves is always preserved untouched.
+  const category = !existingCategory
+    ? defaultCategoryForType
+    : AUTO_GENERATED_STOCK_CATEGORY_LABELS.has(existingCategory.toLowerCase())
+      ? defaultCategoryForType
+      : existingCategory;
   const explicitStocked = merged.isStocked ?? merged.is_stocked;
   const isStocked = ["sub_recipe", "subrecipe", "virtual"].includes(itemType)
     ? 0
@@ -669,36 +687,53 @@ async function saveStockItem(
   if (!item.name) throw new Error("Stock item name is required.");
   const allowStockBalanceUpdate = options.allowStockBalanceUpdate !== false;
 
+  // Deliberately NOT filtered to active = 1. Deletion is a soft delete (active = 0), so filtering
+  // here made a save against a deleted id look like a brand-new item: `nameIsChanging` became true
+  // and the uniqueness scan below then rejected the save with "a stock item named X already exists"
+  // even though the only thing it collided with was the item's own former name. The duplicate scan
+  // itself still considers active rows only, so a deleted item's name never blocks a genuinely new
+  // one.
   const existing = await env.DB.prepare(
-    `SELECT id
+    `SELECT id, name
        FROM stock_items
       WHERE workspace_id = ?1
-        AND active = 1
         AND id = ?2
       LIMIT 1`,
   )
     .bind(workspaceId, item.id)
-    .first<{ id: string }>();
+    .first<{ id: string; name: string }>();
 
-  const duplicateRows = await env.DB.prepare(
-    `SELECT id, name
-       FROM stock_items
-      WHERE workspace_id = ?1
-        AND active = 1`,
-  )
-    .bind(workspaceId)
-    .all<{ id: string; name: string }>();
-  const nextNameKey = normalizeStockItemDuplicateName(item.name);
-  const duplicateName = (duplicateRows.results || []).find(
-    (row) =>
-      normalizeStockItemDuplicateName(row.name) === nextNameKey &&
-      text(row.id) !== item.id,
-  );
+  // Only enforce name-uniqueness when the name is actually changing. Some workspaces
+  // already carry pre-existing stock items that share a name but differ by unit (e.g.
+  // imported from a POS catalogue before this rule existed). Re-running a full-workspace
+  // uniqueness check on every save — including saves that only change UOM, cost, category,
+  // etc. — permanently blocks editing those items even though the edit has nothing to do
+  // with the name collision. Gating on an actual name change lets existing records keep
+  // being edited while still preventing a brand-new collision from being introduced.
+  const nameIsChanging =
+    !existing || normalizeStockItemDuplicateName(existing.name) !== normalizeStockItemDuplicateName(item.name);
 
-  if (duplicateName?.id) {
-    throw new Error(
-      `A stock item named "${item.name}" already exists. Stock item names must be unique.`,
+  if (nameIsChanging) {
+    const duplicateRows = await env.DB.prepare(
+      `SELECT id, name
+         FROM stock_items
+        WHERE workspace_id = ?1
+          AND active = 1`,
+    )
+      .bind(workspaceId)
+      .all<{ id: string; name: string }>();
+    const nextNameKey = normalizeStockItemDuplicateName(item.name);
+    const duplicateName = (duplicateRows.results || []).find(
+      (row) =>
+        normalizeStockItemDuplicateName(row.name) === nextNameKey &&
+        text(row.id) !== item.id,
     );
+
+    if (duplicateName?.id) {
+      throw new Error(
+        `A stock item named "${item.name}" already exists. Stock item names must be unique.`,
+      );
+    }
   }
 
   const stockItemId = existing?.id || item.id;
@@ -1051,33 +1086,15 @@ async function assertRecipeIngredientIdsAllowed(
   workspaceId: string,
   recipeLines: Array<{ stockItemId: string }>,
 ) {
-  const ids = [
-    ...new Set(
-      recipeLines.map((line) => text(line.stockItemId)).filter(Boolean),
-    ),
-  ];
-  if (!ids.length) return;
-  const placeholders = ids.map((_, index) => `?${index + 2}`).join(", ");
-  const rows = await env.DB.prepare(
-    `SELECT id, name, item_type, raw_json
-       FROM stock_items
-      WHERE workspace_id = ?1
-        AND id IN (${placeholders})`,
-  )
-    .bind(workspaceId, ...ids)
-    .all<Record<string, unknown>>();
-  const disallowed = (rows.results || []).find((row) => {
-    const itemType = normalizeItemType(
-      row.item_type || objectValue(jsonParse(row.raw_json)).itemType,
-      "raw",
-    );
-    return ["recipe_source", "non_stock", "virtual"].includes(itemType);
-  });
-  if (disallowed) {
-    throw new Error(
-      `${text(disallowed.name || disallowed.id)} is a non-stock item and cannot be assigned as a recipe ingredient.`,
-    );
-  }
+  // Non Stock items ("recipe_source"/"non_stock"/"virtual") are simple purchased items with a
+  // real unit cost — condiments, packaging, garnishes, etc. — and are legitimate to cost into a
+  // recipe or product just like any other stock item. They only differ from a standard item in
+  // that they don't get their own bill-of-materials (see saveStockItemRecipe). Previously this
+  // function hard-blocked them from being used as an ingredient anywhere, which had no real
+  // technical justification (they have a valid unit_cost like any other item) and was a recurring
+  // point of friction. The only thing still worth guarding against is an actual circular
+  // reference, which callers already prevent via their own sub-recipe ownership checks.
+  return;
 }
 
 async function saveProductRecipe(
@@ -1346,16 +1363,11 @@ async function saveStockItemRecipe(
   raw: Record<string, unknown>,
   item: ReturnType<typeof normalizeStockItemPayload>,
 ) {
-  if (
-    ![
-      "manufactured",
-      "sub_recipe",
-      "recipe_source",
-      "non_stock",
-      "virtual",
-    ].includes(item.itemType)
-  )
-    return;
+  // Non Stock ("recipe_source"/"non_stock") and "virtual" items are simple purchased items
+  // with no bill-of-materials — they are not assembled from other ingredients — so they must
+  // never get a persisted recipe/BOM here. Only Sub-Recipe and Manufactured items are actually
+  // built from ingredients.
+  if (!["manufactured", "sub_recipe"].includes(item.itemType)) return;
 
   const recipeLines = normalizeStockRecipeLines(arrayValue(raw.recipe));
   await assertRecipeIngredientIdsAllowed(env, workspaceId, recipeLines);
@@ -2453,7 +2465,6 @@ const TENANT_TABLE_ALLOWLIST = new Set([
   "yoco_order_lines",
   "yoco_orders",
   "yoco_processed_signatures",
-  "yoco_webhook_events",
 ]);
 
 const SQL_IDENTIFIER = /^[a-z_][a-z0-9_]*$/i;
@@ -2680,13 +2691,20 @@ export async function patchAdminWorkspaceSettingsDO(
   const merged = { ...existing, ...nextPayload } as Record<string, unknown>;
   for (const key of deleteKeys) delete merged[key];
   await env.DB.prepare(
-    `INSERT INTO workspace_settings (workspace_id, raw_json, updated_at)
-     VALUES (?1, ?2, datetime('now'))
+    `INSERT INTO workspace_settings (workspace_id, raw_json, vat_rate, vat_registered, updated_at)
+     VALUES (?1, ?2, ?3, ?4, datetime('now'))
      ON CONFLICT(workspace_id) DO UPDATE SET
        raw_json = excluded.raw_json,
+       vat_rate = excluded.vat_rate,
+       vat_registered = excluded.vat_registered,
        updated_at = excluded.updated_at`,
   )
-    .bind(workspaceId, JSON.stringify(merged))
+    .bind(
+      workspaceId,
+      JSON.stringify(merged),
+      numberValue(merged.vatRate, 15),
+      merged.vatRegistered === false ? 0 : 1,
+    )
     .run();
   return json(request, env, { ok: true, settings: merged });
 }
@@ -2722,14 +2740,6 @@ export async function adminYocoActionDO(
     }
     if (action === "sync-catalogue") {
       const result = await syncYocoCatalogue(env, workspaceId);
-      return json(request, env, { ok: true, ...result });
-    }
-    if (action === "reset-webhook") {
-      const result = await resetYocoWebhook(env, workspaceId);
-      return json(request, env, { ok: true, ...result });
-    }
-    if (action === "test-webhook") {
-      const result = await testYocoWebhook(env, workspaceId);
       return json(request, env, { ok: true, ...result });
     }
     return error(request, env, 404, `Unknown Yoco admin action: ${action}`);
@@ -3014,44 +3024,20 @@ export async function adminYocoEventsDO(
     100,
   );
   const rows = await env.DB.prepare(
-    `SELECT *
-       FROM (
-         SELECT id,
-                'webhook' AS source,
-                provider_event_id,
-                event_type AS operation,
-                yoco_order_id,
-                status,
-                COALESCE(
-                  NULLIF(error_message, ''),
-                  CASE
-                    WHEN lower(replace(event_type, '_', '.')) = 'payment.refunded' AND status = 'processed'
-                      THEN 'Refund webhook marked processed. Confirm the linked refund reporting row and stock movement were created.'
-                    ELSE event_type
-                  END
-                ) AS message,
-                raw_json AS details_json,
-                processed_at,
-                NULL AS duration_ms,
-                created_at
-           FROM yoco_webhook_events
-          WHERE workspace_id = ?1
-         UNION ALL
-         SELECT id,
-                'operation' AS source,
-                correlation_id AS provider_event_id,
-                operation,
-                NULL AS yoco_order_id,
-                status,
-                message,
-                details_json,
-                completed_at AS processed_at,
-                duration_ms,
-                created_at
-           FROM integration_logs
-          WHERE workspace_id = ?1
-            AND provider = 'yoco'
-       ) combined
+    `SELECT id,
+            'operation' AS source,
+            correlation_id AS provider_event_id,
+            operation,
+            NULL AS yoco_order_id,
+            status,
+            message,
+            details_json,
+            completed_at AS processed_at,
+            duration_ms,
+            created_at
+       FROM integration_logs
+      WHERE workspace_id = ?1
+        AND provider = 'yoco'
       ORDER BY created_at DESC
       LIMIT ?2`,
   )
@@ -3243,125 +3229,6 @@ export async function adminUnlinkOrgDO(
     .run();
   console.log(`[admin-unlink-org] cleared org fields ws=${workspaceId}`);
   return json(request, env, { ok: true });
-}
-
-async function recordYocoWebhookRejection(
-  env: Env,
-  details: {
-    workspaceId: string;
-    eventId: string;
-    eventType: string;
-    orderId: string;
-    payloadHash: string;
-    message: string;
-  },
-) {
-  await env.DB.batch([
-    env.DB.prepare(
-      `INSERT INTO yoco_webhook_events
-        (id, workspace_id, provider_event_id, event_type, yoco_order_id,
-         payload_hash, status, error_message, raw_json, created_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'rejected', ?7, '{}', ?8)
-       ON CONFLICT(workspace_id, payload_hash) DO UPDATE SET
-        status = 'rejected',
-        error_message = excluded.error_message`,
-    ).bind(
-      id("yoco_evt"),
-      details.workspaceId,
-      details.eventId,
-      details.eventType || "unknown",
-      details.orderId || null,
-      details.payloadHash,
-      details.message,
-      nowIso(),
-    ),
-    env.DB.prepare(
-      `UPDATE yoco_connections
-          SET last_error = ?2,
-              updated_at = ?3
-        WHERE workspace_id = ?1`,
-    ).bind(details.workspaceId, details.message, nowIso()),
-  ]);
-}
-
-function activeYocoWebhookSecrets(
-  connection: Record<string, unknown> | null | undefined,
-) {
-  const secrets = [text(connection?.webhook_secret)];
-  const previousSecret = text(connection?.webhook_previous_secret);
-  const previousUntil = Date.parse(text(connection?.webhook_previous_until));
-  if (
-    previousSecret &&
-    Number.isFinite(previousUntil) &&
-    previousUntil > Date.now()
-  ) {
-    secrets.push(previousSecret);
-  }
-  return secrets.filter(Boolean);
-}
-
-async function markYocoWebhookSignatureMismatch(env: Env, workspaceId: string) {
-  await env.DB.prepare(
-    `UPDATE yoco_connections
-        SET last_error = ?2,
-            updated_at = ?3
-      WHERE workspace_id = ?1`,
-  )
-    .bind(
-      workspaceId,
-      "Yoco webhook signature mismatch. The webhook subscription may be stale and will be reset on the next integration sync or manual webhook reset.",
-      nowIso(),
-    )
-    .run();
-}
-
-const YOCO_SIGNATURE_ALERT_THRESHOLD = 3;
-const YOCO_SIGNATURE_ALERT_WINDOW_MINUTES = 60;
-
-async function checkYocoWebhookSignatureHealth(env: Env, workspaceId: string) {
-  const row = await env.DB.prepare(
-    `SELECT COUNT(*) AS failures,
-            MIN(created_at) AS first_failure_at,
-            MAX(created_at) AS last_failure_at
-       FROM yoco_webhook_events
-      WHERE workspace_id = ?1
-        AND status = 'rejected'
-        AND error_message LIKE '%signature%'
-        AND datetime(created_at) >= datetime('now', ?2)`,
-  )
-    .bind(workspaceId, `-${YOCO_SIGNATURE_ALERT_WINDOW_MINUTES} minutes`)
-    .first<Record<string, unknown>>();
-
-  const failures = Number(row?.failures || 0) || 0;
-  const alerting = failures >= YOCO_SIGNATURE_ALERT_THRESHOLD;
-  const message = alerting
-    ? `Yoco webhook alert: ${failures} signature verification failures in the last ${YOCO_SIGNATURE_ALERT_WINDOW_MINUTES} minutes. Reset the webhook subscription and verify the stored secret.`
-    : "";
-
-  if (alerting) {
-    console.error(
-      `[yoco-webhook-alert] ws=${workspaceId} failures=${failures} first=${text(row?.first_failure_at)} last=${text(row?.last_failure_at)}`,
-    );
-    await env.DB.prepare(
-      `UPDATE yoco_connections
-          SET last_error = ?2,
-              updated_at = ?3
-        WHERE workspace_id = ?1`,
-    )
-      .bind(workspaceId, message, nowIso())
-      .run();
-  }
-
-  return {
-    ok: true,
-    alerting,
-    failures,
-    threshold: YOCO_SIGNATURE_ALERT_THRESHOLD,
-    windowMinutes: YOCO_SIGNATURE_ALERT_WINDOW_MINUTES,
-    firstFailureAt: text(row?.first_failure_at),
-    lastFailureAt: text(row?.last_failure_at),
-    message,
-  };
 }
 
 async function scoped(
@@ -3999,19 +3866,53 @@ export async function patchWorkspaceSettingsRoute(
     .bind(workspaceId)
     .first<{ raw_json: string }>();
   const current = objectValue(jsonParse(currentRow?.raw_json));
-  const next = {
+  const next: Record<string, unknown> = {
     ...current,
     ...incoming,
     updatedAt: nowIso(),
   };
-  await env.DB.batch([
+
+  // Default to VAT-registered so existing workspaces (which have always had VAT calculated
+  // in reports/costing up to now) see no behavior change until they explicitly flip this off.
+  const wasVatRegistered = current.vatRegistered !== false;
+  const isVatRegistered = next.vatRegistered !== false;
+  let vatRegistrationRecompute: { itemsRescaled: number; locationPricesRescaled: number } | null = null;
+
+  // Only recompute when the caller actually sent `vatRegistered` and it's genuinely changing —
+  // never re-trigger this on unrelated settings saves that happen to echo the current value back.
+  if (
+    Object.prototype.hasOwnProperty.call(incoming, "vatRegistered") &&
+    wasVatRegistered !== isVatRegistered
+  ) {
+    const vatRate = numberValue(next.vatRate, 15) / 100;
+    // Registered -> Not registered: stored costs were ex-VAT and must become VAT-inclusive
+    // (a non-registered business cannot reclaim input VAT, so the full amount paid is a real cost).
+    // Not registered -> Registered: stored costs were VAT-inclusive and must become ex-VAT
+    // (a registered business reclaims input VAT, so it is not part of the item's true cost).
+    const factor = isVatRegistered ? 1 / (1 + vatRate) : 1 + vatRate;
+    vatRegistrationRecompute = await rescaleCostsForVatRegistrationChange(
+      env,
+      workspaceId,
+      factor,
+    );
+  }
+
+  const statements: DbStatementLike[] = [
     env.DB.prepare(
-      `INSERT INTO workspace_settings (workspace_id, raw_json, updated_at)
-       VALUES (?1, ?2, ?3)
+      `INSERT INTO workspace_settings (workspace_id, raw_json, vat_rate, vat_registered, updated_at)
+       VALUES (?1, ?2, ?3, ?4, ?5)
        ON CONFLICT(workspace_id) DO UPDATE SET
         raw_json = excluded.raw_json,
+        vat_rate = excluded.vat_rate,
+        vat_registered = excluded.vat_registered,
         updated_at = excluded.updated_at`,
-    ).bind(workspaceId, JSON.stringify(next), next.updatedAt),
+    ).bind(
+      workspaceId,
+      JSON.stringify(next),
+      numberValue(next.vatRate, 15),
+      isVatRegistered ? 1 : 0,
+      next.updatedAt,
+    ),
     env.DB.prepare(
       `INSERT INTO audit_events (id, workspace_id, actor_uid, event_type, entity_type, entity_id, after_json, created_at)
        VALUES (?1, ?2, ?3, 'workspace_settings_saved', 'workspace_settings', ?2, ?4, ?5)`,
@@ -4022,8 +3923,89 @@ export async function patchWorkspaceSettingsRoute(
       JSON.stringify(next),
       next.updatedAt,
     ),
+  ];
+  if (vatRegistrationRecompute) {
+    statements.push(
+      env.DB.prepare(
+        `INSERT INTO audit_events (id, workspace_id, actor_uid, event_type, entity_type, entity_id, before_json, after_json, created_at)
+         VALUES (?1, ?2, ?3, 'vat_registration_cost_recompute', 'workspace_settings', ?2, ?4, ?5, ?6)`,
+      ).bind(
+        id("audit"),
+        workspaceId,
+        auth.uid,
+        JSON.stringify({ vatRegistered: wasVatRegistered }),
+        JSON.stringify({ vatRegistered: isVatRegistered, ...vatRegistrationRecompute }),
+        next.updatedAt,
+      ),
+    );
+  }
+  await env.DB.batch(statements);
+  return json(request, env, {
+    ok: true,
+    settings: next,
+    vatRegistrationRecompute,
+  });
+}
+
+/**
+ * Rescale every VAT-enabled stock item's cost (master unit_cost and any per-location override)
+ * by `factor` when the workspace's VAT-registration status changes. Only VAT-enabled items are
+ * touched — VAT-exempt items' costs are unaffected by the business's registration status. This
+ * is a one-time, best-effort reinterpretation of currently-stored costs under the new convention;
+ * it cannot retroactively re-derive costs from original GRV line data, so it assumes the entire
+ * stored cost for a VAT-enabled item was VAT-bearing at the workspace's current VAT rate.
+ */
+async function rescaleCostsForVatRegistrationChange(
+  env: Env,
+  workspaceId: string,
+  factor: number,
+): Promise<{ itemsRescaled: number; locationPricesRescaled: number }> {
+  const now = nowIso();
+  const [itemCount, locationPriceCount] = await Promise.all([
+    env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM stock_items WHERE workspace_id = ?1 AND active = 1 AND vat_enabled = 1`,
+    )
+      .bind(workspaceId)
+      .first<{ n: number }>(),
+    env.DB.prepare(
+      `SELECT COUNT(*) AS n
+         FROM stock_item_location_prices silp
+         JOIN stock_items si
+           ON si.id = silp.stock_item_id
+          AND si.workspace_id = silp.workspace_id
+        WHERE silp.workspace_id = ?1
+          AND si.active = 1
+          AND si.vat_enabled = 1`,
+    )
+      .bind(workspaceId)
+      .first<{ n: number }>(),
   ]);
-  return json(request, env, { ok: true, settings: next });
+
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE stock_items
+          SET unit_cost = ROUND(unit_cost * ?2, 4),
+              updated_at = ?3
+        WHERE workspace_id = ?1
+          AND active = 1
+          AND vat_enabled = 1`,
+    ).bind(workspaceId, factor, now),
+    env.DB.prepare(
+      `UPDATE stock_item_location_prices
+          SET price = ROUND(price * ?2, 4),
+              updated_at = ?3
+        WHERE workspace_id = ?1
+          AND stock_item_id IN (
+            SELECT id FROM stock_items
+             WHERE workspace_id = ?1 AND active = 1 AND vat_enabled = 1
+          )`,
+    ).bind(workspaceId, factor, now),
+  ]);
+
+  return {
+    itemsRescaled: Number(itemCount?.n || 0),
+    locationPricesRescaled: Number(locationPriceCount?.n || 0),
+  };
 }
 
 function normalizeMemberRow(row: Record<string, unknown>) {
@@ -4998,7 +4980,7 @@ export async function getProducts(
       .bind(workspaceId)
       .all(),
     env.DB.prepare(
-      `SELECT id, name, category, item_type, is_stocked, unit, unit_cost, raw_json
+      `SELECT id, name, category, item_type, is_stocked, unit, unit_cost, active, raw_json
 	         FROM stock_items
 	        WHERE workspace_id = ?1`,
     )
@@ -5122,13 +5104,22 @@ export async function getProducts(
     );
     const recipe = recipeByProduct.get(productId);
     const recipeLines = recipe
-      ? (linesByRecipe.get(text(recipe.id)) || []).map((line) => ({
-          ingId: text(line.stock_item_id),
-          stockItemId: text(line.stock_item_id),
-          qty: numberValue(line.quantity, 0),
-          quantity: numberValue(line.quantity, 0),
-          unit: text(line.unit, "ea") || "ea",
-        }))
+      ? (linesByRecipe.get(text(recipe.id)) || []).map((line) => {
+          const stockItemId = text(line.stock_item_id);
+          const stockItem = stockItemsById.get(stockItemId) || null;
+          // Include name/active even when the stock item has been deleted (soft-deleted rows
+          // stay in stockItemsById since that query is not filtered to active=1) so the UI can
+          // show "<Name> (deleted)" instead of a bare id it has to guess about.
+          return {
+            ingId: stockItemId,
+            stockItemId,
+            qty: numberValue(line.quantity, 0),
+            quantity: numberValue(line.quantity, 0),
+            unit: text(line.unit, "ea") || "ea",
+            name: text(stockItem?.name),
+            active: stockItem ? Number(stockItem.active ?? 1) !== 0 : false,
+          };
+        })
       : [];
     const recipeSourceStockItemId = text(
       row.recipe_source_stock_item_id ||
@@ -5142,19 +5133,25 @@ export async function getProducts(
       ? recipeByStockItem.get(recipeSourceStockItemId) || null
       : null;
     const recipeSourceRecipeLines = recipeSourceRecipe
-      ? (linesByRecipe.get(text(recipeSourceRecipe.id)) || []).map((line) => ({
-          ingId: text(line.stock_item_id),
-          stockItemId: text(line.stock_item_id),
-          qty: numberValue(line.quantity, 0),
-          quantity: numberValue(line.quantity, 0),
-          unit:
-            text(
-              line.unit ||
-                recipeSourceRecipe.yield_unit ||
-                recipeSourceStockItem?.unit,
-              "ea",
-            ) || "ea",
-        }))
+      ? (linesByRecipe.get(text(recipeSourceRecipe.id)) || []).map((line) => {
+          const stockItemId = text(line.stock_item_id);
+          const stockItem = stockItemsById.get(stockItemId) || null;
+          return {
+            ingId: stockItemId,
+            stockItemId,
+            qty: numberValue(line.quantity, 0),
+            quantity: numberValue(line.quantity, 0),
+            unit:
+              text(
+                line.unit ||
+                  recipeSourceRecipe.yield_unit ||
+                  recipeSourceStockItem?.unit,
+                "ea",
+              ) || "ea",
+            name: text(stockItem?.name),
+            active: stockItem ? Number(stockItem.active ?? 1) !== 0 : false,
+          };
+        })
       : [];
     const effectiveRecipeLines = recipeLines.length
       ? recipeLines
@@ -6390,9 +6387,6 @@ export async function postStockResetDashboardHistory(
       workspaceId,
     ),
     env.DB.prepare(
-      `DELETE FROM yoco_webhook_events WHERE workspace_id = ?1`,
-    ).bind(workspaceId),
-    env.DB.prepare(
       `DELETE FROM integration_errors WHERE workspace_id = ?1`,
     ).bind(workspaceId),
     env.DB.prepare(
@@ -7310,7 +7304,7 @@ export async function postStockUomAction(
   return json(request, env, { ok: true });
 }
 
-function normalizePurchaseOrderPayload(raw: Record<string, unknown>) {
+function normalizePurchaseOrderPayload(raw: Record<string, unknown>, vatRate = 0.15) {
   const order = objectValue(raw.order || raw);
   const orderId = text(order.id) || id("po");
   const date =
@@ -7394,7 +7388,7 @@ function normalizePurchaseOrderPayload(raw: Record<string, unknown>) {
     (sum, line) => sum + numberValue(line.lineTotalEx, 0),
     0,
   );
-  const totalVat = numberValue(order.totalVat, totalEx * 0.15);
+  const totalVat = numberValue(order.totalVat, totalEx * vatRate);
   const totalInc = numberValue(order.totalInc, totalEx + totalVat);
   const status = text(order.status, "draft")
     .toLowerCase()
@@ -7559,8 +7553,10 @@ export async function postPurchaseOrder(
     workspaceId,
     "nav-purchase-orders",
   );
+  const workspaceVatRate = await getWorkspaceEffectiveVatRate(env, workspaceId);
   const payload = normalizePurchaseOrderPayload(
     await readJson<Record<string, unknown>>(request),
+    workspaceVatRate,
   );
   if (!payload.supplierId)
     return error(
@@ -7685,7 +7681,7 @@ export async function postPurchaseOrder(
     const qty = numberValue(line.qty ?? line.quantity, 0);
     const unitPrice = numberValue(line.unitCost, 0);
     const totalEx = qty * numberValue(line.packSize, 1) * unitPrice;
-    const totalVat = totalEx * 0.15;
+    const totalVat = totalEx * workspaceVatRate;
     const lineKey =
       text(line.id || line.stockItemId || `line_${index}`)
         .replace(/[^a-zA-Z0-9_-]+/g, "_")
@@ -7829,7 +7825,7 @@ export async function postPurchaseOrderBulkDelete(
   return json(request, env, { ok: true, deleted: ids.length });
 }
 
-function normalizeGoodsReceiptPayload(raw: Record<string, unknown>) {
+function normalizeGoodsReceiptPayload(raw: Record<string, unknown>, vatRate = 0.15) {
   const receipt = objectValue(raw.receipt || raw);
   const receiptId = text(receipt.id) || id("grv");
   const date =
@@ -7906,7 +7902,7 @@ function normalizeGoodsReceiptPayload(raw: Record<string, unknown>) {
     (sum, line) => sum + numberValue(line.lineTotalEx, 0),
     0,
   );
-  const totalVat = numberValue(receipt.totalVat, totalEx * 0.15);
+  const totalVat = numberValue(receipt.totalVat, totalEx * vatRate);
   const totalInc = numberValue(receipt.totalInc, totalEx + totalVat);
   const timestamp = date.length <= 10 ? `${date}T00:00:00.000Z` : date;
   const normalized = {
@@ -8219,8 +8215,10 @@ export async function postGoodsReceipt(
 ) {
   await scoped(request, env, auth, workspaceId);
   await assertWorkspacePermission(env, auth, workspaceId, "nav-grv");
+  const workspaceVatRate = await getWorkspaceEffectiveVatRate(env, workspaceId);
   const payload = normalizeGoodsReceiptPayload(
     await readJson<Record<string, unknown>>(request),
+    workspaceVatRate,
   );
   if (!payload.normalized.items.length)
     return error(request, env, 400, "Add at least one received stock item.");
@@ -8387,7 +8385,7 @@ export async function postGoodsReceipt(
       incomingUnitCost: unitCost,
     });
     const totalEx = numberValue(line.lineTotalEx, quantity * unitCost);
-    const totalVat = totalEx * 0.15;
+    const totalVat = totalEx * workspaceVatRate;
     const metadata = JSON.stringify({
       before,
       after: before + quantity,
@@ -14533,7 +14531,6 @@ export async function getDataVersion(
   const row = await env.DB.prepare(
     `SELECT
        COALESCE(
-         (SELECT MAX(COALESCE(processed_at, created_at)) FROM yoco_webhook_events WHERE workspace_id = ?1 AND created_at > datetime('now', '-12 hours')),
          (SELECT last_sales_sync_at FROM yoco_connections WHERE workspace_id = ?1),
          ''
        ) AS yoco,
@@ -15569,6 +15566,41 @@ export async function postYocoSyncCatalogue(
     resetWebhook: payload.resetWebhook === true,
   });
   return json(request, env, { ok: true, ...result });
+}
+
+// Internal scheduler-only route (called from the Worker's `scheduled()` cron fan-out, never from
+// the browser). Menu/catalogue sync previously ran ONLY client-side, tied to a browser tab being
+// open, visible, and focused — it stopped the moment staff closed the tab, switched apps, or
+// minimized the window, and even while running it fired every 15 minutes rather than the intended
+// 45. This gives every connected workspace a guaranteed background sync regardless of whether
+// anyone has the app open, matching the cadence configured in wrangler.toml.
+export async function postRunDueCatalogueSync(
+  request: Request,
+  env: Env,
+  auth: AuthContext,
+  workspaceId: string,
+) {
+  if (auth.uid !== "system")
+    return error(request, env, 403, "Internal scheduler route.");
+  const connection = await env.DB.prepare(
+    `SELECT connection_active FROM yoco_connections WHERE workspace_id = ?1 LIMIT 1`,
+  )
+    .bind(workspaceId)
+    .first<{ connection_active: number }>();
+  if (!connection || Number(connection.connection_active) !== 1) {
+    return json(request, env, { ok: true, skipped: "not_connected" });
+  }
+  try {
+    const result = await syncYocoCatalogue(env, workspaceId, {
+      resetWebhook: false,
+    });
+    return json(request, env, { ok: true, ...result });
+  } catch (cause) {
+    return json(request, env, {
+      ok: false,
+      error: cause instanceof Error ? cause.message : "Catalogue sync failed.",
+    });
+  }
 }
 
 // Sale, refund, retry, and webhook business processing moved permanently to yoco-engine-v2.

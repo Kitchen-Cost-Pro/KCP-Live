@@ -171,10 +171,16 @@ export async function saveWorkspaceSettings(workspaceId, draft = {}, { includePe
         payload: { preferences: personalSettings }
       })
     : { preferences: personalSettings };
-  return normalizeSettings({
+  const result = normalizeSettings({
     ...(workspaceResponse.settings || workspaceSettings),
     ...(personalResponse.preferences || personalSettings)
   });
+  // Ephemeral, not part of the persisted settings shape — read once by the caller (e.g. to show
+  // a "N items recalculated" confirmation) and must never be echoed back on a later save.
+  if (workspaceResponse.vatRegistrationRecompute) {
+    result.__vatRegistrationRecompute = workspaceResponse.vatRegistrationRecompute;
+  }
+  return result;
 }
 
 export async function exportWorkspaceSnapshot(workspaceId, workspaceName = 'workspace') {
@@ -270,6 +276,9 @@ export function normalizeSettings(value = {}) {
   const tradingTime = legacyTradingTimeFromStartHour(reportingDayFromHour);
   const logoutTimeout = Math.max(1, Math.min(1440, parseInt(source.logoutTimeout ?? source.autoLogoutMinutes ?? 30, 10) || 30));
   const vatRate = clampNumber(source.vatRate ?? source.vatPercentage ?? 15, 0, 100, 15);
+  // Defaults to true (VAT registered) so existing workspaces — which have always had VAT
+  // calculated in reports/costing — see no behavior change until they explicitly toggle this off.
+  const vatRegistered = !(source.vatRegistered === false || String(source.vatRegistered ?? '').toLowerCase() === 'false');
   const uiScale = String(source.uiScale || 'normal') === 'large' ? 'large' : 'normal';
   const costingMethod = String(source.costingMethod || 'last').toLowerCase() === 'wac' ? 'wac' : 'last';
   const yocoStoreLocationsAsStockLocations = source.yocoStoreLocationsAsStockLocations === true ||
@@ -294,6 +303,7 @@ export function normalizeSettings(value = {}) {
   return {
     ...source,
     vatRate,
+    vatRegistered,
     siteName: String(source.siteName || '').trim(),
     orgId: String(source.orgId || source.org_id || '').trim(),
     corpId: String(source.corpId || source.corp_id || '').trim(),

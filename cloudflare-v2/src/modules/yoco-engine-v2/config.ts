@@ -18,6 +18,8 @@ export interface YocoV2FeatureEnv {
   YOCO_V2_RATE_LIMIT_PAUSE_FALLBACK_MS?: string;
   YOCO_V2_RECONCILIATION_OVERLAP_MINUTES?: string;
   YOCO_V2_RECONCILIATION_LOOKBACK_HOURS?: string;
+  YOCO_V2_WRITE_BUDGET_DAILY_CAP?: string;
+  YOCO_V2_WRITE_BUDGET_SOFT_WARN_RATIO?: string;
 }
 
 export interface YocoV2FeatureFlags {
@@ -61,6 +63,12 @@ function boundedInteger(value: unknown, fallback: number, min: number, max: numb
   return Math.max(min, Math.min(max, Math.floor(parsed)));
 }
 
+function boundedNumber(value: unknown, fallback: number, min: number, max: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, parsed));
+}
+
 export function yocoV2RetryConfig(env: YocoV2FeatureEnv) {
   return {
     maxAttempts: boundedInteger(env.YOCO_V2_MAX_ATTEMPTS, 8, 1, 25),
@@ -86,5 +94,17 @@ export function yocoV2ReconciliationConfig(env: YocoV2FeatureEnv) {
   return {
     overlapMinutes: boundedInteger(env.YOCO_V2_RECONCILIATION_OVERLAP_MINUTES, 120, 5, 7 * 24 * 60),
     initialLookbackHours: boundedInteger(env.YOCO_V2_RECONCILIATION_LOOKBACK_HOURS, 24, 1, 90 * 24)
+  };
+}
+
+/**
+ * Daily cap is deliberately well below Cloudflare's real 100,000 writes/day account-wide limit —
+ * this app is not the only thing sharing that cap (admin actions, reporting, other cron work all
+ * write too), so this leaves headroom rather than racing the real ceiling.
+ */
+export function yocoV2WriteBudgetConfig(env: YocoV2FeatureEnv) {
+  return {
+    dailyCap: boundedInteger(env.YOCO_V2_WRITE_BUDGET_DAILY_CAP, 90_000, 1_000, 100_000),
+    softWarnRatio: boundedNumber(env.YOCO_V2_WRITE_BUDGET_SOFT_WARN_RATIO, 0.8, 0.1, 1)
   };
 }

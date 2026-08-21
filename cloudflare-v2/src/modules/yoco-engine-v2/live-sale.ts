@@ -3,7 +3,7 @@ import type {
   CanonicalSaleCompletedEvent,
   YocoV2QueueMessage,
 } from "./contracts";
-import { getSaleEffectRuntime, type SaleEffectRuntime } from "./cutover";
+import { getEffectRuntime, type EffectRuntime } from "./effect-gate";
 import { sha256Hex } from "./identity";
 import { appendTimeline, newId, nowIso, type Row } from "./repository";
 
@@ -76,7 +76,7 @@ export function partitionSaleStockProposals(rows: Row[]): {
 async function applyReporting(
   env: Env,
   input: {
-    runtime: SaleEffectRuntime;
+    runtime: EffectRuntime;
     domainEvent: Row;
     canonical: CanonicalSaleCompletedEvent;
     rawEvent: Row;
@@ -259,7 +259,7 @@ async function applyReporting(
 async function applyStock(
   env: Env,
   input: {
-    runtime: SaleEffectRuntime;
+    runtime: EffectRuntime;
     domainEvent: Row;
     canonical: CanonicalSaleCompletedEvent;
     rawEvent: Row;
@@ -575,13 +575,13 @@ export async function applyControlledLiveSaleEffects(
       resolution_status: input.canonical.resolution_status,
     };
   const [reportingRuntime, stockRuntime] = await Promise.all([
-    getSaleEffectRuntime(
+    getEffectRuntime(
       env,
       input.canonical.workspace_id,
       input.canonical.integration_id,
       "SALE_REPORTING",
     ),
-    getSaleEffectRuntime(
+    getEffectRuntime(
       env,
       input.canonical.workspace_id,
       input.canonical.integration_id,

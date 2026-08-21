@@ -52,7 +52,6 @@ import {
   postAdminWorkspaceEmailQueue,
   postAdminYocoConnect,
   postAdminYocoDisconnect,
-  postAdminYocoResetWebhook,
   postAdminYocoSyncCatalogue,
   requireAdmin,
   putAdminEmailConfig,
@@ -177,6 +176,7 @@ import {
   postYocoConnect,
   postYocoDisconnect,
   postYocoSyncCatalogue,
+  postRunDueCatalogueSync,
 } from "./routes";
 import { sendWorkspaceLowStockNow } from "./low-stock-email";
 import {
@@ -595,8 +595,6 @@ export async function dispatchCentralRoute(
       return postAdminYocoConnect(request, env, workspaceId);
     if (action === "disconnect")
       return postAdminYocoDisconnect(request, env, workspaceId);
-    if (action === "reset-webhook")
-      return postAdminYocoResetWebhook(request, env, workspaceId);
     if (action === "sync-catalogue")
       return postAdminYocoSyncCatalogue(request, env, workspaceId);
   }
@@ -740,6 +738,12 @@ export async function dispatchWorkspaceRoute(
     resource === "admin-action/report-schedules-due"
   )
     return postRunDueReportSchedules(request, env, auth, workspaceId);
+
+  if (
+    request.method === "POST" &&
+    resource === "admin-action/catalogue-sync-due"
+  )
+    return postRunDueCatalogueSync(request, env, auth, workspaceId);
   const transactionDetailMatch = routePattern(
     resource,
     /^reports\/transactions\/([^/]+)$/,
@@ -1521,8 +1525,20 @@ export default {
         raw,
         cause instanceof Error ? cause.stack : undefined,
       );
+      // Deliberate validation errors thrown by route handlers (e.g. "X cannot be assigned as a
+      // recipe ingredient.", "A stock item named X already exists.") are safe and useful to show
+      // verbatim. The keyword list below was previously too narrow — clear, specific validation
+      // messages that didn't happen to contain one of these exact words were silently replaced
+      // with a useless generic message, hiding the real (and actionable) reason from the user.
+      // The denylist guards against ever surfacing a raw runtime/DB exception that happens to
+      // contain one of these words incidentally.
+      const looksLikeInternalException =
+        /sqlite|d1_error|TypeError:|ReferenceError:|SyntaxError:|RangeError:|at Object\.|at async|stack trace|\bundefined is not\b/i.test(
+          raw,
+        );
       const isUserFacing =
-        /token|session|expired|access|permission|denied|invalid|required|not found|sign in|password|email|already exists|duplicate|unique/i.test(
+        !looksLikeInternalException &&
+        /token|session|expired|access|permission|denied|invalid|required|not found|sign in|password|email|already exists|duplicate|unique|cannot be|must be|not allowed|not permitted|is not configured|could not|non-stock item|no longer/i.test(
           raw,
         );
       const message = isUserFacing

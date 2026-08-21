@@ -6,6 +6,9 @@
     <title>Yoco Admin Console</title>
     <link rel="icon" type="image/svg+xml" href="admin-favicon.svg"/>
     <link rel="shortcut icon" href="admin-favicon.svg"/>
+    <link rel="preconnect" href="https://fonts.googleapis.com"/>
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Inter:wght@400;500;600;700;800&display=swap"/>
     <script>
         window.KCP_CONFIG = window.KCP_CONFIG || {};
 
@@ -40,8 +43,6 @@
     <script src="https://cdn.jsdelivr.net/npm/fuse.js@6.6.2"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Inter:wght@400;500;600;700;800&display=swap');
-        
         :root {
             --primary: #00AEEF;
             --primary-glow: rgba(0, 174, 239, 0.3);
@@ -67,7 +68,7 @@
         }
 
         body {
-            font-family: 'Plus Jakarta Sans', 'Inter', sans-serif;
+            font-family: 'Plus Jakarta Sans', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji';
             background: var(--bg-dark);
             color: var(--text-main);
             background-image: 
@@ -223,7 +224,7 @@
             border-radius: 0.75rem;
             padding: 0.7rem 1rem;
             color: #fff !important;
-            font-family: 'Plus Jakarta Sans', 'Inter', sans-serif;
+            font-family: 'Plus Jakarta Sans', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji';
             font-size: 0.9rem;
             font-weight: 800;
             line-height: 1.25;
@@ -435,6 +436,61 @@
             transition: all 0.2s;
         }
         .btn-ghost:hover { background: rgba(255, 255, 255, 0.08); color: #fff; border-color: rgba(255, 255, 255, 0.15); }
+
+        /* Custom dropdown (replaces native <select> so it can be fully themed) */
+        .kcp-dropdown-trigger {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.6rem;
+            background: rgba(255, 255, 255, 0.03);
+            color: #fff;
+            padding: 0.5rem 1rem;
+            border-radius: 0.75rem;
+            font-weight: 700;
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .kcp-dropdown-trigger:hover { background: rgba(255, 255, 255, 0.08); border-color: rgba(255, 255, 255, 0.18); }
+        .kcp-dropdown-trigger.is-open { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.15); }
+        .kcp-dropdown-chevron { font-size: 9px; color: rgba(255, 255, 255, 0.4); transition: transform 0.2s; }
+        .kcp-dropdown-trigger.is-open .kcp-dropdown-chevron { transform: rotate(180deg); color: var(--accent); }
+
+        .kcp-dropdown-menu {
+            min-width: 12rem;
+            background: rgba(15, 23, 42, 0.98);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 0.9rem;
+            box-shadow: 0 24px 48px -20px rgba(0, 0, 0, 0.7);
+            padding: 0.4rem;
+            backdrop-filter: blur(16px);
+        }
+        html.light .kcp-dropdown-menu { background: rgba(255, 255, 255, 0.98); border-color: rgba(0, 0, 0, 0.08); }
+        .kcp-dropdown-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            width: 100%;
+            text-align: left;
+            padding: 0.55rem 0.75rem;
+            border-radius: 0.6rem;
+            font-size: 11px;
+            font-weight: 600;
+            color: rgba(255, 255, 255, 0.7);
+            background: transparent;
+            border: none;
+            cursor: pointer;
+            transition: background 0.15s, color 0.15s;
+        }
+        html.light .kcp-dropdown-item { color: rgba(15, 23, 42, 0.7); }
+        .kcp-dropdown-item:hover { background: rgba(255, 255, 255, 0.06); color: #fff; }
+        html.light .kcp-dropdown-item:hover { background: rgba(0, 0, 0, 0.05); color: #0f172a; }
+        .kcp-dropdown-item.is-active { color: var(--accent); background: rgba(var(--accent-rgb), 0.12); }
+        .kcp-dropdown-item .fa-check { font-size: 9px; opacity: 0; }
+        .kcp-dropdown-item.is-active .fa-check { opacity: 1; }
 
         .org-stat-card {
             background: linear-gradient(145deg, rgba(30, 41, 59, 0.72), rgba(15, 23, 42, 0.82));
@@ -761,7 +817,7 @@
             border-color: rgba(96, 165, 250, 0.24);
             padding-top: 0;
             padding-bottom: 0;
-            font-family: 'Plus Jakarta Sans', 'Inter', sans-serif;
+            font-family: 'Plus Jakarta Sans', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji';
             font-size: 0.94rem;
             font-weight: 800;
             letter-spacing: 0;
@@ -923,7 +979,6 @@
             100% { left: 100%; width: 30%; }
         }
     </style>
-    <link rel="stylesheet" href="/yoco-v2-admin.css">
 </head>
 <body class="h-[100dvh] w-full flex overflow-hidden">
 
@@ -1028,6 +1083,7 @@
         <button onclick="switchTab('workspaces')" id="nav-workspaces" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs font-bold uppercase text-slate-500 hover:bg-white/5"><i class="fa-solid fa-building w-5"></i> Workspaces</button>
         <button onclick="switchTab('orgs')" id="nav-orgs" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs font-bold uppercase text-slate-500 hover:bg-white/5"><i class="fa-solid fa-sitemap w-5"></i> Organization Manager</button>
         <button onclick="switchTab('integrations')" id="nav-integrations" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs font-bold uppercase text-slate-500 hover:bg-white/5"><i class="fa-solid fa-plug-circle-bolt w-5"></i> Integrations</button>
+        <button onclick="switchTab('webhook-health')" id="nav-webhook-health" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs font-bold uppercase text-slate-500 hover:bg-white/5"><i class="fa-solid fa-tower-broadcast w-5"></i> Webhook Health</button>
         <button onclick="switchTab('invitations')" id="nav-invitations" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs font-bold uppercase text-slate-500 hover:bg-white/5"><i class="fa-solid fa-envelope w-5"></i> Pending Invitations</button>
         <button onclick="switchTab('admins')" id="nav-admins" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs font-bold uppercase text-slate-500 hover:bg-white/5"><i class="fa-solid fa-user-shield w-5"></i> Superusers</button>
         <button onclick="switchTab('logs')" id="nav-logs" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs font-bold uppercase text-slate-500 hover:bg-white/5"><i class="fa-solid fa-file-shield w-5"></i> Audit Logs</button>
@@ -1402,6 +1458,57 @@
                     <button onclick="changeAuditLogPage(-1)" class="w-8 h-8 flex items-center justify-center rounded-lg bg-white/5 border border-white/10 text-slate-400 hover:text-white hover:border-blue-500/50 transition-all"><i class="fa-solid fa-chevron-left text-[10px]"></i></button>
                     <button onclick="changeAuditLogPage(1)" class="w-8 h-8 flex items-center justify-center rounded-lg bg-white/5 border border-white/10 text-slate-400 hover:text-white hover:border-blue-500/50 transition-all"><i class="fa-solid fa-chevron-right text-[10px]"></i></button>
                 </div>
+            </div>
+        </div>
+
+        <!-- WEBHOOK & WORKSPACE HEALTH -->
+        <div id="view-webhook-health" class="tab-view space-y-5">
+            <div class="flex items-center justify-between flex-wrap gap-3">
+                <div class="flex items-center gap-3">
+                    <h3 class="text-sm font-black uppercase tracking-widest">Webhook &amp; Workspace Health</h3>
+                    <i class="fa-solid fa-circle-info info-icon" onclick="showInfo('Webhook &amp; Workspace Health', 'Per-workspace Yoco webhook call volume and the live count of active remote subscriptions, sourced directly from Yoco. Use this to spot subscription drift or a workspace that has gone quiet. Nothing here auto-refreshes — use Refresh to pull the latest.')"></i>
+                </div>
+                <div class="flex items-center gap-2">
+                    <input type="text" id="webhook-health-search" placeholder="Search workspaces..." class="bg-white/5 border border-white/10 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-violet-500/50 w-56" oninput="renderWebhookHealthTable()">
+                    <button onclick="refreshWebhookHealth()" class="btn-ghost text-[10px]"><i class="fa-solid fa-sync mr-2"></i>Refresh</button>
+                </div>
+            </div>
+
+            <div id="webhook-health-summary" class="glass px-5 py-3 text-[11px] text-slate-400 font-semibold"></div>
+
+            <div class="glass p-5 space-y-4">
+                <div class="flex items-center justify-between flex-wrap gap-3">
+                    <h4 class="text-xs font-black uppercase tracking-widest text-slate-300">Webhook Calls</h4>
+                    <div class="flex items-center gap-2">
+                        <button onclick="toggleWebhookWorkspaceFilter(event)" id="webhook-health-filter-btn" class="btn-ghost text-[10px]"><i class="fa-solid fa-filter mr-2"></i>Workspaces</button>
+                        <button onclick="toggleWebhookRangeDropdown(event)" id="webhook-health-range-btn" class="kcp-dropdown-trigger"><span id="webhook-health-range-label">Last 24 Hours</span><i class="fa-solid fa-chevron-down kcp-dropdown-chevron"></i></button>
+                    </div>
+                </div>
+                <div id="webhook-health-legend" class="flex flex-wrap gap-x-4 gap-y-2 text-[10px]"></div>
+                <div class="relative h-72 w-full"><canvas id="webhook-health-chart"></canvas></div>
+            </div>
+
+            <div class="glass overflow-hidden shadow-2xl overflow-x-auto">
+                <div class="flex items-center justify-between px-5 py-3 border-b border-white/5">
+                    <p id="webhook-health-count" class="text-[9px] font-black uppercase tracking-widest text-slate-500"></p>
+                </div>
+                <table class="w-full text-left">
+                    <thead><tr class="border-b border-white/5 text-[9px] font-black uppercase tracking-widest text-slate-500">
+                        <th class="px-5 py-4">Workspace</th>
+                        <th class="px-4 py-4 text-right">5m</th>
+                        <th class="px-4 py-4 text-right">15m</th>
+                        <th class="px-4 py-4 text-right">30m</th>
+                        <th class="px-4 py-4 text-right">1h</th>
+                        <th class="px-4 py-4 text-right">24h</th>
+                        <th class="px-4 py-4 text-right">Success Rate</th>
+                        <th class="px-4 py-4 text-right">Failure Rate</th>
+                        <th class="px-4 py-4 text-right">Active Subscriptions</th>
+                        <th class="px-4 py-4">Last Event</th>
+                        <th class="px-4 py-4">Status</th>
+                        <th class="px-4 py-4 text-right">Actions</th>
+                    </tr></thead>
+                    <tbody id="webhook-health-tbody"><tr><td colspan="11" class="px-5 py-10 text-center text-slate-500 text-xs">Loading workspaces...</td></tr></tbody>
+                </table>
             </div>
         </div>
 
@@ -1965,16 +2072,10 @@ function renderWorkspaceIntegrationPanel(wsId, options = {}) {
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <button onclick="syncYocoCatalogueFromAdmin(${adminInlineString(wsId)})" class="btn-ghost w-full text-blue-400"><i class="fa-solid fa-boxes-stacked mr-2"></i>Sync Products & Locations</button>
                     <button onclick="runYocoV2ReconciliationFromAdmin(${adminInlineString(wsId)})" class="btn-ghost w-full text-blue-400"><i class="fa-solid fa-scale-balanced mr-2"></i>Run V2 Reconciliation</button>
-                    <button onclick="openYocoV2ControlCentre(${adminInlineString(wsId)})" class="btn-ghost w-full text-violet-300"><i class="fa-solid fa-gauge-high mr-2"></i>Open V2 Control Centre</button>
                 </div>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <button onclick="sendLowStockSummaryFromAdmin(${adminInlineString(wsId)})" class="btn-ghost w-full text-emerald-300"><i class="fa-solid fa-envelope-circle-check mr-2"></i>Send Low Stock Email</button>
                     <button onclick="runYocoV2ReconciliationFromAdmin(${adminInlineString(wsId)})" class="btn-ghost w-full text-sky-300"><i class="fa-solid fa-arrows-spin mr-2"></i>Reconcile Now</button>
-                </div>
-                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    <button onclick="openYocoV2ControlCentre(${adminInlineString(wsId)})" class="btn-ghost w-full text-orange-300"><i class="fa-solid fa-user-check mr-2"></i>Review Attention Items</button>
-                    <button onclick="resetWebhookSubscriptionForWorkspace(${adminInlineString(wsId)})" class="btn-ghost w-full text-amber-400"><i class="fa-solid fa-tower-broadcast mr-2"></i>Webhook Reset</button>
-                    <button onclick="testWebhookSubscriptionForWorkspace(${adminInlineString(wsId)})" class="btn-ghost w-full text-violet-300"><i class="fa-solid fa-vial-circle-check mr-2"></i>Test Webhook</button>
                 </div>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                     <button onclick="factoryResetIntegrationCredentials(${adminInlineString(wsId)})" class="btn-danger w-full"><i class="fa-solid fa-power-off mr-2"></i>Factory Reset</button>
@@ -2215,11 +2316,7 @@ function renderWorkspaceVisualIntegrationSections(wsId) {
                     <button onclick="connectYocoIntegrationFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn bg-blue-600/90 !text-white border-blue-400/30"><i class="fa-solid fa-plug-circle-bolt mr-2"></i>Connect / Rotate Key</button>
                     <button onclick="syncYocoCatalogueFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn"><i class="fa-solid fa-boxes-stacked mr-2"></i>Sync Products & Locations</button>
                     <button onclick="runYocoV2ReconciliationFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn"><i class="fa-solid fa-scale-balanced mr-2"></i>Run V2 Reconciliation</button>
-                    <button onclick="openYocoV2ControlCentre(${adminInlineString(wsId)})" class="workspace-action-btn"><i class="fa-solid fa-gauge-high mr-2"></i>Open V2 Control Centre</button>
                     <button onclick="sendLowStockSummaryFromAdmin(${adminInlineString(wsId)})" class="workspace-action-btn !text-emerald-300 border-emerald-500/30"><i class="fa-solid fa-envelope-circle-check mr-2"></i>Send Low Stock Email</button>
-                    <button onclick="openYocoV2ControlCentre(${adminInlineString(wsId)})" class="workspace-action-btn !text-orange-300 border-orange-500/30"><i class="fa-solid fa-user-check mr-2"></i>Review Attention Items</button>
-                    <button onclick="resetWebhookSubscriptionForWorkspace(${adminInlineString(wsId)})" class="workspace-action-btn !text-amber-300 border-amber-500/30"><i class="fa-solid fa-tower-broadcast mr-2"></i>Webhook Reset</button>
-                    <button onclick="testWebhookSubscriptionForWorkspace(${adminInlineString(wsId)})" class="workspace-action-btn !text-violet-300 border-violet-500/30"><i class="fa-solid fa-vial-circle-check mr-2"></i>Test Webhook</button>
                 </div>
             </section>
         </div>
@@ -2340,7 +2437,7 @@ function renderIntegrationControlTower() {
                 <td class="px-4 py-4 text-[10px] text-slate-400">${adminEscapeHtml(row.orderId || '—')}</td>
                 <td class="px-4 py-4 text-[10px] font-black uppercase">${adminEscapeHtml(row.status || 'Queued')}</td>
                 <td class="px-4 py-4 text-[10px] text-slate-400 max-w-md">${adminEscapeHtml(row.message || row.error || '—')}</td>
-                <td class="px-4 py-4">${row.orderId ? `<button type="button" class="btn-ghost text-[9px] font-black uppercase px-2 py-1" onclick="event.stopPropagation(); KCPYocoV2Admin.search(${adminInlineString(row.orderId)}, ${adminInlineString(row.workspaceId)})">Open in V2</button>` : '<span class="text-[9px] text-slate-600">No source reference</span>'}</td>
+                <td class="px-4 py-4">${row.orderId ? adminEscapeHtml(row.orderId) : '<span class="text-[9px] text-slate-600">No source reference</span>'}</td>
             </tr>
         `).join('') || '<tr><td colspan="7" class="px-4 py-8 text-center text-slate-500 text-xs">No Yoco integration events found</td></tr>';
     }
@@ -2482,15 +2579,6 @@ async function runYocoV2ReconciliationFromAdmin(wsId = '') {
     } catch (e) { }
 }
 
-function openYocoV2ControlCentre(wsId = '') {
-    const targetWsId = wsId || getIntegrationSelectedWorkspaceId();
-    if (targetWsId && window.KCPYocoV2Admin?.search) {
-        window.KCPYocoV2Admin.search('', targetWsId);
-        return;
-    }
-    switchTab('yoco-v2');
-}
-
 async function sendLowStockSummaryFromAdmin(wsId = '') {
     const targetWsId = wsId || getIntegrationSelectedWorkspaceId();
     if (!targetWsId) return showToast('Select a workspace first', 'error');
@@ -2551,32 +2639,6 @@ async function factoryResetIntegrationCredentials(wsId = '') {
         console.error('[Admin] Failed to factory reset workspace integration', e);
         showToast(`Could not reset integration: ${e.message}`, 'error');
     }
-}
-
-async function resetWebhookSubscriptionForWorkspace(wsId = '') {
-    const targetWsId = wsId || getIntegrationSelectedWorkspaceId();
-    if (!targetWsId) return showToast('Select a workspace first', 'error');
-    try {
-        const result = await runAdminYocoAction(targetWsId, 'Resetting Webhook...', async (workspaceId) => {
-            return callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(workspaceId)}/yoco/reset-webhook`);
-        });
-        if (result?.webhookCleanupPending) {
-            showToast(`Replacement webhook is live. ${Number(result?.deferredSubscriptionCleanupCount || 0)} stale subscription cleanup attempt(s) were deferred by Yoco rate limiting.`, 'warning');
-        } else {
-            showToast('Yoco webhook subscription reset', 'success');
-        }
-    } catch (e) { }
-}
-
-async function testWebhookSubscriptionForWorkspace(wsId = '') {
-    const targetWsId = wsId || getIntegrationSelectedWorkspaceId();
-    if (!targetWsId) return showToast('Select a workspace first', 'error');
-    try {
-        const result = await runAdminYocoAction(targetWsId, 'Testing Webhook...', async (workspaceId) => {
-            return callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(workspaceId)}/yoco/test-webhook`);
-        });
-        showToast(`Yoco test webhook dispatched${result?.messageId ? ` (${result.messageId})` : ''}. Check the integration log for delivery.`, 'success');
-    } catch (e) { }
 }
 
 let allUsers={},allWorkspaces={},allInvitations={},allSignupRequests={},userPresence={};
@@ -3474,11 +3536,12 @@ function switchTab(tab){
     document.getElementById('view-'+tab)?.classList.add('active');
     document.querySelectorAll('nav button').forEach(b=>{b.classList.remove('sidebar-active');b.classList.add('text-slate-500')});
     const nb=document.getElementById('nav-'+tab);if(nb){nb.classList.add('sidebar-active');nb.classList.remove('text-slate-500')}
-    const titles={dashboard:'Dashboard',users:'User Management',workspaces:'Workspace Management',orgs:'Organization Manager',integrations:'Integration Manager',invitations:'Pending Invitations',admins:'Superuser Management',logs:'Audit Trail',tools:'System Tools',billing:'Billing & Access'};
+    const titles={dashboard:'Dashboard',users:'User Management',workspaces:'Workspace Management',orgs:'Organization Manager',integrations:'Integration Manager','webhook-health':'Webhook & Workspace Health',invitations:'Pending Invitations',admins:'Superuser Management',logs:'Audit Trail',tools:'System Tools',billing:'Billing & Access'};
     document.getElementById('view-title').innerText=titles[tab]||tab;
     if (tab === 'logs') fetchAuditLogs();
     if (tab === 'orgs' && !orgManagerLoaded) fetchOrgManagerSites();
     if (tab === 'integrations') renderIntegrationControlTower();
+    if (tab === 'webhook-health') refreshWebhookHealth();
     if (tab === 'tools') { renderAccentSwatches(); loadSystemGmailStatus(); loadEmailConfig(); loadBroadcastQueue(); }
     if (tab === 'billing') { renderBillingTable(); fetchAllBillingStatuses(); }
     if (tab === 'invitations') { fetchSignupRequests().then(() => { fetchInvitations().then(renderInvitations); }); }
@@ -3615,7 +3678,7 @@ function renderDashboard(){
                 scales: {
                     x: {
                         grid: { display: false, color: 'rgba(255,255,255,0.06)' },
-                        ticks: { color: '#94a3b8', font: { size: 11, family: "'Plus Jakarta Sans', sans-serif", weight: 700 } }
+                        ticks: { color: '#94a3b8', font: { size: 11, family: "'Plus Jakarta Sans', 'Inter', -apple-system, sans-serif", weight: 700 } }
                     },
                     y: {
                         grid: { color: 'rgba(255,255,255,0.06)' },
@@ -3769,6 +3832,449 @@ function showInfo(title, text) {
             <button onclick="closeModal()" class="btn-primary px-8">Understood</button>
         </div>
     `);
+}
+
+// ─── Webhook & Workspace Health ───
+let webhookHealthRows = [];
+let webhookHealthChartRange = '24h';
+let webhookHealthTimeseries = null;
+let webhookHealthVisibleWorkspaces = new Set();
+let webhookHealthColorMap = new Map();
+const WEBHOOK_HEALTH_PALETTE = ['#60a5fa','#fbbf24','#a78bfa','#34d399','#f472b6','#38bdf8','#fb923c','#4ade80','#f87171','#c084fc','#facc15','#818cf8'];
+
+let webhookHealthWriteBudget = null;
+
+async function refreshWebhookHealth() {
+    await Promise.all([fetchWebhookHealth(), fetchWebhookHealthTimeseries(), fetchWebhookWriteBudget()]);
+}
+
+async function fetchWebhookWriteBudget() {
+    try {
+        webhookHealthWriteBudget = await callAdminApi('GET', '/api/admin/webhook-health/write-budget');
+    } catch (e) {
+        console.error('[Admin] Failed to load write budget', e);
+        webhookHealthWriteBudget = null;
+    }
+    renderWebhookHealthSummary();
+}
+
+async function fetchWebhookHealth() {
+    const tbody = document.getElementById('webhook-health-tbody');
+    try {
+        const result = await callAdminApi('GET', '/api/admin/webhook-health');
+        webhookHealthRows = result?.workspaces || [];
+        renderWebhookHealthTable();
+    } catch (e) {
+        console.error('[Admin] Failed to load webhook health', e);
+        if (tbody) tbody.innerHTML = `<tr><td colspan="11" class="px-5 py-10 text-center text-red-400 text-xs">Failed to load: ${adminEscapeHtml(e.message)}</td></tr>`;
+    }
+}
+
+const WEBHOOK_HEALTH_RANGE_OPTIONS = [
+    { value: '1h', label: 'Last Hour' },
+    { value: '24h', label: 'Last 24 Hours' },
+    { value: '7d', label: 'Last 7 Days' }
+];
+
+function setWebhookHealthRange(range) {
+    webhookHealthChartRange = range;
+    const option = WEBHOOK_HEALTH_RANGE_OPTIONS.find(o => o.value === range);
+    const label = document.getElementById('webhook-health-range-label');
+    if (label && option) label.textContent = option.label;
+    fetchWebhookHealthTimeseries();
+}
+
+function toggleWebhookRangeDropdown(event) {
+    event.stopPropagation();
+    const wasOpen = document.querySelector('.webhook-health-range-dropdown');
+    document.querySelectorAll('.webhook-health-range-dropdown').forEach(m => m.remove());
+    document.getElementById('webhook-health-range-btn')?.classList.remove('is-open');
+    if (wasOpen) return;
+
+    const button = event.currentTarget;
+    button.classList.add('is-open');
+    const rect = button.getBoundingClientRect();
+    const menu = document.createElement('div');
+    menu.className = 'webhook-health-range-dropdown kcp-dropdown-menu fixed z-50';
+    menu.style.top = `${rect.bottom + 6}px`;
+    menu.style.left = `${Math.max(8, rect.right - 192)}px`;
+    menu.innerHTML = WEBHOOK_HEALTH_RANGE_OPTIONS.map(o => `
+        <button onclick="closeWebhookRangeDropdown(); setWebhookHealthRange(${adminInlineString(o.value)})" class="kcp-dropdown-item ${o.value === webhookHealthChartRange ? 'is-active' : ''}">
+            <span>${adminEscapeHtml(o.label)}</span>
+            <i class="fa-solid fa-check"></i>
+        </button>
+    `).join('');
+    menu.addEventListener('click', e => e.stopPropagation());
+    document.body.appendChild(menu);
+    setTimeout(() => document.addEventListener('click', closeWebhookRangeDropdown, { once: true }), 0);
+}
+
+function closeWebhookRangeDropdown() {
+    document.querySelectorAll('.webhook-health-range-dropdown').forEach(m => m.remove());
+    document.getElementById('webhook-health-range-btn')?.classList.remove('is-open');
+}
+
+async function fetchWebhookHealthTimeseries() {
+    try {
+        const result = await callAdminApi('GET', `/api/admin/webhook-health/timeseries?range=${encodeURIComponent(webhookHealthChartRange)}`);
+        webhookHealthTimeseries = result;
+        const sorted = [...(result.series || [])].sort((a, b) => b.total - a.total);
+        webhookHealthColorMap = new Map(sorted.map((s, i) => [s.workspaceId, WEBHOOK_HEALTH_PALETTE[i % WEBHOOK_HEALTH_PALETTE.length]]));
+        webhookHealthVisibleWorkspaces = new Set(sorted.slice(0, 8).map(s => s.workspaceId));
+        renderWebhookHealthChart();
+    } catch (e) {
+        console.error('[Admin] Failed to load webhook timeseries', e);
+        showToast(`Failed to load webhook chart: ${e.message}`, 'error');
+    }
+}
+
+function formatWebhookHealthBucketLabel(iso, range) {
+    const d = new Date(iso);
+    if (range === '7d') return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+
+function renderWebhookHealthChart() {
+    const canvas = document.getElementById('webhook-health-chart');
+    if (!canvas || !webhookHealthTimeseries) return;
+    const { labels, series, range } = webhookHealthTimeseries;
+    const chartLabels = labels.map(l => formatWebhookHealthBucketLabel(l, range));
+    const visible = series.filter(s => webhookHealthVisibleWorkspaces.has(s.workspaceId));
+    const datasets = visible.map(s => ({
+        label: s.name,
+        data: s.data,
+        backgroundColor: webhookHealthColorMap.get(s.workspaceId) || '#64748b',
+        borderRadius: 2,
+        stack: 'calls'
+    }));
+
+    if (window.webhookHealthChartInstance) window.webhookHealthChartInstance.destroy();
+    window.webhookHealthChartInstance = new Chart(canvas.getContext('2d'), {
+        type: 'bar',
+        data: { labels: chartLabels, datasets },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: false }, tooltip: { mode: 'index', intersect: false } },
+            scales: {
+                x: { stacked: true, grid: { display: false }, ticks: { color: '#94a3b8', font: { size: 10 } } },
+                y: { stacked: true, grid: { color: 'rgba(255,255,255,0.06)' }, ticks: { color: '#64748b', font: { size: 10 }, precision: 0 }, beginAtZero: true }
+            }
+        }
+    });
+    renderWebhookHealthLegend();
+}
+
+function renderWebhookHealthLegend() {
+    const el = document.getElementById('webhook-health-legend');
+    if (!el || !webhookHealthTimeseries) return;
+    const sorted = [...(webhookHealthTimeseries.series || [])].sort((a, b) => b.total - a.total).filter(s => s.total > 0 || webhookHealthVisibleWorkspaces.has(s.workspaceId));
+    if (!sorted.length) { el.innerHTML = '<span class="text-slate-500">No webhook calls in this window.</span>'; return; }
+    el.innerHTML = sorted.map(s => {
+        const isVisible = webhookHealthVisibleWorkspaces.has(s.workspaceId);
+        const color = webhookHealthColorMap.get(s.workspaceId) || '#64748b';
+        return `
+            <button onclick="toggleWebhookWorkspaceVisibility(${adminInlineString(s.workspaceId)}, ${isVisible ? 'false' : 'true'})" class="flex items-center gap-1.5 px-1 py-0.5 rounded hover:bg-white/5 transition-all ${isVisible ? '' : 'opacity-40'}">
+                <span class="w-2 h-2 rounded-full" style="background:${color}"></span>
+                <span class="text-slate-300 font-bold">${adminEscapeHtml(s.name)}</span>
+                <span class="text-slate-500">${s.total}</span>
+            </button>
+        `;
+    }).join('');
+}
+
+function toggleWebhookWorkspaceVisibility(wsId, makeVisible) {
+    if (makeVisible) webhookHealthVisibleWorkspaces.add(wsId); else webhookHealthVisibleWorkspaces.delete(wsId);
+    renderWebhookHealthChart();
+    const checkbox = document.querySelector(`.webhook-filter-row input[data-ws-id="${wsId}"]`);
+    if (checkbox) checkbox.checked = makeVisible;
+}
+
+function toggleWebhookWorkspaceFilter(event) {
+    event.stopPropagation();
+    document.querySelectorAll('.webhook-health-filter-popover').forEach(m => m.remove());
+    const button = event.currentTarget;
+    const rect = button.getBoundingClientRect();
+    const series = [...((webhookHealthTimeseries?.series) || [])].sort((a, b) => b.total - a.total);
+    const popover = document.createElement('div');
+    popover.className = 'webhook-health-filter-popover fixed w-72 glass shadow-2xl z-50 p-3 space-y-2';
+    popover.style.top = `${rect.bottom + 4}px`;
+    popover.style.left = `${Math.max(8, rect.left)}px`;
+    popover.innerHTML = `
+        <input type="text" placeholder="Search workspaces..." class="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none" oninput="filterWebhookWorkspaceFilterList(this.value)">
+        <div class="flex items-center justify-between text-[10px] text-slate-500 px-1">
+            <button onclick="setAllWebhookWorkspaceVisibility(true)" class="hover:text-white font-bold uppercase">Select All</button>
+            <button onclick="setAllWebhookWorkspaceVisibility(false)" class="hover:text-white font-bold uppercase">Clear</button>
+        </div>
+        <div class="max-h-64 overflow-y-auto space-y-1">
+            ${series.map(s => `
+                <label class="webhook-filter-row flex items-center gap-2 px-1 py-1 text-xs text-slate-300 hover:bg-white/5 rounded cursor-pointer" data-name="${adminEscapeHtml(s.name.toLowerCase())}">
+                    <input type="checkbox" data-ws-id="${adminEscapeHtml(s.workspaceId)}" ${webhookHealthVisibleWorkspaces.has(s.workspaceId) ? 'checked' : ''} onchange="toggleWebhookWorkspaceVisibility(${adminInlineString(s.workspaceId)}, this.checked)">
+                    <span class="truncate">${adminEscapeHtml(s.name)}</span>
+                    <span class="ml-auto text-slate-500">${s.total}</span>
+                </label>
+            `).join('') || '<p class="text-slate-500 text-xs px-1">No workspaces.</p>'}
+        </div>
+    `;
+    popover.addEventListener('click', e => e.stopPropagation());
+    document.body.appendChild(popover);
+    setTimeout(() => document.addEventListener('click', closeWebhookWorkspaceFilter, { once: true }), 0);
+}
+
+function closeWebhookWorkspaceFilter() {
+    document.querySelectorAll('.webhook-health-filter-popover').forEach(m => m.remove());
+}
+
+function filterWebhookWorkspaceFilterList(q) {
+    const query = q.trim().toLowerCase();
+    document.querySelectorAll('.webhook-filter-row').forEach(row => {
+        row.style.display = !query || row.dataset.name.includes(query) ? '' : 'none';
+    });
+}
+
+function setAllWebhookWorkspaceVisibility(all) {
+    const series = webhookHealthTimeseries?.series || [];
+    webhookHealthVisibleWorkspaces = all ? new Set(series.map(s => s.workspaceId)) : new Set();
+    document.querySelectorAll('.webhook-filter-row input[type=checkbox]').forEach(cb => { cb.checked = all; });
+    renderWebhookHealthChart();
+}
+
+function renderWebhookHealthSummary() {
+    const el = document.getElementById('webhook-health-summary');
+    if (!el) return;
+    const total = webhookHealthRows.length;
+    const drift = webhookHealthRows.filter(r => r.activeSubscriptions > 1).length;
+    const silentFail = webhookHealthRows.filter(r => r.connectionActive && r.activeSubscriptions === 0 && !r.subscriptionCheckError).length;
+    const checkFailed = webhookHealthRows.filter(r => r.subscriptionCheckError).length;
+    const disconnected = webhookHealthRows.filter(r => !r.connectionActive).length;
+    const parts = [`<span class="text-white font-black">${total}</span> workspace${total === 1 ? '' : 's'}`];
+    if (drift) parts.push(`<span class="text-amber-400 font-black">${drift}</span> <span class="text-amber-400">with subscription drift</span>`);
+    if (silentFail) parts.push(`<span class="text-red-400 font-black">${silentFail}</span> <span class="text-red-400">with no active subscriptions</span>`);
+    if (checkFailed) parts.push(`<span class="text-red-400 font-black">${checkFailed}</span> <span class="text-red-400">check failed</span>`);
+    parts.push(`<span class="text-slate-500">${disconnected} not connected</span>`);
+    const budget = webhookHealthWriteBudget;
+    if (budget?.configured && Number.isFinite(budget.used)) {
+        const cap = Number(budget.dailyCap || 0) || 90000;
+        const pct = cap > 0 ? Math.round((Number(budget.used) / cap) * 100) : 0;
+        const budgetClass = pct >= 100 ? 'text-red-400' : pct >= 80 ? 'text-amber-400' : 'text-slate-500';
+        parts.push(`<span class="${budgetClass}">write budget: ${Number(budget.used).toLocaleString()} / ${cap.toLocaleString()} today (${pct}%)</span>`);
+    } else if (budget && budget.configured === false) {
+        parts.push(`<span class="text-slate-600">write-budget gate not configured</span>`);
+    }
+    el.innerHTML = parts.join(' <span class="text-slate-600">&middot;</span> ');
+}
+
+function webhookHealthProblemScore(row) {
+    let score = 0;
+    if (row.subscriptionCheckError) score += 4;
+    if (row.connectionActive && row.activeSubscriptions === 0) score += 3;
+    if (row.activeSubscriptions > 1) score += 2;
+    return score;
+}
+
+function renderWebhookHealthTable() {
+    const tbody = document.getElementById('webhook-health-tbody');
+    if (!tbody) return;
+    renderWebhookHealthSummary();
+    const q = (document.getElementById('webhook-health-search')?.value || '').trim().toLowerCase();
+    const rows = webhookHealthRows
+        .filter(row => !q || row.name.toLowerCase().includes(q) || row.workspaceId.toLowerCase().includes(q))
+        .slice()
+        .sort((a, b) => {
+            const scoreDiff = webhookHealthProblemScore(b) - webhookHealthProblemScore(a);
+            if (scoreDiff !== 0) return scoreDiff;
+            return (Number(b.calls?.last24h) || 0) - (Number(a.calls?.last24h) || 0);
+        });
+
+    const countEl = document.getElementById('webhook-health-count');
+    if (countEl) countEl.textContent = `${rows.length} of ${webhookHealthRows.length} workspace${webhookHealthRows.length === 1 ? '' : 's'} shown`;
+
+    if (!rows.length) {
+        tbody.innerHTML = `<tr><td colspan="11" class="px-5 py-10 text-center text-slate-500 text-xs">No workspaces found</td></tr>`;
+        return;
+    }
+    tbody.innerHTML = rows.map(row => {
+        const calls = row.calls || {};
+        const hasError = Boolean(row.subscriptionCheckError);
+        const drift = row.activeSubscriptions > 1;
+        const silentFail = row.connectionActive && row.activeSubscriptions === 0 && !hasError;
+        const rowBorderClass = hasError || silentFail
+            ? 'border-l-2 border-l-red-500/70'
+            : drift ? 'border-l-2 border-l-amber-500/70' : 'border-l-2 border-l-transparent';
+        const statusColor = row.connectionActive ? 'text-emerald-400' : 'text-slate-500';
+        const statusLabel = row.connectionActive
+            ? (row.connectionStatus || 'connected')
+            : (row.connectionStatus === 'disconnected' ? 'Disconnected' : 'Not Connected');
+        const subCellClass = hasError || silentFail ? 'text-red-400' : drift ? 'text-amber-400' : 'text-slate-300';
+        const subTooltip = hasError
+            ? `title="${adminEscapeHtml(row.subscriptionCheckError)}"`
+            : silentFail
+                ? `title="Connection is active but no subscriptions were found remotely."`
+                : drift
+                    ? `title="More than one active subscription found — possible duplicate."`
+                    : '';
+        const subWarningIcon = hasError || silentFail || drift ? ' <i class="fa-solid fa-triangle-exclamation ml-1 text-[10px]"></i>' : '';
+        const total24h = Number(row.total24h || 0);
+        const succeeded24h = Number(row.succeeded24h || 0);
+        const failed24h = Number(row.failed24h || 0);
+        const successRate = total24h > 0 ? (succeeded24h / total24h) * 100 : null;
+        const failureRate = total24h > 0 ? (failed24h / total24h) * 100 : null;
+        const successRateClass = successRate === null ? 'text-slate-500' : successRate >= 99 ? 'text-emerald-400' : successRate >= 95 ? 'text-amber-400' : 'text-red-400';
+        const failureRateClass = failureRate === null ? 'text-slate-500' : failureRate <= 1 ? 'text-slate-300' : failureRate <= 5 ? 'text-amber-400' : 'text-red-400';
+        const successRateLabel = successRate === null ? '—' : `${successRate.toFixed(1)}%`;
+        const failureRateLabel = failureRate === null ? '—' : `${failureRate.toFixed(1)}%`;
+        const rateTooltip = total24h > 0 ? `title="${succeeded24h} succeeded / ${failed24h} failed of ${total24h} received in the last 24h"` : `title="No webhook receipts in the last 24h"`;
+        return `
+            <tr class="tbl-row border-b border-white/5 ${rowBorderClass}">
+                <td class="px-5 py-4 text-xs font-bold text-white">${adminEscapeHtml(row.name)}</td>
+                <td class="px-4 py-4 text-right text-xs text-slate-300">${Number(calls.last5m || 0)}</td>
+                <td class="px-4 py-4 text-right text-xs text-slate-300">${Number(calls.last15m || 0)}</td>
+                <td class="px-4 py-4 text-right text-xs text-slate-300">${Number(calls.last30m || 0)}</td>
+                <td class="px-4 py-4 text-right text-xs text-slate-300">${Number(calls.last1h || 0)}</td>
+                <td class="px-4 py-4 text-right text-xs text-slate-300">${Number(calls.last24h || 0)}</td>
+                <td class="px-4 py-4 text-right text-xs font-bold ${successRateClass}" ${rateTooltip}>${successRateLabel}</td>
+                <td class="px-4 py-4 text-right text-xs font-bold ${failureRateClass}" ${rateTooltip}>${failureRateLabel}</td>
+                <td class="px-4 py-4 text-right text-xs font-bold ${subCellClass}" ${subTooltip}>${Number(row.activeSubscriptions || 0)}${subWarningIcon}</td>
+                <td class="px-4 py-4 text-[10px] text-slate-400">${formatAdminDateTime(row.lastReceivedAt, 'Never')}</td>
+                <td class="px-4 py-4 text-[10px] font-black uppercase ${statusColor}">${adminEscapeHtml(statusLabel)}</td>
+                <td class="px-4 py-4 text-right">
+                    <div class="relative inline-block">
+                        <button onclick="toggleWebhookHealthMenu(event, ${adminInlineString(row.workspaceId)})" class="w-8 h-8 flex items-center justify-center rounded-lg bg-white/5 border border-white/10 text-slate-400 hover:text-white"><i class="fa-solid fa-ellipsis-vertical text-xs"></i></button>
+                    </div>
+                </td>
+            </tr>
+        `;
+    }).join('');
+}
+
+function toggleWebhookHealthMenu(event, wsId) {
+    event.stopPropagation();
+    document.querySelectorAll('.webhook-health-menu').forEach(m => m.remove());
+    const button = event.currentTarget;
+    const rect = button.getBoundingClientRect();
+    const menu = document.createElement('div');
+    menu.className = 'webhook-health-menu fixed w-52 glass shadow-2xl z-50 py-1';
+    menu.style.top = `${rect.bottom + 4}px`;
+    menu.style.left = `${Math.max(8, rect.right - 208)}px`;
+    menu.innerHTML = `
+        <button onclick="closeWebhookHealthMenus(); viewWebhookLogsForWorkspace(${adminInlineString(wsId)})" class="w-full text-left px-4 py-2 text-xs text-slate-300 hover:bg-white/10"><i class="fa-solid fa-list mr-2"></i>View Logs</button>
+        <button onclick="closeWebhookHealthMenus(); viewWebhookAuditTrailForWorkspace(${adminInlineString(wsId)})" class="w-full text-left px-4 py-2 text-xs text-slate-300 hover:bg-white/10"><i class="fa-solid fa-clock-rotate-left mr-2"></i>View Audit Trail</button>
+        <button onclick="closeWebhookHealthMenus(); reconcileWebhookSubscriptionForWorkspace(${adminInlineString(wsId)})" class="w-full text-left px-4 py-2 text-xs text-slate-300 hover:bg-white/10"><i class="fa-solid fa-arrows-rotate mr-2"></i>Reconcile to 1 Subscription</button>
+        <button onclick="closeWebhookHealthMenus(); disconnectAllSubscriptionsForWorkspace(${adminInlineString(wsId)})" class="w-full text-left px-4 py-2 text-xs text-red-400 hover:bg-red-500/10"><i class="fa-solid fa-power-off mr-2"></i>Disconnect All Subscriptions</button>
+    `;
+    document.body.appendChild(menu);
+    setTimeout(() => document.addEventListener('click', closeWebhookHealthMenus, { once: true }), 0);
+}
+
+function closeWebhookHealthMenus() {
+    document.querySelectorAll('.webhook-health-menu').forEach(m => m.remove());
+}
+
+async function viewWebhookLogsForWorkspace(wsId) {
+    openModal(`<div class="space-y-4"><h3 class="text-sm font-black uppercase tracking-widest text-white">Webhook Logs</h3><div id="webhook-logs-body" class="text-xs text-slate-400">Loading...</div></div>`);
+    try {
+        const result = await callAdminApi('GET', `/api/admin/workspaces/${encodeURIComponent(wsId)}/yoco-v2/receipts?limit=50`);
+        const rows = result?.rows || [];
+        const body = document.getElementById('webhook-logs-body');
+        if (!body) return;
+        if (!rows.length) { body.innerHTML = '<p class="text-slate-500">No webhook receipts recorded for this workspace.</p>'; return; }
+        body.innerHTML = `
+            <table class="w-full text-left text-[10px]">
+                <thead><tr class="text-slate-500 uppercase border-b border-white/10"><th class="py-2 pr-2">Received</th><th class="py-2 pr-2">Event</th><th class="py-2 pr-2">Signature</th><th class="py-2 pr-2">Capture</th><th class="py-2">Queue</th></tr></thead>
+                <tbody>${rows.map(r => `<tr class="border-b border-white/5"><td class="py-2 pr-2">${adminEscapeHtml(formatAdminDateTime(r.received_at))}</td><td class="py-2 pr-2">${adminEscapeHtml(r.event_type || '')}</td><td class="py-2 pr-2">${adminEscapeHtml(r.signature_status || '')}</td><td class="py-2 pr-2">${adminEscapeHtml(r.capture_status || '')}</td><td class="py-2">${adminEscapeHtml(r.queue_status || '')}</td></tr>`).join('')}</tbody>
+            </table>
+        `;
+    } catch (e) {
+        const body = document.getElementById('webhook-logs-body');
+        if (body) body.innerHTML = `<p class="text-red-400">Failed to load logs: ${adminEscapeHtml(e.message)}</p>`;
+    }
+}
+
+async function viewWebhookAuditTrailForWorkspace(wsId) {
+    openModal(`<div class="space-y-4"><h3 class="text-sm font-black uppercase tracking-widest text-white">Webhook Admin Actions</h3><div id="webhook-actions-body" class="text-xs text-slate-400">Loading...</div></div>`);
+    try {
+        const result = await callAdminApi('GET', `/api/admin/workspaces/${encodeURIComponent(wsId)}/yoco-v2/actions?limit=50`);
+        const rows = result?.rows || [];
+        const body = document.getElementById('webhook-actions-body');
+        if (!body) return;
+        if (!rows.length) { body.innerHTML = '<p class="text-slate-500">No admin actions recorded for this workspace.</p>'; return; }
+        body.innerHTML = `
+            <table class="w-full text-left text-[10px]">
+                <thead><tr class="text-slate-500 uppercase border-b border-white/10"><th class="py-2 pr-2">When</th><th class="py-2 pr-2">Actor</th><th class="py-2 pr-2">Action</th><th class="py-2">Status</th></tr></thead>
+                <tbody>${rows.map(r => `<tr class="border-b border-white/5"><td class="py-2 pr-2">${adminEscapeHtml(formatAdminDateTime(r.created_at))}</td><td class="py-2 pr-2">${adminEscapeHtml(r.actor_email || r.actor_uid || '')}</td><td class="py-2 pr-2">${adminEscapeHtml(r.action || '')}</td><td class="py-2">${adminEscapeHtml(r.status || '')}</td></tr>`).join('')}</tbody>
+            </table>
+        `;
+    } catch (e) {
+        const body = document.getElementById('webhook-actions-body');
+        if (body) body.innerHTML = `<p class="text-red-400">Failed to load audit trail: ${adminEscapeHtml(e.message)}</p>`;
+    }
+}
+
+function disconnectAllSubscriptionsForWorkspace(wsId) {
+    const row = webhookHealthRows.find(r => r.workspaceId === wsId);
+    const name = row ? row.name : wsId;
+    openModal(`
+        <div class="space-y-5">
+            <div class="flex items-center gap-3">
+                <div class="w-12 h-12 rounded-full bg-red-500/10 border border-red-500/30 flex items-center justify-center shrink-0">
+                    <i class="fa-solid fa-triangle-exclamation text-red-400"></i>
+                </div>
+                <div>
+                    <h3 class="text-sm font-black uppercase tracking-widest text-white">Disconnect All Subscriptions</h3>
+                    <p class="text-xs text-slate-500 mt-1">This fully disconnects the Yoco integration for this workspace and deletes its remote webhook subscription(s). This cannot be undone from here.</p>
+                </div>
+            </div>
+            <p class="text-xs text-slate-400">Type <span class="font-black text-white">${adminEscapeHtml(name)}</span> to confirm.</p>
+            <input type="text" id="webhook-disconnect-confirm-input" placeholder="Workspace name" class="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-red-500/50" oninput="document.getElementById('webhook-disconnect-confirm-btn').disabled = this.value.trim() !== ${adminInlineString(name)}">
+            <div class="flex justify-end gap-2">
+                <button onclick="closeModal()" class="btn-ghost">Cancel</button>
+                <button id="webhook-disconnect-confirm-btn" disabled onclick="confirmDisconnectAllSubscriptions(${adminInlineString(wsId)})" class="btn-danger disabled:opacity-40 disabled:cursor-not-allowed">Disconnect All Subscriptions</button>
+            </div>
+        </div>
+    `);
+}
+
+async function reconcileWebhookSubscriptionForWorkspace(wsId) {
+    const row = webhookHealthRows.find(r => r.workspaceId === wsId);
+    const name = row ? row.name : wsId;
+    showSync('Reconciling Webhook Subscription...', `Checking ${name} for duplicate remote subscriptions...`);
+    try {
+        const result = await callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(wsId)}/yoco-v2/reconcile-subscription`);
+        hideSync();
+        if (result?.skipped) {
+            showToast(`${name} is not connected — nothing to reconcile.`, 'info');
+        } else if (!result?.extraSubscriptionsFound) {
+            showToast(`${name} already has exactly one active subscription.`, 'success');
+        } else if (result?.failedCount) {
+            showToast(`Found ${result.extraSubscriptionsFound} extra subscription(s). ${result.deletedCount || 0} removed, ${result.failedCount} could not be deleted (rate limited) — check the audit trail.`, 'warning');
+        } else {
+            showToast(`Found ${result.extraSubscriptionsFound} extra subscription(s) — all removed. Exactly 1 remains.`, 'success');
+        }
+        refreshWebhookHealth();
+    } catch (e) {
+        hideSync();
+        showToast(`Failed to reconcile: ${e.message}`, 'error');
+    }
+}
+
+async function confirmDisconnectAllSubscriptions(wsId) {
+    const row = webhookHealthRows.find(r => r.workspaceId === wsId);
+    const name = row ? row.name : wsId;
+    closeModal();
+    showSync('Disconnecting Webhook Subscriptions...', `Removing remote Yoco subscriptions for ${name}...`);
+    try {
+        const result = await callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(wsId)}/yoco-v2/disconnect-all`);
+        hideSync();
+        if (result?.cleanupPending) {
+            showToast(`Disconnected locally. ${Number(result?.deletedSubscriptionCount || 0)} subscription(s) removed; some cleanup was rate limited and may finish shortly.`, 'warning');
+        } else {
+            showToast(`Disconnected. ${Number(result?.deletedSubscriptionCount || 0)} remote subscription(s) removed.`, 'success');
+        }
+        refreshWebhookHealth();
+    } catch (e) {
+        hideSync();
+        showToast(`Failed to disconnect: ${e.message}`, 'error');
+    }
 }
 
 // ─── Users ───
@@ -6302,8 +6808,6 @@ async function submitForcePasswordChange() {
     }
 }
 </script>
-
-<script src="/yoco-v2-admin.js"></script>
 
 <!-- Force Password Change Overlay (non-dismissable) -->
 <div id="force-pw-overlay" class="hidden fixed inset-0 z-[300] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
