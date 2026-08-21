@@ -187,14 +187,20 @@ async function completeCanonicalProcessing(
     });
     // Record the live-effect outcome so a partial/skipped sale is never silently "completed".
     // Stock is best-effort: unmapped/unresolved lines are skipped (not blocked), so surface
-    // whether stock fully APPLIED, PARTIAL-ly applied, or was SKIPPED, plus the reason.
+    // whether stock fully APPLIED, PARTIAL-ly applied, was SKIPPED, or was a no-op DUPLICATE,
+    // plus the reason. DUPLICATE must stay distinct from APPLIED — it means this attempt inserted
+    // nothing (an earlier attempt already fully applied this order's effects), and collapsing it
+    // into "APPLIED" made a genuinely-stuck order look successfully processed in the timeline with
+    // no way to tell the two apart short of checking the stock ledger directly.
     const reportingOutcome = String(effectResult.reporting ?? 'UNKNOWN');
     const stockOutcome = String(effectResult.stock ?? 'UNKNOWN');
     const status = stockOutcome === 'PARTIAL'
       ? 'PARTIAL'
       : stockOutcome === 'SKIPPED' || stockOutcome.startsWith('SKIPPED')
         ? 'SKIPPED'
-        : 'APPLIED';
+        : stockOutcome === 'DUPLICATE'
+          ? 'DUPLICATE'
+          : 'APPLIED';
     await appendTimeline(env.DB, {
       rawEventId,
       processingRunId: runId,
@@ -204,7 +210,9 @@ async function completeCanonicalProcessing(
         ? 'Live sale effects applied for all resolvable lines; unmapped/unresolved lines were skipped and flagged for review.'
         : status === 'SKIPPED'
           ? 'Live sale stock was skipped (no resolvable lines or a closed ownership/control gate); reporting outcome recorded below.'
-          : 'Live sale effects were applied through the ownership gates.',
+          : status === 'DUPLICATE'
+            ? 'Live sale stock was NOT re-applied: an earlier attempt already fully applied this order’s effects. No new stock movement was written by this attempt.'
+            : 'Live sale effects were applied through the ownership gates.',
       metadata: {
         reporting: reportingOutcome,
         stock: stockOutcome,

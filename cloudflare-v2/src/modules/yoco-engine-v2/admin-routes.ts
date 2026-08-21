@@ -8,6 +8,7 @@ import { saveManualRefundAllocation } from './refund-resolver';
 import { runYocoV2Reconciliation, setYocoV2ReconciliationPause } from './reconciliation';
 import { getEffectRuntime, pauseEffect, resumeEffect } from './effect-gate';
 import { countActiveYocoWebhookSubscriptions, disconnectYoco, getYocoConnection, reconcileYocoWebhookSubscription } from './integration-service';
+import { processYocoV2QueueMessage } from './processor';
 
 const RECEIPT_STATS_WINDOWS_MINUTES: Array<[string, number]> = [
   ['last5m', 5],
@@ -32,14 +33,12 @@ async function loadEvent(env: Env, workspaceId: string, rawEventId: string) {
   ).bind(workspaceId, rawEventId).first<Row>();
 }
 
-async function publishAdminReplay(
-  env: YocoV2QueueEnv,
+function buildAdminReplayMessage(
   event: Row,
   reason: string,
   options: Pick<YocoV2QueueMessage, 'force_refresh' | 'rerun_stage' | 'live_effects'> = {}
-): Promise<void> {
-  if (!env.YOCO_V2_EVENTS) throw new Error('YOCO_V2_EVENTS queue binding is not configured.');
-  const message: YocoV2QueueMessage = {
+): YocoV2QueueMessage {
+  return {
     raw_event_id: String(event.id),
     workspace_id: String(event.workspace_id),
     integration_id: String(event.integration_id),
@@ -49,6 +48,10 @@ async function publishAdminReplay(
     live_effects: false,
     ...options
   };
+}
+
+async function publishAdminReplay(env: YocoV2QueueEnv, message: YocoV2QueueMessage): Promise<void> {
+  if (!env.YOCO_V2_EVENTS) throw new Error('YOCO_V2_EVENTS queue binding is not configured.');
   await env.YOCO_V2_EVENTS.send(message, { contentType: 'json' });
 }
 
@@ -357,8 +360,16 @@ export async function handleYocoV2AdminRoute(
       if (!event) return response({ ok: false, error: 'Raw refund event was not found after allocation.' }, 409);
       if (!flags.yoco_v2_queue_enabled) return response({ ok: true, review, queued: false, message: 'Allocation saved. Queue is disabled, so re-resolution remains pending.' });
       await resetForAdminReplay(env, String(event.id), false);
-      await publishAdminReplay(env, event, 'manual-refund-allocation', { force_refresh: false, rerun_stage: 'all', live_effects: true });
+      const replayMessage = buildAdminReplayMessage(event, 'manual-refund-allocation', { force_refresh: false, rerun_stage: 'all', live_effects: true });
+      await publishAdminReplay(env, replayMessage);
       await markRawEventQueued(env.DB, String(event.id));
+      // Durable Cloudflare Queue delivery can lag well beyond its configured batch window (seen
+      // directly in production — see the sale replay action below for the full explanation), so
+      // also process inline here rather than leaving the admin waiting on queue latency alone. The
+      // publish above still lands as a durable, idempotent fallback if this inline attempt fails.
+      await processYocoV2QueueMessage(env, replayMessage).catch((cause) => {
+        console.error('[admin] inline manual-refund-allocation replay failed; durable queue fallback remains pending', cause);
+      });
       await appendTimeline(env.DB, {
         rawEventId: String(event.id),
         step: 'MANUAL_REFUND_ALLOCATION_SAVED',
@@ -528,10 +539,11 @@ export async function handleYocoV2AdminRoute(
           : 'all';
     await resetForAdminReplay(env, rawEventId, action === 'requeue-dead-letter');
     try {
-      await publishAdminReplay(env, event, action, {
+      const replayMessage = buildAdminReplayMessage(event, action, {
         force_refresh: action === 'refetch',
         rerun_stage: rerunStage
       });
+      await publishAdminReplay(env, replayMessage);
       await markRawEventQueued(env.DB, rawEventId);
       await appendTimeline(env.DB, {
         rawEventId,
@@ -540,7 +552,17 @@ export async function handleYocoV2AdminRoute(
         message: `Administrator queued V2 shadow action ${action}.`,
         metadata: { actor_uid: auth.uid, actor_email: auth.email, action, rerun_stage: rerunStage, force_refresh: action === 'refetch', action_id: newId('yoco_v2_admin_action') }
       });
-      return response({ ok: true, status: 'QUEUED', action, rerunStage });
+      // The durable Cloudflare Queue message above is the fallback of record, but its delivery
+      // latency has been observed in production to run well past its configured 5s batch window
+      // (root cause not yet isolated — tracked separately). An admin waiting on a manual replay
+      // shouldn't be stuck on that: process inline here too and surface the real outcome now.
+      // Idempotent by design (same effect_key/proposal_key guards), so a later duplicate delivery
+      // from the queue is a harmless no-op.
+      const inlineResult = await processYocoV2QueueMessage(env, replayMessage).catch((cause) => {
+        console.error('[admin] inline replay failed; durable queue fallback remains pending', cause);
+        return null;
+      });
+      return response({ ok: true, status: 'QUEUED', action, rerunStage, inlineResult });
     } catch (cause) {
       const errorMessage = cause instanceof Error ? cause.message : String(cause);
       await markRawEventQueueFailure(env.DB, rawEventId, 'YOCO_V2_ADMIN_REPLAY_PUBLISH_FAILED', errorMessage);

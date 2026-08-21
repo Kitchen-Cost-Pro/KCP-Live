@@ -990,7 +990,16 @@ function navigateTo(sectionId) {
 
   const nextSection = resolveAccessibleRoute(sectionId || 'dashboard');
 
-  if (nextSection === 'reporting') clearReportingNavigationParameters();
+  if (nextSection === 'reporting') {
+    clearReportingNavigationParameters();
+  } else {
+    // clearReportingNavigationParameters() stamps `?route=reporting` into the URL on every visit
+    // to Reporting, but nothing ever removed it again on navigating elsewhere — so once a user
+    // visited Reporting even once, the URL stayed pinned to `?route=reporting` forever, and
+    // getInitialRoute() (URL always wins over the persisted localStorage route) forced every
+    // later page refresh straight back to Reporting regardless of what the user was actually on.
+    clearStaleReportingRouteParam();
+  }
   if (appState.route.active === nextSection) {
     if (nextSection === 'reporting') renderApp();
     return;
@@ -21004,6 +21013,31 @@ function clearReportingNavigationParameters() {
     window.history.replaceState({}, '', url);
   } catch (error) {
     console.warn('[Reporting] Could not reset stale report navigation state:', error);
+  }
+}
+
+// Companion to clearReportingNavigationParameters(): removes `route=reporting` (and any leftover
+// reporting deep-link filter params) from the URL when navigating to any OTHER section, so a
+// later page refresh doesn't re-read a stale reporting URL and get forced back into Reporting.
+function clearStaleReportingRouteParam() {
+  if (typeof window === 'undefined' || !window.history?.replaceState) return;
+  try {
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has('route')) return;
+    const keys = [
+      'route', 'report', 'view', 'from', 'to', 'startDate', 'endDate', 'dateRangeType',
+      'search', 'time', 'locationId', 'category', 'source', 'sourceType',
+      'paymentMethod', 'status', 'receiptNumber', 'menuCategory', 'menuItemId',
+      'inventoryCategory', 'inventoryItemId', 'modifierGroupId', 'modifierType',
+      'modifierName', 'stockDeductionStatus', 'yocoCategory', 'recipeStatus',
+      'riskStatus', 'warningSeverity', 'supplierId', 'itemType', 'onlyCritical',
+      'onlyBelowPar', 'missingSupplier', 'missingCost', 'user', 'action',
+      'entityType', 'entityName'
+    ];
+    keys.forEach((key) => url.searchParams.delete(key));
+    window.history.replaceState({}, '', url);
+  } catch (error) {
+    console.warn('[Route] Could not clear stale reporting route param:', error);
   }
 }
 

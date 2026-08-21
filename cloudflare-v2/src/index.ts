@@ -1181,14 +1181,23 @@ async function handle(request: Request, env: Env): Promise<Response> {
   // business effect executes in the request path.
   const yocoWebhookM = url.pathname.match(/^\/webhooks\/yoco\/([^/]+)$/);
   if (yocoWebhookM && request.method === 'POST') {
-    // Yoco webhook ingestion is disabled account-wide (2026-08-20) — the account is staying on the
-    // Durable Objects free tier by decision, and WorkspaceDO.migrate() was re-attempting writes on
-    // every single cold start with no in-memory "already migrated" cache, so any workspace with
-    // enough traffic to exhaust its free-tier row-write allowance couldn't even construct its DO
-    // (see the hardening fix below). Re-enable this once that fix has shipped and held, and
-    // reconciliation (24h lookback) has been run to backfill anything missed while this was off —
-    // do not leave this disabled past that lookback window without a plan to backfill further back.
-    return withCors(request, env, json(request, env, { ok: true, received: true, skipped: 'webhook_ingestion_disabled' }));
+    // Re-enabled 2026-08-21 after the Phase 0 (real subscription-dedup fix), Phase 1 (write-budget
+    // gate) and Phase 2 (unified effect gate) rebuild shipped and held clean in production. The DO
+    // cold-start migration crash that originally forced this off is already fixed (see
+    // WorkspaceDO.migrate()'s backoff handling). No reconciliation backfill was run for the outage
+    // window (2026-08-20 → today) — reconciliation's normal scheduled sweep will pick up anything
+    // missed on its own lookback window; a dedicated backfill can still be run later if needed.
+    const workspaceId = decodeURIComponent(yocoWebhookM[1]);
+    const doResponse = await forwardToWorkspaceDO(
+      request,
+      env,
+      workspaceId,
+      'yoco-v2/webhook',
+      { uid: 'yoco-webhook', email: '' }
+    );
+    const headers = new Headers(doResponse.headers);
+    for (const [k, v] of Object.entries(corsHeaders(request, env))) headers.set(k, v);
+    return new Response(doResponse.body, { status: doResponse.status, headers });
   }
 
   // Gmail OAuth returns to a global callback URL, but the connected account is stored in the

@@ -38,16 +38,29 @@ export class WorkspaceDO extends DurableObject<Env> {
     // throws — a workspace whose migration is pending simply keeps serving on its current schema
     // until the migration can succeed.
     ctx.blockConcurrencyWhile(async () => {
-      // migrate() already catches everything it does internally and never throws, but this is a
-      // second, unconditional safety net: nothing thrown from in here may ever reach
-      // blockConcurrencyWhile, because that's the one failure mode that takes the whole workspace
-      // down (every route, every request) rather than degrading just the thing that needed it.
-      try {
-        this.migrate(ctx.storage);
-      } catch (cause) {
-        console.error('[WorkspaceDO] migrate() threw despite its own internal handling — swallowing to keep the DO constructible', cause);
-      }
+      this.ensureMigrated();
     });
+  }
+
+  // Durable Object instances that are actively receiving requests do NOT pick up a new code
+  // deploy's constructor when it ships — Cloudflare only re-runs the constructor (and therefore
+  // migrate()) the next time this specific object is freshly instantiated, which for a workspace
+  // under continuous traffic (status polling, cron fan-out) may not happen for a long time. A
+  // migration added in a deploy can therefore sit unapplied against an already-warm workspace
+  // indefinitely, even though every *new* instantiation already has it. Calling this cheap,
+  // idempotent check at the top of every fetch() (in addition to the constructor) closes that gap:
+  // an already-warm object picks up newly deployed migrations on its very next request instead of
+  // waiting for an unpredictable restart.
+  private ensureMigrated(): void {
+    // migrate() already catches everything it does internally and never throws, but this is a
+    // second, unconditional safety net: nothing thrown from in here may ever reach the caller,
+    // because that's the one failure mode that takes the whole workspace down (every route, every
+    // request) rather than degrading just the thing that needed it.
+    try {
+      this.migrate(this.state.storage);
+    } catch (cause) {
+      console.error('[WorkspaceDO] migrate() threw despite its own internal handling — swallowing to keep the DO serving', cause);
+    }
   }
 
   private migrate(storage: DurableObjectStorage): void {
@@ -177,6 +190,7 @@ export class WorkspaceDO extends DurableObject<Env> {
   }
 
   async fetch(request: Request): Promise<Response> {
+    this.ensureMigrated();
     const workspaceId = request.headers.get('x-kcp-workspace') || '';
     const resource = request.headers.get('x-kcp-resource') || new URL(request.url).pathname;
 
