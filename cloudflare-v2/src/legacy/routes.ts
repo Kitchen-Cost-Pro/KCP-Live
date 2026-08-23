@@ -3948,12 +3948,51 @@ export async function patchWorkspaceSettingsRoute(
     // The per-DO migration that adds the typed `vat_registered` column self-applies on this same
     // workspace's next request rather than instantly on deploy (see WorkspaceDO.ensureMigrated),
     // so a workspace can briefly still be missing it — most likely while a prior migration attempt
-    // is backed off after hitting the write-quota cap. Rather than 500 the whole settings save
-    // (raw_json already carries vatRegistered/vatRate either way), fall back to writing just the
-    // JSON blob so the toggle still takes effect; the typed columns catch up on a later save once
-    // the migration has had a chance to run.
+    // is backed off after hitting the write-quota cap. Cloudflare's DO SQLite phrases this as
+    // "table X has no column named Y" rather than SQLite's usual "no such column: Y" — match both.
     const message = String((cause as Error)?.message || cause || "");
-    if (!/no such column:\s*vat_(registered|rate)/i.test(message)) throw cause;
+    if (!/no such column:\s*vat_(registered|rate)\b|no column named vat_(registered|rate)\b/i.test(message)) {
+      throw cause;
+    }
+    // Repair the column directly rather than only ever falling back — otherwise a workspace stuck
+    // on the old schema (e.g. a prior migration attempt backed off and never got retried) would
+    // silently keep losing the typed columns on every save instead of catching up.
+    try {
+      await env.DB.prepare(
+        `ALTER TABLE workspace_settings ADD COLUMN vat_registered INTEGER NOT NULL DEFAULT 1`,
+      ).run();
+    } catch {
+      // Already added by a concurrent request, or still can't succeed (e.g. quota) — either way,
+      // fall through to the raw_json-only write below rather than compounding the failure.
+    }
+    try {
+      await env.DB.batch([
+        env.DB.prepare(
+          `INSERT INTO workspace_settings (workspace_id, raw_json, vat_rate, vat_registered, updated_at)
+           VALUES (?1, ?2, ?3, ?4, ?5)
+           ON CONFLICT(workspace_id) DO UPDATE SET
+            raw_json = excluded.raw_json,
+            vat_rate = excluded.vat_rate,
+            vat_registered = excluded.vat_registered,
+            updated_at = excluded.updated_at`,
+        ).bind(
+          workspaceId,
+          JSON.stringify(next),
+          numberValue(next.vatRate, 15),
+          isVatRegistered ? 1 : 0,
+          next.updatedAt,
+        ),
+        ...auditStatements,
+      ]);
+      return json(request, env, {
+        ok: true,
+        settings: next,
+        vatRegistrationRecompute,
+      });
+    } catch {
+      // Column repair didn't take (e.g. write quota) — fall back to the JSON blob so the toggle
+      // still takes effect; the typed columns catch up on a later save once repair succeeds.
+    }
     await env.DB.batch([
       env.DB.prepare(
         `INSERT INTO workspace_settings (workspace_id, raw_json, updated_at)

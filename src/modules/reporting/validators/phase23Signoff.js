@@ -32,8 +32,8 @@ import {
   calculateCostChangePercent,
   calculateExpectedClosingStock,
   calculatePriceRange,
+  calculateQuantityVariancePercent,
   calculateTheoreticalUsage,
-  calculateVariancePercent,
   calculateVolatilityPercent,
   calculateWeightedAverageCost
 } from '../engine/statistics.js';
@@ -191,7 +191,7 @@ export function auditPhase23FormulaContracts() {
     coefficientOfVariation: calculateCoefficientOfVariation([50, 55, 60]) > 0,
     theoreticalUsage: calculateTheoreticalUsage(25, 5, 10) === 40,
     theoreticalExpectedClosing: calculateExpectedClosingStock({ openingStock: 100, purchases: 20, transfersIn: 5, manufacturingIn: 0, theoreticalUsage: 35, wastage: 3, transfersOut: 5 }) === 82,
-    theoreticalVariancePercent: almostEqual(calculateVariancePercent(-3, 82), -3 / 82),
+    theoreticalVariancePercent: almostEqual(calculateQuantityVariancePercent(-3, 82), -3 / 82),
     accuracyPercent: almostEqual(calculateAccuracyPercent(79, 82), 1 - (3 / 82)),
     riskScore: calculateRiskScore({ probability: 90, financialImpact: 70, urgency: 80, dataConfidence: 100 }) > 0
   };

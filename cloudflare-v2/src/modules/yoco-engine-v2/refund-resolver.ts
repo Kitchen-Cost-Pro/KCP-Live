@@ -538,7 +538,19 @@ function refundOccurredAt(refund: Row, refundOrder: Row, receivedAt: string): st
 }
 
 async function workspaceVatRate(env: Env, workspaceId: string): Promise<number> {
-  const row = await env.DB.prepare(`SELECT vat_rate FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`).bind(workspaceId).first<Row>();
+  // Mirrors sale-resolver.ts's workspaceVatRate: a non-VAT-registered workspace must resolve to
+  // 0, not the 15 default, or live refund processing keeps reversing VAT that was never charged
+  // in the first place. Tolerate `vat_registered` still being missing on a workspace whose
+  // per-DO migration hasn't applied yet, same as the sale path.
+  let row: Row | null = null;
+  try {
+    row = await env.DB.prepare(
+      `SELECT vat_rate, vat_registered FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`,
+    ).bind(workspaceId).first<Row>();
+  } catch {
+    row = await env.DB.prepare(`SELECT vat_rate FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`).bind(workspaceId).first<Row>();
+  }
+  if (row && numberValue(row.vat_registered, 1) === 0) return 0;
   const vat = numberValue(row?.vat_rate, 15);
   return vat > 0 ? vat : 15;
 }

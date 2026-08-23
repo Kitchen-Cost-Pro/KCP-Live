@@ -318,7 +318,20 @@ function resolutionStatus(input: { completed: boolean; locationId: string; sourc
 }
 
 async function workspaceVatRate(env: Env, workspaceId: string): Promise<number> {
-  const row = await env.DB.prepare(`SELECT vat_rate FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`).bind(workspaceId).first<Row>();
+  // A non-VAT-registered workspace must resolve to 0 here, not just fall through to the
+  // default 15 — otherwise live sale processing keeps charging VAT on every order regardless
+  // of the toggle. `vat_registered` is a newer column than `vat_rate`, so tolerate it still
+  // being missing on a workspace whose per-DO migration hasn't applied yet (see
+  // WorkspaceDO.ensureMigrated) rather than failing sale processing outright.
+  let row: Row | null = null;
+  try {
+    row = await env.DB.prepare(
+      `SELECT vat_rate, vat_registered FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`,
+    ).bind(workspaceId).first<Row>();
+  } catch {
+    row = await env.DB.prepare(`SELECT vat_rate FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`).bind(workspaceId).first<Row>();
+  }
+  if (row && numberValue(row.vat_registered, 1) === 0) return 0;
   const value = numberValue(row?.vat_rate, 15);
   return value > 0 ? value : 15;
 }
