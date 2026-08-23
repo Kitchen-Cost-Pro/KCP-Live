@@ -177,6 +177,7 @@ import {
   postYocoDisconnect,
   postYocoSyncCatalogue,
   postRunDueCatalogueSync,
+  postSyncCatalogueIfDue,
 } from "./routes";
 import { sendWorkspaceLowStockNow } from "./low-stock-email";
 import {
@@ -1478,6 +1479,13 @@ export async function dispatchWorkspaceRoute(
 
   if (request.method === "POST" && resource === "yoco/sync-catalogue") {
     return postYocoSyncCatalogue(request, env, auth, workspaceId);
+  }
+
+  // Called once per login/app-load (see requestCatalogueSyncIfDue in the frontend). Unlike the
+  // manual button above, this only actually syncs when the catalogue is stale — see
+  // postSyncCatalogueIfDue's due-check.
+  if (request.method === "POST" && resource === "yoco/sync-catalogue-if-due") {
+    return postSyncCatalogueIfDue(request, env, auth, workspaceId);
   }
 
   if (request.method === "GET" && resource === "gmail-oauth-callback") {

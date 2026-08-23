@@ -31,10 +31,13 @@ function resolveSalesDateTime(row = {}) {
 export function normalizeSalesFinancialRow(row = {}) {
   const saleDateTime = resolveSalesDateTime(row);
   const sourceGrossAmount = safeNumber(row.grossAmount ?? row.gross_amount);
-  const suppliedVatRate = row.vatRate !== undefined || row.vat_rate !== undefined
-    ? normalizeRate(row.vatRate ?? row.vat_rate)
-    : 0;
-  const vatRate = suppliedVatRate > 0 ? suppliedVatRate : DEFAULT_VAT_RATE;
+  // A non-VAT-registered workspace legitimately supplies vatRate: 0 — that must not collapse
+  // into "not supplied" and fall back to the 15% default below, or every sale on that workspace
+  // would show fabricated VAT instead of the R0 the backend already correctly calculated.
+  const vatRateSupplied = row.vatRate !== undefined || row.vat_rate !== undefined;
+  const suppliedVatRate = vatRateSupplied ? normalizeRate(row.vatRate ?? row.vat_rate) : NaN;
+  const vatRate = vatRateSupplied ? suppliedVatRate : DEFAULT_VAT_RATE;
+  const isExplicitZeroRate = vatRateSupplied && suppliedVatRate === 0;
   const status = text(row.status) || 'Unknown';
   const isRefund = status.toLowerCase().includes('refund') || text(row.orderType || row.order_type).toLowerCase() === 'refund';
   const sourcePaymentMethod = text(row.paymentMethod || row.payment_method);
@@ -51,7 +54,7 @@ export function normalizeSalesFinancialRow(row = {}) {
   const explicitVat = row.vatAmount ?? row.vat_amount;
   const explicitVatAmount = safeNumber(explicitVat);
   const explicitVatUsable = hasValue(explicitVat)
-    && (explicitVatAmount !== 0 || (!sourceGrossAmount && !refundGrossAmount) || isVatExempt);
+    && (explicitVatAmount !== 0 || (!sourceGrossAmount && !refundGrossAmount) || isVatExempt || isExplicitZeroRate);
   const accountingVatAmount = isRefund
     ? explicitVatUsable
       ? (explicitVatAmount > 0 ? -explicitVatAmount : explicitVatAmount)
@@ -139,15 +142,17 @@ export function normalizeSaleUsageRow(row = {}) {
     : roundMoney(qtyUsed * unitCostExVat);
   const qtySold = safeNumber(row.qtySold ?? row.qty_sold ?? row.lineQuantity ?? row.line_quantity, 1) || 1;
   const grossSaleAmount = safeNumber(row.grossSaleAmount ?? row.gross_sale_amount);
-  const suppliedVatRate = row.vatRate !== undefined || row.vat_rate !== undefined
-    ? normalizeRate(row.vatRate ?? row.vat_rate)
-    : 0;
-  const vatRate = suppliedVatRate > 0 ? suppliedVatRate : DEFAULT_VAT_RATE;
+  // Same fix as normalizeSalesFinancialRow: an explicitly-supplied vatRate: 0 (non-VAT-registered
+  // workspace) must not fall back to the 15% default.
+  const vatRateSupplied = row.vatRate !== undefined || row.vat_rate !== undefined;
+  const suppliedVatRate = vatRateSupplied ? normalizeRate(row.vatRate ?? row.vat_rate) : NaN;
+  const vatRate = vatRateSupplied ? suppliedVatRate : DEFAULT_VAT_RATE;
+  const isExplicitZeroRate = vatRateSupplied && suppliedVatRate === 0;
   const isVatExempt = booleanValue(row.isVatExempt ?? row.is_vat_exempt ?? row.vatExempt ?? row.vat_exempt ?? row.zeroRated ?? row.zero_rated)
     || /zero[ _-]?rated|tax[ _-]?exempt|vat[ _-]?exempt|non[ _-]?taxable/.test(text(row.vatSource || row.vat_source || row.taxStatus || row.tax_status).toLowerCase());
   const explicitVat = row.vatAmount ?? row.vat_amount;
   const explicitVatAmount = safeNumber(explicitVat);
-  const explicitVatUsable = hasValue(explicitVat) && (explicitVatAmount > 0 || !grossSaleAmount || isVatExempt);
+  const explicitVatUsable = hasValue(explicitVat) && (explicitVatAmount > 0 || !grossSaleAmount || isVatExempt || isExplicitZeroRate);
   const vatAmount = explicitVatUsable ? explicitVatAmount : calculateVatFromGross(grossSaleAmount, vatRate);
   const explicitNet = row.netSaleAmount ?? row.net_sale_amount;
   const explicitNetAmount = safeNumber(explicitNet);

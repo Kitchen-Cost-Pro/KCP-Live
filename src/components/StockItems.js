@@ -122,7 +122,7 @@ export function renderStockItems({ state, onStockFilterChange, onStockAction = {
 
     ${stock.actionError && !stock.editingItem && !stock.confirmDelete ? renderNotice(stock.actionError, 'error') : ''}
     ${renderStockBody(stock, items, pagedItems, paging, activeFilters, selectedIds, state.settings?.values?.vatRegistered !== false)}
-    ${renderStockModal(stock, categories, uoms, stock.locations || [], renderItems)}
+    ${renderStockModal(stock, categories, uoms, stock.locations || [], renderItems, state.settings?.values?.vatRegistered !== false)}
     ${renderStockLookupPickerModal(stock, categories, uoms)}
     ${renderStockManagerModal(stock, managerData)}
     ${renderLocationCostingPickerModal(filters, locationOptions, stock.actionStatus || '')}
@@ -916,7 +916,7 @@ function renderInlineBulkDelete(selectedIds, actionStatus) {
   `;
 }
 
-function renderStockModal(stock, categories = [], uoms = [], locations = [], stockItems = []) {
+function renderStockModal(stock, categories = [], uoms = [], locations = [], stockItems = [], vatRegistered = true) {
   if (!stock.editingItem) return '';
   const rawItem = stock.editingItem || {};
   const item = rawItem.id === '__new__' ? { ...rawItem, id: '' } : rawItem;
@@ -1027,9 +1027,9 @@ function renderStockModal(stock, categories = [], uoms = [], locations = [], sto
                 </div>
               </label>
               <div class="stockModule__quickSettings stockModule__span2">
-                <label class="stockModule__toggle">
+                <label class="stockModule__toggle" title="${vatRegistered ? 'This item carries VAT on the workspace\'s configured rate.' : 'The workspace is not VAT registered, so no VAT is applied regardless of this setting.'}">
                   <input name="vatEnabled" type="checkbox" ${item.vatEnabled === false ? '' : 'checked'} data-stock-draft-field="vatEnabled" />
-                  <span>VAT Enabled</span>
+                  <span>VAT Enabled${vatRegistered ? '' : ' (workspace not VAT registered — no VAT applied)'}</span>
                 </label>
                 <div class="stockModule__typeControl" aria-label="Item type">
                   <span>Item Type</span>

@@ -39,6 +39,13 @@ export async function syncYocoCatalogue(workspaceId, options = {}) {
   });
 }
 
+// Called once per login/app-load — unlike syncYocoCatalogue above, the backend only actually syncs
+// when the catalogue is stale (see postSyncCatalogueIfDue), so this is cheap to call on every
+// login: most of the time it costs one D1 read on the worker and nothing else.
+export async function syncYocoCatalogueIfDue(workspaceId) {
+  return callCloudflareYocoRoute(workspaceId, 'sync-catalogue-if-due', {});
+}
+
 export async function syncYocoSales(workspaceId, options = {}) {
   return callCloudflareYocoRoute(workspaceId, 'sync-sales', {
     resetWebhook: options.resetWebhook === true

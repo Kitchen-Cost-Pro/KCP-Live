@@ -53,7 +53,7 @@ import {
   exportSchemas,
 } from './services/exportService.js';
 import { callCloudflareWorkspaceRoute, clearApiCache } from './services/cloudflareApi.js';
-import { sendSupplierEmailWithGmail, syncYocoCatalogue, syncYocoSales } from './services/integrationService.js';
+import { sendSupplierEmailWithGmail, syncYocoCatalogue, syncYocoCatalogueIfDue, syncYocoSales } from './services/integrationService.js';
 import { fetchSystemBroadcast } from './services/systemBroadcastService.js';
 import { DEFAULT_STOCK_LOCATION_ID, DEFAULT_STOCK_LOCATION_NAME } from './services/locationModel.js';
 import {
@@ -604,12 +604,23 @@ function hideGlobalSaving() {
   }
 }
 
+// Called once per login/workspace-open (see selectWorkspace). The backend only actually reaches
+// out to Yoco when the catalogue is stale — see postSyncCatalogueIfDue — so this is cheap to call
+// on every login: most of the time it costs one D1 read on the worker and nothing else, and it's
+// what keeps the menu up to date for someone opening the app after being away, without needing the
+// (currently disabled) cron trigger.
+function requestCatalogueSyncIfDue(workspaceId) {
+  if (!workspaceId) return;
+  syncYocoCatalogueIfDue(workspaceId).catch(() => { /* best-effort, silent */ });
+}
+
 function startIntegrationAutoSync() {
   // NOTE: this client-side timer is now a convenience/fast-path only, for whoever currently has
-  // the app open — it is no longer the sole mechanism for menu/catalogue sync. The Worker's
-  // scheduled() cron (`*/45 * * * *` in wrangler.toml, dispatched to
-  // `admin-action/catalogue-sync-due`) guarantees every connected workspace's catalogue syncs
-  // every 45 minutes regardless of whether any browser tab is open, visible, or focused.
+  // the app open — it is no longer the sole mechanism for menu/catalogue sync. The cron path
+  // (`*/45 * * * *` in wrangler.toml, dispatched to `admin-action/catalogue-sync-due`) is
+  // currently disabled account-wide; `requestCatalogueSyncIfDue` (called from `selectWorkspace` on
+  // every login/workspace-open) is the real guarantee today that the catalogue doesn't go stale
+  // for longer than one login cycle.
   const runSync = async () => {
     if (!appState.user || !appState.workspace) return;
     if (isUserBusy()) return;
@@ -950,6 +961,7 @@ async function selectWorkspace(workspace, options = {}) {
   // Chat widget mounted later, after workspace settings load (chat_enabled must be true)
   startSystemBroadcastRefresh();
   startIntegrationAutoSync();
+  requestCatalogueSyncIfDue(workspace.id);
   startDataVersionPoll();
   startAccessSubscription(workspace.id);
   bootstrapActiveRouteForWorkspace(workspace.id);
@@ -1496,7 +1508,13 @@ async function refreshActiveTabFromApi() {
 
     if (appState.route.active === 'ingredients') {
       const { fetchStock } = await import('./services/stockService.js');
+      // A delete that completes AFTER this fetch started already bumped stockMutationToken and
+      // pruned appState.stock locally (see confirmStockDelete). If this fetch's snapshot predates
+      // that delete, applying it here would resurrect the just-deleted row — drop it instead,
+      // mirroring the same guard refreshStockFromDataVersion already uses.
+      const requestToken = stockMutationToken;
       const stock = await fetchStock(workspaceId);
+      if (requestToken !== stockMutationToken) return;
       appState.stock = {
         ...appState.stock,
         status: 'ready',
@@ -1896,10 +1914,15 @@ async function startStockSubscription(workspaceId) {
       appState.workspace?.id !== workspaceId
     ) return;
 
+    // subscribeStockItems fires exactly one fetch on subscribe (load-on-open, no background
+    // polling). If a delete completes and bumps stockMutationToken while that fetch is still in
+    // flight, this snapshot predates the delete and would resurrect the just-deleted row.
+    const requestToken = stockMutationToken;
     unsubscribeStock = subscribeStockItems(workspaceId, {
       onSnapshot: ({ status, items, sites, locations, categories, uoms, loaded, updatedAt }) => {
         if (
           subscriptionToken !== stockSubscriptionToken ||
+          requestToken !== stockMutationToken ||
           appState.route.active !== 'ingredients' ||
           appState.workspace?.id !== workspaceId
         ) return;
@@ -4952,11 +4975,18 @@ function updateRecipeSourceStockItem(stockItemId = '') {
   const recipeSourceRecipeLines = stockItem ? structuredCloneSafe(stockItem.recipe || stockItem.recipeLines || []) : [];
   const directRecipe = structuredCloneSafe(appState.recipes.draftRecipe || item.recipe || []);
   const hasDirectRecipe = directRecipe.some((line) => String(line.ingId || line.stockItemId || '').trim() && parseDecimalInputValue(line.qty ?? line.quantity, 0) > 0);
+  // Only sub-recipe/manufactured stock items build their cost from their OWN recipe lines. A
+  // standard, recipe-source, or virtual (non-stock) item's cost comes straight from its unit_cost
+  // (see stockCostResolver.js) — it has no BOM of its own by design, so an empty
+  // recipeSourceRecipeLines here is expected, not a "missing recipe" error.
+  const linkedItemNeedsOwnRecipe = stockItem && ['sub_recipe', 'manufactured'].includes(deriveStockItemType(stockItem));
   const nextStatus = hasDirectRecipe
     ? 'COMPLETE'
-    : recipeSourceRecipeLines.length
-      ? 'COMPLETE_VIA_LINKED_STOCK_ITEM'
-      : 'MISSING_RECIPE';
+    : !stockItem
+      ? 'MISSING_RECIPE'
+      : (recipeSourceRecipeLines.length || !linkedItemNeedsOwnRecipe)
+        ? 'COMPLETE_VIA_LINKED_STOCK_ITEM'
+        : 'MISSING_RECIPE';
 
   appState.recipes = {
     ...appState.recipes,

@@ -15633,6 +15633,69 @@ export async function postYocoSyncCatalogue(
   return json(request, env, { ok: true, ...result });
 }
 
+// How long a catalogue sync stays "fresh enough" before a due-check will trigger another one.
+// Matches the intended cron cadence (wrangler.toml's `*/45 * * * *`) so a login-triggered sync and
+// the (currently disabled) scheduled sync agree on what "due" means.
+const CATALOGUE_SYNC_STALE_AFTER_MS = 45 * 60 * 1000;
+
+/**
+ * Atomically claims the sync slot for a connected workspace whose catalogue is due (never synced,
+ * or older than the stale threshold) — and returns `claimed: false` otherwise. This is the check
+ * the original cron fan-out was missing (it called `syncYocoCatalogue` — several outbound Yoco API
+ * calls plus a D1 write — for every connected workspace on every tick regardless of whether
+ * anything was actually stale), and it's what makes a login-triggered sync cheap: most logins land
+ * well inside the freshness window and cost only this one write attempt, never touching Yoco.
+ *
+ * Doing the check-and-claim as ONE UPDATE (rather than a SELECT followed later by a write) matters
+ * because `syncYocoCatalogue` only writes `last_catalogue_sync_at` at the very end, after several
+ * sequential Yoco API calls — a real window in which two staff logging in seconds apart could
+ * otherwise both read "due" and both kick off a full sync. Claiming atomically means only the
+ * request whose UPDATE actually lands the row proceeds; `syncYocoCatalogue` overwrites this
+ * provisional timestamp with the real completion time once it finishes.
+ */
+async function claimCatalogueSyncIfDue(
+  env: Env,
+  workspaceId: string,
+): Promise<{ claimed: boolean; connectionActive: boolean; previousSyncAt: string | null }> {
+  const connection = await env.DB.prepare(
+    `SELECT connection_active, last_catalogue_sync_at FROM yoco_connections WHERE workspace_id = ?1 LIMIT 1`,
+  )
+    .bind(workspaceId)
+    .first<{ connection_active: number; last_catalogue_sync_at: string | null }>();
+  if (!connection || Number(connection.connection_active) !== 1) {
+    return { claimed: false, connectionActive: false, previousSyncAt: null };
+  }
+  const staleBefore = new Date(Date.now() - CATALOGUE_SYNC_STALE_AFTER_MS).toISOString();
+  const result = await env.DB.prepare(
+    `UPDATE yoco_connections
+        SET last_catalogue_sync_at = ?2
+      WHERE workspace_id = ?1
+        AND connection_active = 1
+        AND (last_catalogue_sync_at IS NULL OR last_catalogue_sync_at <= ?3)`,
+  )
+    .bind(workspaceId, nowIso(), staleBefore)
+    .run();
+  const claimed = Number(result.meta?.changes || 0) > 0;
+  return { claimed, connectionActive: true, previousSyncAt: claimed ? connection.last_catalogue_sync_at : null };
+}
+
+/**
+ * If `syncYocoCatalogue` throws AFTER a claim was made, the claim's provisional timestamp would
+ * otherwise stand as if the sync had succeeded — silently blocking any retry for the full 45
+ * minutes. Restore the pre-claim value so the next login (or cron tick) sees it as still due.
+ */
+async function releaseCatalogueSyncClaim(env: Env, workspaceId: string, previousSyncAt: string | null) {
+  try {
+    await env.DB.prepare(
+      `UPDATE yoco_connections SET last_catalogue_sync_at = ?2 WHERE workspace_id = ?1`,
+    )
+      .bind(workspaceId, previousSyncAt)
+      .run();
+  } catch {
+    // Best-effort: if this write fails too, the claim stands and simply delays the next retry.
+  }
+}
+
 // Internal scheduler-only route (called from the Worker's `scheduled()` cron fan-out, never from
 // the browser). Menu/catalogue sync previously ran ONLY client-side, tied to a browser tab being
 // open, visible, and focused — it stopped the moment staff closed the tab, switched apps, or
@@ -15647,13 +15710,12 @@ export async function postRunDueCatalogueSync(
 ) {
   if (auth.uid !== "system")
     return error(request, env, 403, "Internal scheduler route.");
-  const connection = await env.DB.prepare(
-    `SELECT connection_active FROM yoco_connections WHERE workspace_id = ?1 LIMIT 1`,
-  )
-    .bind(workspaceId)
-    .first<{ connection_active: number }>();
-  if (!connection || Number(connection.connection_active) !== 1) {
+  const { claimed, connectionActive, previousSyncAt } = await claimCatalogueSyncIfDue(env, workspaceId);
+  if (!connectionActive) {
     return json(request, env, { ok: true, skipped: "not_connected" });
+  }
+  if (!claimed) {
+    return json(request, env, { ok: true, skipped: "not_due" });
   }
   try {
     const result = await syncYocoCatalogue(env, workspaceId, {
@@ -15661,8 +15723,44 @@ export async function postRunDueCatalogueSync(
     });
     return json(request, env, { ok: true, ...result });
   } catch (cause) {
+    await releaseCatalogueSyncClaim(env, workspaceId, previousSyncAt);
     return json(request, env, {
       ok: false,
+      error: cause instanceof Error ? cause.message : "Catalogue sync failed.",
+    });
+  }
+}
+
+// User-triggered equivalent of postRunDueCatalogueSync, called once per login/app-load instead of
+// on a cron (cron triggers are currently disabled — see wrangler.toml). Same due-check, so a
+// second login within the freshness window costs one D1 read and nothing else; it only reaches out
+// to Yoco when the catalogue is actually stale.
+export async function postSyncCatalogueIfDue(
+  request: Request,
+  env: Env,
+  auth: AuthContext,
+  workspaceId: string,
+) {
+  await scoped(request, env, auth, workspaceId);
+  const { claimed, connectionActive, previousSyncAt } = await claimCatalogueSyncIfDue(env, workspaceId);
+  if (!connectionActive) {
+    return json(request, env, { ok: true, synced: false, skipped: "not_connected" });
+  }
+  if (!claimed) {
+    return json(request, env, { ok: true, synced: false, skipped: "not_due" });
+  }
+  try {
+    const result = await syncYocoCatalogue(env, workspaceId, { resetWebhook: false });
+    return json(request, env, { ok: true, synced: true, ...result });
+  } catch (cause) {
+    // A failed background sync must never surface as an error to someone who just logged in —
+    // the manual "Sync Catalogue" button remains available. Release the claim so this doesn't
+    // silently look "just synced" and block a retry for the next 45 minutes.
+    await releaseCatalogueSyncClaim(env, workspaceId, previousSyncAt);
+    return json(request, env, {
+      ok: true,
+      synced: false,
+      skipped: "sync_failed",
       error: cause instanceof Error ? cause.message : "Catalogue sync failed.",
     });
   }

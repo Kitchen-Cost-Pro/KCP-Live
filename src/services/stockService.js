@@ -118,6 +118,22 @@ export async function upsertStockItem(workspaceId, item = {}) {
     method: item.id ? 'PATCH' : 'POST',
     payload: { item: payload }
   });
+
+  // A displayed row can stand for several database rows: dedupeStockItems merges rows sharing
+  // name+category+unit and keeps the rest in `mergedIds`. Saving only the primary id (e.g. when
+  // editing just the Unit field) left those siblings on their old unit — on the next refresh they
+  // no longer matched the merge key, resurfaced as separate rows with the SAME name, and the next
+  // save then hit the "item already exists" duplicate-name check. Keep every id in the group in
+  // sync with the same field values instead of letting siblings silently drift.
+  if (item.id) {
+    const siblingIds = resolveStockItemPersistedIds(item).filter((id) => id !== payload.id);
+    for (const siblingId of siblingIds) {
+      await callCloudflareWorkspaceRoute(workspaceKey, `stock-items/${encodeURIComponent(siblingId)}`, {
+        method: 'PATCH',
+        payload: { item: { ...payload, id: siblingId } }
+      });
+    }
+  }
 }
 
 /**

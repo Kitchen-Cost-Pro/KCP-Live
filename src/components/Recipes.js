@@ -1265,7 +1265,11 @@ function renderRecipeSourceStockItemPanel(item = {}, stockItems = [], filters = 
     .sort((left, right) => Number(isRecipeSourceStockItem(right)) - Number(isRecipeSourceStockItem(left)) || String(left.name || '').localeCompare(String(right.name || '')))
     .slice(0, 100);
   const selectedLabel = selectedItem?.name || 'No non-stock item';
-  const warning = selectedItem && linkedRecipeLines.length === 0
+  // Only a sub-recipe/manufactured linked item builds its cost from its own recipe lines. A
+  // non-stock/raw/virtual item's cost comes straight from its unit_cost — zero recipe lines there
+  // is expected, not a problem, so the warning must not fire for it.
+  const linkedItemNeedsOwnRecipe = selectedItem && ['sub_recipe', 'manufactured'].includes(getIngredientTypeMeta(selectedItem).value);
+  const warning = linkedItemNeedsOwnRecipe && linkedRecipeLines.length === 0
     ? '<p class="recipesModule__sourceWarning">Linked stock item has no recipe lines.</p>'
     : '';
 
