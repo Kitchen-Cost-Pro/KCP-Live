@@ -1,7 +1,7 @@
 import { roundMoney, safeNumber } from '../../engine/calculations.js';
 import { groupBy, sumBy, text, toArray } from '../../engine/grouping.js';
 import { calculateVarianceImpactScore, scoreToRiskStatus } from '../../engine/riskScoring.js';
-import { calculateAccuracyPercent, calculateExpectedClosingStock, calculateTheoreticalUsage, calculateVariancePercent, calculateVarianceQty, calculateVarianceValue, percentileRank } from '../../engine/statistics.js';
+import { calculateAccuracyPercent, calculateExpectedClosingStock, calculateQuantityVariancePercent, calculateTheoreticalUsage, calculateVarianceQty, calculateVarianceValue, percentileRank } from '../../engine/statistics.js';
 import { buildDailySeries } from '../../engine/trendAnalysis.js';
 import { applyAdvancedFilters, attachModelMeta, countWarning, isManufacturingInRow, isManufacturingOutRow, isPurchaseLedgerRow, isTransferInRow, isTransferOutRow, isWastageRow, itemLocationKey, latestByDate, loadAdvancedSources, maxAbs, normalizeDate, sourceWarnings } from './advancedReportHelpers.js';
 import { filterCustomerActionableIssueText } from '../../validators/warningCategories.js';
@@ -156,7 +156,7 @@ function buildComparisonRow(key, { stock = {}, ledger = [], usage = [], stockTak
   const varianceQty = calculateVarianceQty(actualClosingStock, expectedClosingStock);
   const unitCostExVat = safeNumber(stock.unitCostExVat || stockTake?.unitCostExVat || firstLedger?.unitCostExVat);
   const varianceValue = calculateVarianceValue(varianceQty, unitCostExVat);
-  const variancePercent = calculateVariancePercent(varianceQty, expectedClosingStock);
+  const variancePercent = calculateQuantityVariancePercent(varianceQty, expectedClosingStock);
   const actualUsageQty = derivedOpening + purchases + transfersIn + manufacturingIn - wastageQty - transfersOut - actualClosingStock;
   const theoreticalUsageValue = roundMoney(theoreticalUsageQty * unitCostExVat);
   const actualUsageValue = roundMoney(actualUsageQty * unitCostExVat);

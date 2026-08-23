@@ -580,13 +580,17 @@ export async function resolveCanonicalYocoSale(env: YocoV2ApiClientEnv, input: R
     notes: Array.isArray(line.metadata?.raw_note_texts) ? line.metadata.raw_note_texts.map((value) => text(value)).filter(Boolean) : [],
     observedAt: occurredAt
   })));
+  // Log the AUTHORITATIVE stored outcome (domainEvent), not this call's own local `status` — if
+  // the upsert guard above rejected this call's write because a better resolution already existed,
+  // `status` no longer describes what's actually in the database and would leave a misleading
+  // timeline entry (e.g. "stored ... UNSUPPORTED_ORDER_STATE" for an order that's really RESOLVED).
   await appendTimeline(env.DB, {
     rawEventId,
     processingRunId,
     step: 'CANONICAL_SALE_STORED',
-    status,
-    message: `Canonical sale ${sourceOrderId} stored once with resolution status ${status}.`,
-    metadata: { domain_event_id: eventId, source_order_id: sourceOrderId, line_count: lines.length, resolution_status: status }
+    status: String(domainEvent.resolution_status || status),
+    message: `Canonical sale ${sourceOrderId} stored once with resolution status ${domainEvent.resolution_status || status}.`,
+    metadata: { domain_event_id: domainEvent.id, source_order_id: sourceOrderId, line_count: lines.length, resolution_status: domainEvent.resolution_status || status }
   });
   return { domainEvent, canonical: storedCanonical };
 }

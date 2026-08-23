@@ -1,3 +1,5 @@
+import { inferDateRangeType } from './dateRangePresets.js';
+
 const RUNTIME_FILTER_KEYS = new Set([
   'limit',
   'offset',
@@ -35,7 +37,7 @@ export function normalizeScheduledReportFilters({
   scheduleFilters = {},
   itemFilters = {},
   range = {},
-  dateRangeType = 'custom',
+  dateRangeType = '',
   location = null
 } = {}) {
   const filters = {
@@ -53,7 +55,9 @@ export function normalizeScheduledReportFilters({
       filters[key] = normalizedRange[key];
     }
   }
-  filters.dateRangeType = clean(dateRangeType || 'custom');
+  // One shared fallback: blank stays the unbounded 'custom' range that resolveScheduledRelativeRange
+  // expects for a date-less report, instead of a second hand-written default that can drift.
+  filters.dateRangeType = clean(dateRangeType) || inferDateRangeType(normalizedRange, { fallback: 'custom' });
 
   if (location && clean(location.id)) {
     filters.locationId = clean(location.id);

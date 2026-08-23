@@ -185,19 +185,31 @@ export function deriveYocoFinancialAmounts({
     && taxResolution.value <= taxBaseAmount + CENT_TOLERANCE
     && (taxResolution.value > 0 || !taxBaseAmount || !normalizedVatRate || explicitZeroRated);
   const calculatedVat = calculateVatFromGross(grossAmount, vatRate);
-  const refundVatAmount = roundMoney(explicitZeroRated
+  // VAT resolution priority is IDENTICAL for sales and refunds so the same order can never
+  // report one VAT figure on its sale row and a different one on its refund row.
+  // An explicit zero-rated marker wins over a stored VAT value, matching how the rest of this
+  // module treats zero-rating (see `vatSource`, the zero-VAT issue suppression below, and the
+  // authoritative explicit-zero handling in resolveYocoVatRate).
+  const resolveVatAmount = (calculatedFallback) => roundMoney(explicitZeroRated
     ? 0
     : hasStoredVat
       ? storedVat
       : explicitTaxPlausible
         ? taxResolution.value
-        : calculateVatFromGross(refundAmount, vatRate));
+        : calculatedFallback);
+  const refundVatAmount = resolveVatAmount(calculateVatFromGross(refundAmount, vatRate));
+  const saleVatAmount = resolveVatAmount(calculatedVat);
+  const contradictoryZeroRatedVat = explicitZeroRated && hasStoredVat && roundMoney(storedVat) !== 0;
   const vatAmount = isRefund
     ? roundMoney(-refundVatAmount)
-    : roundMoney(hasStoredVat ? storedVat : explicitTaxPlausible ? taxResolution.value : calculatedVat);
+    : saleVatAmount;
+  // A contradictory zero-rated order's persisted net was derived from the stale nonzero VAT, so it
+  // cannot be trusted either: keeping it would leave gross != net + VAT and trip the critical
+  // reconciliation issue. Both components are re-derived from the zero-rated VAT of 0 instead.
+  const useStoredNet = hasStoredNet && !contradictoryZeroRatedVat;
   const netAmount = isRefund
-    ? roundMoney(-(hasStoredNet ? storedNet : refundAmount - refundVatAmount))
-    : roundMoney(hasStoredNet ? storedNet : grossAmount - vatAmount);
+    ? roundMoney(-(useStoredNet ? storedNet : refundAmount - refundVatAmount))
+    : roundMoney(useStoredNet ? storedNet : grossAmount - vatAmount);
 
   const directDiscount = resolveYocoMoney(raw, [
     'amounts.discount_amount',
@@ -223,7 +235,7 @@ export function deriveYocoFinancialAmounts({
   ], NaN).value;
   const feeAmount = isRefund ? 0 : roundMoney(finiteOr(directFee, finiteOr(sumYocoProcessingFees(raw), 0)));
 
-  const refundNetAmount = roundMoney(isRefund && hasStoredNet ? storedNet : Math.max(0, refundAmount - refundVatAmount));
+  const refundNetAmount = roundMoney(isRefund && useStoredNet ? storedNet : Math.max(0, refundAmount - refundVatAmount));
   // Refunds are cash returned to the customer, so payout and payment reconciliation
   // must deduct the full VAT-inclusive gross refund. VAT and ex-VAT components are
   // still exposed separately for accounting tables.
@@ -237,6 +249,13 @@ export function deriveYocoFinancialAmounts({
       code: 'yoco-persisted-total-mismatch',
       level: 'critical',
       message: 'The stored Yoco total did not match the authoritative raw final amount; reporting used the raw amount. Re-sync this order to repair the stored value.'
+    });
+  }
+  if (contradictoryZeroRatedVat) {
+    issues.push({
+      code: 'yoco-zero-rated-with-stored-vat',
+      level: 'warning',
+      message: 'This order is marked zero-rated but also carries a nonzero stored VAT amount. Reporting used the zero-rated marker (VAT 0); re-sync or correct the stored VAT value.'
     });
   }
   if (!isRefund && grossAmount > 0 && normalizedVatRate > 0 && vatAmount === 0 && !explicitZeroRated) {
@@ -271,7 +290,11 @@ export function deriveYocoFinancialAmounts({
     expectedPayout,
     vatRate,
     isVatExempt: explicitZeroRated,
-    vatSource: isRefund ? (hasStoredVat ? 'persisted-refund' : explicitTaxPlausible ? 'yoco-return' : 'refund-calculated') : explicitZeroRated ? 'zero-rated' : hasStoredVat ? 'persisted' : explicitTaxPlausible ? 'yoco' : 'calculated',
+    vatSource: explicitZeroRated
+      ? 'zero-rated'
+      : isRefund
+        ? (hasStoredVat ? 'persisted-refund' : explicitTaxPlausible ? 'yoco-return' : 'refund-calculated')
+        : hasStoredVat ? 'persisted' : explicitTaxPlausible ? 'yoco' : 'calculated',
     grossSource: persistedTotalMismatch
       ? `raw-corrected:${resolvedGrossPath}`
       : storedTotal

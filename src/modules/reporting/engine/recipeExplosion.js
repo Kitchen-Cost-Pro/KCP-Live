@@ -110,8 +110,12 @@ export function resolveSubRecipeIngredients({ recipe, quantityMultiplier = 1, re
       continue;
     }
 
-    const unitCostExVat = resolveUnitCost(stockItem, line);
-    if (!unitCostExVat) {
+    // A genuinely zero unit cost (a free or zero-valued ingredient) is a real cost, not a missing
+    // one: resolveUnitCost returns null only when no cost is present anywhere, and only that case
+    // is warned about.
+    const resolvedUnitCost = resolveUnitCost(stockItem, line);
+    const unitCostExVat = resolvedUnitCost === null ? 0 : resolvedUnitCost;
+    if (resolvedUnitCost === null) {
       warnings.push(warning('missing-unit-cost', `Missing unit cost for ingredient ${text(stockItem.name) || stockItemId}.`, { stockItemId, recipeId }));
     }
 
@@ -240,12 +244,21 @@ function isStockHoldingPrepItem(stockItem = {}) {
   return explicitlyStocked && prepLike;
 }
 
+// Returns the resolved unit cost, or null when no cost value is present at all. A present value of
+// 0 is returned as 0 so callers can tell "free ingredient" apart from "cost not captured".
 function resolveUnitCost(stockItem = {}, line = {}) {
-  return safeNumber(
+  const raw =
     line.unitCostExVat ?? line.unit_cost_ex_vat ?? line.unitCost ?? line.unit_cost ??
-    stockItem.unitCostExVat ?? stockItem.unit_cost_ex_vat ?? stockItem.unitCost ?? stockItem.unit_cost ?? stockItem.costExVat ?? stockItem.cost,
-    0
-  );
+    stockItem.unitCostExVat ?? stockItem.unit_cost_ex_vat ?? stockItem.unitCost ?? stockItem.unit_cost ?? stockItem.costExVat ?? stockItem.cost;
+  // Only a finite number or a non-blank numeric string counts as present. Booleans, arrays and
+  // whitespace-only strings would all coerce to 0 through `Number()` and masquerade as a genuine
+  // zero cost, swallowing the missing-unit-cost warning they should raise.
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : null;
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const numeric = Number(trimmed);
+  return Number.isFinite(numeric) ? numeric : null;
 }
 
 function findExplicitConversionFactor({ from, to, stockItem = {}, recipeData = {} } = {}) {

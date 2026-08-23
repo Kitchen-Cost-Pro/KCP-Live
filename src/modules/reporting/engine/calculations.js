@@ -25,7 +25,10 @@ export function calculateExpectedClosingValue(openingValue, increases, decreases
   return roundMoney(Number(openingValue || 0) + Number(increases || 0) - Number(decreases || 0));
 }
 
-export function calculateVariancePercent(varianceValue, expectedValue) {
+// Money-variance ratio: variance VALUE over expected VALUE. Deliberately not named
+// `calculateVariancePercent` — statistics.js exports a same-signature quantity-variance ratio
+// (`calculateQuantityVariancePercent`) and the ambiguous shared name let callers import the wrong one.
+export function calculateValueVariancePercent(varianceValue, expectedValue) {
   if (!expectedValue) return 0;
   return Number(varianceValue || 0) / Number(expectedValue || 0);
 }

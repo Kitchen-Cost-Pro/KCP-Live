@@ -503,13 +503,48 @@ export async function handleYocoV2AdminRoute(
     return response({ ok: true, integrationId, ...result });
   }
 
-  const actionMatch = suffix.match(/^events\/([^/]+)\/(replay|requeue-dead-letter|manual-review|refetch|reresolve|repropose|recompare)$/);
+  const actionMatch = suffix.match(/^events\/([^/]+)\/(replay|requeue-dead-letter|manual-review|refetch|reresolve|repropose|recompare|discard-stock-effects)$/);
   if (request.method === 'POST' && actionMatch) {
     const rawEventId = decodeURIComponent(actionMatch[1]);
     const action = actionMatch[2];
     const event = await loadEvent(env, workspaceId, rawEventId);
     if (!event) return response({ ok: false, error: 'V2 raw event not found.' }, 404);
     if (Number(event.signature_valid || 0) !== 1) return response({ ok: false, error: 'Invalid-signature events cannot enter V2 processing.' }, 409);
+
+    // Cleans up a stock effect that was proposed but never actually applied to the stock ledger
+    // (e.g. a test order stuck by a since-fixed race condition) — deletes the unapplied proposal
+    // rows and marks the raw event for manual review so it's never auto-retried again. Refuses if
+    // a real stock_movements row already exists for this order, so this can never silently erase
+    // the record of an inventory change that genuinely happened. Does NOT touch the immutable raw
+    // event, the processing timeline, or the sale's reporting/financial record — those stay intact.
+    if (action === 'discard-stock-effects') {
+      const domainEvent = await env.DB.prepare(
+        `SELECT * FROM yoco_v2_domain_events WHERE raw_event_id = ?1 AND workspace_id = ?2 LIMIT 1`
+      ).bind(rawEventId, workspaceId).first<Row>();
+      if (!domainEvent) return response({ ok: false, error: 'No canonical sale found for this event.' }, 404);
+      const sourceOrderId = String(domainEvent.source_entity_id || '');
+      const existingMovements = await env.DB.prepare(
+        `SELECT COUNT(*) AS count FROM stock_movements
+          WHERE workspace_id = ?1 AND document_type = 'yoco_order' AND document_id = ?2 AND movement_type = 'sale_depletion'`
+      ).bind(workspaceId, sourceOrderId).first<Row>();
+      if (Number(existingMovements?.count || 0) > 0) {
+        return response({ ok: false, error: 'Refusing to discard: real stock movements already exist for this order.' }, 409);
+      }
+      await env.DB.batch([
+        env.DB.prepare(`DELETE FROM yoco_v2_proposed_stock_movements WHERE workspace_id = ?1 AND source_order_id = ?2`).bind(workspaceId, sourceOrderId),
+        env.DB.prepare(`DELETE FROM yoco_v2_live_sale_stock_effects WHERE workspace_id = ?1 AND source_order_id = ?2`).bind(workspaceId, sourceOrderId),
+        env.DB.prepare(`DELETE FROM yoco_v2_live_effect_outbox WHERE workspace_id = ?1 AND domain_event_id = ?2 AND effect_type = 'SALE_STOCK'`).bind(workspaceId, String(domainEvent.id)),
+        env.DB.prepare(`UPDATE yoco_v2_raw_events SET processing_status = 'MANUAL_REVIEW_REQUIRED', updated_at = ?2 WHERE id = ?1`).bind(rawEventId, nowIso())
+      ]);
+      await appendTimeline(env.DB, {
+        rawEventId,
+        step: 'ADMIN_STOCK_EFFECTS_DISCARDED',
+        status: 'MANUAL_REVIEW_REQUIRED',
+        message: 'Administrator discarded unapplied stock effect proposals for this order and marked the event for manual review. The immutable raw event, its timeline, and the sale reporting record are unaffected.',
+        metadata: { actor_uid: auth.uid, actor_email: auth.email, source_order_id: sourceOrderId }
+      });
+      return response({ ok: true, status: 'DISCARDED', sourceOrderId });
+    }
 
     if (action === 'manual-review') {
       await env.DB.prepare(

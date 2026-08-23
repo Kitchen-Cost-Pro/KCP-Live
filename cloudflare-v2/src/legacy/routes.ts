@@ -3897,22 +3897,7 @@ export async function patchWorkspaceSettingsRoute(
     );
   }
 
-  const statements: DbStatementLike[] = [
-    env.DB.prepare(
-      `INSERT INTO workspace_settings (workspace_id, raw_json, vat_rate, vat_registered, updated_at)
-       VALUES (?1, ?2, ?3, ?4, ?5)
-       ON CONFLICT(workspace_id) DO UPDATE SET
-        raw_json = excluded.raw_json,
-        vat_rate = excluded.vat_rate,
-        vat_registered = excluded.vat_registered,
-        updated_at = excluded.updated_at`,
-    ).bind(
-      workspaceId,
-      JSON.stringify(next),
-      numberValue(next.vatRate, 15),
-      isVatRegistered ? 1 : 0,
-      next.updatedAt,
-    ),
+  const auditStatements: DbStatementLike[] = [
     env.DB.prepare(
       `INSERT INTO audit_events (id, workspace_id, actor_uid, event_type, entity_type, entity_id, after_json, created_at)
        VALUES (?1, ?2, ?3, 'workspace_settings_saved', 'workspace_settings', ?2, ?4, ?5)`,
@@ -3925,7 +3910,7 @@ export async function patchWorkspaceSettingsRoute(
     ),
   ];
   if (vatRegistrationRecompute) {
-    statements.push(
+    auditStatements.push(
       env.DB.prepare(
         `INSERT INTO audit_events (id, workspace_id, actor_uid, event_type, entity_type, entity_id, before_json, after_json, created_at)
          VALUES (?1, ?2, ?3, 'vat_registration_cost_recompute', 'workspace_settings', ?2, ?4, ?5, ?6)`,
@@ -3939,7 +3924,48 @@ export async function patchWorkspaceSettingsRoute(
       ),
     );
   }
-  await env.DB.batch(statements);
+
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO workspace_settings (workspace_id, raw_json, vat_rate, vat_registered, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(workspace_id) DO UPDATE SET
+          raw_json = excluded.raw_json,
+          vat_rate = excluded.vat_rate,
+          vat_registered = excluded.vat_registered,
+          updated_at = excluded.updated_at`,
+      ).bind(
+        workspaceId,
+        JSON.stringify(next),
+        numberValue(next.vatRate, 15),
+        isVatRegistered ? 1 : 0,
+        next.updatedAt,
+      ),
+      ...auditStatements,
+    ]);
+  } catch (cause) {
+    // The per-DO migration that adds the typed `vat_registered` column self-applies on this same
+    // workspace's next request rather than instantly on deploy (see WorkspaceDO.ensureMigrated),
+    // so a workspace can briefly still be missing it — most likely while a prior migration attempt
+    // is backed off after hitting the write-quota cap. Rather than 500 the whole settings save
+    // (raw_json already carries vatRegistered/vatRate either way), fall back to writing just the
+    // JSON blob so the toggle still takes effect; the typed columns catch up on a later save once
+    // the migration has had a chance to run.
+    const message = String((cause as Error)?.message || cause || "");
+    if (!/no such column:\s*vat_(registered|rate)/i.test(message)) throw cause;
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO workspace_settings (workspace_id, raw_json, updated_at)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(workspace_id) DO UPDATE SET
+          raw_json = excluded.raw_json,
+          updated_at = excluded.updated_at`,
+      ).bind(workspaceId, JSON.stringify(next), next.updatedAt),
+      ...auditStatements,
+    ]);
+  }
+
   return json(request, env, {
     ok: true,
     settings: next,

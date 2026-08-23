@@ -42,6 +42,42 @@ test('recipe explosion converts units and returns final ingredient usage rows', 
   assert.deepEqual(result.warnings, []);
 });
 
+test('a genuinely zero-cost ingredient is costed at zero and is not reported as a missing unit cost', () => {
+  // Regression: cost resolution used truthiness, so a real 0 was indistinguishable from "no cost
+  // captured" — it raised a missing-unit-cost warning instead of standing as a real zero cost.
+  const result = explodeRecipeToIngredients({
+    menuItemId: 'water-glass',
+    quantitySold: 2,
+    recipeData: {
+      recipes: [{ id: 'recipe-water', owner_type: 'product', owner_id: 'water-glass', yield_qty: 1 }],
+      recipeLines: [
+        { id: 'line-water', recipe_id: 'recipe-water', stock_item_id: 'tap-water', quantity: 250, unit: 'ml', unit_cost_ex_vat: 0 },
+        { id: 'line-mystery', recipe_id: 'recipe-water', stock_item_id: 'mystery', quantity: 1, unit: 'ea' }
+      ],
+      stockItems: [
+        { id: 'tap-water', name: 'Tap Water', category: 'Beverage', unit: 'l', item_type: 'raw' },
+        { id: 'mystery', name: 'Mystery', category: 'Other', unit: 'ea', item_type: 'raw' }
+      ]
+    }
+  });
+  const waterRow = result.rows.find((row) => row.inventoryItemId === 'tap-water');
+  assert.equal(waterRow.unitCostExVat, 0);
+  assert.ok(!result.warnings.some((warning) => warning.code === 'missing-unit-cost' && warning.details?.stockItemId === 'tap-water'));
+  assert.ok(result.warnings.some((warning) => warning.code === 'missing-unit-cost' && warning.details?.stockItemId === 'mystery'));
+});
+
+test('a mapped modifier with a genuine zero unit cost keeps a zero stock value', () => {
+  const result = mapModifierUsageRows({
+    modifierSelections: [{ id: 'no-ice', type: 'note', name: 'No Ice', quantity: 2 }],
+    stockMappings: [{ modifierId: 'no-ice', inventoryItemId: 'ice', inventoryItemName: 'Ice', qtyPerSelection: 1, unitCostExVat: 0, baseUom: 'ea' }],
+    saleContext: { workspaceId: 'ws-1', saleId: 'sale-1' }
+  });
+  assert.equal(result.rows.length, 1);
+  assert.equal(result.rows[0].unitCostExVat, 0);
+  assert.equal(result.rows[0].qtyUsed, 2);
+  assert.equal(result.rows[0].stockValueUsed, 0);
+});
+
 test('sub-recipe explosion prevents parent and child double counting', () => {
   const result = explodeRecipeToIngredients({
     menuItemId: 'pizza',

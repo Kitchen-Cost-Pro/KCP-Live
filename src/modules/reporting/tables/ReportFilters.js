@@ -345,56 +345,109 @@ export function renderReportFilters({ filters = {}, locations = [], categories =
   return form;
 }
 
+const SIMPLE_FILTER_FIELDS = [
+  'search',
+  'locationId',
+  'category',
+  'source',
+  'paymentMethod',
+  'status',
+  'receiptNumber',
+  'menuCategory',
+  'menuItemId',
+  'inventoryCategory',
+  'inventoryItemId',
+  'modifierGroupId',
+  'modifierType',
+  'modifierName',
+  'stockDeductionStatus',
+  'yocoCategory',
+  'recipeStatus',
+  'riskStatus',
+  'warningSeverity',
+  'supplierId',
+  'itemType',
+  'onlyCritical',
+  'onlyHighRisk',
+  'onlyHighVolatility',
+  'onlyItemsWithStockTake',
+  'onlyNegativeVariance',
+  'onlyPositiveVariance',
+  'lookbackPeriod',
+  'costChangeThreshold',
+  'volatilityThreshold',
+  'varianceThreshold',
+  'onlyBelowPar',
+  'missingSupplier',
+  'missingCost',
+  'user',
+  'action',
+  'entityType',
+  'entityName'
+];
+
 export function readReportFilters(form) {
   const data = new FormData(form);
-  const parsedRange = parseDateRangeText(String(data.get('dateRangeDisplay') || ''));
-  const startDate = String(data.get('startDate') || parsedRange.startDate || '').trim();
-  const endDate = String(data.get('endDate') || parsedRange.endDate || '').trim();
+  const filters = {};
+  // Only report the filters this report actually renders. Returning every key as '' made a disabled
+  // filter look like an explicit override, so `{ ...report.defaultFilters, ...savedFilters }` let an
+  // empty string silently beat a real default (e.g. status: 'Active' collapsed to status: '').
+  for (const name of SIMPLE_FILTER_FIELDS) {
+    if (!data.has(name)) continue;
+    filters[name] = String(data.get(name) ?? '').trim();
+  }
+  if (data.has('time')) filters.time = normalizeTime(String(data.get('time') ?? '').trim());
+  if (data.has('sourceType')) filters.sourceType = String(data.get('sourceType') || data.get('source') || '').trim();
+  Object.assign(filters, readDateRangeFilters(form, data));
+  return filters;
+}
+
+function readDateRangeFilters(form, data) {
+  if (!data.has('dateRangeType') && !data.has('startDate') && !data.has('endDate') && !data.has('dateRangeDisplay')) return {};
+
+  const hiddenStart = String(data.get('startDate') || '').trim();
+  const hiddenEnd = String(data.get('endDate') || '').trim();
+  let startDate = hiddenStart;
+  let endDate = hiddenEnd;
+
+  if (data.has('dateRangeDisplay')) {
+    // The visible text input is what the user last edited, so a complete range typed there wins.
+    // Previously the (possibly stale) hidden fields were primary and a typed range was silently
+    // ignored on Apply. The picker writes both fields, so in its own flow the two already agree.
+    const displayText = String(data.get('dateRangeDisplay') || '').trim();
+    const typed = parseDateRangeText(displayText);
+    if (typed.startDate && typed.endDate) {
+      startDate = typed.startDate;
+      endDate = typed.endDate;
+    } else if (!displayText) {
+      startDate = '';
+      endDate = '';
+    } else if (typed.startDate && !hiddenStart && !hiddenEnd) {
+      startDate = typed.startDate;
+      endDate = '';
+    }
+  }
+
+  // Keep the hidden fields (the picker's own state) in sync with what was just applied.
+  syncHiddenDateFields(form, startDate, endDate);
+
   return {
-    search: String(data.get('search') || '').trim(),
-    dateRangeType: String(data.get('dateRangeType') || 'custom').trim(),
-    time: normalizeTime(String(data.get('time') || '').trim()),
+    // The enhanced-select placeholder for this field IS the custom option ("Custom Range"), so an
+    // empty selection means custom — never "infer something for me", which would land on 'today'.
+    dateRangeType: data.has('dateRangeType')
+      ? String(data.get('dateRangeType') || '').trim() || 'custom'
+      : inferDateRangeType({ startDate, endDate }),
     startDate,
-    endDate,
-    locationId: String(data.get('locationId') || '').trim(),
-    category: String(data.get('category') || '').trim(),
-    source: String(data.get('source') || '').trim(),
-    sourceType: String(data.get('sourceType') || data.get('source') || '').trim(),
-    paymentMethod: String(data.get('paymentMethod') || '').trim(),
-    status: String(data.get('status') || '').trim(),
-    receiptNumber: String(data.get('receiptNumber') || '').trim(),
-    menuCategory: String(data.get('menuCategory') || '').trim(),
-    menuItemId: String(data.get('menuItemId') || '').trim(),
-    inventoryCategory: String(data.get('inventoryCategory') || '').trim(),
-    inventoryItemId: String(data.get('inventoryItemId') || '').trim(),
-    modifierGroupId: String(data.get('modifierGroupId') || '').trim(),
-    modifierType: String(data.get('modifierType') || '').trim(),
-    modifierName: String(data.get('modifierName') || '').trim(),
-    stockDeductionStatus: String(data.get('stockDeductionStatus') || '').trim(),
-    yocoCategory: String(data.get('yocoCategory') || '').trim(),
-    recipeStatus: String(data.get('recipeStatus') || '').trim(),
-    riskStatus: String(data.get('riskStatus') || '').trim(),
-    warningSeverity: String(data.get('warningSeverity') || '').trim(),
-    supplierId: String(data.get('supplierId') || '').trim(),
-    itemType: String(data.get('itemType') || '').trim(),
-    onlyCritical: String(data.get('onlyCritical') || '').trim(),
-    onlyHighRisk: String(data.get('onlyHighRisk') || '').trim(),
-    onlyHighVolatility: String(data.get('onlyHighVolatility') || '').trim(),
-    onlyItemsWithStockTake: String(data.get('onlyItemsWithStockTake') || '').trim(),
-    onlyNegativeVariance: String(data.get('onlyNegativeVariance') || '').trim(),
-    onlyPositiveVariance: String(data.get('onlyPositiveVariance') || '').trim(),
-    lookbackPeriod: String(data.get('lookbackPeriod') || '').trim(),
-    costChangeThreshold: String(data.get('costChangeThreshold') || '').trim(),
-    volatilityThreshold: String(data.get('volatilityThreshold') || '').trim(),
-    varianceThreshold: String(data.get('varianceThreshold') || '').trim(),
-    onlyBelowPar: String(data.get('onlyBelowPar') || '').trim(),
-    missingSupplier: String(data.get('missingSupplier') || '').trim(),
-    missingCost: String(data.get('missingCost') || '').trim(),
-    user: String(data.get('user') || '').trim(),
-    action: String(data.get('action') || '').trim(),
-    entityType: String(data.get('entityType') || '').trim(),
-    entityName: String(data.get('entityName') || '').trim()
+    endDate
   };
+}
+
+function syncHiddenDateFields(form, startDate, endDate) {
+  if (typeof form?.querySelector !== 'function') return;
+  const start = form.querySelector('[data-report-start-date]') || form.querySelector('input[name="startDate"]');
+  const end = form.querySelector('[data-report-end-date]') || form.querySelector('input[name="endDate"]');
+  if (start && start.value !== startDate) start.value = startDate;
+  if (end && end.value !== endDate) end.value = endDate;
 }
 
 function resolveEnabledFilters(config) {
@@ -524,7 +577,12 @@ function normalizeTime(value = '') {
 
 function parseDateRangeText(value = '') {
   const dates = text(value).match(/\d{4}-\d{2}-\d{2}/g) || [];
-  return { startDate: dates[0] || '', endDate: dates[1] || '' };
+  const startDate = dates[0] || '';
+  const endDate = dates[1] || '';
+  // A reversed range ("2026-03-10 → 2026-03-01") used to be accepted verbatim and quietly returned
+  // zero rows. Order the two dates instead so the query matches what the user meant.
+  if (startDate && endDate && startDate > endDate) return { startDate: endDate, endDate: startDate };
+  return { startDate, endDate };
 }
 
 function normalizeGenericOptions(values = []) {

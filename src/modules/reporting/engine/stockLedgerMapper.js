@@ -9,6 +9,7 @@ import {
   resolveClearLocationName,
   resolveStockItem,
   resolveUnitCost,
+  resolveUnitCostOrNull,
 } from "./reportDataMapper.js";
 import { sortByDateDesc, text, toArray } from "./grouping.js";
 import {
@@ -496,7 +497,7 @@ export function mapGrvLedgerRows(dataSet = {}) {
         ),
         qtyOut: 0,
         baseUom: line.baseUom || line.unit || line.uom,
-        unitCost: resolveUnitCost(line, dataSet.stockCostLookup),
+        unitCost: resolveUnitCostOrNull(line, dataSet.stockCostLookup),
         createdBy:
           grv.submittedByName ||
           grv.createdByName ||
@@ -548,7 +549,7 @@ export function mapCreditNoteLedgerRows(dataSet = {}) {
             line.quantity,
         ),
         baseUom: line.baseUom || line.unit || line.uom,
-        unitCost: resolveUnitCost(line, dataSet.stockCostLookup),
+        unitCost: resolveUnitCostOrNull(line, dataSet.stockCostLookup),
         createdBy:
           note.submittedByName ||
           note.createdByName ||
@@ -616,7 +617,7 @@ export function mapPurchaseOrderReceiveLedgerRows(dataSet = {}) {
         ),
         qtyOut: 0,
         baseUom: line.baseUom || line.unit || line.uom,
-        unitCost: resolveUnitCost(line, dataSet.stockCostLookup),
+        unitCost: resolveUnitCostOrNull(line, dataSet.stockCostLookup),
         createdBy:
           receipt.receivedByName ||
           receipt.submittedByName ||
@@ -683,7 +684,7 @@ export function mapPurchaseOrderReceiveLedgerRows(dataSet = {}) {
         qtyIn: resolveBaseQuantity(line, receivedQty),
         qtyOut: 0,
         baseUom: line.baseUom || line.unit || line.uom,
-        unitCost: resolveUnitCost(line, dataSet.stockCostLookup),
+        unitCost: resolveUnitCostOrNull(line, dataSet.stockCostLookup),
         createdBy:
           order.receivedByName ||
           order.createdByName ||
@@ -739,7 +740,7 @@ export function mapAdjustmentLedgerRows(dataSet = {}) {
       qtyIn: isIncrease ? qty : 0,
       qtyOut: isIncrease ? 0 : qty,
       baseUom: log.baseUom || log.unit || log.uom,
-      unitCost: resolveUnitCost(log, dataSet.stockCostLookup),
+      unitCost: resolveUnitCostOrNull(log, dataSet.stockCostLookup),
       createdBy:
         log.createdByName || log.user || log.createdByEmail || log.createdBy,
       notes: log.note || log.wasteReason || log.waste_reason,
@@ -783,7 +784,7 @@ export function mapStockTakeLedgerRows(dataSet = {}) {
         qtyIn,
         qtyOut,
         baseUom: line.baseUom || line.unit || line.uom,
-        unitCost: resolveUnitCost(
+        unitCost: resolveUnitCostOrNull(
           { ...line, id: line.stockItemId || line.itemId },
           dataSet.stockCostLookup,
         ),
@@ -841,7 +842,7 @@ export function mapTransferLedgerRows(dataSet = {}) {
         itemName,
         category: line.category,
         baseUom: line.baseUom || line.unit || line.uom,
-        unitCost: resolveUnitCost(
+        unitCost: resolveUnitCostOrNull(
           { ...line, id: itemId },
           dataSet.stockCostLookup,
         ),
@@ -991,7 +992,7 @@ export function mapManufacturingLedgerRows(dataSet = {}) {
     const producedQty = safeNumber(
       log.producedQty ?? log.actualQty ?? log.quantity ?? log.madeQty,
     );
-    const finishedCost = resolveUnitCost(log, dataSet.stockCostLookup);
+    const finishedCost = resolveUnitCostOrNull(log, dataSet.stockCostLookup);
 
     if (producedQty > 0) {
       rows.push(
@@ -1065,7 +1066,7 @@ export function mapManufacturingLedgerRows(dataSet = {}) {
             qtyIn: 0,
             qtyOut: componentQty,
             baseUom: component.baseUom || component.unit || component.uom,
-            unitCost: resolveUnitCost(
+            unitCost: resolveUnitCostOrNull(
               { ...component, id: component.stockItemId || component.itemId },
               dataSet.stockCostLookup,
             ),
@@ -1166,7 +1167,7 @@ export function mapSaleUsageLedgerRows(dataSet = {}) {
         usage.qty ?? usage.quantity ?? usage.usedQty,
       ),
       baseUom: usage.baseUom || usage.unit || usage.uom,
-      unitCost: resolveUnitCost(usage, dataSet.stockCostLookup),
+      unitCost: resolveUnitCostOrNull(usage, dataSet.stockCostLookup),
       createdBy:
         usage.createdByName ||
         usage.user ||
@@ -1215,7 +1216,7 @@ export function mapModifierUsageLedgerRows(dataSet = {}) {
         usage.qty ?? usage.quantity ?? usage.usedQty,
       ),
       baseUom: usage.baseUom || usage.unit || usage.uom,
-      unitCost: resolveUnitCost(usage, dataSet.stockCostLookup),
+      unitCost: resolveUnitCostOrNull(usage, dataSet.stockCostLookup),
       createdBy:
         usage.createdByName ||
         usage.user ||
@@ -1247,7 +1248,13 @@ function createLedgerRow({ raw = {}, dataSet = {}, extra = {}, ...row }) {
     dataSet,
   );
   const baseUom = text(row.baseUom) || text(stockItem?.baseUom) || "ea";
-  const unitCost = safeNumber(row.unitCost || stockItem?.unitCost);
+  // A genuine unit cost of 0 on the row is authoritative — only a missing value may fall back to
+  // the stock item's cost, so presence is tested explicitly rather than by truthiness. Callers
+  // resolve costs with resolveUnitCostOrNull, so a lookup miss arrives here as null (not 0) and
+  // still reaches the stock-item fallback.
+  const unitCost = hasValue(row.unitCost)
+    ? safeNumber(row.unitCost)
+    : safeNumber(stockItem?.unitCost);
   const qtyIn = Math.abs(safeNumber(row.qtyIn));
   const qtyOut = Math.abs(safeNumber(row.qtyOut));
   const netQty = calculateNetMovement(qtyIn, qtyOut);
@@ -1299,10 +1306,18 @@ function normalizeGenericLedgerRow(row = {}, dataSet = {}, index = 0) {
   const locationName =
     normalized.locationName ||
     resolveLedgerLocationName(normalized.locationId, "", dataSet);
-  const unitCost =
-    normalized.unitCost ||
-    resolveUnitCost(normalized, dataSet.stockCostLookup) ||
-    safeNumber(stockItem?.unitCost);
+  // A genuine unit cost of 0 on the source row is authoritative; only a missing value falls
+  // through to the cost lookup and then to the stock item. Presence is tested on the source row
+  // because normalizeLedgerRow already flattens a missing cost to 0.
+  const hasSourceUnitCost = hasValue(
+    row.unitCostExVat ?? row.unit_cost_ex_vat ?? row.unitCost ?? row.unit_cost,
+  );
+  const unitCost = hasSourceUnitCost
+    ? safeNumber(normalized.unitCost)
+    : (resolveUnitCostOrNull(
+        { itemId: normalized.itemId, itemName: normalized.itemName },
+        dataSet.stockCostLookup,
+      ) ?? safeNumber(stockItem?.unitCost));
   const movementValue = calculateStockValue(normalized.netQty, unitCost);
   return {
     ...normalized,
@@ -1349,7 +1364,16 @@ function addRunningBalances(rows = []) {
       trustedApiRow && hasValue(row.runningQty ?? row.running_qty);
     const hasBackendRunningValue =
       trustedApiRow && hasValue(row.runningValue ?? row.running_value);
+    const key = getBalanceKey(row);
     if (trustedApiRow && (!hasBackendRunningQty || !hasBackendRunningValue)) {
+      // The row itself keeps the partial (null) backend values, but the running balance for this
+      // item/location must still advance — otherwise every later row for the same key would be
+      // computed off a stale previous balance and the whole ledger tail would be wrong.
+      const previousQty = safeNumber(balances.get(key));
+      const carriedQty = hasBackendRunningQty
+        ? safeNumber(row.runningQty ?? row.running_qty)
+        : previousQty + safeNumber(row.netQty);
+      balances.set(key, carriedQty);
       return {
         ...row,
         runningQty: hasBackendRunningQty
@@ -1361,7 +1385,6 @@ function addRunningBalances(rows = []) {
       };
     }
 
-    const key = getBalanceKey(row);
     const previousQty = safeNumber(balances.get(key));
     const runningQty = hasBackendRunningQty
       ? safeNumber(row.runningQty ?? row.running_qty)

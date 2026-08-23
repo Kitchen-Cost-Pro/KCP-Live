@@ -1,5 +1,6 @@
 import { escapeHtml } from '../engine/formatters.js';
 import { enhanceReportingSelects } from '../ui/customSelect.js';
+import { inferDateRangeType } from '../scheduling/dateRangePresets.js';
 import { closeReportActionMenu } from '../ui/reportActionMenu.js';
 import {
   createSavedView,
@@ -27,6 +28,7 @@ export function renderSavedViewsControl({
   let error = '';
   let activeSavedViewId = initialActiveSavedViewId;
   let defaultNotified = false;
+  let initialLoadPending = true;
 
   // A default belongs to the exact report, not every child report in the same dashboard group.
   // Group-wide matching caused a Payment Summary default to overwrite Stock Movement (and vice
@@ -91,7 +93,7 @@ export function renderSavedViewsControl({
         filters: config.filters || {},
         sort: config.sort || null,
         visibleColumns: config.visibleColumns || [],
-        dateRangeType: config.dateRangeType || config.filters?.dateRangeType || 'custom',
+        dateRangeType: config.dateRangeType || inferDateRangeType(config.filters || {}),
         locationId: config.filters?.locationId || ''
       }));
     });
@@ -103,7 +105,10 @@ export function renderSavedViewsControl({
       onLoad?.(selected);
     }));
     root.querySelectorAll('[data-saved-view-default]').forEach((button) => button.addEventListener('click', async () => {
-      activeSavedViewId = button.dataset.savedViewDefault || activeSavedViewId;
+      // Marking a view as default must NOT switch the active view. Reassigning activeSavedViewId
+      // here without loading that view's configuration meant the next "Update" click wrote the
+      // currently displayed filters onto the newly defaulted view, silently overwriting it.
+      // Loading a view stays an explicit action (the saved-view row button, which calls onLoad).
       await mutate(async () => updateSavedView(workspaceId, button.dataset.savedViewDefault, { isDefault: true }));
     }));
     root.querySelectorAll('[data-saved-view-duplicate]').forEach((button) => button.addEventListener('click', async () => {
@@ -191,7 +196,7 @@ export function renderSavedViewsControl({
           filters: config.filters || {},
           sort: config.sort || null,
           visibleColumns: config.visibleColumns || [],
-          dateRangeType: config.dateRangeType || config.filters?.dateRangeType || 'custom',
+          dateRangeType: config.dateRangeType || inferDateRangeType(config.filters || {}),
           locationId: config.filters?.locationId || ''
         });
         close();
@@ -214,7 +219,17 @@ export function renderSavedViewsControl({
     try {
       views = await listSavedViews(workspaceId);
       const relevantDefault = views.find((view) => view.isDefault && view.reportId === reportId);
-      if (relevantDefault && !defaultNotified && typeof onDefaultAvailable === 'function') {
+      // Announcing "this report has a default" is a separate feature from "this view is loaded".
+      // Only the very first load may adopt the default as the active view (the caller applies that
+      // view's configuration in response to the notification, so screen and active view agree).
+      // Every later refresh — notably the one that follows starring a view as default — must leave
+      // activeSavedViewId alone, or a later "Update" would write the on-screen filters of a
+      // different view onto the starred one. Loading stays an explicit [data-saved-view-load] click.
+      // The notification and the adoption are gated by the SAME condition. Announcing a default
+      // while another view is already active told the caller to put that default's filters on
+      // screen while the header (and Update) still pointed at the active view — the same overwrite
+      // B2 is about, just via a different trigger.
+      if (initialLoadPending && relevantDefault && !defaultNotified && !activeSavedViewId && typeof onDefaultAvailable === 'function') {
         defaultNotified = true;
         activeSavedViewId = relevantDefault.id;
         queueMicrotask(() => onDefaultAvailable(relevantDefault));
@@ -223,6 +238,9 @@ export function renderSavedViewsControl({
       error = cause?.message || 'Could not load saved views.';
     } finally {
       loading = false;
+      // Only a successful load retires the initial-load window: a failed first fetch must not
+      // permanently disable default adoption for the rest of the session.
+      if (!error) initialLoadPending = false;
       draw();
     }
   };
@@ -241,7 +259,7 @@ function serializeView(view = {}) {
     filters: view.filters || {},
     sort: view.sort || null,
     visibleColumns: view.visibleColumns || [],
-    dateRangeType: view.dateRangeType || 'custom',
+    dateRangeType: view.dateRangeType || inferDateRangeType(view.filters || {}),
     locationId: view.locationId || ''
   };
 }

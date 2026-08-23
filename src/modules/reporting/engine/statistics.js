@@ -73,7 +73,10 @@ export function calculateVarianceValue(varianceQty, unitCostExVat) {
   return roundMoney(safeNumber(varianceQty) * safeNumber(unitCostExVat));
 }
 
-export function calculateVariancePercent(varianceQty, expectedClosing) {
+// Quantity-variance ratio: variance QTY over expected closing QTY. See the note on
+// calculations.js's `calculateValueVariancePercent` for why neither is called
+// `calculateVariancePercent` any more.
+export function calculateQuantityVariancePercent(varianceQty, expectedClosing) {
   const expected = safeNumber(expectedClosing);
   if (!expected) return 0;
   return safeNumber(varianceQty) / expected;

@@ -3,7 +3,7 @@ import {
   calculateExpectedClosingQty,
   calculateExpectedClosingValue,
   calculateStockValue,
-  calculateVariancePercent,
+  calculateValueVariancePercent,
   calculateVarianceQty,
   calculateVarianceValue,
   safeNumber
@@ -318,7 +318,7 @@ function buildByCategoryRows(ledgerRows = [], snapshotResolver) {
         expectedClosing,
         actualClosing: snapshot.hasActual ? snapshot.actualValue : null,
         variance,
-        variancePercent: calculateVariancePercent(variance, expectedClosing),
+        variancePercent: calculateValueVariancePercent(variance, expectedClosing),
         stockIn,
         stockOut,
         positiveAdjustments: metrics.positiveAdjustments,
@@ -497,7 +497,7 @@ function getTotalsForView(view = 'overview', rows = []) {
       expectedClosing,
       actualClosing,
       variance,
-      variancePercent: calculateVariancePercent(variance, expectedClosing)
+      variancePercent: calculateValueVariancePercent(variance, expectedClosing)
     };
   }
 
