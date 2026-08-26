@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 900" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <linearGradient id="water" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0f766e"/>
+      <stop offset="0.42" stop-color="#06b6d4"/>
+      <stop offset="1" stop-color="#1d4ed8"/>
+    </linearGradient>
+    <radialGradient id="light" cx="22%" cy="20%" r="54%">
+      <stop offset="0" stop-color="#e0faff" stop-opacity=".58"/>
+      <stop offset=".42" stop-color="#67e8f9" stop-opacity=".22"/>
+      <stop offset="1" stop-color="#082f49" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="scale" width="82" height="42" patternUnits="userSpaceOnUse">
+      <path d="M0 42C18 8 64 8 82 42" fill="none" stroke="#ecfeff" stroke-opacity=".18" stroke-width="3"/>
+    </pattern>
+  </defs>
+  <rect width="1400" height="900" fill="url(#water)"/>
+  <rect width="1400" height="900" fill="url(#light)"/>
+  <rect width="1400" height="900" fill="url(#scale)" opacity=".72"/>
+  <path d="M-80 620C160 510 250 690 470 570S790 430 1010 520s330 56 510-96" fill="none" stroke="#e0f2fe" stroke-opacity=".28" stroke-width="28"/>
+  <path d="M-120 690C160 590 300 770 560 650s470-188 680-88 292 70 520-42" fill="none" stroke="#0f172a" stroke-opacity=".22" stroke-width="32"/>
+</svg>

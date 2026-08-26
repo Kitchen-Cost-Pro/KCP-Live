@@ -1,0 +1,93 @@
+/* ============================================================
+   Yoco Design System tokens — dashboard-scoped.
+   Primitives are global (harmless), but the *semantic* tokens are
+   scoped to `.ydsDashboard` so they only restyle the dashboard and
+   never leak into the rest of the app. Dark mode follows the existing
+   [data-theme="dark"] switch on <html>.
+   ============================================================ */
+
+:root {
+  /* Fonts (already loaded in index.html) */
+  --yds-font-display: "Space Grotesk", system-ui, sans-serif;
+  --yds-font-sans: "Inter", system-ui, -apple-system, sans-serif;
+  --yds-font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  /* Primitive ramp (subset) */
+  --yds-white: #ffffff;
+  --yds-grey-40: #f6f6f6;
+  --yds-grey-90: #e9e9e9;
+  --yds-grey-170: #d9d9d9;
+  --yds-grey-330: #b5b5b5;
+  --yds-grey-540: #767676;
+  --yds-grey-690: #4e4e4e;
+  --yds-grey-830: #2b2b2b;
+  --yds-grey-870: #222222;
+
+  --yds-blue-40: #ecf7fc;
+  --yds-blue-90: #d4eef9;
+  --yds-blue-330: #58b5fa;
+  --yds-blue-540: #0099e0;   /* brand */
+  --yds-blue-690: #005570;
+
+  --yds-green-40: #e9f2ef;
+  --yds-green-540: #118e6b;
+  --yds-yellow-540: #ff9e00;
+  --yds-yellow-690: #9e6700;
+  --yds-orange-540: #f15a28;
+  --yds-red-40: #fcecee;
+  --yds-red-540: #eb001f;
+  --yds-purple-540: #7129e3;
+
+  /* Spacing / radius / shadow scales */
+  --yds-space-xxs: 4px;
+  --yds-space-xs: 8px;
+  --yds-space-s: 12px;
+  --yds-space-m: 16px;
+  --yds-space-l: 24px;
+  --yds-space-xl: 36px;
+  --yds-radius-s: 8px;
+  --yds-radius-m: 12px;
+  --yds-radius-l: 16px;
+  --yds-radius-xl: 24px;
+  --yds-radius-pill: 1000px;
+  --yds-shadow-xs: 0 1px 2px 0 rgba(0, 0, 0, 0.08);
+  --yds-shadow-sm: 0 2px 6px 0 rgba(0, 0, 0, 0.10);
+  --yds-shadow-md: 0 3px 12px 0 rgba(0, 0, 0, 0.08), 0 8px 24px 0 rgba(0, 0, 0, 0.12);
+}
+
+/* ── Semantic tokens (light) — scoped to the dashboard ───────────────── */
+.ydsDashboard {
+  --bg-page: #f4f5f7;
+  --bg-card: #ffffff;
+  --bg-elev: #f1f3f5;
+  --hair: rgba(20, 22, 26, 0.08);
+  --content-primary: #14161a;
+  --content-secondary: #5b626c;
+  --content-tertiary: #8b929c;
+  /* Follow the app's selected customization accent (restaurant theme presets set
+     --accent-blue on <html>); fall back to YDS brand blue. */
+  --content-brand: var(--accent-blue, var(--yds-blue-540));
+  --content-success: var(--yds-green-540);
+  --content-warning: var(--yds-yellow-690);
+  --content-critical: var(--yds-red-540);
+  --yds-card-shadow: var(--yds-shadow-sm);
+
+  font-family: var(--yds-font-sans);
+  color: var(--content-primary);
+}
+
+/* ── Semantic tokens (dark) ─────────────────────────────────────────── */
+:root[data-theme="dark"] .ydsDashboard {
+  --bg-page: #0e1013;
+  --bg-card: #181b21;
+  --bg-elev: #23262e;
+  --hair: rgba(255, 255, 255, 0.08);
+  --content-primary: #f3f4f6;
+  --content-secondary: #9aa0ab;
+  --content-tertiary: #5e646e;
+  --content-brand: var(--accent-blue, #37aef2);
+  --content-success: #4cbe97;
+  --content-warning: #ffc470;
+  --content-critical: #f87f8c;
+  --yds-card-shadow: 0 2px 6px 0 rgba(0, 0, 0, 0.28), 0 8px 24px 0 rgba(0, 0, 0, 0.32);
+}

@@ -1,0 +1,78 @@
+{
+  "release": "phase91-modifier-report-bounded-snapshot-enrichment",
+  "generatedAt": "2026-07-16T21:02:00Z",
+  "overall": "PASS_LOCAL_VALIDATION_DEPLOYMENT_PENDING",
+  "sourceValidation": {
+    "status": "PASS",
+    "commands": [
+      {
+        "name": "Root final source audit",
+        "command": "npm run audit:yoco-v2-final",
+        "status": "PASS",
+        "result": "24 passed, 0 failed",
+        "log": "release-evidence/logs/audit_root.log"
+      },
+      {
+        "name": "Worker final source audit",
+        "command": "npm --prefix cloudflare-v2 run audit:yoco-v2-final",
+        "status": "PASS",
+        "result": "0 failures",
+        "log": "release-evidence/logs/audit_worker.log"
+      },
+      {
+        "name": "Frontend and reporting tests",
+        "command": "npm test",
+        "status": "PASS",
+        "result": "426 passed, 0 failed",
+        "log": "release-evidence/logs/tests_frontend.log"
+      },
+      {
+        "name": "Worker V2 tests",
+        "command": "npm --prefix cloudflare-v2 test",
+        "status": "PASS",
+        "result": "39 passed, 0 failed",
+        "log": "release-evidence/logs/tests_worker.log"
+      },
+      {
+        "name": "Worker TypeScript typecheck",
+        "command": "npm --prefix cloudflare-v2 run typecheck",
+        "status": "PASS",
+        "result": "No TypeScript errors",
+        "log": "release-evidence/logs/typecheck_worker.log"
+      },
+      {
+        "name": "Frontend production build",
+        "command": "npm run build",
+        "status": "PASS_WITH_WARNING",
+        "result": "Build completed; existing 2,053.23 kB chunk-size warning remains",
+        "log": "release-evidence/logs/build_frontend.log"
+      },
+      {
+        "name": "Cloudflare Worker deployment dry run",
+        "command": "npm --prefix cloudflare-v2 run deploy:dry",
+        "status": "PASS",
+        "result": "Wrangler bundle and binding validation completed",
+        "log": "release-evidence/logs/deploy_dry.log"
+      }
+    ]
+  },
+  "runtimeValidation": {
+    "status": "PENDING",
+    "command": "npm run audit:yoco-v2-runtime-readiness -- runtime-evidence/yoco-v2-readiness.json",
+    "lastResult": "YOCO_V2_RUNTIME_EVIDENCE_REQUIRED",
+    "reason": "The source archive does not contain current production ownership, health, observation-period legacy execution counters, unresolved critical failure count, or live reconciliation/export parity evidence.",
+    "log": "release-evidence/logs/runtime_readiness.log"
+  },
+  "knownWarnings": [
+    "The frontend production bundle still reports a chunk larger than 2,048 kB; this is a performance warning, not a build failure.",
+    "Production acceptance is blocked until runtime readiness, live financial and inventory reconciliation, and UI/CSV/XLSX/PDF/scheduled parity evidence are supplied."
+  ],
+  "phase91Validation": {
+    "frontendTests": "475 passed",
+    "workerTests": "69 passed",
+    "workerTypecheck": "PASS",
+    "frontendBuild": "PASS_WITH_EXISTING_CHUNK_WARNING",
+    "workerDeployDryRun": "PASS",
+    "productionDeployment": "PENDING"
+  }
+}

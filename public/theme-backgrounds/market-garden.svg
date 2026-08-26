@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <linearGradient id="prep" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#052e1c"/>
+      <stop offset=".42" stop-color="#155e3a"/>
+      <stop offset="1" stop-color="#07111f"/>
+    </linearGradient>
+    <radialGradient id="daylight" cx="20%" cy="18%" r="54%">
+      <stop offset="0" stop-color="#dcfce7" stop-opacity=".52"/>
+      <stop offset=".42" stop-color="#22c55e" stop-opacity=".18"/>
+      <stop offset="1" stop-color="#020617" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1920" height="1080" fill="url(#prep)"/>
+  <rect width="1920" height="1080" fill="url(#daylight)"/>
+  <g opacity=".7">
+    <rect x="0" y="710" width="1920" height="250" fill="#052e1c" opacity=".66"/>
+    <rect x="126" y="612" width="340" height="150" rx="30" fill="#84cc16" opacity=".22"/>
+    <rect x="540" y="620" width="270" height="136" rx="28" fill="#f97316" opacity=".2"/>
+    <rect x="900" y="598" width="350" height="166" rx="32" fill="#22c55e" opacity=".24"/>
+    <rect x="1330" y="620" width="410" height="136" rx="28" fill="#38bdf8" opacity=".14"/>
+  </g>
+  <g fill="none" stroke-linecap="round">
+    <path d="M170 870C370 760 534 852 752 730s400-128 636-38 374 42 546-118" stroke="#bbf7d0" stroke-opacity=".25" stroke-width="34"/>
+    <path d="M120 930C340 840 536 924 778 816s430-100 672-26" stroke="#fef3c7" stroke-opacity=".16" stroke-width="22"/>
+  </g>
+  <g opacity=".2" fill="#dcfce7">
+    <path d="M260 360C306 390 302 456 260 500C218 456 214 390 260 360Z"/>
+    <path d="M430 300C476 330 472 396 430 440C388 396 384 330 430 300Z"/>
+    <path d="M1490 330C1536 360 1532 426 1490 470C1448 426 1444 360 1490 330Z"/>
+  </g>
+</svg>

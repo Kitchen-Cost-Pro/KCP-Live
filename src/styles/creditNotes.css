@@ -1,0 +1,1146 @@
+#view-credit-note {
+  min-height: 100%;
+  display: flex;
+  padding: clamp(12px, 2vw, 24px) clamp(10px, 1.5vw, 20px) clamp(16px, 2.5vw, 32px);
+  color: var(--text-main);
+  font-family: var(--font-main);
+}
+
+#view-credit-note .cn-frame {
+  flex: 1 1 auto;
+  width: 100%;
+  max-width: none;
+  margin: 0 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background:
+    radial-gradient(1200px 600px at 20% 10%, rgba(239, 68, 68, 0.12), transparent 60%),
+    linear-gradient(180deg, rgba(15, 23, 42, 1), rgba(10, 16, 30, 1));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: clamp(1.25rem, 3vw, 2.25rem);
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.35);
+  padding: clamp(18px, 3vw, 34px);
+}
+
+#view-credit-note .cn-layout {
+  display: grid;
+  flex: 1 1 auto;
+  min-height: 0;
+  grid-template-columns: minmax(min(300px, 40%), 0.35fr) minmax(0, 0.65fr);
+  gap: clamp(14px, 2vw, 34px);
+  align-items: stretch;
+}
+
+#view-credit-note .cn-card {
+  display: flex;
+  flex-direction: column;
+  background: linear-gradient(180deg, rgba(30, 41, 59, 0.92), rgba(22, 30, 48, 0.92));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 2rem;
+}
+
+#view-credit-note .cn-sidecard,
+#view-credit-note .cn-draft-panel {
+  height: 100%;
+  padding: 36px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+#view-credit-note .cn-sidecard {
+  justify-content: space-between;
+}
+
+#view-credit-note .cn-side-title,
+#view-credit-note .cn-topbarTitle span,
+#view-credit-note .cn-summary span,
+#view-credit-note .cn-commit-label,
+#view-credit-note .cn-overlayCard header p,
+#view-credit-note .cn-detailLocation span,
+#view-credit-note .cn-table thead th,
+#view-credit-note .cn-table td span {
+  color: rgba(255, 255, 255, 0.46);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+#view-credit-note .cn-side-title,
+#view-credit-note .cn-topbar h3,
+#view-credit-note .cn-overlayCard header h3 {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 1.35rem;
+  font-weight: 950;
+}
+
+#view-credit-note .cn-stack,
+#view-credit-note .cn-overlayFilters,
+#view-credit-note .cn-detailGrid {
+  display: grid;
+  gap: 14px;
+}
+
+#view-credit-note .cn-stack {
+  flex: 1 1 auto;
+  align-content: start;
+}
+
+#view-credit-note .cn-notesField {
+  display: grid;
+  gap: 10px;
+}
+
+#view-credit-note .cn-inputWrap {
+  position: relative;
+}
+
+#view-credit-note .cn-dropdown {
+  position: relative;
+}
+
+#view-credit-note .cn-dropdownButton {
+  width: 100%;
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 1rem;
+  padding: 0 18px;
+  background: rgba(10, 16, 30, 0.92);
+  color: rgba(255, 255, 255, 0.95);
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 880;
+  text-align: left;
+  cursor: pointer;
+}
+
+#view-credit-note .cn-dropdownButton:focus {
+  outline: none;
+  border-color: rgba(220, 38, 38, 0.85);
+  box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.18);
+}
+
+#view-credit-note .cn-dropdownButton svg {
+  width: 16px;
+  height: 16px;
+}
+
+#view-credit-note .cn-dropdownMenu {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  z-index: 32;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 1.2rem;
+  background: rgba(11, 18, 33, 0.98);
+  box-shadow: 0 22px 55px rgba(0, 0, 0, 0.32);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-6px);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+#view-credit-note .cn-dropdown--open .cn-dropdownMenu {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+#view-credit-note .cn-dropdownMenu input {
+  min-height: 42px;
+  border-radius: 0.95rem;
+}
+
+#view-credit-note .cn-dropdownOptions {
+  display: grid;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+#view-credit-note .cn-dropdownOptions button {
+  min-height: 40px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0.95rem;
+  padding: 0 14px;
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(255, 255, 255, 0.92);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+#view-credit-note .cn-dropdownOptions button:hover,
+#view-credit-note .cn-dropdownOptions button.is-active {
+  border-color: rgba(239, 68, 68, 0.3);
+  background: rgba(220, 38, 38, 0.16);
+}
+
+#view-credit-note .cn-fieldIcon {
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0.9rem;
+  background: rgba(30, 64, 175, 0.28);
+  color: #93c5fd;
+  transform: translateY(-50%);
+  cursor: pointer;
+}
+
+#view-credit-note .cn-input,
+#view-credit-note .cn-pill,
+#view-credit-note .cn-overlayFilters input,
+#view-credit-note .cn-detailGrid input {
+  width: 100%;
+  min-height: 52px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 1rem;
+  padding: 0 18px;
+  background: rgba(10, 16, 30, 0.92);
+  color: rgba(255, 255, 255, 0.95);
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 880;
+}
+
+#view-credit-note .cn-textarea {
+  width: 100%;
+  min-height: 124px;
+  resize: vertical;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 1rem;
+  padding: 16px 18px;
+  background: rgba(10, 16, 30, 0.92);
+  color: rgba(255, 255, 255, 0.95);
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 780;
+  line-height: 1.5;
+}
+
+#view-credit-note .cn-inputWrap .cn-input {
+  padding-right: 56px;
+}
+
+#view-credit-note .cn-selectLike {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  text-align: left;
+  cursor: pointer;
+}
+
+#view-credit-note .cn-input:focus,
+#view-credit-note .cn-textarea:focus,
+#view-credit-note .cn-overlayFilters input:focus,
+#view-credit-note .cn-detailGrid input:focus {
+  outline: none;
+  border-color: rgba(220, 38, 38, 0.85);
+  box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.18);
+}
+
+#view-credit-note .cn-pill {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+#view-credit-note .cn-secondary {
+  min-height: 46px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  padding: 0 20px;
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.88);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 950;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+#view-credit-note .cn-check {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: #dc2626;
+}
+
+#view-credit-note .cn-supplierMenu {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  z-index: 40;
+  display: grid;
+  gap: 6px;
+  max-height: 280px;
+  overflow-y: auto;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 1.25rem;
+  padding: 8px;
+  background: rgba(11, 18, 33, 0.98);
+  box-shadow: 0 22px 55px rgba(0, 0, 0, 0.32);
+}
+
+#view-credit-note .cn-supplierEmpty {
+  border: 1px dashed rgba(255, 255, 255, 0.1);
+  border-radius: 1rem;
+  padding: 14px;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 0.84rem;
+}
+
+#view-credit-note .cn-supplierOption,
+#view-credit-note .cn-add-primary,
+#view-credit-note .cn-rowActions button,
+#view-credit-note .cn-commit-primary,
+#view-credit-note .cn-overlayActions button,
+#view-credit-note .cn-iconButton {
+  font: inherit;
+}
+
+#view-credit-note .cn-supplierOption,
+#view-credit-note .cn-pickerItem {
+  display: grid;
+  gap: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 1rem;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(255, 255, 255, 0.92);
+  text-align: left;
+  cursor: pointer;
+}
+
+#view-credit-note .cn-topbar,
+#view-credit-note .cn-bottombar,
+#view-credit-note .cn-rowActions,
+#view-credit-note .cn-overlayActions,
+#view-credit-note .cn-overlayCard header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+#view-credit-note .cn-topbar {
+  margin-bottom: 18px;
+}
+
+#view-credit-note .cn-topbarActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+#view-credit-note .cn-add-primary,
+#view-credit-note .cn-commit-primary,
+#view-credit-note .cn-overlayActions button {
+  min-height: 46px;
+  border: 0;
+  border-radius: 999px;
+  padding: 0 20px;
+  background: linear-gradient(135deg, #dc2626, #ef4444);
+  color: white;
+  font-size: 10px;
+  font-weight: 950;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+#view-credit-note .cn-add-primary:disabled,
+#view-credit-note .cn-commit-primary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+#view-credit-note .cn-draft-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 64vh;
+  overflow: auto;
+}
+
+#view-credit-note .cn-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+/* Sticky header — stick the th (not thead) with a background + inset border since the table is
+   border-collapse:collapse (a collapsed border would scroll away). */
+#view-credit-note .cn-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--surface-elevated);
+  box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.08);
+}
+
+/* Subtle zebra striping across line rows. */
+#view-credit-note .cn-table tbody tr:nth-child(even) td {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+#view-credit-note .cn-table thead th,
+#view-credit-note .cn-table td {
+  padding: clamp(6px, 1.2vw, 14px) clamp(4px, 0.8vw, 10px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  vertical-align: top;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+/* Column width distribution — sums to ~100% */
+#view-credit-note .cn-table thead th:nth-child(1),
+#view-credit-note .cn-table td:nth-child(1) { width: 36px; }
+#view-credit-note .cn-table thead th:nth-child(2),
+#view-credit-note .cn-table td:nth-child(2) { width: 22%; }
+#view-credit-note .cn-table thead th:nth-child(3),
+#view-credit-note .cn-table td:nth-child(3) { width: 17%; }
+#view-credit-note .cn-table thead th:nth-child(4),
+#view-credit-note .cn-table td:nth-child(4) { width: 10%; }
+#view-credit-note .cn-table thead th:nth-child(5),
+#view-credit-note .cn-table td:nth-child(5) { width: 11%; }
+#view-credit-note .cn-table thead th:nth-child(6),
+#view-credit-note .cn-table td:nth-child(6) { width: 11%; }
+#view-credit-note .cn-table thead th:nth-child(7),
+#view-credit-note .cn-table td:nth-child(7) { width: 20%; }
+#view-credit-note .cn-table thead th:nth-child(8),
+#view-credit-note .cn-table td:nth-child(8) { width: 9%; }
+
+#view-credit-note .cn-tableCheck {
+  width: 36px;
+}
+
+#view-credit-note .cn-tableCheck input {
+  width: 18px;
+  height: 18px;
+  margin: 2px 0 0;
+  accent-color: #dc2626;
+}
+
+#view-credit-note .cn-table td strong {
+  display: block;
+  color: rgba(255, 255, 255, 0.94);
+}
+
+#view-credit-note .cn-tableInput {
+  width: 100%;
+  min-width: 0;
+  min-height: clamp(32px, 4vh, 42px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0.6rem;
+  padding: 0 clamp(6px, 0.8vw, 10px);
+  background: rgba(10, 16, 30, 0.9);
+  color: rgba(255, 255, 255, 0.95);
+  font: inherit;
+  font-size: clamp(0.72rem, 1.1vw, 0.88rem);
+  font-weight: 900;
+}
+
+#view-credit-note .cn-tableInput:focus {
+  outline: none;
+  border-color: rgba(239, 68, 68, 0.72);
+  box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.16);
+}
+
+#view-credit-note .cn-cellHint {
+  display: block;
+  margin-top: 6px;
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  line-height: 1.25;
+  text-transform: uppercase;
+}
+
+#view-credit-note .cn-packField,
+#view-credit-note .cn-moneyField {
+  position: relative;
+  display: block;
+}
+
+#view-credit-note .cn-tableInput--pack {
+  padding-right: 42px;
+}
+
+#view-credit-note .cn-packField em,
+#view-credit-note .cn-moneyField i {
+  position: absolute;
+  top: 50%;
+  color: rgba(255, 255, 255, 0.42);
+  font-style: normal;
+  font-size: 0.7rem;
+  font-weight: 950;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+#view-credit-note .cn-packField em {
+  right: 12px;
+}
+
+#view-credit-note .cn-moneyField i {
+  left: 12px;
+}
+
+#view-credit-note .cn-tableInput--money {
+  padding-left: 32px;
+}
+
+#view-credit-note .cn-lineTotal {
+  display: block;
+  margin-top: 8px;
+  font-size: 0.84rem;
+}
+
+#view-credit-note .cn-lineLocation {
+  position: relative;
+  min-width: 0;
+  z-index: 1;
+}
+
+#view-credit-note .cn-lineLocation--open {
+  z-index: 35;
+}
+
+#view-credit-note .cn-lineLocationButton {
+  width: 100%;
+  min-height: 36px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 16px;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid rgba(239, 68, 68, 0.24);
+  border-radius: 999px;
+  padding: 0 10px 0 12px;
+  background: rgba(220, 38, 38, 0.1);
+  color: #fecaca;
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 900;
+  text-align: left;
+  cursor: pointer;
+}
+
+#view-credit-note .cn-lineLocationButton strong {
+  overflow: hidden;
+  color: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#view-credit-note .cn-lineLocationButton svg {
+  width: 14px;
+  height: 14px;
+  transition: transform 0.16s ease;
+}
+
+#view-credit-note .cn-lineLocation--open .cn-lineLocationButton svg {
+  transform: rotate(180deg);
+}
+
+#view-credit-note .cn-lineLocationButton:hover,
+#view-credit-note .cn-lineLocationButton:focus {
+  outline: none;
+  border-color: rgba(252, 165, 165, 0.6);
+  box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.14);
+}
+
+#view-credit-note .cn-lineLocationMenu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  width: min(260px, calc(100vw - 40px));
+  max-height: 190px;
+  overflow-y: auto;
+  display: grid;
+  gap: 4px;
+  border: 1px solid rgba(239, 68, 68, 0.22);
+  border-radius: 14px;
+  padding: 6px;
+  background: rgba(10, 16, 30, 0.98);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.42);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-4px);
+  transition: opacity 0.16s ease, transform 0.16s ease;
+}
+
+#view-credit-note .cn-lineLocation--open .cn-lineLocationMenu {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+#view-credit-note .cn-lineLocationMenu button {
+  min-height: 34px;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 10px;
+  padding: 0 10px;
+  background: transparent;
+  color: rgba(226, 232, 240, 0.86);
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 850;
+  text-align: left;
+  cursor: pointer;
+}
+
+#view-credit-note .cn-lineLocationMenu button:hover {
+  background: rgba(220, 38, 38, 0.14);
+  color: #fee2e2;
+}
+
+#view-credit-note .cn-lineLocationMenu button.is-active {
+  background: rgba(220, 38, 38, 0.24);
+  color: #ffffff;
+}
+
+#view-credit-note .cn-lineLocationMenu button i {
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  font-style: normal;
+}
+
+#view-credit-note .cn-lineLocationMenu button i svg {
+  width: 14px;
+  height: 14px;
+  color: #fca5a5;
+}
+
+#view-credit-note .cn-lineLocationMenu button em {
+  overflow: hidden;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#view-credit-note .cn-valueNegative {
+  color: #fca5a5;
+}
+
+#view-credit-note .cn-valueNeutral {
+  color: rgba(255, 255, 255, 0.92);
+  font-weight: 900;
+}
+
+#view-credit-note .cn-rowActions button,
+#view-credit-note .cn-iconButton {
+  width: 34px;
+  height: 34px;
+  min-height: 0;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0.6rem;
+  padding: 0;
+  background: rgba(239, 68, 68, 0.06);
+  color: rgba(239, 68, 68, 0.6);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+#view-credit-note .cn-rowActions button:hover {
+  background: rgba(239, 68, 68, 0.16);
+  color: rgba(239, 68, 68, 0.95);
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
+#view-credit-note .cn-dateTrigger svg,
+#view-credit-note .cn-secondary svg,
+#view-credit-note .cn-fieldIcon svg,
+#view-credit-note .cn-iconButton svg {
+  width: 16px;
+  height: 16px;
+}
+
+#view-credit-note .cn-iconButton {
+  width: 40px;
+  min-width: 40px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#view-credit-note .cn-summary {
+  display: flex;
+  gap: 24px;
+}
+
+#view-credit-note .cn-summary strong,
+#view-credit-note .cn-commit-value {
+  display: block;
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 1.1rem;
+  font-weight: 950;
+}
+
+#view-credit-note .cn-overlayBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(15, 23, 42, 0.56);
+}
+
+#view-credit-note .cn-overlayCard {
+  width: min(860px, 100%);
+  max-height: 88vh;
+  overflow: auto;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 2rem;
+  padding: 28px;
+  background: linear-gradient(180deg, rgba(30, 41, 59, 0.98), rgba(22, 30, 48, 0.98));
+}
+
+#view-credit-note .cn-overlayCard--picker {
+  width: min(1360px, 100%);
+  padding: 40px;
+}
+
+#view-credit-note .cn-overlayCard--detail {
+  width: min(1420px, 100%);
+  padding: 40px;
+}
+
+#view-credit-note .cn-overlayCard--confirm {
+  width: min(520px, 100%);
+  padding: 30px 32px;
+}
+
+#view-credit-note .cn-pickerList {
+  display: grid;
+  gap: 0;
+  max-height: 50vh;
+  overflow-y: auto;
+  margin-top: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 1.5rem;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+#view-credit-note .cn-pickerItem {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 18px;
+  min-height: 68px;
+  border: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0;
+  padding: 0 20px;
+  background: transparent;
+}
+
+#view-credit-note .cn-pickerItem.is-added {
+  background: rgba(239, 68, 68, 0.06);
+}
+
+#view-credit-note .cn-pickerItem input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: #dc2626;
+}
+
+#view-credit-note .cn-pickerItem strong {
+  display: block;
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 0.92rem;
+  font-weight: 950;
+  text-transform: uppercase;
+}
+
+#view-credit-note .cn-pickerItem span {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+#view-credit-note .cn-pickerUnit {
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 10px;
+  font-weight: 950;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+#view-credit-note .cn-pickerList .cn-pickerItem:last-child {
+  border-bottom: 0;
+}
+
+#view-credit-note .cn-overlaySearchWrap {
+  grid-column: 1 / span 1;
+}
+
+#view-credit-note .cn-overlaySearchWrap label,
+#view-credit-note .cn-overlayFilters > label {
+  display: grid;
+  gap: 10px;
+}
+
+#view-credit-note .cn-overlaySearchWrap span,
+#view-credit-note .cn-overlayFilters > label > span,
+#view-credit-note .cn-detailLocation > span,
+#view-credit-note .cn-detailGrid > span {
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 10px;
+  font-weight: 950;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+#view-credit-note .cn-overlayFilters {
+  grid-template-columns: minmax(0, 1.6fr) minmax(300px, 0.8fr);
+  align-items: end;
+  gap: 18px;
+}
+
+#view-credit-note .cn-overlayFilters input {
+  min-height: 46px;
+}
+
+#view-credit-note .cn-overlaySelectionCount {
+  color: rgba(255, 255, 255, 0.52);
+  font-size: 11px;
+  font-weight: 950;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+#view-credit-note .cn-overlayActionRail {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+#view-credit-note .cn-outlineButton {
+  min-height: 46px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  padding: 0 22px;
+  background: rgba(255, 255, 255, 0.02);
+  color: rgba(255, 255, 255, 0.86);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 950;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+#view-credit-note .cn-outlineButton:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+#view-credit-note .cn-outlineButton--danger {
+  border-color: rgba(239, 68, 68, 0.28);
+  color: rgba(254, 202, 202, 0.92);
+}
+
+#view-credit-note .cn-detailLocation {
+  display: grid;
+  gap: 10px;
+  margin: 10px 0 28px;
+}
+
+#view-credit-note .cn-detailGrid {
+  grid-template-columns: minmax(300px, 1.5fr) repeat(3, minmax(160px, 220px));
+  align-items: center;
+  gap: 22px 28px;
+}
+
+#view-credit-note .cn-detailName strong {
+  display: block;
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 1rem;
+  font-weight: 950;
+  text-transform: uppercase;
+}
+
+#view-credit-note .cn-detailName span {
+  display: block;
+  margin-top: 6px;
+  color: rgba(255, 255, 255, 0.48);
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+#view-credit-note .cn-detailInputWrap {
+  position: relative;
+}
+
+#view-credit-note .cn-detailInputWrap input {
+  min-height: 54px;
+  padding: 0 18px;
+  font-size: 0.95rem;
+  font-weight: 950;
+}
+
+#view-credit-note .cn-detailInputWrap--uom input {
+  padding-right: 58px;
+}
+
+#view-credit-note .cn-detailTag {
+  position: absolute;
+  top: 50%;
+  right: 16px;
+  transform: translateY(-50%);
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 10px;
+  font-weight: 950;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+
+#view-credit-note .cn-overlayActions {
+  margin-top: 34px;
+}
+
+#view-credit-note .cn-overlayActions .cn-add-primary,
+#view-credit-note .cn-overlayActions .cn-outlineButton {
+  flex: 1 1 0;
+  justify-content: center;
+}
+
+#view-credit-note .cn-confirmCopy {
+  margin: 18px 0 0;
+  color: rgba(255, 255, 255, 0.74);
+  font-size: 0.92rem;
+  line-height: 1.6;
+}
+
+#view-credit-note .cn-empty,
+#view-credit-note .cn-notice {
+  display: grid;
+  place-items: center;
+  min-height: 100%;
+  color: rgba(255, 255, 255, 0.34);
+  font-size: 1.2rem;
+  font-weight: 950;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+#view-credit-note .cn-notice--error {
+  min-height: auto;
+  margin-bottom: 16px;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  border-radius: 1rem;
+  padding: 16px;
+  background: rgba(127, 29, 29, 0.18);
+  color: rgba(254, 202, 202, 0.96);
+  font-size: 0.82rem;
+}
+
+#view-credit-note .cn-toast {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 140;
+  min-width: min(360px, calc(100vw - 44px));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid rgba(239, 68, 68, 0.28);
+  border-radius: 16px;
+  padding: 12px 14px;
+  background: rgba(15, 23, 42, 0.96);
+  color: rgba(255, 255, 255, 0.9);
+}
+
+@media (max-width: 980px) {
+  #view-credit-note .cn-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  #view-credit-note {
+    padding: 18px;
+  }
+
+  #view-credit-note .cn-frame {
+    min-height: auto;
+    padding: 20px;
+    border-radius: 1.5rem;
+  }
+
+  #view-credit-note .cn-layout {
+    gap: 20px;
+  }
+
+  #view-credit-note .cn-sidecard,
+  #view-credit-note .cn-draft-panel {
+    padding: 22px;
+  }
+
+  #view-credit-note .cn-overlayFilters {
+    grid-template-columns: 1fr;
+  }
+
+  #view-credit-note .cn-detailGrid {
+    grid-template-columns: 1fr;
+  }
+
+  #view-credit-note .cn-bottombar,
+  #view-credit-note .cn-topbar,
+  #view-credit-note .cn-overlayActions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  #view-credit-note .cn-summary {
+    width: 100%;
+    justify-content: space-between;
+  }
+}
+
+@media (max-width: 860px) {
+  #view-credit-note .cn-layout {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+
+  #view-credit-note .cn-sidecard,
+  #view-credit-note .cn-draft-panel {
+    height: auto;
+  }
+
+  #view-credit-note .cn-draft-scroll {
+    max-height: 60vh;
+  }
+}
+
+@media (max-width: 640px) {
+  #view-credit-note {
+    padding: 14px;
+  }
+
+  #view-credit-note .cn-frame {
+    padding: 16px;
+    border-radius: 1.25rem;
+  }
+
+  #view-credit-note .cn-sidecard,
+  #view-credit-note .cn-draft-panel {
+    padding: 18px;
+  }
+
+  #view-credit-note .cn-overlayCard {
+    padding: 18px;
+    width: min(100%, 100vw - 28px);
+  }
+
+  #view-credit-note .cn-topbar h3,
+  #view-credit-note .cn-side-title,
+  #view-credit-note .cn-overlayCard header h3 {
+    font-size: 1.1rem;
+  }
+
+  #view-credit-note .cn-bottombar button,
+  #view-credit-note .cn-topbar button,
+  #view-credit-note .cn-overlayActions button {
+    width: 100%;
+  }
+}
+
+/* ── CN header location picker ── */
+#view-credit-note .cn-locationPickerWrap { position: relative; display: flex; flex-direction: column; gap: 0.25rem; }
+#view-credit-note .cn-locationPickerLabel { font-size: 0.72rem; font-weight: 600; color: var(--color-text-muted, #94a3b8); text-transform: uppercase; letter-spacing: 0.04em; }
+#view-credit-note .cn-locationTrigger { display: flex; align-items: center; gap: 0.5rem; width: 100%; }
+#view-credit-note .cn-locationTrigger svg:first-child { opacity: 0.55; flex-shrink: 0; }
+#view-credit-note .cn-locationTrigger span { flex: 1; text-align: left; }
+#view-credit-note .cn-locationTrigger--empty { border-style: dashed !important; color: var(--color-text-muted, #94a3b8); }
+#view-credit-note .cn-locationTrigger--set svg:first-child { opacity: 0.85; color: var(--color-accent, #3b82f6); }
+#view-credit-note .cn-chevron { flex-shrink: 0; opacity: 0.55; }
+#view-credit-note .cn-locationMenu {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 200;
+  background: var(--bg-card, #1e2a3a); border: 1px solid var(--color-border, #334155);
+  border-radius: 10px; padding: 0.4rem; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  display: flex; flex-direction: column; gap: 2px;
+}
+#view-credit-note .cn-locationOption {
+  display: flex; align-items: center; gap: 0.6rem;
+  padding: 0.6rem 0.75rem; border-radius: 7px; border: none;
+  background: transparent; color: var(--color-text, #e2e8f0);
+  cursor: pointer; font-size: 0.875rem; text-align: left; width: 100%;
+  transition: background 0.12s;
+}
+#view-credit-note .cn-locationOption svg:first-child { opacity: 0.6; flex-shrink: 0; }
+#view-credit-note .cn-locationOption span { flex: 1; }
+#view-credit-note .cn-locationOption:hover { background: var(--bg-elev, #1e2530); }
+#view-credit-note .cn-locationOption.is-selected { background: rgba(59,130,246,0.12); color: var(--color-accent, #3b82f6); }
+#view-credit-note .cn-locationOptionEmpty { padding: 0.75rem; text-align: center; font-size: 0.85rem; color: var(--color-text-muted, #94a3b8); }
+/* Line location button – empty state */
+#view-credit-note .cn-lineLocationButton--empty { border-color: rgba(239, 68, 68, 0.5); color: var(--color-text-muted, #94a3b8); }
+
+#view-credit-note .cn-locationSearchShell {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+#view-credit-note .cn-locationSearchShell .cn-input {
+  width: 100%;
+  padding-right: 42px;
+}
+
+#view-credit-note .cn-locationSearchShell > svg {
+  position: absolute;
+  right: 14px;
+  width: 16px;
+  height: 16px;
+  pointer-events: none;
+  color: rgba(255, 255, 255, 0.48);
+}

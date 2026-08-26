@@ -1,0 +1,189 @@
+# Final Release Change Manifest
+
+**Release:** `phase-v2-final-legacy-removal-reporting-audit`  
+**Comparison:** Original uploaded archive versus final source tree  
+
+Generated dependencies, build output, local Wrangler state, `.env`, `.DS_Store`, and macOS metadata were excluded from the comparison.
+
+| Classification | Count |
+|---|---:|
+| Added | 64 |
+| Modified | 38 |
+| Deleted | 65 |
+| Unchanged | 438 |
+
+## Deleted files
+
+- `cloudflare-v2/scripts/audit-yoco-v2-phase12-safety.mjs`
+- `cloudflare-v2/src/legacy/yoco-client.ts`
+- `cloudflare-v2/src/legacy/yoco-refund-context.ts`
+- `cloudflare-v2/src/legacy/yoco-sales.ts`
+- `cloudflare-v2/src/legacy/yoco-webhooks.ts`
+- `cloudflare-v2/src/modules/yoco-engine-v2/legacy-shadow-observer.ts`
+- `cloudflare-v2/src/modules/yoco-engine-v2/legacy-shutdown.ts`
+- `cloudflare-v2/src/modules/yoco-engine-v2/refund-shadow.ts`
+- `cloudflare-v2/src/modules/yoco-engine-v2/sale-shadow.ts`
+- `cloudflare-v2/tests/yoco-engine-v2-controlled-cutover.test.ts`
+- `cloudflare-v2/tests/yoco-engine-v2-legacy-shutdown.test.ts`
+- `cloudflare-v2/tests/yoco-engine-v2-refund-controlled-cutover.test.ts`
+- `cloudflare-v2/tests/yoco-engine-v2-sale-shadow.test.ts`
+- `cloudflare-v2/tests/yoco-v2-admin-control-centre.test.ts`
+- `docs/yoco-v2-admin-control-centre/ADMIN_YOCO_V2_REWIRE_AUDIT.md`
+- `docs/yoco-v2-admin-control-centre/DEPLOYMENT_INSTRUCTIONS.md`
+- `docs/yoco-v2-admin-control-centre/DISABLED_CONTROLS_PHASES_10_11.md`
+- `docs/yoco-v2-admin-control-centre/IMPLEMENTATION_MANIFEST.md`
+- `docs/yoco-v2-admin-control-centre/REMAINING_LEGACY_ADMIN_DEPENDENCIES.md`
+- `docs/yoco-v2-admin-control-centre/ROLLBACK_INSTRUCTIONS.md`
+- `docs/yoco-v2-admin-control-centre/TEST_RESULTS.md`
+- `docs/yoco-v2-admin-control-centre/UI_ROUTE_MAP.md`
+- `docs/yoco-v2/ARCHITECTURE_CONTRACT.md`
+- `docs/yoco-v2/CONTROLLED_REFUND_CUTOVER_RUNBOOK.md`
+- `docs/yoco-v2/CONTROLLED_SALE_CUTOVER_RUNBOOK.md`
+- `docs/yoco-v2/DEPLOYMENT.md`
+- `docs/yoco-v2/LEGACY_DEPENDENCY_MAP.md`
+- `docs/yoco-v2/LEGACY_MAINTENANCE_POLICY.md`
+- `docs/yoco-v2/LEGACY_REMOVAL_MANIFEST_PHASE13.md`
+- `docs/yoco-v2/LEGACY_YOCO_API_CALL_AUDIT_PHASE_V2_04_06.md`
+- `docs/yoco-v2/NPM_REGISTRY_FIX.md`
+- `docs/yoco-v2/PHASE11_STAGING_REFUND_ROLLBACK_DRILL.md`
+- `docs/yoco-v2/PHASE12_ADMIN_DEPENDENCY_AUDIT.md`
+- `docs/yoco-v2/PHASE12_OBSERVATION_RUNBOOK.md`
+- `docs/yoco-v2/PHASE13_BLOCKER_AND_EXECUTION_PLAN.md`
+- `docs/yoco-v2/RECONCILIATION_ENGINE.md`
+- `docs/yoco-v2/REFUND_CONTRACT_AND_STATE_MACHINE.md`
+- `docs/yoco-v2/RELEASE_AUDIT_PHASE_V2_01_03.md`
+- `docs/yoco-v2/RELEASE_AUDIT_PHASE_V2_04_06.md`
+- `docs/yoco-v2/RELEASE_AUDIT_PHASE_V2_07_09.md`
+- `docs/yoco-v2/RELEASE_AUDIT_PHASE_V2_10.md`
+- `docs/yoco-v2/RELEASE_AUDIT_PHASE_V2_11.md`
+- `docs/yoco-v2/RELEASE_AUDIT_PHASE_V2_12.md`
+- `docs/yoco-v2/REPORTING_WIRING_AUDIT.md`
+- `docs/yoco-v2/ROLLBACK.md`
+- `docs/yoco-v2/STAGING_ROLLBACK_DRILL.md`
+- `docs/yoco-v2/VALIDATION_RECORD_PHASE_V2_12.md`
+- `scripts/activate-yoco-v2-refunds-local.mjs`
+- `scripts/enable-yoco-v2-shadow-all.mjs`
+- `scripts/verify-yoco-v2-release.sh`
+- `src/phase60YocoWebhookRecoveryAudit.test.js`
+- `src/phase61YocoSalesReconciliationAudit.test.js`
+- `src/phase62YocoCompletedOrderDeductionAudit.test.js`
+- `src/phase64YocoWebhookHardeningAudit.test.js`
+- `src/phase65YocoRefundStockReportingAudit.test.js`
+- `src/phase67YocoRefundRecoveryAudit.test.js`
+- `src/phase68YocoLivePartialRefundGrossVat.test.js`
+- `src/phase69StockTakeDraftRefundWebhookRefresh.test.js`
+- `src/phase70YocoLiveRefundReplay.test.js`
+- `src/phase71YocoRefundLiveRecovery.test.js`
+- `src/phase72YocoWebhookRateLimitSafety.test.js`
+- `src/phase74YocoRefundAmountLineResolution.test.js`
+- `src/phase75YocoRefundOrderHydration.test.js`
+- `src/phaseV2AdminYocoEngineControlCentre.test.js`
+- `src/yocoV2DeploymentHardening.test.js`
+
+## Added files
+
+- `cloudflare-v2/scripts/audit-yoco-v2-final.mjs`
+- `cloudflare-v2/src/inventory/recipe-expansion.ts`
+- `cloudflare-v2/src/modules/yoco-engine-v2/catalog-client.ts`
+- `cloudflare-v2/src/modules/yoco-engine-v2/effect-proposals.ts`
+- `cloudflare-v2/src/modules/yoco-engine-v2/refund-effect-proposals.ts`
+- `cloudflare-v2/src/modules/yoco-engine-v2/webhook-ingress.ts`
+- `cloudflare-v2/src/modules/yoco-engine-v2/webhook-signature.ts`
+- `cloudflare-v2/tests/yoco-engine-v2-final.test.ts`
+- `docs/LEGACY_YOCO_REMOVAL_AUDIT.md`
+- `docs/REPORTING_RECONCILIATION_EVIDENCE.md`
+- `docs/YOCO_V2_REPORTING_WIRING_AUDIT.md`
+- `docs/legacy-audits/yoco-v2-admin-control-centre-history/ADMIN_YOCO_V2_REWIRE_AUDIT.md`
+- `docs/legacy-audits/yoco-v2-admin-control-centre-history/DEPLOYMENT_INSTRUCTIONS.md`
+- `docs/legacy-audits/yoco-v2-admin-control-centre-history/DISABLED_CONTROLS_PHASES_10_11.md`
+- `docs/legacy-audits/yoco-v2-admin-control-centre-history/IMPLEMENTATION_MANIFEST.md`
+- `docs/legacy-audits/yoco-v2-admin-control-centre-history/README.md`
+- `docs/legacy-audits/yoco-v2-admin-control-centre-history/REMAINING_LEGACY_ADMIN_DEPENDENCIES.md`
+- `docs/legacy-audits/yoco-v2-admin-control-centre-history/ROLLBACK_INSTRUCTIONS.md`
+- `docs/legacy-audits/yoco-v2-admin-control-centre-history/TEST_RESULTS.md`
+- `docs/legacy-audits/yoco-v2-admin-control-centre-history/UI_ROUTE_MAP.md`
+- `docs/legacy-audits/yoco-v2-phase-history/ARCHITECTURE_CONTRACT.md`
+- `docs/legacy-audits/yoco-v2-phase-history/CONTROLLED_REFUND_CUTOVER_RUNBOOK.md`
+- `docs/legacy-audits/yoco-v2-phase-history/CONTROLLED_SALE_CUTOVER_RUNBOOK.md`
+- `docs/legacy-audits/yoco-v2-phase-history/DEPLOYMENT.md`
+- `docs/legacy-audits/yoco-v2-phase-history/LEGACY_DEPENDENCY_MAP.md`
+- `docs/legacy-audits/yoco-v2-phase-history/LEGACY_MAINTENANCE_POLICY.md`
+- `docs/legacy-audits/yoco-v2-phase-history/LEGACY_REMOVAL_MANIFEST_PHASE13.md`
+- `docs/legacy-audits/yoco-v2-phase-history/LEGACY_YOCO_API_CALL_AUDIT_PHASE_V2_04_06.md`
+- `docs/legacy-audits/yoco-v2-phase-history/NPM_REGISTRY_FIX.md`
+- `docs/legacy-audits/yoco-v2-phase-history/PHASE11_STAGING_REFUND_ROLLBACK_DRILL.md`
+- `docs/legacy-audits/yoco-v2-phase-history/PHASE12_ADMIN_DEPENDENCY_AUDIT.md`
+- `docs/legacy-audits/yoco-v2-phase-history/PHASE12_OBSERVATION_RUNBOOK.md`
+- `docs/legacy-audits/yoco-v2-phase-history/PHASE13_BLOCKER_AND_EXECUTION_PLAN.md`
+- `docs/legacy-audits/yoco-v2-phase-history/README.md`
+- `docs/legacy-audits/yoco-v2-phase-history/RECONCILIATION_ENGINE.md`
+- `docs/legacy-audits/yoco-v2-phase-history/REFUND_CONTRACT_AND_STATE_MACHINE.md`
+- `docs/legacy-audits/yoco-v2-phase-history/RELEASE_AUDIT_PHASE_V2_01_03.md`
+- `docs/legacy-audits/yoco-v2-phase-history/RELEASE_AUDIT_PHASE_V2_04_06.md`
+- `docs/legacy-audits/yoco-v2-phase-history/RELEASE_AUDIT_PHASE_V2_07_09.md`
+- `docs/legacy-audits/yoco-v2-phase-history/RELEASE_AUDIT_PHASE_V2_10.md`
+- `docs/legacy-audits/yoco-v2-phase-history/RELEASE_AUDIT_PHASE_V2_11.md`
+- `docs/legacy-audits/yoco-v2-phase-history/RELEASE_AUDIT_PHASE_V2_12.md`
+- `docs/legacy-audits/yoco-v2-phase-history/REPORTING_WIRING_AUDIT.md`
+- `docs/legacy-audits/yoco-v2-phase-history/ROLLBACK.md`
+- `docs/legacy-audits/yoco-v2-phase-history/STAGING_ROLLBACK_DRILL.md`
+- `docs/legacy-audits/yoco-v2-phase-history/VALIDATION_RECORD_PHASE_V2_12.md`
+- `docs/yoco-v2/ARCHITECTURE_AND_OPERATIONS.md`
+- `docs/yoco-v2/README.md`
+- `docs/yoco-v2/RUNTIME_READINESS_EVIDENCE.md`
+- `release-evidence/CHANGE_MANIFEST.md`
+- `release-evidence/change-manifest.json`
+- `release-evidence/logs/audit_root.log`
+- `release-evidence/logs/audit_worker.log`
+- `release-evidence/logs/build_frontend.log`
+- `release-evidence/logs/deploy_dry.log`
+- `release-evidence/logs/runtime_readiness.log`
+- `release-evidence/logs/tests_frontend.log`
+- `release-evidence/logs/tests_worker.log`
+- `release-evidence/logs/typecheck_worker.log`
+- `release-evidence/validation-results.txt`
+- `release-evidence/validation-summary.json`
+- `scripts/verify-final-yoco-v2-release.mjs`
+- `scripts/verify-yoco-v2-runtime-readiness.mjs`
+- `src/phaseV2FinalLegacyRemovalReportingAudit.test.js`
+
+## Modified files
+
+- `RELEASE.txt`
+- `cloudflare-v2/package.json`
+- `cloudflare-v2/src/index.ts`
+- `cloudflare-v2/src/legacy/admin-routes.ts`
+- `cloudflare-v2/src/legacy/chat-routes.ts`
+- `cloudflare-v2/src/legacy/index.ts`
+- `cloudflare-v2/src/legacy/routes.ts`
+- `cloudflare-v2/src/legacy/types.ts`
+- `cloudflare-v2/src/legacy/yoco-service.ts`
+- `cloudflare-v2/src/modules/yoco-engine-v2/admin-control-centre.ts`
+- `cloudflare-v2/src/modules/yoco-engine-v2/admin-routes.ts`
+- `cloudflare-v2/src/modules/yoco-engine-v2/api-client.ts`
+- `cloudflare-v2/src/modules/yoco-engine-v2/capture.ts`
+- `cloudflare-v2/src/modules/yoco-engine-v2/config.ts`
+- `cloudflare-v2/src/modules/yoco-engine-v2/cutover.ts`
+- `cloudflare-v2/src/modules/yoco-engine-v2/index.ts`
+- `cloudflare-v2/src/modules/yoco-engine-v2/live-refund.ts`
+- `cloudflare-v2/src/modules/yoco-engine-v2/live-sale.ts`
+- `cloudflare-v2/src/modules/yoco-engine-v2/ownership.ts`
+- `cloudflare-v2/src/modules/yoco-engine-v2/processor.ts`
+- `cloudflare-v2/src/modules/yoco-engine-v2/reconciliation.ts`
+- `cloudflare-v2/src/modules/yoco-engine-v2/refund-cutover.ts`
+- `cloudflare-v2/src/modules/yoco-engine-v2/route-dispatch.ts`
+- `cloudflare-v2/src/release.ts`
+- `cloudflare-v2/src/types.ts`
+- `cloudflare-v2/src/workspace-do.ts`
+- `cloudflare-v2/tests/yoco-engine-v2-refund-reconciliation.test.ts`
+- `cloudflare-v2/tests/yoco-v2-admin-route-path.test.ts`
+- `cloudflare-v2/wrangler.toml`
+- `docs/INDEX.md`
+- `docs/README.md`
+- `package.json`
+- `public/KCP Admin ConsoleByYOCO.html`
+- `public/yoco-v2-admin.js`
+- `src/modules/reporting/engine/yocoFinancials.test.js`
+- `src/modules/reporting/validators/phase24ProductionHardening.test.js`
+- `src/phase56NotificationWebhookTradingTime.test.js`
+- `src/phase58SettingsGoLive.test.js`

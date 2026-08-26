@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 900" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <linearGradient id="field" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#052e1c"/>
+      <stop offset=".42" stop-color="#16a34a"/>
+      <stop offset="1" stop-color="#38bdf8"/>
+    </linearGradient>
+    <radialGradient id="mint" cx="32%" cy="22%" r="46%">
+      <stop offset="0" stop-color="#86efac" stop-opacity=".62"/>
+      <stop offset=".45" stop-color="#22c55e" stop-opacity=".18"/>
+      <stop offset="1" stop-color="#052e1c" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="leaf" width="92" height="92" patternUnits="userSpaceOnUse">
+      <path d="M46 16C62 30 60 55 46 72C32 55 30 30 46 16Z" fill="none" stroke="#dcfce7" stroke-opacity=".18" stroke-width="3"/>
+      <path d="M46 28v40" stroke="#dcfce7" stroke-opacity=".16" stroke-width="2"/>
+    </pattern>
+  </defs>
+  <rect width="1400" height="900" fill="url(#field)"/>
+  <rect width="1400" height="900" fill="url(#mint)"/>
+  <rect width="1400" height="900" fill="url(#leaf)" opacity=".76"/>
+  <path d="M-80 660C170 550 310 610 520 520s420-154 660-80 330 10 500-126" fill="none" stroke="#bbf7d0" stroke-opacity=".24" stroke-width="34"/>
+  <path d="M-120 742C180 650 340 700 590 610s410-122 650-40 360 20 520-98" fill="none" stroke="#052e1c" stroke-opacity=".28" stroke-width="42"/>
+</svg>

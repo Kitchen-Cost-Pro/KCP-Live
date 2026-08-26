@@ -1,0 +1,424 @@
+/* ─── KCP AI Chat Widget ─── */
+
+.kcpChat__toggle {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 900;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  border: none;
+  background: var(--accent-blue);
+  color: #fff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 20px rgba(37, 99, 235, 0.45);
+  transition: transform 160ms ease, box-shadow 160ms ease;
+}
+
+.kcpChat__toggle:hover {
+  transform: scale(1.08);
+  box-shadow: 0 6px 28px rgba(37, 99, 235, 0.55);
+}
+
+.kcpChat__toggle svg {
+  width: 22px;
+  height: 22px;
+}
+
+.kcpChat__toggle--open {
+  background: var(--surface-elevated);
+  color: var(--text-muted);
+  box-shadow: 0 2px 12px rgba(0,0,0,0.2);
+}
+
+.kcpChat__panel {
+  position: fixed;
+  bottom: 88px;
+  right: 24px;
+  z-index: 899;
+  width: 420px;
+  max-width: calc(100vw - 32px);
+  height: 480px;
+  max-height: calc(100dvh - 120px);
+  background: color-mix(in srgb, var(--surface-elevated) 80%, transparent);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border-subtle);
+  border-radius: 16px;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 24px 64px rgba(0,0,0,0.22);
+  overflow: hidden;
+  animation: kcpChatIn 180ms ease-out;
+}
+
+@keyframes kcpChatIn {
+  from { opacity: 0; transform: translateY(12px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.kcpChat__panel.is-hidden {
+  display: none;
+}
+
+.kcpChat__panel--expanded {
+  width: min(680px, calc(100vw - 32px));
+  height: min(640px, calc(100dvh - 120px));
+}
+
+.kcpChat__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  flex: 0 0 auto;
+}
+
+.kcpChat__headerIcon {
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent-blue) 15%, transparent);
+  color: var(--accent-blue);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+
+.kcpChat__headerIcon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.kcpChat__headerText {
+  flex: 1;
+  min-width: 0;
+}
+
+.kcpChat__headerText strong {
+  display: block;
+  font-size: 0.88rem;
+  font-weight: 780;
+  color: var(--text-main);
+  line-height: 1.2;
+}
+
+.kcpChat__headerText span {
+  display: block;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin-top: 1px;
+}
+
+.kcpChat__headerClose {
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 120ms, color 120ms;
+  flex: 0 0 auto;
+}
+
+.kcpChat__headerClose:hover {
+  background: var(--surface-secondary);
+  color: var(--text-main);
+}
+
+.kcpChat__headerClose svg {
+  width: 14px;
+  height: 14px;
+}
+
+.kcpChat__headerExpand {
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 120ms, color 120ms;
+  flex: 0 0 auto;
+}
+
+.kcpChat__headerExpand:hover {
+  background: var(--surface-secondary);
+  color: var(--text-main);
+}
+
+.kcpChat__headerExpand svg {
+  width: 14px;
+  height: 14px;
+}
+
+.kcpChat__chart {
+  width: 100%;
+  height: 140px;
+  display: block;
+  margin: 6px 0 2px;
+}
+
+.kcpChat__messages {
+  flex: 1;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 10px 10px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.kcpChat__empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  text-align: center;
+  padding: 16px;
+}
+
+.kcpChat__empty svg {
+  width: 32px;
+  height: 32px;
+  color: var(--accent-blue);
+  opacity: 0.5;
+}
+
+.kcpChat__empty p {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+  max-width: 240px;
+}
+
+.kcpChat__suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: center;
+  margin-top: 4px;
+}
+
+.kcpChat__suggestion {
+  font-size: 0.72rem;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-secondary);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: border-color 120ms, color 120ms;
+  white-space: nowrap;
+}
+
+.kcpChat__suggestion:hover {
+  border-color: var(--accent-blue);
+  color: var(--accent-blue);
+}
+
+.kcpChat__bubble {
+  display: flex;
+  gap: 8px;
+  max-width: 100%;
+}
+
+.kcpChat__bubble--user {
+  flex-direction: row-reverse;
+}
+
+.kcpChat__bubbleBody {
+  padding: 8px 11px;
+  border-radius: 12px;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  min-width: 0;
+}
+
+.kcpChat__bubble--user .kcpChat__bubbleBody {
+  max-width: 82%;
+  background: var(--accent-blue);
+  color: #fff;
+  border-bottom-right-radius: 3px;
+}
+
+.kcpChat__bubble--assistant .kcpChat__bubbleBody {
+  width: 100%;
+  background: var(--surface-secondary);
+  color: var(--text-main);
+  border-bottom-left-radius: 3px;
+  border: 1px solid var(--border-subtle);
+}
+
+.kcpChat__bubble--error .kcpChat__bubbleBody {
+  width: 100%;
+  background: var(--danger-bg);
+  color: var(--accent-red);
+  border: 1px solid var(--danger-border);
+  border-bottom-left-radius: 3px;
+}
+
+.kcpChat__thinking {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 14px;
+  background: var(--surface-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  border-bottom-left-radius: 4px;
+  width: fit-content;
+}
+
+.kcpChat__thinking span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  animation: kcpChatDot 1.2s infinite ease-in-out;
+}
+
+.kcpChat__thinking span:nth-child(2) { animation-delay: 0.2s; }
+.kcpChat__thinking span:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes kcpChatDot {
+  0%, 80%, 100% { transform: scale(0.7); opacity: 0.4; }
+  40% { transform: scale(1); opacity: 1; }
+}
+
+.kcpChat__inputRow {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--border-subtle);
+  flex: 0 0 auto;
+  background: var(--surface-elevated);
+}
+
+.kcpChat__input {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-secondary);
+  color: var(--text-main);
+  font-size: 0.83rem;
+  resize: none;
+  line-height: 1.45;
+  max-height: 100px;
+  overflow-y: auto;
+  font-family: inherit;
+  transition: border-color 120ms;
+}
+
+.kcpChat__input:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+}
+
+.kcpChat__input::placeholder {
+  color: var(--text-soft);
+}
+
+.kcpChat__send {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  border: none;
+  background: var(--accent-blue);
+  color: #fff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  align-self: flex-end;
+  transition: opacity 120ms, background 120ms;
+}
+
+.kcpChat__send:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.kcpChat__send:not(:disabled):hover {
+  background: var(--accent-indigo);
+}
+
+.kcpChat__send svg {
+  width: 16px;
+  height: 16px;
+}
+
+.kcpChat__tableWrap {
+  overflow-x: auto;
+  margin: 4px 0;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+}
+
+.kcpChat__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.kcpChat__table th {
+  background: color-mix(in srgb, var(--accent-blue) 12%, transparent);
+  color: var(--text-main);
+  font-weight: 680;
+  padding: 5px 8px;
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 0.72rem;
+}
+
+.kcpChat__table td {
+  padding: 4px 8px;
+  color: var(--text-main);
+  border-bottom: 1px solid var(--border-subtle);
+  white-space: nowrap;
+  font-size: 0.72rem;
+}
+
+.kcpChat__table tr:last-child td {
+  border-bottom: none;
+}
+
+.kcpChat__table tbody tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--surface-secondary) 50%, transparent);
+}
+
+@media (max-width: 480px) {
+  .kcpChat__panel {
+    right: 8px;
+    bottom: 80px;
+    width: calc(100vw - 16px);
+  }
+
+  .kcpChat__toggle {
+    right: 16px;
+    bottom: 16px;
+  }
+}

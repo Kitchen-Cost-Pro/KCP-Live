@@ -1,0 +1,1833 @@
+.shell {
+  --dash-bg: var(--bg-primary);
+  --dash-card: color-mix(in srgb, var(--surface-primary) 92%, var(--bg-primary));
+  --dash-elev: var(--surface-elevated);
+  --dash-text: var(--text-main);
+  --dash-muted: var(--text-muted);
+  --dash-border: var(--border-subtle);
+  --dash-grid: color-mix(in srgb, var(--text-main) 8%, transparent);
+  --dash-row-border: color-mix(in srgb, var(--text-main) 7%, transparent);
+  --dash-hover: color-mix(in srgb, var(--text-main) 4%, transparent);
+  --dash-tooltip: color-mix(in srgb, var(--surface-elevated) 96%, var(--bg-primary));
+  --dash-shadow: var(--shadow-soft);
+  --dash-green: #00e5a0;
+  --dash-red: #ff4455;
+  --dash-amber: #f5a623;
+  --dash-purple: #7b61ff;
+  width: 100%;
+  min-height: 100%;
+  color: var(--dash-text);
+  background: transparent;
+  font-family: var(--font-main);
+}
+
+:global(:root[data-theme="light"]) .shell {
+  --dash-green: #007a57;
+  --dash-red: #c92d3f;
+  --dash-amber: #a86100;
+  --dash-purple: #6046d8;
+}
+
+.frame {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 35;
+  min-height: 62px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--dash-border);
+  background: color-mix(in srgb, var(--restaurant-theme-panel) 50%, var(--surface-primary));
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+
+.brandBlock,
+.topbarActions,
+.brandBlock > div:last-child,
+.kpiCard > div,
+.kpiCard p,
+.kpiCard footer,
+.alertBar,
+.panelHeader,
+.seriesToggles,
+.inventoryHeader,
+.categoryStrip,
+.tableFooter,
+.tableFooter > div,
+.supplierChartWrap,
+.supplierLegend > div {
+  display: flex;
+  align-items: center;
+}
+
+.brandBlock {
+  min-width: 0;
+  gap: 11px;
+}
+
+.brandIcon {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  background: var(--dash-green);
+  color: #07110e;
+  box-shadow: 0 0 28px rgba(0, 229, 160, 0.17);
+}
+
+.brandBlock > div:last-child {
+  min-width: 0;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.brandBlock h1,
+.panelHeader h2,
+.inventoryHeader h2 {
+  margin: 0;
+  color: var(--dash-text);
+  font-family: var(--font-main);
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.brandBlock h1 {
+  font-size: 0.82rem;
+  letter-spacing: 0.08em;
+}
+
+.brandBlock p,
+.panelHeader p,
+.inventoryHeader p {
+  margin: 0;
+  color: var(--dash-muted);
+  font-family: var(--font-main);
+  font-size: 0.68rem;
+}
+
+.topbarActions {
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.searchBox {
+  min-width: 235px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 11px;
+  border: 1px solid var(--dash-border);
+  border-radius: 7px;
+  background: var(--dash-elev);
+  color: var(--dash-muted);
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.searchBox:focus-within {
+  border-color: rgba(0, 229, 160, 0.5);
+  box-shadow: 0 0 0 3px rgba(0, 229, 160, 0.08);
+}
+
+.searchBox input {
+  min-width: 0;
+  width: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--dash-text);
+  font-family: var(--font-main);
+  font-size: 0.68rem;
+}
+
+.searchBox input::placeholder {
+  color: var(--text-soft);
+}
+
+.refreshButton {
+  min-width: 96px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 13px;
+  border: 1px solid color-mix(in srgb, var(--dash-green) 34%, var(--dash-border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--dash-green) 9%, var(--dash-elev));
+  color: var(--dash-text);
+  font-family: var(--font-main);
+  font-size: 0.66rem;
+  font-weight: 780;
+  cursor: pointer;
+  transition: border-color 150ms ease, background 150ms ease, transform 150ms ease;
+}
+
+.refreshButton:hover,
+.refreshButton:focus-visible {
+  border-color: color-mix(in srgb, var(--dash-green) 60%, var(--dash-border));
+  background: color-mix(in srgb, var(--dash-green) 15%, var(--dash-elev));
+  outline: none;
+  transform: translateY(-1px);
+}
+
+.refreshButton:disabled {
+  opacity: 0.58;
+  cursor: wait;
+  transform: none;
+}
+
+.refreshButton.refreshing svg {
+  animation: dashboardSpin 800ms linear infinite;
+}
+
+.iconButton {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--dash-muted);
+  cursor: pointer;
+  transition: color 150ms ease, border-color 150ms ease, background 150ms ease;
+}
+
+.iconButton:hover,
+.iconButton:focus-visible {
+  border-color: var(--dash-border);
+  background: var(--dash-elev);
+  color: var(--dash-text);
+  outline: none;
+}
+
+.iconButton:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.refreshing svg {
+  animation: dashboardSpin 800ms linear infinite;
+}
+
+.notificationDot {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--dash-red);
+  box-shadow: 0 0 0 2px var(--dash-bg);
+}
+
+.notificationWrap {
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+
+.iconButtonActive {
+  border-color: color-mix(in srgb, var(--dash-red) 30%, var(--dash-border));
+  background: color-mix(in srgb, var(--dash-red) 8%, var(--dash-elev));
+  color: var(--dash-text);
+}
+
+.notificationCount {
+  position: absolute;
+  top: -5px;
+  right: -6px;
+  min-width: 17px;
+  height: 17px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0 4px;
+  border: 2px solid var(--dash-card);
+  border-radius: 999px;
+  background: var(--dash-red);
+  color: #ffffff;
+  font-size: 0.52rem;
+  font-weight: 800;
+  line-height: 1;
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--dash-red) 32%, transparent);
+}
+
+.notificationMenu {
+  position: absolute;
+  z-index: 120;
+  top: calc(100% + 10px);
+  right: 0;
+  width: min(380px, calc(100vw - 32px));
+  max-height: min(560px, calc(100vh - 96px));
+  overflow: hidden;
+  border: 1px solid var(--dash-border);
+  border-radius: 12px;
+  background: var(--dash-tooltip);
+  color: var(--dash-text);
+  box-shadow: 0 24px 64px rgba(2, 6, 23, 0.24), 0 0 0 1px color-mix(in srgb, var(--dash-text) 3%, transparent) inset;
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.notificationMenu[hidden] {
+  display: none;
+}
+
+.notificationHeader {
+  min-height: 62px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--dash-border);
+}
+
+
+.notificationHeaderActions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.notificationSettingsActive {
+  color: var(--dash-green);
+  border-color: color-mix(in srgb, var(--dash-green) 35%, var(--dash-border));
+}
+
+.notificationSettingsPanel {
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+}
+
+.notificationSettingsIntro {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--dash-green) 22%, var(--dash-border));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--dash-green) 7%, var(--dash-elev));
+  color: var(--dash-green);
+}
+
+.notificationSettingsIntro div,
+.notificationTimeField,
+.notificationRecipientSection {
+  display: grid;
+  gap: 4px;
+}
+
+.notificationSettingsIntro strong,
+.notificationTimeField > span,
+.notificationRecipientHeader > span {
+  color: var(--dash-text);
+  font-size: 0.68rem;
+  font-weight: 750;
+}
+
+.notificationSettingsIntro span,
+.notificationTimeField small,
+.notificationRecipientHeader small {
+  color: var(--dash-muted);
+  font-size: 0.58rem;
+  line-height: 1.45;
+}
+
+.notificationTimeField input {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid var(--dash-border);
+  border-radius: 8px;
+  padding: 0 10px;
+  background: var(--dash-elev);
+  color: var(--dash-text);
+  font: inherit;
+}
+
+.notificationRecipientHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.notificationRecipientList {
+  max-height: 230px;
+  overflow-y: auto;
+  border: 1px solid var(--dash-border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--dash-elev) 70%, transparent);
+}
+
+.notificationRecipient {
+  min-height: 52px;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--dash-row-border);
+  cursor: pointer;
+}
+
+.notificationRecipient:last-child { border-bottom: 0; }
+.notificationRecipient:hover { background: var(--dash-hover); }
+.notificationRecipient input { accent-color: var(--dash-green); }
+.notificationRecipient > span { min-width: 0; display: grid; gap: 2px; }
+.notificationRecipient strong { overflow: hidden; color: var(--dash-text); font-size: 0.64rem; text-overflow: ellipsis; white-space: nowrap; }
+.notificationRecipient small { overflow: hidden; color: var(--dash-muted); font-size: 0.55rem; text-overflow: ellipsis; white-space: nowrap; }
+
+.notificationSettingsActions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.notificationSettingsActions button {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid color-mix(in srgb, var(--dash-green) 35%, var(--dash-border));
+  border-radius: 7px;
+  padding: 0 12px;
+  background: color-mix(in srgb, var(--dash-green) 10%, var(--dash-elev));
+  color: var(--dash-green);
+  font-size: 0.62rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.notificationSettingsActions button:disabled { cursor: wait; opacity: .65; }
+.notificationSettingsState { min-height: 180px; display: grid; place-items: center; align-content: center; gap: 8px; color: var(--dash-muted); font-size: .64rem; }
+.notificationSettingsEmpty { margin: 0; padding: 18px 12px; color: var(--dash-muted); font-size: .6rem; text-align: center; }
+
+.notificationHeader > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.notificationHeader strong {
+  color: var(--dash-text);
+  font-size: 0.8rem;
+  font-weight: 750;
+}
+
+.notificationHeader span {
+  color: var(--dash-muted);
+  font-size: 0.64rem;
+}
+
+.notificationClose {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--dash-border);
+  border-radius: 7px;
+  background: var(--dash-elev);
+  color: var(--dash-muted);
+  cursor: pointer;
+}
+
+.notificationClose:hover,
+.notificationClose:focus-visible {
+  outline: none;
+  color: var(--dash-text);
+  border-color: color-mix(in srgb, var(--dash-text) 20%, var(--dash-border));
+}
+
+.notificationSummary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--dash-border);
+  background: color-mix(in srgb, var(--dash-elev) 72%, transparent);
+}
+
+.notificationSummary span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid;
+  border-radius: 999px;
+  font-size: 0.58rem;
+  font-weight: 700;
+}
+
+.notificationSummaryCritical {
+  border-color: color-mix(in srgb, var(--dash-red) 35%, transparent);
+  background: color-mix(in srgb, var(--dash-red) 10%, transparent);
+  color: var(--dash-red);
+}
+
+.notificationSummaryLow {
+  border-color: color-mix(in srgb, var(--dash-amber) 35%, transparent);
+  background: color-mix(in srgb, var(--dash-amber) 10%, transparent);
+  color: var(--dash-amber);
+}
+
+.notificationList {
+  max-height: 330px;
+  overflow-y: auto;
+  padding: 5px 0;
+  scrollbar-color: color-mix(in srgb, var(--dash-muted) 42%, transparent) transparent;
+}
+
+.notificationItem {
+  width: 100%;
+  min-height: 58px;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  border-bottom: 1px solid var(--dash-row-border);
+  padding: 9px 14px;
+  background: transparent;
+  color: var(--dash-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.notificationItem:last-child {
+  border-bottom: 0;
+}
+
+.notificationItem:hover,
+.notificationItem:focus-visible {
+  outline: none;
+  background: var(--dash-hover);
+}
+
+.notificationItemIcon {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--notification-tone) 11%, transparent);
+  color: var(--notification-tone);
+}
+
+.notificationItemCopy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.notificationItemCopy strong {
+  overflow: hidden;
+  color: var(--dash-text);
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notificationItemCopy small {
+  overflow: hidden;
+  color: var(--dash-muted);
+  font-size: 0.58rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notificationItemStatus {
+  min-height: 22px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 7px;
+  border: 1px solid color-mix(in srgb, var(--notification-tone) 28%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--notification-tone) 9%, transparent);
+  color: var(--notification-tone);
+  font-size: 0.5rem;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.notificationMore {
+  margin: 0;
+  padding: 7px 14px;
+  border-top: 1px solid var(--dash-border);
+  color: var(--dash-muted);
+  font-size: 0.6rem;
+}
+
+.notificationActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+  padding: 11px 14px;
+  border-top: 1px solid var(--dash-border);
+  background: color-mix(in srgb, var(--dash-elev) 70%, transparent);
+}
+
+.notificationActions button {
+  min-height: 31px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--dash-border);
+  border-radius: 7px;
+  padding: 0 10px;
+  background: var(--dash-elev);
+  color: var(--dash-muted);
+  font-size: 0.6rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.notificationActions button:last-child {
+  border-color: color-mix(in srgb, var(--dash-green) 35%, var(--dash-border));
+  background: color-mix(in srgb, var(--dash-green) 9%, var(--dash-elev));
+  color: var(--dash-green);
+}
+
+.notificationActions button:hover,
+.notificationActions button:focus-visible {
+  outline: none;
+  color: var(--dash-text);
+  border-color: color-mix(in srgb, var(--dash-text) 20%, var(--dash-border));
+}
+
+
+.notificationEmailStatus {
+  margin: 0;
+  padding: 9px 12px 11px;
+  border-top: 1px solid var(--border-subtle);
+  color: var(--accent-success, #00e5a0);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.notificationEmailStatusError {
+  color: var(--accent-danger, #ff4455);
+}
+
+.notificationEmpty {
+  min-height: 180px;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 7px;
+  padding: 24px;
+  color: var(--dash-green);
+  text-align: center;
+}
+
+.notificationEmpty strong {
+  color: var(--dash-text);
+  font-size: 0.76rem;
+}
+
+.notificationEmpty span {
+  max-width: 260px;
+  color: var(--dash-muted);
+  font-size: 0.66rem;
+  line-height: 1.45;
+}
+
+.body {
+  width: min(1500px, 100%);
+  margin: 0 auto;
+  padding: 22px 24px 34px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.filterBar {
+  min-height: 66px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 10px 24px;
+  border-bottom: 1px solid var(--dash-border);
+  background: color-mix(in srgb, var(--dash-bg) 84%, var(--dash-card));
+}
+
+.filterControls {
+  min-width: 0;
+  display: flex;
+  align-items: end;
+  gap: 9px;
+  flex-wrap: wrap;
+}
+
+
+.customField {
+  position: relative;
+  display: grid;
+  flex: 0 1 240px;
+  width: clamp(190px, 22vw, 280px);
+  min-width: 190px;
+  max-width: 100%;
+  gap: 5px;
+}
+
+.customFieldLabel {
+  color: var(--dash-muted);
+  font-family: var(--font-main);
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.customSelectButton {
+  width: 100%;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 11px;
+  border: 1px solid var(--dash-border);
+  border-radius: 8px;
+  outline: none;
+  background: var(--dash-elev);
+  color: var(--dash-text);
+  font-family: var(--font-main);
+  font-size: 0.76rem;
+  font-weight: 550;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 150ms ease, box-shadow 150ms ease, background 150ms ease;
+}
+
+.customSelectButton:hover,
+.customSelectButton:focus-visible,
+.customSelectButton[aria-expanded="true"] {
+  border-color: color-mix(in srgb, var(--dash-green) 48%, var(--dash-border));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dash-green) 10%, transparent);
+}
+
+.customSelectButton > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.customSelectButton svg {
+  flex: 0 0 auto;
+  color: var(--dash-muted);
+  transition: transform 150ms ease;
+}
+
+.customSelectButton[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
+
+.customSelectMenu {
+  position: absolute;
+  z-index: 80;
+  top: calc(100% + 7px);
+  left: 0;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 190px;
+  max-width: min(320px, calc(100vw - 24px));
+  max-height: 280px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px;
+  border: 1px solid var(--dash-border);
+  border-radius: 10px;
+  background: var(--dash-tooltip);
+  box-shadow: var(--shadow-hover);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+
+.customSelectMenu[hidden] {
+  display: none;
+}
+
+.customSelectMenuOpen {
+  display: grid;
+  gap: 2px;
+}
+
+.customSelectOption {
+  width: 100%;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--dash-muted);
+  font-family: var(--font-main);
+  font-size: 0.75rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.customSelectOption:hover,
+.customSelectOption:focus-visible {
+  outline: none;
+  background: var(--dash-hover);
+  color: var(--dash-text);
+}
+
+.customSelectOptionSelected {
+  background: color-mix(in srgb, var(--dash-green) 10%, transparent);
+  color: var(--dash-green);
+}
+
+.dateCalendar {
+  position: absolute;
+  z-index: 90;
+  top: calc(100% + 7px);
+  left: 0;
+  width: min(330px, calc(100vw - 32px));
+  padding: 13px;
+  border: 1px solid var(--dash-border);
+  border-radius: 12px;
+  background: var(--dash-tooltip);
+  box-shadow: var(--shadow-hover);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+
+.calendarHeader,
+.calendarFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.calendarHeader {
+  margin-bottom: 12px;
+}
+
+.calendarHeader > div {
+  min-width: 0;
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+}
+
+.calendarHeader strong {
+  color: var(--dash-text);
+  font-size: 0.82rem;
+}
+
+.calendarHeader span,
+.calendarFooter span {
+  color: var(--dash-muted);
+  font-size: 0.65rem;
+}
+
+.calendarHeader button,
+.calendarFooter button {
+  min-width: 30px;
+  min-height: 30px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--dash-border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--dash-muted);
+  font-family: var(--font-main);
+  cursor: pointer;
+}
+
+.calendarHeader button:hover,
+.calendarHeader button:focus-visible,
+.calendarFooter button:hover,
+.calendarFooter button:focus-visible {
+  outline: none;
+  background: var(--dash-hover);
+  color: var(--dash-text);
+}
+
+.calendarWeekdays,
+.calendarGrid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+}
+
+.calendarWeekdays {
+  margin-bottom: 5px;
+}
+
+.calendarWeekdays span {
+  padding: 4px 0;
+  color: var(--dash-muted);
+  font-size: 0.58rem;
+  font-weight: 700;
+  text-align: center;
+}
+
+.calendarGrid {
+  gap: 3px;
+}
+
+.calendarDay,
+.calendarDayEmpty {
+  aspect-ratio: 1;
+  min-width: 0;
+}
+
+.calendarDay {
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--dash-text);
+  font-family: var(--font-main);
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.calendarDay:hover:not(:disabled),
+.calendarDay:focus-visible:not(:disabled) {
+  outline: none;
+  border-color: var(--dash-border);
+  background: var(--dash-hover);
+}
+
+.calendarDay:disabled {
+  color: var(--text-soft);
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
+.calendarDayToday {
+  border-color: color-mix(in srgb, var(--dash-green) 45%, transparent);
+}
+
+.calendarDayInRange {
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--dash-green) 9%, transparent);
+  color: var(--dash-text);
+}
+
+.calendarDaySelected {
+  border-color: var(--dash-green);
+  background: color-mix(in srgb, var(--dash-green) 18%, transparent);
+  color: var(--dash-green);
+  font-weight: 750;
+}
+
+.calendarFooter {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--dash-border);
+}
+
+.calendarFooter button {
+  width: auto;
+  padding: 0 9px;
+}
+
+.filterField {
+  display: grid;
+  gap: 5px;
+  min-width: 154px;
+}
+
+.dateField {
+  min-width: 138px;
+}
+
+.filterField > span {
+  color: var(--dash-muted);
+  font-family: var(--font-main);
+  font-size: 0.56rem;
+  font-weight: 650;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.filterField select,
+.filterField input {
+  width: 100%;
+  height: 34px;
+  border: 1px solid var(--dash-border);
+  border-radius: 7px;
+  padding: 0 10px;
+  outline: none;
+  background: var(--dash-elev);
+  color: var(--dash-text);
+  font-family: var(--font-main);
+  font-size: 0.64rem;
+}
+
+.filterField select:focus,
+.filterField input:focus {
+  border-color: color-mix(in srgb, var(--dash-green) 48%, var(--dash-border));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dash-green) 10%, transparent);
+}
+
+.filterSummary {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  color: var(--dash-muted);
+  font-family: var(--font-main);
+  font-size: 0.62rem;
+  text-align: right;
+}
+
+.filterSummary span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kpiGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.kpiCard,
+.panel,
+.inventoryPanel {
+  border: 1px solid var(--dash-border);
+  border-radius: 9px;
+  background: var(--dash-card);
+  box-shadow: var(--dash-shadow);
+}
+
+.kpiCard {
+  min-height: 140px;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 14px;
+  transition: border-color 160ms ease, transform 160ms ease;
+}
+
+.kpiCard:hover {
+  border-color: color-mix(in srgb, var(--dash-text) 16%, var(--dash-border));
+  transform: translateY(-1px);
+}
+
+.kpiCard > div {
+  justify-content: space-between;
+  color: color-mix(in srgb, var(--kpi-accent) 80%, white);
+}
+
+.kpiCard > div span {
+  color: var(--dash-muted);
+  font-family: var(--font-main);
+  font-size: 0.64rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.kpiCard p {
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin: 0;
+}
+
+.kpiCard p strong {
+  color: var(--dash-text);
+  font-family: var(--font-main);
+  font-size: clamp(1.35rem, 2vw, 2rem);
+  font-weight: 650;
+  letter-spacing: -0.04em;
+}
+
+.kpiCard p span {
+  color: var(--dash-muted);
+  font-family: var(--font-main);
+  font-size: 0.68rem;
+}
+
+.kpiCard footer {
+  gap: 5px;
+  font-family: var(--font-main);
+  font-size: 0.64rem;
+}
+
+.deltaGood { color: var(--dash-green); }
+.deltaBad { color: var(--dash-red); }
+.deltaNeutral { color: var(--dash-muted); }
+
+.alertBar {
+  min-height: 42px;
+  gap: 10px;
+  padding: 10px 13px;
+  border: 1px solid;
+  border-radius: 7px;
+  font-family: var(--font-main);
+}
+
+.alertBarCritical {
+  border-color: rgba(255, 68, 85, 0.28);
+  background: rgba(255, 68, 85, 0.07);
+  color: var(--dash-red);
+}
+
+.alertBarHealthy {
+  border-color: rgba(0, 229, 160, 0.24);
+  background: rgba(0, 229, 160, 0.055);
+  color: var(--dash-green);
+}
+
+.alertBar p {
+  min-width: 0;
+  flex: 1;
+  margin: 0;
+  color: var(--dash-text);
+  font-size: 0.69rem;
+  line-height: 1.5;
+}
+
+.alertBar p strong {
+  color: inherit;
+}
+
+.alertBar p span {
+  color: var(--dash-muted);
+}
+
+.alertBar button,
+.tableFooter button,
+.categoryButton,
+.seriesToggle,
+.errorState button {
+  border: 1px solid var(--dash-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dash-muted);
+  font-family: var(--font-main);
+  cursor: pointer;
+  transition: border-color 150ms ease, color 150ms ease, background 150ms ease;
+}
+
+.alertBar button {
+  padding: 6px 10px;
+  color: var(--dash-red);
+  border-color: rgba(255, 68, 85, 0.25);
+  font-size: 0.63rem;
+}
+
+.alertBar button:hover {
+  background: rgba(255, 68, 85, 0.08);
+}
+
+.chartGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
+  gap: 12px;
+}
+
+.panel {
+  min-width: 0;
+  padding: 18px;
+}
+
+.panelHeader {
+  min-height: 42px;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 14px;
+  margin-bottom: 10px;
+}
+
+.panelHeader > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.panelHeader h2,
+.inventoryHeader h2 {
+  font-size: 0.66rem;
+  letter-spacing: 0.11em;
+}
+
+.seriesToggles {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.seriesToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  font-size: 0.59rem;
+}
+
+.seriesToggle span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--series-color);
+  opacity: 0.28;
+}
+
+.seriesToggleActive {
+  border-color: color-mix(in srgb, var(--series-color) 42%, transparent);
+  background: color-mix(in srgb, var(--series-color) 9%, transparent);
+  color: var(--series-color);
+}
+
+.seriesToggleActive span {
+  opacity: 1;
+}
+
+.chartStage {
+  position: relative;
+  min-height: 238px;
+}
+
+.chartStage svg {
+  width: 100%;
+  height: 238px;
+  display: block;
+  overflow: visible;
+}
+
+.gridLine {
+  stroke: var(--dash-grid);
+  stroke-dasharray: 2 5;
+}
+
+.axisText {
+  fill: var(--dash-muted);
+  font-family: var(--font-main);
+  font-size: 10px;
+}
+
+.chartLine {
+  filter: drop-shadow(0 0 6px color-mix(in srgb, currentColor 18%, transparent));
+}
+
+.chartDot {
+  pointer-events: none;
+}
+
+.chartTooltip {
+  position: absolute;
+  z-index: 8;
+  width: 170px;
+  display: grid;
+  gap: 5px;
+  padding: 9px 10px;
+  border: 1px solid var(--dash-border);
+  border-radius: 7px;
+  background: var(--dash-tooltip);
+  box-shadow: var(--shadow-hover);
+  pointer-events: none;
+  font-family: var(--font-main);
+  font-size: 0.61rem;
+}
+
+.chartTooltip[hidden] {
+  display: none;
+}
+
+.chartTooltip strong {
+  margin-bottom: 2px;
+  color: var(--dash-text);
+}
+
+.chartTooltip span {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.chartTooltip b {
+  color: inherit;
+  font-weight: 650;
+}
+
+.chartEmpty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--dash-muted);
+  font-family: var(--font-main);
+  font-size: 0.68rem;
+  pointer-events: none;
+}
+
+.supplierChartWrap {
+  min-height: 238px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.donut {
+  width: 142px;
+  height: 142px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  box-shadow: 0 0 26px rgba(0, 0, 0, 0.2);
+}
+
+.donut > div {
+  width: 94px;
+  height: 94px;
+  display: grid;
+  place-content: center;
+  gap: 3px;
+  border-radius: 50%;
+  background: var(--dash-card);
+  text-align: center;
+  font-family: var(--font-main);
+}
+
+.donut strong {
+  font-size: 0.9rem;
+  color: var(--dash-text);
+}
+
+.donut span {
+  color: var(--dash-muted);
+  font-size: 0.57rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.supplierLegend {
+  width: 100%;
+  display: grid;
+  gap: 7px;
+}
+
+.supplierLegend > div {
+  min-width: 0;
+  gap: 8px;
+  font-family: var(--font-main);
+  font-size: 0.61rem;
+}
+
+.supplierLegend > div > span {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+}
+
+.supplierLegend p {
+  min-width: 0;
+  flex: 1;
+  margin: 0;
+  overflow: hidden;
+  color: var(--dash-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.supplierLegend strong {
+  color: var(--dash-text);
+  font-weight: 550;
+}
+
+.supplierEmpty,
+.tableEmpty,
+.errorState {
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  text-align: center;
+  color: var(--dash-muted);
+}
+
+.supplierEmpty {
+  min-height: 238px;
+  gap: 8px;
+}
+
+.supplierEmpty strong,
+.tableEmpty strong {
+  color: var(--dash-text);
+  font-family: var(--font-main);
+  font-size: 0.72rem;
+}
+
+.supplierEmpty span,
+.tableEmpty span {
+  max-width: 260px;
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+
+.inventoryPanel {
+  overflow: hidden;
+}
+
+.inventoryHeader {
+  min-height: 68px;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--dash-border);
+}
+
+.inventoryHeader > div:first-child {
+  display: grid;
+  gap: 5px;
+  flex: 0 0 auto;
+}
+
+.inventoryFilters {
+  min-width: 0;
+  display: grid;
+  justify-items: end;
+  gap: 8px;
+}
+
+.locationPills,
+.categoryStrip {
+  min-width: 0;
+  max-width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.locationPills::-webkit-scrollbar,
+.categoryStrip::-webkit-scrollbar {
+  display: none;
+}
+
+.locationPill {
+  flex: 0 0 auto;
+  min-height: 30px;
+  padding: 0 11px;
+  border: 1px solid var(--dash-border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dash-muted);
+  font-family: var(--font-main);
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 150ms ease, color 150ms ease, background 150ms ease;
+}
+
+.locationPill:hover,
+.locationPill:focus-visible {
+  outline: none;
+  border-color: color-mix(in srgb, var(--dash-text) 20%, var(--dash-border));
+  color: var(--dash-text);
+}
+
+.locationPillActive {
+  border-color: color-mix(in srgb, var(--dash-green) 48%, transparent);
+  background: color-mix(in srgb, var(--dash-green) 11%, transparent);
+  color: var(--dash-green);
+}
+
+.categoryButton {
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  font-size: 0.6rem;
+}
+
+.categoryButton:hover,
+.tableFooter button:hover,
+.errorState button:hover {
+  border-color: color-mix(in srgb, var(--dash-text) 18%, var(--dash-border));
+  color: var(--dash-text);
+}
+
+.categoryButtonActive {
+  border-color: rgba(0, 229, 160, 0.35);
+  background: rgba(0, 229, 160, 0.08);
+  color: var(--dash-green);
+}
+
+.tableWrap {
+  width: 100%;
+  overflow-x: auto;
+  scrollbar-color: color-mix(in srgb, var(--dash-muted) 48%, transparent) transparent;
+}
+
+.inventoryTable {
+  width: 100%;
+  min-width: 1050px;
+  border-collapse: collapse;
+  color: var(--dash-text);
+  font-family: var(--font-main);
+  font-size: 0.64rem;
+}
+
+.inventoryTable th,
+.inventoryTable td {
+  padding: 11px 18px;
+  border-bottom: 1px solid var(--dash-row-border);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.inventoryTable th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--dash-card);
+}
+
+.inventoryTable th button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--dash-muted);
+  font: inherit;
+  font-size: 0.58rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.inventoryTable th button:hover {
+  color: var(--dash-text);
+}
+
+.inventoryTable tbody tr {
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.inventoryTable tbody tr:hover,
+.inventoryTable tbody tr:focus-visible {
+  background: var(--dash-hover);
+  outline: none;
+}
+
+.inventoryTable tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.inventoryTable td {
+  color: var(--dash-muted);
+}
+
+.inventoryTable td:nth-child(2),
+.inventoryTable td:nth-child(5),
+.inventoryTable td:nth-child(6) {
+  color: var(--dash-text);
+}
+
+.inventoryTable td:nth-child(2) strong {
+  display: block;
+  max-width: 240px;
+  overflow: hidden;
+  color: var(--dash-text);
+  font-weight: 550;
+  text-overflow: ellipsis;
+}
+
+.inventoryTable td:nth-child(2) span,
+.inventoryTable td:nth-child(4) span {
+  color: var(--text-soft);
+  font-size: 0.58rem;
+}
+
+.qtyLow { color: var(--dash-amber) !important; }
+.qtyCritical { color: var(--dash-red) !important; }
+
+.statusBadge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 7px;
+  border: 1px solid color-mix(in srgb, var(--status-color) 28%, transparent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--status-color) 10%, transparent);
+  color: var(--status-color);
+  font-size: 0.55rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.sortMuted {
+  opacity: 0.25;
+}
+
+.tableFooter {
+  min-height: 50px;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 18px;
+  border-top: 1px solid var(--dash-border);
+  color: var(--dash-muted);
+  font-family: var(--font-main);
+  font-size: 0.61rem;
+}
+
+.tableFooter > div {
+  gap: 7px;
+}
+
+.tableFooter button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 0.6rem;
+}
+
+.tableEmpty {
+  min-height: 230px;
+  gap: 8px;
+}
+
+.dataNote {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: -4px 0 0;
+  color: var(--dash-muted);
+  font-family: var(--font-main);
+  font-size: 0.58rem;
+}
+
+.loadingWrap {
+  width: min(1500px, 100%);
+  min-height: 100%;
+  margin: 0 auto;
+  padding: 22px 24px;
+  display: grid;
+  align-content: start;
+  gap: 16px;
+  background: var(--dash-bg);
+}
+
+.loadingHeader {
+  min-height: 46px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.loadingBrand,
+.loadingHeader span,
+.loadingGrid div,
+.loadingPanels div,
+.loadingTable {
+  background: linear-gradient(90deg, color-mix(in srgb, var(--dash-card) 88%, var(--dash-bg)) 25%, var(--dash-elev) 50%, color-mix(in srgb, var(--dash-card) 88%, var(--dash-bg)) 75%);
+  background-size: 200% 100%;
+  animation: dashboardShimmer 1.25s linear infinite;
+}
+
+.loadingBrand {
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+}
+
+.loadingHeader > div:last-child {
+  display: grid;
+  gap: 6px;
+}
+
+.loadingHeader span {
+  display: block;
+  width: 150px;
+  height: 9px;
+  border-radius: 4px;
+}
+
+.loadingHeader span:last-child {
+  width: 220px;
+  opacity: 0.7;
+}
+
+.loadingGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.loadingGrid div {
+  height: 140px;
+  border: 1px solid var(--dash-border);
+  border-radius: 9px;
+}
+
+.loadingPanels {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 12px;
+}
+
+.loadingPanels div {
+  height: 320px;
+  border: 1px solid var(--dash-border);
+  border-radius: 9px;
+}
+
+.loadingTable {
+  height: 360px;
+  border: 1px solid var(--dash-border);
+  border-radius: 9px;
+}
+
+.loadingWrap > p {
+  margin: 0;
+  color: var(--dash-muted);
+  font-family: var(--font-main);
+  font-size: 0.66rem;
+}
+
+.errorState {
+  min-height: 70vh;
+  gap: 10px;
+  padding: 32px;
+  background: var(--dash-bg);
+}
+
+.errorState > svg {
+  color: var(--dash-red);
+}
+
+.errorState p {
+  margin: 0;
+  color: var(--dash-text);
+  font-family: var(--font-main);
+  font-weight: 650;
+}
+
+.errorState span {
+  max-width: 460px;
+  line-height: 1.6;
+}
+
+.errorState button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 8px 12px;
+  font-size: 0.65rem;
+}
+
+@keyframes dashboardSpin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes dashboardShimmer {
+  to { background-position: -200% 0; }
+}
+
+@media (max-width: 1180px) {
+  .kpiGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .chartGrid { grid-template-columns: 1fr; }
+  .supplierChartWrap { flex-direction: row; }
+  .supplierLegend { max-width: 420px; }
+  .filterBar { align-items: flex-start; flex-direction: column; }
+  .filterSummary { justify-content: flex-start; text-align: left; }
+}
+
+@media (max-width: 760px) {
+  .topbar {
+    align-items: flex-start;
+    flex-direction: column;
+    padding: 12px 16px;
+  }
+  .topbarActions { width: 100%; }
+  .searchBox { min-width: 0; flex: 1; }
+  .filterBar { padding: 12px 16px; }
+  .filterControls { width: 100%; display: grid; grid-template-columns: 1fr 1fr; }
+  .filterField,
+  .dateField,
+  .customField { min-width: 0; width: 100%; max-width: none; }
+  .filterSummary { width: 100%; }
+  .body { padding: 16px; }
+  .kpiGrid { grid-template-columns: 1fr; }
+  .panelHeader,
+  .inventoryHeader {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .seriesToggles,
+  .locationPills,
+  .categoryStrip { justify-content: flex-start; width: 100%; }
+  .inventoryFilters { width: 100%; justify-items: start; }
+  .supplierChartWrap { flex-direction: column; }
+  .tableFooter { align-items: flex-start; flex-direction: column; }
+  .loadingWrap { padding: 16px; }
+  .loadingGrid { grid-template-columns: 1fr; }
+  .loadingPanels { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 520px) {
+  .filterControls { grid-template-columns: 1fr; }
+  .topbarActions { flex-wrap: wrap; }
+  .searchBox { flex-basis: 100%; }
+  .notificationMenu {
+    position: fixed;
+    top: 72px;
+    right: 12px;
+    left: 12px;
+    width: auto;
+  }
+  .notificationActions { flex-direction: column; }
+  .notificationActions button { width: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kpiCard,
+  .iconButton,
+  .seriesToggle,
+  .categoryButton,
+  .inventoryTable tbody tr {
+    transition: none;
+  }
+  .loadingBrand,
+  .loadingHeader span,
+  .loadingGrid div,
+  .loadingPanels div,
+  .loadingTable,
+  .refreshing svg {
+    animation: none;
+  }
+}
