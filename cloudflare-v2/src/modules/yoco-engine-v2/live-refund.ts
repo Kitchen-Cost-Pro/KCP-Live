@@ -39,6 +39,30 @@ function johannesburgIso(value: string): string {
 async function stableId(prefix: string, value: string): Promise<string> {
   return `${prefix}_${(await sha256Hex(value)).slice(0, 32)}`;
 }
+
+// Stamps the VAT rate/registration status actually in effect at processing time onto the order
+// row, so a later change to the workspace's VAT settings can never retroactively alter what an
+// already-processed refund reports as its VAT rate. Mirrors the sale-side helper in live-sale.ts.
+// Exported so this exact snapshot logic can be tested directly against a fake env.DB.
+export async function fetchWorkspaceVatSnapshot(
+  env: Env,
+  workspaceId: string,
+): Promise<{ vatRate: number; vatRegistered: boolean }> {
+  let row: Row | null = null;
+  try {
+    row = await env.DB.prepare(
+      `SELECT vat_rate, vat_registered FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`,
+    ).bind(workspaceId).first<Row>();
+  } catch {
+    row = await env.DB.prepare(
+      `SELECT vat_rate FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`,
+    ).bind(workspaceId).first<Row>();
+  }
+  const vatRegistered = numberValue(row?.vat_registered ?? 1) !== 0;
+  const vatRate = numberValue(row?.vat_rate) || 15;
+  return { vatRate, vatRegistered };
+}
+
 async function applyReporting(
   env: Env,
   input: {
@@ -83,6 +107,7 @@ async function applyReporting(
     net = -Math.abs(input.canonical.net_amount),
     tax = -Math.abs(input.canonical.tax_amount);
   const sourceRefund = objectValue(input.canonical.metadata.source_refund);
+  const vatSnapshot = await fetchWorkspaceVatSnapshot(env, input.canonical.workspace_id);
   const statements = [
     env.DB.prepare(
       `INSERT INTO yoco_v2_live_refund_effect_outbox (id,workspace_id,integration_id,domain_event_id,refund_id,effect_type,effect_key,status,payload_json,cutover_at,attempt_count,created_at,updated_at)
@@ -102,9 +127,12 @@ async function applyReporting(
       text(input.runtime.cutoverAt),
       now,
     ),
+    // vat_rate/vat_registered (?18/?19) are deliberately NOT in the ON CONFLICT UPDATE below —
+    // this is a point-in-time snapshot of the rate that applied when the refund was FIRST
+    // processed, and must not shift on a later re-delivery/retry of the same webhook.
     env.DB.prepare(
-      `INSERT INTO yoco_orders (id,workspace_id,yoco_order_id,yoco_payment_id,location_id,order_type,status,payment_method,total,occurred_at,raw_json,created_at,parent_yoco_order_id,provider_refund_id,refund_reason,refund_behavior,gross_total,vat_total,net_total)
-      VALUES (?1,?2,?3,NULLIF(?4,''),NULLIF(?5,''),'refund','refunded',NULLIF(?17,''),?6,?7,?8,?9,?10,?11,NULLIF(?12,''),?13,?14,?15,?16)
+      `INSERT INTO yoco_orders (id,workspace_id,yoco_order_id,yoco_payment_id,location_id,order_type,status,payment_method,total,occurred_at,raw_json,created_at,parent_yoco_order_id,provider_refund_id,refund_reason,refund_behavior,gross_total,vat_total,net_total,vat_rate,vat_registered)
+      VALUES (?1,?2,?3,NULLIF(?4,''),NULLIF(?5,''),'refund','refunded',NULLIF(?17,''),?6,?7,?8,?9,?10,?11,NULLIF(?12,''),?13,?14,?15,?16,?18,?19)
       ON CONFLICT(workspace_id,yoco_order_id,order_type) DO UPDATE SET yoco_payment_id=excluded.yoco_payment_id,location_id=excluded.location_id,status=excluded.status,payment_method=excluded.payment_method,total=excluded.total,occurred_at=excluded.occurred_at,raw_json=excluded.raw_json,parent_yoco_order_id=excluded.parent_yoco_order_id,provider_refund_id=excluded.provider_refund_id,refund_reason=excluded.refund_reason,refund_behavior=excluded.refund_behavior,gross_total=excluded.gross_total,vat_total=excluded.vat_total,net_total=excluded.net_total`,
     ).bind(
       orderDbId,
@@ -150,6 +178,8 @@ async function applyReporting(
       tax,
       net,
       text(input.canonical.payment_method),
+      vatSnapshot.vatRate,
+      vatSnapshot.vatRegistered ? 1 : 0,
     ),
   ];
   for (const [index, line] of input.canonical.lines.entries()) {

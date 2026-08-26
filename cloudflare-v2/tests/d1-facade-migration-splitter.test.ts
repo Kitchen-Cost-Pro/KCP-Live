@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { splitSqlStatements } from '../src/d1-facade';
+import { splitSqlStatements, isRetryableAddColumnError } from '../src/d1-facade';
 import {
   YOCO_V2_ADMIN_CONTROL_CENTRE_MIGRATION,
   YOCO_V2_CONTROLLED_CUTOVER_MIGRATION,
@@ -88,4 +88,29 @@ test('the Durable Object statement splitter applies every Yoco V2 migration incl
     `SELECT COUNT(*) AS total FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'trg_yoco_v2_%'`
   ).get() as { total: number };
   assert.equal(Number(triggers.total), triggerCount);
+});
+
+test('isRetryableAddColumnError still recognizes a retried ADD COLUMN when the statement carries a leading explanatory comment', () => {
+  // splitSqlStatements() keeps a leading `--` comment glued to the statement that follows it (no
+  // statement-terminating semicolon inside a comment), so a documented migration written as
+  // `-- why this column exists...\nALTER TABLE t ADD COLUMN c ...;` produces one statement whose
+  // trimmed text does not literally start with ALTER. A retry of that exact migration (the
+  // scenario this whole mechanism exists for — see execScript's comment) must still be tolerated.
+  const commented = `-- Stop the write storm.\n--\n-- Root cause: see migration history.\nALTER TABLE t ADD COLUMN c INTEGER NOT NULL DEFAULT 0;`;
+  const duplicateColumnError = new Error('duplicate column name: c');
+  assert.equal(isRetryableAddColumnError(commented.trim(), duplicateColumnError), true);
+
+  // A block-comment header must be tolerated the same way.
+  const blockCommented = `/* Stop the write storm. */\nALTER TABLE t ADD COLUMN c INTEGER NOT NULL DEFAULT 0;`;
+  assert.equal(isRetryableAddColumnError(blockCommented.trim(), duplicateColumnError), true);
+
+  // An uncommented ADD COLUMN keeps working exactly as before.
+  assert.equal(isRetryableAddColumnError('ALTER TABLE t ADD COLUMN c INTEGER;', duplicateColumnError), true);
+
+  // A genuine, unrelated SQL error is never swallowed, comment or no comment.
+  const syntaxError = new Error('near "COLUM": syntax error');
+  assert.equal(isRetryableAddColumnError(commented.trim(), syntaxError), false);
+
+  // A non-ADD-COLUMN statement is never swallowed even if the error text happens to match.
+  assert.equal(isRetryableAddColumnError('-- some note\nCREATE TABLE t (c INTEGER);', duplicateColumnError), false);
 });

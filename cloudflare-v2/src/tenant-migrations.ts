@@ -586,5 +586,16 @@ CREATE INDEX IF NOT EXISTS idx_low_stock_alert_state_workspace_active
   // 35 — Phase V2 14: unify the sale and refund effect-control tables into one yoco_v2_effect_gate
   // table (see migration body). Collapses cutover.ts/refund-cutover.ts's duplicated runtime gate
   // logic into a single effect-gate.ts module.
-  YOCO_V2_EFFECT_GATE_MIGRATION
+  YOCO_V2_EFFECT_GATE_MIGRATION,
+  // 36 — snapshot vat_rate/vat_registered onto yoco_orders at write time. Reporting previously
+  // resolved VAT purely via a live subquery against workspace_settings, so an order's displayed
+  // VAT rate (and, for any order missing a persisted vat_total, its computed VAT amount) could
+  // silently change after the fact whenever the workspace's VAT rate/registration was edited —
+  // today's setting would retroactively apply to old orders. applyReporting (live-sale.ts and
+  // live-refund.ts) now stamps the rate/registration in effect at processing time onto each order;
+  // reporting reads prefer this stored snapshot and only fall back to the live value for legacy
+  // rows written before this migration, since there is no way to recover the rate that was
+  // actually in effect for those.
+  `ALTER TABLE yoco_orders ADD COLUMN vat_rate REAL;
+ALTER TABLE yoco_orders ADD COLUMN vat_registered INTEGER;`
 ];

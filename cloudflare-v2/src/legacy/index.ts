@@ -1,5 +1,6 @@
 import type { Env, AuthContext } from "./types";
 import { postWorkspaceChat } from "./chat-routes";
+import { postWorkspaceAiExtract } from "./ai-extract-routes";
 import { requireAuth } from "./auth";
 import { corsHeaders, error, json } from "./http";
 import { ensureWorkspaceLocationNames } from "./location-display";
@@ -182,6 +183,7 @@ import {
 import { sendWorkspaceLowStockNow } from "./low-stock-email";
 import {
   getDetailedActivityReport,
+  getOperationsExcludedSummary,
   getLedgerIntegrityAudit,
   getInventoryAuditReport,
   getMenuRecipeHealthReport,
@@ -761,6 +763,10 @@ export async function dispatchWorkspaceRoute(
 
   if (request.method === "GET" && resource === "reports/detailed-activity") {
     return getDetailedActivityReport(request, env, auth, workspaceId);
+  }
+
+  if (request.method === "GET" && resource === "reports/operations-excluded") {
+    return getOperationsExcludedSummary(request, env, auth, workspaceId);
   }
 
   if (request.method === "GET" && resource === "reports/stock-take-audit") {
@@ -1513,6 +1519,10 @@ export async function dispatchWorkspaceRoute(
 
   if (request.method === "POST" && resource === "chat") {
     return postWorkspaceChat(request, env, auth, workspaceId);
+  }
+
+  if (request.method === "POST" && resource === "ai-extract") {
+    return postWorkspaceAiExtract(request, env, auth, workspaceId);
   }
 
   return notFound(request, env);

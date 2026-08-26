@@ -110,7 +110,16 @@ export async function handleYocoV2AdminRoute(
       env.DB.prepare(
         `SELECT
            (SELECT COUNT(*) FROM yoco_v2_domain_events WHERE workspace_id = ?1 AND event_type = 'sale.completed') AS canonical_sales,
+           -- A sale that resolved as UNSUPPORTED_ORDER_STATE never posts to reporting or stock —
+           -- correct behavior, but previously had zero visibility anywhere. Surfaced here so an
+           -- admin can tell "N sales were silently excluded from Operations" instead of assuming
+           -- Operations is complete by default.
+           (SELECT COUNT(*) FROM yoco_v2_domain_events WHERE workspace_id = ?1 AND event_type = 'sale.completed' AND resolution_status = 'UNSUPPORTED_ORDER_STATE') AS unsupported_order_state_sales,
            (SELECT COUNT(*) FROM yoco_v2_proposed_stock_movements WHERE workspace_id = ?1 AND COALESCE(warning_code, '') = '') AS stock_proposals,
+           -- Lines that resolved but never became a stock movement (unmapped item/modifier,
+           -- missing recipe, invalid UOM, etc.) — previously only visible one-by-one in each
+           -- order's processing timeline, never as an aggregate count.
+           (SELECT COUNT(*) FROM yoco_v2_proposed_stock_movements WHERE workspace_id = ?1 AND COALESCE(warning_code, '') <> '') AS unresolved_stock_proposals,
            (SELECT COUNT(*) FROM yoco_v2_sale_comparisons WHERE workspace_id = ?1) AS comparisons,
            (SELECT COUNT(*) FROM yoco_v2_sale_comparisons WHERE workspace_id = ?1 AND comparison_status = 'MATCHED') AS matched_comparisons,
            (SELECT COUNT(*) FROM yoco_v2_api_requests WHERE workspace_id = ?1) AS api_requests,
@@ -123,6 +132,7 @@ export async function handleYocoV2AdminRoute(
            (SELECT COUNT(*) FROM yoco_v2_manual_reviews WHERE workspace_id = ?1 AND status = 'OPEN') AS open_manual_reviews,
            (SELECT COUNT(*) FROM yoco_v2_proposed_refund_reporting WHERE workspace_id = ?1) AS refund_reporting_proposals,
            (SELECT COUNT(*) FROM yoco_v2_proposed_refund_stock_movements WHERE workspace_id = ?1 AND COALESCE(warning_code, '') = '') AS refund_stock_proposals,
+           (SELECT COUNT(*) FROM yoco_v2_proposed_refund_stock_movements WHERE workspace_id = ?1 AND COALESCE(warning_code, '') <> '') AS unresolved_refund_stock_proposals,
            (SELECT COUNT(*) FROM yoco_v2_refund_comparisons WHERE workspace_id = ?1) AS refund_comparisons`
       ).bind(workspaceId).first<Row>(),
       env.DB.prepare(

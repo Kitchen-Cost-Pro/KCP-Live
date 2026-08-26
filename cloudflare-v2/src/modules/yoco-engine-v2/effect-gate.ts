@@ -23,6 +23,27 @@ function disabledReasonPrefix(effectType: YocoV2EffectType): string {
   return effectType.startsWith('REFUND_') ? 'REFUND_' : '';
 }
 
+function isStockEffect(effectType: YocoV2EffectType): boolean {
+  return effectType === 'SALE_STOCK' || effectType === 'REFUND_STOCK';
+}
+
+// Settings.js's "Go Live" panel sets this flag (stockDepletionEnabled, in workspace_settings.raw_json
+// — see settingsService.js) and its copy explicitly promises "New paid sales will deduct after Go
+// Live". That promise was never actually wired into the deduction path: this was the only gate
+// missing from getEffectRuntime, so a workspace connected to Yoco started deducting real stock on
+// every completed sale regardless of whether the merchant had clicked Go Live. Only STOCK effect
+// types are gated by it — reporting should still reflect real sales during onboarding review.
+async function workspaceStockDepletionEnabled(env: Env, workspaceId: string): Promise<boolean> {
+  const row = await env.DB.prepare(
+    `SELECT raw_json FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`,
+  ).bind(workspaceId).first<Row>();
+  try {
+    return JSON.parse(text(row?.raw_json) || '{}')?.stockDepletionEnabled === true;
+  } catch {
+    return false;
+  }
+}
+
 export interface EffectRuntime {
   effectType: YocoV2EffectType;
   workspaceId: string;
@@ -31,6 +52,7 @@ export interface EffectRuntime {
   ownerIsV2: boolean;
   featureEnabled: boolean;
   paused: boolean;
+  workspaceLive: boolean;
   cutoverAt: string | null;
   activatedBy: string | null;
   canConsume: boolean;
@@ -43,7 +65,7 @@ export async function getEffectRuntime(
   integrationId: string,
   effectType: YocoV2EffectType,
 ): Promise<EffectRuntime> {
-  const [ownership, control] = await Promise.all([
+  const [ownership, control, workspaceLive] = await Promise.all([
     env.DB.prepare(
       `SELECT engine_version, enabled FROM integration_effect_ownership
         WHERE workspace_id = ?1 AND integration_type = 'YOCO' AND effect_type = ?2 LIMIT 1`,
@@ -53,20 +75,24 @@ export async function getEffectRuntime(
          FROM yoco_v2_effect_gate
         WHERE workspace_id = ?1 AND integration_id = ?2 AND effect_type = ?3 LIMIT 1`,
     ).bind(workspaceId, integrationId, effectType).first<Row>(),
+    // Only stock effects care about the merchant's own Go Live status — skip the extra read for
+    // reporting effects, which should keep reflecting real sales during onboarding review.
+    isStockEffect(effectType) ? workspaceStockDepletionEnabled(env, workspaceId) : Promise.resolve(true),
   ]);
   const environmentEnabled = environmentEnabledFor(env, workspaceId, effectType);
   const ownerIsV2 = text(ownership?.engine_version).toUpperCase() === 'V2' && enabled(ownership?.enabled, false);
   const featureEnabled = enabled(control?.feature_enabled, true);
   const paused = enabled(control?.consumption_paused, false);
-  const canConsume = environmentEnabled && ownerIsV2 && featureEnabled && !paused;
+  const canConsume = environmentEnabled && ownerIsV2 && featureEnabled && !paused && workspaceLive;
   const prefix = disabledReasonPrefix(effectType);
   const reason = !environmentEnabled ? `${prefix}ENVIRONMENT_FEATURE_FLAG_DISABLED`
     : !ownerIsV2 ? `${prefix}EFFECT_OWNERSHIP_NOT_V2`
       : !featureEnabled ? `${prefix}WORKSPACE_EFFECT_DISABLED`
         : paused ? `V2_${prefix}CONSUMPTION_PAUSED`
-          : 'ACTIVE';
+          : !workspaceLive ? `${prefix}WORKSPACE_NOT_LIVE`
+            : 'ACTIVE';
   return {
-    effectType, workspaceId, integrationId, environmentEnabled, ownerIsV2, featureEnabled, paused,
+    effectType, workspaceId, integrationId, environmentEnabled, ownerIsV2, featureEnabled, paused, workspaceLive,
     cutoverAt: text(control?.cutover_at) || null,
     activatedBy: text(control?.activated_by) || null,
     canConsume, reason,

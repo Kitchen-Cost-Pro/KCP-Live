@@ -27,6 +27,32 @@ function parseJson(value: unknown): Row {
   }
 }
 
+// Stamps the VAT rate/registration status actually in effect at processing time onto the order
+// row, so a later change to the workspace's VAT settings can never retroactively alter what an
+// already-processed order reports as its VAT rate. Mirrors workspaceVatRate() in sale-resolver.ts
+// (kept separate rather than sharing an implementation since it's a few lines and this module
+// already tolerates the same vat_registered-column-not-yet-migrated case independently).
+// Exported so this exact snapshot logic can be tested directly against a fake env.DB, rather than
+// only indirectly through the much larger applyControlledLiveSaleEffects() entry point.
+export async function fetchWorkspaceVatSnapshot(
+  env: Env,
+  workspaceId: string,
+): Promise<{ vatRate: number; vatRegistered: boolean }> {
+  let row: Row | null = null;
+  try {
+    row = await env.DB.prepare(
+      `SELECT vat_rate, vat_registered FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`,
+    ).bind(workspaceId).first<Row>();
+  } catch {
+    row = await env.DB.prepare(
+      `SELECT vat_rate FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`,
+    ).bind(workspaceId).first<Row>();
+  }
+  const vatRegistered = numberValue(row?.vat_registered ?? 1) !== 0;
+  const vatRate = numberValue(row?.vat_rate) || 15;
+  return { vatRate, vatRegistered };
+}
+
 function johannesburgIso(value: string): string {
   const parsed = Date.parse(value);
   if (!Number.isFinite(parsed)) return value;
@@ -107,6 +133,7 @@ async function applyReporting(
   );
   const occurredAt = johannesburgIso(input.canonical.occurred_at);
   const now = nowIso();
+  const vatSnapshot = await fetchWorkspaceVatSnapshot(env, input.canonical.workspace_id);
   const statements = [
     env.DB.prepare(
       `INSERT INTO yoco_v2_live_effect_outbox
@@ -130,13 +157,16 @@ async function applyReporting(
       text(input.runtime.cutoverAt),
       now,
     ),
+    // vat_rate/vat_registered are deliberately NOT in the ON CONFLICT UPDATE below — this is a
+    // point-in-time snapshot of the rate that applied when the order was FIRST processed, and
+    // must not shift on a later re-delivery/retry of the same webhook.
     env.DB.prepare(
       `INSERT INTO yoco_orders
         (id, workspace_id, yoco_order_id, yoco_payment_id, location_id, order_type,
          status, payment_method, total, occurred_at, raw_json, created_at,
-         gross_total, vat_total, net_total)
+         gross_total, vat_total, net_total, vat_rate, vat_registered)
        VALUES (?1, ?2, ?3, NULLIF(?4, ''), NULLIF(?5, ''), 'sale', ?6,
-         NULLIF(?7, ''), ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+         NULLIF(?7, ''), ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
        ON CONFLICT(workspace_id, yoco_order_id, order_type) DO UPDATE SET
          yoco_payment_id = excluded.yoco_payment_id,
          location_id = excluded.location_id,
@@ -179,6 +209,8 @@ async function applyReporting(
       input.canonical.gross_amount,
       input.canonical.tax_amount,
       input.canonical.net_amount,
+      vatSnapshot.vatRate,
+      vatSnapshot.vatRegistered ? 1 : 0,
     ),
   ];
   for (const [index, line] of input.canonical.lines.entries()) {
