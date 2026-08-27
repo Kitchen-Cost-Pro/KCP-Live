@@ -92,8 +92,13 @@ export function resolveStockItem(item = {}, lookup = null) {
   return (id && lookup.byId.get(id)) || (name && lookup.byName.get(name)) || null;
 }
 
-export function resolveUnitCost(item = {}, lookup = null) {
-  const direct = safeNumber(
+// Resolves a unit cost, or returns null when neither the item nor the lookup carries one. The null
+// is what lets callers tell a GENUINE cost of 0 (free/complimentary or zero-valued stock, which
+// must survive as 0) apart from "no cost known here", which still has to fall back to whatever
+// other source the caller has. `resolveUnitCost` below keeps the historical number-only contract.
+export function resolveUnitCostOrNull(item = {}, lookup = null) {
+  // Presence is tested explicitly rather than by truthiness so a real 0 is not read as missing.
+  const directRaw =
     item.unitCostExVat ??
     item.unitCostExVAT ??
     item.unitCost ??
@@ -105,14 +110,36 @@ export function resolveUnitCost(item = {}, lookup = null) {
     item.weightedAverageCost ??
     item.weighted_average_cost ??
     item.recipeCost ??
-    item.baseRecipeCost ??
-    0
-  );
-  if (direct) return direct;
-  if (!lookup) return 0;
+    item.baseRecipeCost;
+  const direct = toPresentNumber(directRaw);
+  if (direct !== null) return direct;
+  if (!lookup) return null;
   const id = text(item.id || item.itemId || item.stockItemId || item.productId || item.ingredientId || item.ingId);
   const name = text(item.name || item.itemName || item.stockItemName || item.productName || item.ingredientName).toLowerCase();
-  return safeNumber((id && lookup.byId.get(id)) || (name && lookup.byName.get(name)) || 0);
+  // `has` rather than truthiness, so a looked-up cost of exactly 0 counts as a hit.
+  let hit;
+  if (id && lookup.byId?.has(id)) hit = lookup.byId.get(id);
+  else if (name && lookup.byName?.has(name)) hit = lookup.byName.get(name);
+  return toPresentNumber(hit);
+}
+
+// A cost is "present" only when it is a finite number or a non-blank numeric string. Booleans,
+// arrays, objects and whitespace-only strings are missing values, not a genuine zero — `Number()`
+// would coerce all of them to 0 and disguise them as real zero costs. Matches the presence test
+// stockLedgerMapper's `hasValue` applies to the same fields.
+function toPresentNumber(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const numeric = Number(trimmed);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+// Historical contract: always a number, 0 when nothing is known. Existing callers outside this
+// module keep working unchanged; callers that need to distinguish a miss use resolveUnitCostOrNull.
+export function resolveUnitCost(item = {}, lookup = null) {
+  return resolveUnitCostOrNull(item, lookup) ?? 0;
 }
 
 export function buildLocationLookup(locations = []) {

@@ -538,6 +538,22 @@ function renderActiveSection({
 }) {
   const activeSection = state.route?.active || 'dashboard';
 
+  // Body-level portals (position:fixed toasts/dialogs that escape a stacking-context-creating
+  // ancestor) are only re-created/removed by their OWNING section's own render function. Every
+  // section below returns early, before the section-switch cleanup this function used to rely on
+  // — so navigating away from Settings (or GRV) to almost any other section left that section's
+  // portal stuck in the DOM indefinitely, visible on top of unrelated pages, because nothing ever
+  // called it again to let it react to the toast's state having cleared. Running this cleanup
+  // unconditionally, before any section-specific branch, guarantees a portal is removed the moment
+  // its owning section stops being active, regardless of which branch below returns.
+  if (activeSection !== 'settings' && activeSection !== 'settings-business' && activeSection !== 'settings-customization') {
+    document.getElementById('kcp-settings-toast-portal')?.remove();
+    document.getElementById('kcp-reset-dialog-portal')?.remove();
+  }
+  if (activeSection !== 'grv') {
+    document.getElementById('kcp-grv-toast-portal')?.remove();
+  }
+
   if (activeSection === 'dashboard') {
     return renderDashboard({
       state,
@@ -674,11 +690,6 @@ function renderActiveSection({
   if (activeSection === 'settings' || activeSection === 'settings-business' || activeSection === 'settings-customization') {
     return renderSectionWithDataPermissions('settings', state, restrictSectionDataActions('settings', state, onSettingsAction), (actions) => renderSettings({ state, onSettingsAction: actions }));
   }
-
-  // Clean up portals when navigating away from their sections
-  document.getElementById('kcp-settings-toast-portal')?.remove();
-  document.getElementById('kcp-reset-dialog-portal')?.remove();
-  document.getElementById('kcp-grv-toast-portal')?.remove();
 
   return renderModuleShell(activeSection, state);
 }

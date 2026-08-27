@@ -1,5 +1,6 @@
 import { downloadReportCsv } from "../exports/exportCsv.js";
 import { drawReportPdfHeader } from "../exports/exportPdf.js";
+import { buildExportFilename } from "../../../services/exportService.js";
 import { KCP_PDF_THEME, kcpPdfTableTheme } from "../../../utils/pdfTheme.js";
 import { formatTransactionDetailValue,
   transactionDetailExportRows,
@@ -100,10 +101,10 @@ export function transactionDetailToReport(detail = {}) {
   };
 }
 
-export function downloadTransactionDetailCsv(detail = {}) {
+export function downloadTransactionDetailCsv(detail = {}, options = {}) {
   return downloadReportCsv(transactionDetailToReport(detail), {
     includeTotals: false,
-    fileName: `${transactionDetailFileStem(detail)}.csv`,
+    fileName: `${buildExportFilename({ workspaceName: options.workspaceName, reportType: 'Transaction Detail Export', suffix: transactionDetailFileStem(detail) })}.csv`,
   });
 }
 
@@ -129,7 +130,7 @@ export function transactionDetailWorkbookSheets(detail = {}) {
   ];
 }
 
-export async function downloadTransactionDetailExcel(detail = {}) {
+export async function downloadTransactionDetailExcel(detail = {}, options = {}) {
   const XLSX = await import("xlsx");
   const workbook = XLSX.utils.book_new();
   const append = (name, rows) => {
@@ -145,7 +146,7 @@ export async function downloadTransactionDetailExcel(detail = {}) {
   append("Line Items", sheets.find((sheet) => sheet.name === "Line Items")?.rows);
   append("Stock Movements", sheets.find((sheet) => sheet.name === "Stock Movements")?.rows);
   append("Audit Trail", sheets.find((sheet) => sheet.name === "Audit Trail")?.rows);
-  const fileName = `${transactionDetailFileStem(detail)}.xlsx`;
+  const fileName = `${buildExportFilename({ workspaceName: options.workspaceName, reportType: 'Transaction Detail Export', suffix: transactionDetailFileStem(detail) })}.xlsx`;
   XLSX.writeFile(workbook, fileName);
   return { fileName, workbook };
 }
@@ -452,7 +453,7 @@ function drawTransactionPdfFooter(doc, model, pageNumber, pageHeight, margin) {
 
 export async function downloadTransactionDetailPdf(detail = {}, options = {}) {
   const doc = await transactionDetailToPdfDocument(detail, options);
-  const fileName = `${transactionDetailFileStem(detail)}.pdf`;
+  const fileName = `${buildExportFilename({ workspaceName: options.workspaceName || options.branding?.companyName, reportType: 'Transaction Detail Export', suffix: transactionDetailFileStem(detail) })}.pdf`;
   const blob = doc.output("blob");
   triggerDownload(blob, fileName);
   return { fileName, document: doc };

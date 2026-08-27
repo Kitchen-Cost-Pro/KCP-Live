@@ -12,6 +12,7 @@ import {
   renderReportTable,
 } from "./tables/ReportTable.js";
 import { renderReportWarningBanner } from "./tables/ReportWarningBanner.js";
+import { renderExcludedSummaryBanner } from "./tables/ExcludedSummaryBanner.js";
 import { renderReportViewTabs } from "./tables/ReportDrilldownTabs.js";
 import { renderReportLoadingState } from "./tables/ReportEmptyState.js";
 import { downloadReportCsv } from "./exports/exportCsv.js";
@@ -262,6 +263,7 @@ export function renderReportViewer({
         }),
       );
       root.append(renderReportWarningBanner(result.warnings));
+      root.append(renderExcludedSummaryBanner(result.excluded, result.excluded?.includedOrderCount ?? result.rows.length));
       if (
         result.presentation &&
         (result.presentation.summaryCards?.length ||
@@ -305,13 +307,17 @@ export function renderReportViewer({
         .querySelector('[data-report-export="csv"]')
         ?.addEventListener("click", (event) => {
           closeReportActionMenu(event.currentTarget);
-          downloadReportCsv(displayResult);
+          downloadReportCsv(displayResult, {
+            workspaceName: getReportBranding(state || sourceData || dataSet).companyName,
+          });
         });
       root
         .querySelector('[data-report-export="xlsx"]')
         ?.addEventListener("click", (event) => {
           closeReportActionMenu(event.currentTarget);
-          downloadReportExcel(displayResult);
+          downloadReportExcel(displayResult, {
+            workspaceName: getReportBranding(state || sourceData || dataSet).companyName,
+          });
         });
       root
         .querySelector('[data-report-export="all-xlsx"]')
@@ -333,14 +339,18 @@ export function renderReportViewer({
               ),
             );
           }
-          await downloadReportAllViewsExcel(results);
+          await downloadReportAllViewsExcel(results, {
+            workspaceName: getReportBranding(state || sourceData || dataSet).companyName,
+          });
         });
       root
         .querySelector('[data-report-export="pdf"]')
         ?.addEventListener("click", (event) => {
           closeReportActionMenu(event.currentTarget);
+          const branding = getReportBranding(state || sourceData || dataSet);
           downloadReportPdf(displayResult, {
-            branding: getReportBranding(state || sourceData || dataSet),
+            branding,
+            workspaceName: branding.companyName,
           });
         });
       root

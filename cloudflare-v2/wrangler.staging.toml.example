@@ -17,6 +17,10 @@ class_name = "WorkspaceDO"
 name = "YOCO_V2_RATE_GATE"
 class_name = "YocoV2RateGateDO"
 
+[[durable_objects.bindings]]
+name = "YOCO_V2_WRITE_BUDGET"
+class_name = "YocoV2WriteBudgetDO"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["WorkspaceDO"]
@@ -25,8 +29,12 @@ new_sqlite_classes = ["WorkspaceDO"]
 tag = "v2-yoco-rate-gate"
 new_sqlite_classes = ["YocoV2RateGateDO"]
 
+[[migrations]]
+tag = "v3-yoco-write-budget"
+new_sqlite_classes = ["YocoV2WriteBudgetDO"]
+
 [triggers]
-crons = ["*/15 * * * *"]
+crons = ["*/15 * * * *", "*/45 * * * *"]
 
 [[d1_databases]]
 binding = "CENTRAL_DB"
@@ -59,17 +67,9 @@ YOCO_V2_LIVE_SALE_REPORTING = "false"
 YOCO_V2_LIVE_SALE_STOCK = "false"
 YOCO_V2_LIVE_REFUND_REPORTING = "false"
 YOCO_V2_LIVE_REFUND_STOCK = "false"
-# Pre-launch bypass: "all"/workspace IDs makes the YOCO_V2_LIVE_* flags alone enable live
-# consumption, skipping the controlled cutover. Remove before real go-live.
-YOCO_V2_PRELAUNCH_LIVE = "false"
-YOCO_V2_PILOT_WORKSPACE_IDS = ""
-YOCO_V2_REFUND_PILOT_WORKSPACE_IDS = ""
 YOCO_V2_LEGACY_SHUTDOWN_ENABLED = "false"
 YOCO_V2_OBSERVATION_MIN_HOURS = "168"
 YOCO_V2_PHASE13_REMOVAL_ENABLED = "false"
-YOCO_V2_CUTOVER_MIN_COMPARISONS = "25"
-YOCO_V2_CUTOVER_WINDOW_HOURS = "24"
-YOCO_V2_CUTOVER_TRANSITION_MINUTES = "30"
 YOCO_V2_MAX_ATTEMPTS = "8"
 YOCO_V2_BASE_RETRY_MS = "5000"
 YOCO_V2_MAX_RETRY_MS = "900000"
@@ -82,3 +82,5 @@ YOCO_V2_RECONCILIATION_OVERLAP_MINUTES = "120"
 YOCO_V2_RECONCILIATION_LOOKBACK_HOURS = "24"
 YOCO_V2_REFUND_CACHE_TTL_MS = "20000"
 YOCO_V2_METADATA_CACHE_TTL_MS = "60000"
+YOCO_V2_WRITE_BUDGET_DAILY_CAP = "90000"
+YOCO_V2_WRITE_BUDGET_SOFT_WARN_RATIO = "0.8"

@@ -113,9 +113,9 @@ function renderLoadedDetail(overlay, detail = {}, { branding = {}, canExport = t
     const button = event.target.closest("[data-transaction-tab]");
     if (button) renderTab(button.dataset.transactionTab);
   });
-  body.querySelector('[data-transaction-export="csv"]')?.addEventListener("click", () => downloadTransactionDetailCsv(detail));
-  body.querySelector('[data-transaction-export="xlsx"]')?.addEventListener("click", () => downloadTransactionDetailExcel(detail));
-  body.querySelector('[data-transaction-export="pdf"]')?.addEventListener("click", () => downloadTransactionDetailPdf(detail, { branding }));
+  body.querySelector('[data-transaction-export="csv"]')?.addEventListener("click", () => downloadTransactionDetailCsv(detail, { workspaceName: branding?.companyName }));
+  body.querySelector('[data-transaction-export="xlsx"]')?.addEventListener("click", () => downloadTransactionDetailExcel(detail, { workspaceName: branding?.companyName }));
+  body.querySelector('[data-transaction-export="pdf"]')?.addEventListener("click", () => downloadTransactionDetailPdf(detail, { branding, workspaceName: branding?.companyName }));
   body.querySelectorAll("[data-linked-transaction-reference]").forEach((button) => {
     button.addEventListener("click", () => openTransactionDetailDrawer({
       workspaceId,

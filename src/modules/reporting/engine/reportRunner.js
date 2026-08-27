@@ -67,6 +67,16 @@ export async function runReport(reportId, options = {}) {
     });
   }
 
+  if (typeof report.getExcludedSummary === 'function') {
+    // Best-effort: a failure here (e.g. a legacy tenant DB mid-migration) must never take down
+    // the report itself — the excluded-sales banner just doesn't render.
+    result.excluded = await report.getExcludedSummary({
+      workspaceId: context.workspaceId,
+      filters,
+      services: context.services
+    }).catch(() => null);
+  }
+
   const allWarnings = categorizeReportWarnings([
     ...validateReportResult(result),
     ...runDataQualityRules(dataSet, result),

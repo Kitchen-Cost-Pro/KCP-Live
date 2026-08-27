@@ -249,7 +249,12 @@ export function normalizeApiSalesFinancialRow(row = {}, index = 0, meta = {}) {
     refundBehavior: text(row.refundBehavior || row.refund_behavior),
     paymentMethod: text(row.paymentMethod || row.payment_method || 'Unknown'),
     status: text(row.status || 'completed'),
-    vatRate: safeNumber(row.vatRate ?? row.vat_rate),
+    // Preserve "not supplied" as undefined rather than coercing to 0 — downstream
+    // normalizeSalesFinancialRow() (salesReportHelpers.js) distinguishes a missing vatRate
+    // (use the 15% default) from an explicit 0 (non-VAT-registered workspace, VAT is really
+    // zero). Collapsing both to 0 here would silently zero out VAT reporting the moment the
+    // backend ever omits this field.
+    vatRate: (row.vatRate !== undefined || row.vat_rate !== undefined) ? safeNumber(row.vatRate ?? row.vat_rate) : undefined,
     vatSource: text(row.vatSource || row.vat_source),
     isVatExempt: row.isVatExempt ?? row.is_vat_exempt ?? false,
     grossAmount: safeNumber(row.grossAmount ?? row.gross_amount),

@@ -8,6 +8,22 @@ import {
   downloadXlsx
 } from './dataService.js';
 
+// Every export's filename, workspace-first so a folder full of downloads reads at a glance whose
+// they are: "{Workspace Name}_{Report Type}[_suffix]_{date}". Only strips characters that are
+// actually illegal in a filename (matching dataService.js's sanitizeFilename) — deliberately NOT
+// routed through any of the lowercase-and-hyphenate "slugify" helpers elsewhere in the codebase,
+// since those collapse an apostrophe to a hyphen ("David's" -> "David-s").
+export function buildExportFilename({ workspaceName, reportType, suffix = '', date = '' } = {}) {
+  const clean = (value) => String(value || '').trim().replace(/[<>:"/\\|?*]+/g, '-');
+  const parts = [clean(workspaceName) || 'KCP', clean(reportType) || 'Export'];
+  if (suffix) parts.push(clean(suffix));
+  // `date` lets a caller substitute a meaningful period (e.g. a report's own filtered date
+  // range) for the default "today" stamp — a report of last month's data should say so, not the
+  // day it happened to be exported.
+  parts.push(clean(date) || new Date().toISOString().slice(0, 10));
+  return parts.join('_');
+}
+
 export const exportSchemas = {
   menu: ['ProductName', 'Category', 'Selling_Price', 'Status', 'Barcodes'],
   recipes: ['Product_Name', 'Ingredient_Name', 'Quantity_Needed', 'UOM'],
@@ -93,7 +109,11 @@ export function buildRecipeRows(items = [], ingredients = []) {
           Product_Name: item.name || '',
           Ingredient_Name: ing?.name || '',
           Quantity_Needed: line.qty ?? '',
-          UOM: line.uom || ing?.unit || ''
+          // The recipe line's own chosen unit lives in `line.unit` (see normalizeRecipeLines in
+          // recipeService.js, and how the Recipes editor reads/writes it) — `line.uom` doesn't
+          // exist on a recipe line, so reading it here always fell through to the stock item's
+          // own default unit, silently dropping any custom UOM picked for this recipe line.
+          UOM: line.unit || line.uom || ing?.unit || ''
         };
       });
     });

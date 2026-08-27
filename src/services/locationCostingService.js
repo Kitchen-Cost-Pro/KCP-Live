@@ -1,5 +1,6 @@
 import { callCloudflareWorkspaceRoute } from './cloudflareApi.js';
 import { downloadFileBlob } from './dataService.js';
+import { buildExportFilename } from './exportService.js';
 import { parseBarcodeValues } from '../utils/barcodes.js';
 
 export const IMPORT_TYPES = Object.freeze({
@@ -70,7 +71,7 @@ export async function exportLocationCostingTemplate({ stockItems = [], locations
 
   const buffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
   const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-  const filename = `kcp-location-costing-${slugify(getLocationName(selectedLocation))}-${dateStamp()}.xlsx`;
+  const filename = `${buildExportFilename({ workspaceName, reportType: 'Location Costing Template Export', suffix: getLocationName(selectedLocation) })}.xlsx`;
   downloadFileBlob(blob, filename);
   return { rowCount: rows.length, filename, locationName: getLocationName(selectedLocation) };
 }
@@ -354,16 +355,6 @@ function roundCost(value) {
 
 function isBlankRow(row = {}) {
   return !Object.values(row || {}).some((value) => String(value ?? '').trim());
-}
-
-function slugify(value = '') {
-  return String(value || 'location').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'location';
-}
-
-function dateStamp() {
-  const now = new Date();
-  const pad = (value) => String(value).padStart(2, '0');
-  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`;
 }
 
 function createBatchId() {

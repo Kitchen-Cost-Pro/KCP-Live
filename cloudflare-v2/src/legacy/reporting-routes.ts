@@ -237,6 +237,167 @@ export async function getDetailedActivityReport(
   });
 }
 
+// Human-readable translations for the machine warning codes stamped on a
+// yoco_v2_proposed_stock_movements row when a sale line could not be resolved into an actual
+// stock movement (see effect-proposals.ts, where these codes are assigned).
+const UNRESOLVED_LINE_REASON_LABELS: Record<string, string> = {
+  MENU_RECIPE_MISSING: "This menu item has no recipe configured, so no stock could be deducted.",
+  MODIFIER_RECIPE_MISSING: "A modifier on this sale has no recipe configured.",
+  ITEM_MAPPING_MISSING: "This menu item isn't mapped to a stock item yet.",
+  MODIFIER_MAPPING_MISSING: "A modifier on this sale isn't mapped to a stock item yet.",
+  MODIFIER_STOCK_ITEM_MISSING: "A modifier's linked stock item could not be found.",
+  MODIFIER_STOCK_UOM_INVALID: "A modifier's stock item has an invalid unit of measure.",
+  MODIFIER_RULE_SOURCE_INGREDIENT_MISSING: "A modifier rule's source ingredient could not be found.",
+  MODIFIER_REPLACEMENT_ITEM_MISSING: "A modifier's replacement item could not be found.",
+  RECIPE_CYCLE_DETECTED: "This item's recipe references itself (a recipe cycle), so it could not be costed.",
+};
+
+function unresolvedLineReasonLabel(warningCode: string): string {
+  return UNRESOLVED_LINE_REASON_LABELS[warningCode]
+    || `This line could not be resolved (code: ${warningCode || "unknown"}).`;
+}
+
+// Sales/lines that are structurally invisible to every other report — see getDetailedActivityReport
+// and getSaleStockUsageReport, both of which only ever read stock_movements, which by definition
+// never contains a row for these. Surfaced here, filtered to the SAME date range/location scope a
+// report is currently showing, so "N shown, M excluded" stays in sync with what's on screen.
+export async function getOperationsExcludedSummary(
+  request: Request,
+  env: Env,
+  auth: AuthContext,
+  workspaceId: string,
+) {
+  await assertWorkspaceAccess(env, auth, workspaceId);
+  await assertReportLocationScope(env, auth, workspaceId, request);
+
+  const url = new URL(request.url);
+  const reportingContext = await getWorkspaceReportingContext(env, workspaceId);
+  const timeZone = reportingContext.timeZone;
+  const filters = {
+    ...readFilters(url, request),
+    reportingTimeZone: timeZone,
+    tradingDayStartMinutes: reportingContext.tradingDayStartMinutes,
+  };
+  const limit = limitFromUrl(url, 200, 1000);
+
+  const [domainEventsExists, proposalsExists] = await Promise.all([
+    tableExists(env, "yoco_v2_domain_events"),
+    tableExists(env, "yoco_v2_proposed_stock_movements"),
+  ]);
+
+  // yoco_v2_domain_events has no location_id column — location lives inside the stored canonical
+  // event (payload_json.kcp_location_id, the same field applyReporting/applyStock later read to
+  // write stock_movements.location_id — see sale-resolver.ts). Extracting it here is what lets
+  // "N shown / M excluded" stay in sync when the report is filtered to one location instead of
+  // silently reporting workspace-wide numbers next to a location-scoped report.
+  const DOMAIN_EVENT_LOCATION_EXPR = "json_extract(payload_json, '$.kcp_location_id')";
+
+  let unsupportedOrders: Row[] = [];
+  let unsupportedOrderTotalCount = 0;
+  let includedOrderCount = 0;
+  if (domainEventsExists) {
+    const clauses = ["workspace_id = ?1", "event_type = 'sale.completed'", "resolution_status = 'UNSUPPORTED_ORDER_STATE'"];
+    const binds: unknown[] = [workspaceId];
+    addZonedDateRange(clauses, binds, "occurred_at", filters, timeZone);
+    addLocationSqlScope(clauses, binds, DOMAIN_EVENT_LOCATION_EXPR, filters);
+    const whereSql = clauses.join(" AND ");
+
+    // Counted separately from the row fetch below, which is capped at `limit` for the drill-down
+    // list — otherwise a period with more excluded sales than the row cap would silently under-
+    // report its own count in the "N excluded" banner (the exact kind of silent undercount this
+    // whole feature exists to prevent).
+    const countRow = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM yoco_v2_domain_events WHERE ${whereSql}`,
+    ).bind(...binds).first<Row>();
+    unsupportedOrderTotalCount = numberValue(countRow?.n);
+
+    const rowBinds = [...binds, limit];
+    const rows = await env.DB.prepare(
+      `SELECT id, source_entity_id AS source_order_id, occurred_at
+         FROM yoco_v2_domain_events
+        WHERE ${whereSql}
+        ORDER BY datetime(occurred_at) DESC
+        LIMIT ?${rowBinds.length}`,
+    ).bind(...rowBinds).all<Row>();
+    unsupportedOrders = rows.results || [];
+
+    // A count of sales that WERE eligible to be reported this period — independent of which
+    // aggregation view (overview/by-item/ledger) is currently on screen, so "N shown" stays
+    // meaningful no matter how the report is currently grouped.
+    const includedClauses = ["workspace_id = ?1", "event_type = 'sale.completed'", "resolution_status <> 'UNSUPPORTED_ORDER_STATE'"];
+    const includedBinds: unknown[] = [workspaceId];
+    addZonedDateRange(includedClauses, includedBinds, "occurred_at", filters, timeZone);
+    addLocationSqlScope(includedClauses, includedBinds, DOMAIN_EVENT_LOCATION_EXPR, filters);
+    const includedRow = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM yoco_v2_domain_events WHERE ${includedClauses.join(" AND ")}`,
+    ).bind(...includedBinds).first<Row>();
+    includedOrderCount = numberValue(includedRow?.n);
+  }
+
+  let unresolvedLines: Row[] = [];
+  let unresolvedLineTotalCount = 0;
+  if (proposalsExists && domainEventsExists) {
+    const clauses = ["psm.workspace_id = ?1", "COALESCE(psm.warning_code, '') <> ''"];
+    const binds: unknown[] = [workspaceId];
+    addZonedDateRange(clauses, binds, "de.occurred_at", filters, timeZone);
+    addLocationSqlScope(clauses, binds, "psm.location_id", filters);
+    const whereSql = clauses.join(" AND ");
+
+    // Same reasoning as unsupportedOrderTotalCount above: count independently of the row cap.
+    const countRow = await env.DB.prepare(
+      `SELECT COUNT(*) AS n
+         FROM yoco_v2_proposed_stock_movements psm
+         JOIN yoco_v2_domain_events de ON de.id = psm.domain_event_id
+        WHERE ${whereSql}`,
+    ).bind(...binds).first<Row>();
+    unresolvedLineTotalCount = numberValue(countRow?.n);
+
+    const rowBinds = [...binds, limit];
+    const rows = await env.DB.prepare(
+      `SELECT psm.id, psm.source_order_id, psm.warning_code, de.occurred_at,
+              l.name AS location_name, l.display_name AS location_display_name,
+              p.name AS menu_item_name, si.name AS ingredient_name
+         FROM yoco_v2_proposed_stock_movements psm
+         JOIN yoco_v2_domain_events de ON de.id = psm.domain_event_id
+         LEFT JOIN locations l ON l.id = psm.location_id AND l.workspace_id = psm.workspace_id
+         LEFT JOIN products p ON p.id = psm.menu_item_id AND p.workspace_id = psm.workspace_id
+         LEFT JOIN stock_items si ON si.id = psm.ingredient_item_id AND si.workspace_id = psm.workspace_id
+        WHERE ${whereSql}
+        ORDER BY datetime(de.occurred_at) DESC
+        LIMIT ?${rowBinds.length}`,
+    ).bind(...rowBinds).all<Row>();
+    unresolvedLines = rows.results || [];
+  }
+
+  return json(request, env, {
+    includedOrderCount,
+    unsupportedOrders: {
+      count: unsupportedOrderTotalCount,
+      truncated: unsupportedOrders.length < unsupportedOrderTotalCount,
+      rows: unsupportedOrders.map((row) => ({
+        id: clean(row.id),
+        sourceOrderId: clean(row.source_order_id),
+        occurredAt: clean(row.occurred_at),
+        reason: "This order was not in a completed/paid state when Yoco sent it, so it could not be reported.",
+      })),
+    },
+    unresolvedLines: {
+      count: unresolvedLineTotalCount,
+      truncated: unresolvedLines.length < unresolvedLineTotalCount,
+      rows: unresolvedLines.map((row) => ({
+        id: clean(row.id),
+        sourceOrderId: clean(row.source_order_id),
+        occurredAt: clean(row.occurred_at),
+        locationName: clean(row.location_display_name || row.location_name),
+        itemName: clean(row.menu_item_name || row.ingredient_name) || "Unknown item",
+        warningCode: clean(row.warning_code),
+        reason: unresolvedLineReasonLabel(clean(row.warning_code)),
+      })),
+    },
+    meta: buildMeta(workspaceId, filters, unsupportedOrderTotalCount + unresolvedLineTotalCount, limit, 0, new Date().toISOString(), { timeZone }),
+  });
+}
+
 export async function getStockTakeAuditReport(
   request: Request,
   env: Env,
@@ -449,6 +610,18 @@ export async function getSalesFinancialReport(
   const tableStatus: Record<string, boolean> = {};
   for (const table of requiredTables)
     tableStatus[table] = await tableExists(env, table);
+  // Checking the TABLE exists is not enough for vat_registered specifically — workspace_settings
+  // has existed for a long time, so tableStatus.workspace_settings is already true on any
+  // workspace whose vat_registered column migration simply hasn't finished applying yet (e.g.
+  // still working through the migration circuit-breaker's backoff). Referencing the column in SQL
+  // before it exists throws "no such column", which is exactly what caused sales-financial (and
+  // the other reports below) to 500 for a workspace mid-migration. Gate on the column directly.
+  const vatRegisteredColumnAvailable =
+    tableStatus.workspace_settings &&
+    (await tableHasColumns(env, "workspace_settings", ["vat_registered"]));
+  const orderVatColumnsAvailable =
+    tableStatus.yoco_orders &&
+    (await tableHasColumns(env, "yoco_orders", ["vat_rate", "vat_registered"]));
   if (!tableStatus.yoco_orders) {
     return json(request, env, {
       rows: [],
@@ -528,11 +701,13 @@ export async function getSalesFinancialReport(
         yo.created_at,
         l.name AS location_name,
         l.display_name AS location_display_name,
-        ${
-          tableStatus.workspace_settings
-            ? "COALESCE((SELECT NULLIF(ws.vat_rate, 0) FROM workspace_settings ws WHERE ws.workspace_id = yo.workspace_id ORDER BY datetime(ws.updated_at) DESC LIMIT 1), 15)"
-            : "15"
-        } AS vat_rate,
+        ${buildVatRateSqlExpression({
+          orderAlias: "yo",
+          fallbackWorkspaceIdExpr: "yo.workspace_id",
+          orderVatColumnsAvailable,
+          vatRegisteredColumnAvailable,
+          workspaceSettingsExists: tableStatus.workspace_settings,
+        })} AS vat_rate,
         COUNT(*) OVER() AS __total_rows
        FROM canonical_yoco_orders yo
        LEFT JOIN canonical_yoco_orders parent_yo
@@ -620,6 +795,13 @@ export async function getSaleStockUsageReport(
   const tableStatus: Record<string, boolean> = {};
   for (const table of requiredTables)
     tableStatus[table] = await tableExists(env, table);
+  // See getSalesFinancialReport for why this can't just check tableStatus.workspace_settings.
+  const vatRegisteredColumnAvailable =
+    tableStatus.workspace_settings &&
+    (await tableHasColumns(env, "workspace_settings", ["vat_registered"]));
+  const orderVatColumnsAvailable =
+    tableStatus.yoco_orders &&
+    (await tableHasColumns(env, "yoco_orders", ["vat_rate", "vat_registered"]));
   if (!tableStatus.stock_movements) {
     return json(request, env, {
       rows: [],
@@ -696,11 +878,13 @@ export async function getSaleStockUsageReport(
         COALESCE(yol.raw_json, original_yol.raw_json) AS line_raw_json,
         p.name AS product_name,
         p.category AS product_category,
-        ${
-          tableStatus.workspace_settings
-            ? "COALESCE((SELECT NULLIF(ws.vat_rate, 0) FROM workspace_settings ws WHERE ws.workspace_id = sm.workspace_id ORDER BY datetime(ws.updated_at) DESC LIMIT 1), 15)"
-            : "15"
-        } AS vat_rate
+        ${buildVatRateSqlExpression({
+          orderAlias: "yo",
+          fallbackWorkspaceIdExpr: "sm.workspace_id",
+          orderVatColumnsAvailable,
+          vatRegisteredColumnAvailable,
+          workspaceSettingsExists: tableStatus.workspace_settings,
+        })} AS vat_rate
        FROM stock_movements sm
        LEFT JOIN stock_items si ON si.id = sm.stock_item_id AND si.workspace_id = sm.workspace_id
        LEFT JOIN locations l ON l.id = sm.location_id AND l.workspace_id = sm.workspace_id
@@ -868,6 +1052,13 @@ export async function getModifierSalesReport(
   const tableStatus: Record<string, boolean> = {};
   for (const table of requiredTables)
     tableStatus[table] = await tableExists(env, table);
+  // See getSalesFinancialReport for why this can't just check tableStatus.workspace_settings.
+  const vatRegisteredColumnAvailable =
+    tableStatus.workspace_settings &&
+    (await tableHasColumns(env, "workspace_settings", ["vat_registered"]));
+  const orderVatColumnsAvailable =
+    tableStatus.yoco_orders &&
+    (await tableHasColumns(env, "yoco_orders", ["vat_rate", "vat_registered"]));
   if (!tableStatus.yoco_orders || !tableStatus.yoco_order_lines) {
     return json(request, env, {
       rows: [],
@@ -929,11 +1120,13 @@ export async function getModifierSalesReport(
         p.yoco_item_id,
         p.yoco_variant_id,
         p.raw_json AS product_raw_json,
-        ${
-          tableStatus.workspace_settings
-            ? "COALESCE((SELECT NULLIF(ws.vat_rate, 0) FROM workspace_settings ws WHERE ws.workspace_id = yol.workspace_id ORDER BY datetime(ws.updated_at) DESC LIMIT 1), 15)"
-            : "15"
-        } AS vat_rate
+        ${buildVatRateSqlExpression({
+          orderAlias: "yo",
+          fallbackWorkspaceIdExpr: "yol.workspace_id",
+          orderVatColumnsAvailable,
+          vatRegisteredColumnAvailable,
+          workspaceSettingsExists: tableStatus.workspace_settings,
+        })} AS vat_rate
        FROM (
          SELECT * FROM (
            SELECT yol_source.*,
@@ -1268,11 +1461,20 @@ export async function getMenuRecipeHealthReport(
   }
 
   const vatRateRow = tableStatus.workspace_settings
-    ? await env.DB.prepare(
-        `SELECT COALESCE(NULLIF(vat_rate, 0), 15) AS vat_rate FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`,
-      )
-        .bind(workspaceId)
-        .first<Row>()
+    ? await (async () => {
+        // See getSalesFinancialReport for why table existence alone isn't enough to safely
+        // reference vat_registered — it can still be mid-migration on this workspace.
+        const hasVatRegisteredColumn = await tableHasColumns(env, "workspace_settings", ["vat_registered"]);
+        return env.DB.prepare(
+          hasVatRegisteredColumn
+            ? `SELECT CASE WHEN COALESCE(vat_registered, 1) = 0 THEN 0 ELSE COALESCE(NULLIF(vat_rate, 0), 15) END AS vat_rate
+                 FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`
+            : `SELECT COALESCE(NULLIF(vat_rate, 0), 15) AS vat_rate
+                 FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`,
+        )
+          .bind(workspaceId)
+          .first<Row>();
+      })()
     : null;
   const vatRate = numberValue(vatRateRow?.vat_rate, 15);
 
@@ -3031,6 +3233,51 @@ function convertMenuRecipeQty({ qty, fromUom, toUom, stockRawJson }: Row) {
   if (a && b && a[0] === b[0])
     return { qty: quantity * (a[1] / b[1]), factor: a[1] / b[1] };
   const raw = parseJson(stockRawJson);
+  // The UOM builder saves custom UOM ratios under `uomConfigurations` with shape
+  // { baseUom, customUom, ratio } (see normalizeUomConfigurations) — NOT `uomConversions` with a
+  // { from, to, factor } shape. This function previously only ever checked `uomConversions`, a
+  // field nothing in the app actually writes, so a configured custom UOM ratio could never be
+  // found here and every custom-UOM recipe line was permanently flagged as "missing conversion"
+  // regardless of what was set up. Check the real field (with legacy aliases kept as a fallback
+  // for any older data shaped the other way) and match on the correct property names.
+  const configuredUoms = Array.isArray(raw.uomConfigurations)
+    ? raw.uomConfigurations
+    : Array.isArray(raw.uomConfig)
+      ? raw.uomConfig
+      : Array.isArray(raw.uoms)
+        ? raw.uoms
+        : Array.isArray(raw.customUoms)
+          ? raw.customUoms
+          : [];
+  const entryCustom = (conversion: Row) =>
+    normalizeUomForReport(conversion.customUom || conversion.custom_uom || conversion.customUnit);
+  const entryBase = (conversion: Row) =>
+    normalizeUomForReport(conversion.baseUom || conversion.base_uom || conversion.baseUnit);
+  const entryRatio = (conversion: Row) =>
+    numberValue(
+      conversion.ratio ?? conversion.conversionRatio ?? conversion.unitsPerCustomUnit ?? conversion.units_per_custom_unit,
+      0,
+    );
+
+  const configMatch = configuredUoms.find(
+    (conversion: Row) => entryCustom(conversion) === from && (entryBase(conversion) === to || !entryBase(conversion)),
+  );
+  if (configMatch) {
+    const factor = entryRatio(configMatch);
+    if (factor) return { qty: quantity * factor, factor };
+  }
+
+  // A configured ratio describes both directions. `ratio` is base units per ONE custom unit, so the
+  // custom -> base direction is the ratio and base -> custom is its reciprocal. Without this inverse
+  // lookup a recipe line written in the base UOM against an item stocked in a custom one was still
+  // reported as a missing conversion even though the ratio was set up in the UOM builder.
+  const inverseMatch = configuredUoms.find(
+    (conversion: Row) => entryBase(conversion) === from && entryCustom(conversion) === to && entryRatio(conversion) > 0,
+  );
+  if (inverseMatch) {
+    const factor = 1 / entryRatio(inverseMatch);
+    return { qty: quantity * factor, factor };
+  }
   const conversions = Array.isArray(raw.uomConversions)
     ? raw.uomConversions
     : [];
@@ -4435,9 +4682,16 @@ function deepValue(source: Row, path: string) {
 }
 
 function calculateVatAmount(gross: number, vatRate: number) {
-  const supplied = numberValue(vatRate, 0);
-  const resolved =
-    supplied > 0 ? supplied : resolveYocoVatRate({}, supplied).value;
+  // A genuine, explicit 0 (a non-VAT-registered workspace) is authoritative and must not be
+  // treated the same as "no rate supplied" — otherwise it would fall through to a fallback rate
+  // and incorrectly show VAT for a business that isn't registered. Check the raw input for
+  // strict equality to 0 BEFORE any coercion: numberValue(null) and numberValue(undefined) both
+  // resolve to 0 too, so coercing first would misclassify a genuinely missing rate as "explicitly
+  // zero" and wrongly suppress the fallback.
+  const isExplicitZero = vatRate === 0 || (vatRate as unknown) === '0';
+  if (isExplicitZero) return 0;
+  const supplied = numberValue(vatRate, NaN);
+  const resolved = supplied > 0 ? supplied : resolveYocoVatRate({}, supplied).value;
   const rate = resolved > 1 ? resolved / 100 : resolved;
   if (!gross || !rate) return 0;
   return roundMoneyNumber(gross - gross / (1 + rate));
@@ -7851,6 +8105,34 @@ async function tableHasColumns(
   } catch {
     return false;
   }
+}
+
+// Builds the vat_rate SQL expression for a per-order/per-line reporting row. Prefers the
+// point-in-time snapshot stamped onto yoco_orders by applyReporting (live-sale.ts/live-refund.ts)
+// at processing time — this is what actually applied to that specific transaction — and only
+// falls back to the live workspace_settings lookup for rows written before the snapshot columns
+// existed, where there is no way to recover the historical rate. Without this, a VAT rate/
+// registration change made today would silently recompute every past order's reported VAT rate.
+function buildVatRateSqlExpression({
+  orderAlias,
+  fallbackWorkspaceIdExpr,
+  orderVatColumnsAvailable,
+  vatRegisteredColumnAvailable,
+  workspaceSettingsExists,
+}: {
+  orderAlias: string;
+  fallbackWorkspaceIdExpr: string;
+  orderVatColumnsAvailable: boolean;
+  vatRegisteredColumnAvailable: boolean;
+  workspaceSettingsExists: boolean;
+}): string {
+  const liveExpr = vatRegisteredColumnAvailable
+    ? `COALESCE((SELECT CASE WHEN COALESCE(ws.vat_registered, 1) = 0 THEN 0 ELSE NULLIF(ws.vat_rate, 0) END FROM workspace_settings ws WHERE ws.workspace_id = ${fallbackWorkspaceIdExpr} ORDER BY datetime(ws.updated_at) DESC LIMIT 1), 15)`
+    : workspaceSettingsExists
+      ? `COALESCE((SELECT NULLIF(ws.vat_rate, 0) FROM workspace_settings ws WHERE ws.workspace_id = ${fallbackWorkspaceIdExpr} ORDER BY datetime(ws.updated_at) DESC LIMIT 1), 15)`
+      : "15";
+  if (!orderVatColumnsAvailable) return liveExpr;
+  return `COALESCE(CASE WHEN ${orderAlias}.vat_rate IS NOT NULL THEN (CASE WHEN COALESCE(${orderAlias}.vat_registered, 1) = 0 THEN 0 ELSE NULLIF(${orderAlias}.vat_rate, 0) END) END, ${liveExpr})`;
 }
 
 function buildMeta(

@@ -10,7 +10,10 @@ const read = (relativePath) => fs.readFileSync(path.join(process.cwd(), relative
 test('Legal Details has its own save action', () => {
   const settings = read('src/components/Settings.js');
   assert.match(settings, /Save Legal Details/);
-  assert.match(settings, /settingsActions--legal/);
+  // data-settings-save="legal" is the actual wiring that makes this a distinct save action
+  // (see bindSettingsEvents' data-settings-save handler) — checking it directly is more
+  // meaningful than a CSS class name, which is free to change with the panel's visual design.
+  assert.match(settings, /data-settings-save="legal"/);
   assert.match(settings, /renderCompanyTaxPanel\(draft, \{ isSaving \}\)/);
 });
 

@@ -1,6 +1,10 @@
 import { calculateVatFromGross, normalizeVatRate, roundMoney, safeNumber } from './calculations.js';
 
-const CENT_TOLERANCE = 0.011;
+// Canonical money-reconciliation tolerances — import these rather than re-declaring
+// a local literal, so every report agrees on how close two totals must be to "match".
+export const CENT_TOLERANCE = 0.011;
+export const PAYOUT_TOLERANCE = 0.05;
+export const PERSISTED_TOTAL_TOLERANCE = 0.02;
 export const DEFAULT_YOCO_VAT_RATE = 15;
 
 export function yocoMoneyToMajor(value, { scalarUnit = 'major', absolute = true } = {}) {
@@ -143,7 +147,7 @@ export function deriveYocoFinancialAmounts({
     && storedTotal > 0
     && Number.isFinite(resolvedGross)
     && rawFinalAmountIsAuthoritative
-    && !moneyReconciles(storedTotal, resolvedGross, 0.02);
+    && !moneyReconciles(storedTotal, resolvedGross, PERSISTED_TOTAL_TOLERANCE);
   const selectedCustomerTotal = persistedTotalMismatch ? resolvedGross : storedTotal || finiteOr(resolvedGross, 0);
   // Customer-paid totals can include gratuity. Gross sales must represent only the bill
   // value because tips are not taxable and are reported in their own column.
@@ -185,19 +189,31 @@ export function deriveYocoFinancialAmounts({
     && taxResolution.value <= taxBaseAmount + CENT_TOLERANCE
     && (taxResolution.value > 0 || !taxBaseAmount || !normalizedVatRate || explicitZeroRated);
   const calculatedVat = calculateVatFromGross(grossAmount, vatRate);
-  const refundVatAmount = roundMoney(explicitZeroRated
+  // VAT resolution priority is IDENTICAL for sales and refunds so the same order can never
+  // report one VAT figure on its sale row and a different one on its refund row.
+  // An explicit zero-rated marker wins over a stored VAT value, matching how the rest of this
+  // module treats zero-rating (see `vatSource`, the zero-VAT issue suppression below, and the
+  // authoritative explicit-zero handling in resolveYocoVatRate).
+  const resolveVatAmount = (calculatedFallback) => roundMoney(explicitZeroRated
     ? 0
     : hasStoredVat
       ? storedVat
       : explicitTaxPlausible
         ? taxResolution.value
-        : calculateVatFromGross(refundAmount, vatRate));
+        : calculatedFallback);
+  const refundVatAmount = resolveVatAmount(calculateVatFromGross(refundAmount, vatRate));
+  const saleVatAmount = resolveVatAmount(calculatedVat);
+  const contradictoryZeroRatedVat = explicitZeroRated && hasStoredVat && roundMoney(storedVat) !== 0;
   const vatAmount = isRefund
     ? roundMoney(-refundVatAmount)
-    : roundMoney(hasStoredVat ? storedVat : explicitTaxPlausible ? taxResolution.value : calculatedVat);
+    : saleVatAmount;
+  // A contradictory zero-rated order's persisted net was derived from the stale nonzero VAT, so it
+  // cannot be trusted either: keeping it would leave gross != net + VAT and trip the critical
+  // reconciliation issue. Both components are re-derived from the zero-rated VAT of 0 instead.
+  const useStoredNet = hasStoredNet && !contradictoryZeroRatedVat;
   const netAmount = isRefund
-    ? roundMoney(-(hasStoredNet ? storedNet : refundAmount - refundVatAmount))
-    : roundMoney(hasStoredNet ? storedNet : grossAmount - vatAmount);
+    ? roundMoney(-(useStoredNet ? storedNet : refundAmount - refundVatAmount))
+    : roundMoney(useStoredNet ? storedNet : grossAmount - vatAmount);
 
   const directDiscount = resolveYocoMoney(raw, [
     'amounts.discount_amount',
@@ -223,7 +239,7 @@ export function deriveYocoFinancialAmounts({
   ], NaN).value;
   const feeAmount = isRefund ? 0 : roundMoney(finiteOr(directFee, finiteOr(sumYocoProcessingFees(raw), 0)));
 
-  const refundNetAmount = roundMoney(isRefund && hasStoredNet ? storedNet : Math.max(0, refundAmount - refundVatAmount));
+  const refundNetAmount = roundMoney(isRefund && useStoredNet ? storedNet : Math.max(0, refundAmount - refundVatAmount));
   // Refunds are cash returned to the customer, so payout and payment reconciliation
   // must deduct the full VAT-inclusive gross refund. VAT and ex-VAT components are
   // still exposed separately for accounting tables.
@@ -239,6 +255,13 @@ export function deriveYocoFinancialAmounts({
       message: 'The stored Yoco total did not match the authoritative raw final amount; reporting used the raw amount. Re-sync this order to repair the stored value.'
     });
   }
+  if (contradictoryZeroRatedVat) {
+    issues.push({
+      code: 'yoco-zero-rated-with-stored-vat',
+      level: 'warning',
+      message: 'This order is marked zero-rated but also carries a nonzero stored VAT amount. Reporting used the zero-rated marker (VAT 0); re-sync or correct the stored VAT value.'
+    });
+  }
   if (!isRefund && grossAmount > 0 && normalizedVatRate > 0 && vatAmount === 0 && !explicitZeroRated) {
     issues.push({ code: 'yoco-vat-zero-on-taxable-sale', level: 'critical', message: 'A VAT-bearing Yoco sale resolved to zero VAT.' });
   }
@@ -249,7 +272,7 @@ export function deriveYocoFinancialAmounts({
     issues.push({ code: 'yoco-gross-net-vat-mismatch', level: 'critical', message: isRefund ? 'Yoco refund does not reconcile to the reversed net amount plus VAT.' : 'Yoco gross amount does not reconcile to net amount plus VAT.' });
   }
   if (vatRateResolution.fallbackApplied && (grossAmount > 0 || refundAmount > 0) && !explicitZeroRated) {
-    issues.push({ code: 'yoco-vat-rate-fallback-applied', level: 'warning', message: 'The workspace VAT rate was missing or zero; reporting used the default South African VAT rate of 15%.' });
+    issues.push({ code: 'yoco-vat-rate-fallback-applied', level: 'warning', message: 'The workspace VAT rate was not configured; reporting used the default South African VAT rate of 15%.' });
   }
   if (!isRefund && taxResolution.path && !explicitTaxPlausible && grossAmount > 0 && normalizedVatRate > 0) {
     issues.push({ code: 'yoco-tax-fallback-applied', level: 'info', message: 'The Yoco tax value was missing, zero without a zero-rated marker, or invalid; VAT was calculated from the VAT-inclusive bill value.' });
@@ -271,7 +294,11 @@ export function deriveYocoFinancialAmounts({
     expectedPayout,
     vatRate,
     isVatExempt: explicitZeroRated,
-    vatSource: isRefund ? (hasStoredVat ? 'persisted-refund' : explicitTaxPlausible ? 'yoco-return' : 'refund-calculated') : explicitZeroRated ? 'zero-rated' : hasStoredVat ? 'persisted' : explicitTaxPlausible ? 'yoco' : 'calculated',
+    vatSource: explicitZeroRated
+      ? 'zero-rated'
+      : isRefund
+        ? (hasStoredVat ? 'persisted-refund' : explicitTaxPlausible ? 'yoco-return' : 'refund-calculated')
+        : hasStoredVat ? 'persisted' : explicitTaxPlausible ? 'yoco' : 'calculated',
     grossSource: persistedTotalMismatch
       ? `raw-corrected:${resolvedGrossPath}`
       : storedTotal
@@ -292,7 +319,7 @@ export function deriveYocoFinancialAmounts({
       rawFinalAmountPath: resolvedGrossPath,
       persistedTotalMismatch,
       grossNetVatReconciles: grossReconciles,
-      payoutReconciles: moneyReconciles(payoutAmount, expectedPayout, 0.05)
+      payoutReconciles: moneyReconciles(payoutAmount, expectedPayout, PAYOUT_TOLERANCE)
     }
   };
 }
@@ -300,6 +327,17 @@ export function deriveYocoFinancialAmounts({
 
 export function resolveYocoVatRate(raw = {}, configuredVatRate = DEFAULT_YOCO_VAT_RATE) {
   const configuredValue = safeNumber(configuredVatRate, NaN);
+  // An explicit, deliberate 0 (a business that is not VAT registered) is authoritative and must
+  // never be overridden by Yoco's own reported tax data or the hardcoded default rate — otherwise
+  // a non-registered business would still show VAT on reports whenever Yoco's payload happened to
+  // carry a tax figure. Only a missing/NaN value falls through to the lookup chain below.
+  // IMPORTANT: check the raw parameter for strict equality to 0 before any coercion — `Number(null)`
+  // and `Number('')` both equal 0 in JS, so coercing first would misclassify a genuinely missing
+  // rate (null/undefined/'') as "explicitly zero" and wrongly suppress the 15% fallback below.
+  const isExplicitZero = configuredVatRate === 0 || configuredVatRate === '0';
+  if (isExplicitZero) {
+    return { value: 0, source: 'workspace-not-registered', configuredValue: 0, fallbackApplied: false };
+  }
   if (normalizeVatRate(configuredValue) > 0) {
     return { value: configuredValue, source: 'workspace', configuredValue, fallbackApplied: false };
   }

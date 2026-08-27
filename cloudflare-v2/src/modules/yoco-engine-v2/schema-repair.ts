@@ -1,6 +1,7 @@
 import {
   YOCO_V2_ADMIN_CONTROL_CENTRE_MIGRATION,
   YOCO_V2_CONTROLLED_CUTOVER_MIGRATION,
+  YOCO_V2_EFFECT_GATE_MIGRATION,
   YOCO_V2_FOUNDATION_MIGRATION,
   YOCO_V2_LEGACY_SHUTDOWN_MIGRATION,
   YOCO_V2_REFUND_CONTROLLED_CUTOVER_MIGRATION,
@@ -86,6 +87,17 @@ ${YOCO_V2_CONTROLLED_CUTOVER_MIGRATION}
 ${YOCO_V2_REFUND_CONTROLLED_CUTOVER_MIGRATION}
 ${YOCO_V2_LEGACY_SHUTDOWN_MIGRATION}
 ${YOCO_V2_ADMIN_CONTROL_CENTRE_MIGRATION}
+${YOCO_V2_EFFECT_GATE_MIGRATION}
 `;
 
-export const YOCO_V2_RUNTIME_SCHEMA_REPAIR_ID = 'yoco-v2-connect-schema-v1';
+// Bumped to v2 (2026-08-21) after adding YOCO_V2_EFFECT_GATE_MIGRATION to this script: a fixed
+// repair id only ever runs once per tenant, so tenants that already ran v1 would silently never
+// pick up new content appended to the script later. Root-caused via a workspace whose
+// `_kcp_schema.version` (44) had drifted ahead of the current indexed TENANT_MIGRATIONS array
+// length (36) from earlier development history — the indexed-migration loop legitimately skipped
+// everything (applied > target), so migration 35 (yoco_v2_effect_gate) was never actually applied
+// to that tenant's real storage despite _kcp_schema claiming it was long past done. This
+// content-addressed repair path is what's supposed to catch exactly that kind of drift, but only
+// if its id changes whenever meaningful content is added. Bump this id again whenever a new
+// migration is appended here.
+export const YOCO_V2_RUNTIME_SCHEMA_REPAIR_ID = 'yoco-v2-connect-schema-v2';

@@ -1,6 +1,9 @@
 import { callCloudflareWorkspaceRoute } from './cloudflareApi.js';
 import { downloadFileBlob } from './dataService.js';
+import { buildExportFilename } from './exportService.js';
 import { isStockRoutingEligibleItem } from './stockCountEligibility.js';
+import { fetchSuppliers } from './supplierService.js';
+import { fetchStock } from './stockService.js';
 import {
   DEFAULT_RESTAURANT_BACKGROUND_ID,
   DEFAULT_RESTAURANT_THEME_ID,
@@ -114,6 +117,47 @@ export async function getGoLiveReadiness(workspaceId) {
   };
 }
 
+// Drives the onboarding wizard's first-run trigger and its Finish-step summary. Kept separate
+// from getGoLiveReadiness (which only counts products/recipes/locations for the Yoco stock
+// depletion gate) since onboarding also cares about suppliers and stock items.
+export async function getOnboardingReadiness(workspaceId) {
+  const workspaceKey = requireWorkspaceId(workspaceId);
+  const [productResponse, suppliers, stock] = await Promise.all([
+    callCloudflareWorkspaceRoute(workspaceKey, 'products', { query: { limit: 500 } }),
+    fetchSuppliers(workspaceKey).catch(() => []),
+    fetchStock(workspaceKey).catch(() => ({ items: [] }))
+  ]);
+  const products = productResponse.products || productResponse.items || [];
+  // Same "does this product have a usable recipe" check as getGoLiveReadiness's recipeCount
+  // above, inverted — this is the raw products API response, not recipeService.js's
+  // frontend-normalized `status` field, so it must check the same raw field names.
+  const hasUsableRecipe = (product = {}) => {
+    const recipe = product.recipe || product.recipeLines || product.recipe_lines;
+    if (Array.isArray(recipe) && recipe.length > 0) return true;
+    if (product.missingRecipe === false || product.missing_recipe === 0) return true;
+    const status = String(product.recipeStatus || product.recipe_status || '').toLowerCase();
+    return status === 'complete' || status === 'complete_via_linked_stock_item';
+  };
+  const missingRecipeCount = products.filter((product) => !hasUsableRecipe(product)).length;
+  return {
+    productCount: products.length,
+    missingRecipeCount,
+    supplierCount: (suppliers || []).length,
+    stockItemCount: (stock.items || []).length
+  };
+}
+
+// Silent, background-only save — bypasses saveSettingsDraft()/saveWorkspaceSettings() in main.js,
+// which run VAT-number validation and show the global "Saving Settings" toast. Dismissing or
+// stepping through the onboarding wizard must never surface that UI.
+export async function saveOnboardingState(workspaceId, patch = {}) {
+  const workspaceKey = requireWorkspaceId(workspaceId);
+  await callCloudflareWorkspaceRoute(workspaceKey, 'settings', {
+    method: 'PATCH',
+    payload: { settings: { onboarding: patch } }
+  });
+}
+
 export async function getStockCategoryOptions(workspaceId) {
   const workspaceKey = requireWorkspaceId(workspaceId);
   const response = await callCloudflareWorkspaceRoute(workspaceKey, 'stock-items', {
@@ -171,10 +215,16 @@ export async function saveWorkspaceSettings(workspaceId, draft = {}, { includePe
         payload: { preferences: personalSettings }
       })
     : { preferences: personalSettings };
-  return normalizeSettings({
+  const result = normalizeSettings({
     ...(workspaceResponse.settings || workspaceSettings),
     ...(personalResponse.preferences || personalSettings)
   });
+  // Ephemeral, not part of the persisted settings shape — read once by the caller (e.g. to show
+  // a "N items recalculated" confirmation) and must never be echoed back on a later save.
+  if (workspaceResponse.vatRegistrationRecompute) {
+    result.__vatRegistrationRecompute = workspaceResponse.vatRegistrationRecompute;
+  }
+  return result;
 }
 
 export async function exportWorkspaceSnapshot(workspaceId, workspaceName = 'workspace') {
@@ -221,9 +271,8 @@ export async function exportWorkspaceSnapshot(workspaceId, workspaceName = 'work
     logs_mfg: manufacturingBatches.batches || manufacturingBatches.manufacturingBatches || manufacturingBatches.items || []
   };
   const body = JSON.stringify(data, null, 2);
-  const stamp = new Date().toISOString().slice(0, 10);
-  const safeName = String(workspaceName || workspaceKey || 'workspace').trim().replace(/\s+/g, '_');
-  downloadFileBlob(new Blob([body], { type: 'application/json' }), `KCP_${safeName}_Snapshot_${stamp}.json`);
+  const filename = buildExportFilename({ workspaceName: workspaceName || workspaceKey, reportType: 'Workspace Snapshot Export' });
+  downloadFileBlob(new Blob([body], { type: 'application/json' }), `${filename}.json`);
 }
 
 export async function importWorkspaceSnapshot(workspaceId, file) {
@@ -270,6 +319,9 @@ export function normalizeSettings(value = {}) {
   const tradingTime = legacyTradingTimeFromStartHour(reportingDayFromHour);
   const logoutTimeout = Math.max(1, Math.min(1440, parseInt(source.logoutTimeout ?? source.autoLogoutMinutes ?? 30, 10) || 30));
   const vatRate = clampNumber(source.vatRate ?? source.vatPercentage ?? 15, 0, 100, 15);
+  // Defaults to true (VAT registered) so existing workspaces — which have always had VAT
+  // calculated in reports/costing — see no behavior change until they explicitly toggle this off.
+  const vatRegistered = !(source.vatRegistered === false || String(source.vatRegistered ?? '').toLowerCase() === 'false');
   const uiScale = String(source.uiScale || 'normal') === 'large' ? 'large' : 'normal';
   const costingMethod = String(source.costingMethod || 'last').toLowerCase() === 'wac' ? 'wac' : 'last';
   const yocoStoreLocationsAsStockLocations = source.yocoStoreLocationsAsStockLocations === true ||
@@ -290,10 +342,17 @@ export function normalizeSettings(value = {}) {
   const stockDepletionEnabledAt = stockDepletionEnabled && Number.isFinite(Date.parse(stockDepletionEnabledAtValue))
     ? new Date(stockDepletionEnabledAtValue).toISOString()
     : '';
+  const sourceOnboarding = source.onboarding && typeof source.onboarding === 'object' ? source.onboarding : {};
+  const onboarding = {
+    dismissed: sourceOnboarding.dismissed === true,
+    completedAt: String(sourceOnboarding.completedAt || '').trim(),
+    lastStep: String(sourceOnboarding.lastStep || '').trim()
+  };
 
   return {
     ...source,
     vatRate,
+    vatRegistered,
     siteName: String(source.siteName || '').trim(),
     orgId: String(source.orgId || source.org_id || '').trim(),
     corpId: String(source.corpId || source.corp_id || '').trim(),
@@ -318,7 +377,8 @@ export function normalizeSettings(value = {}) {
     restaurantBackgroundName,
     companyTaxInfo,
     stockDepletionEnabled,
-    stockDepletionEnabledAt
+    stockDepletionEnabledAt,
+    onboarding
   };
 }
 

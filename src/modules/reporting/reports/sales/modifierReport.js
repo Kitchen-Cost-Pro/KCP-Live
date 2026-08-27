@@ -382,8 +382,12 @@ function normalizeModifierRow(row = {}) {
     || Boolean(text(row.refundId || row.refund_id));
   const grossAmount = safeNumber(row.grossAmount ?? row.grossSales);
   const refundAmount = safeNumber(row.refundAmount ?? row.refunds ?? row.refund_amount);
-  const suppliedRate = normalizeModifierVatRate(row.vatRate ?? row.vat_rate);
-  const vatRate = suppliedRate > 0 ? suppliedRate : 0.15;
+  // A non-VAT-registered workspace legitimately supplies vatRate: 0 — that must not collapse
+  // into "not supplied" and fall back to the 15% default below, or every sale on that workspace
+  // would show fabricated VAT instead of the R0 the backend already correctly calculated.
+  const vatRateSupplied = row.vatRate !== undefined || row.vat_rate !== undefined;
+  const suppliedRate = vatRateSupplied ? normalizeModifierVatRate(row.vatRate ?? row.vat_rate) : NaN;
+  const vatRate = vatRateSupplied ? suppliedRate : 0.15;
   const isVatExempt = modifierBoolean(row.isVatExempt ?? row.is_vat_exempt ?? row.vatExempt ?? row.vat_exempt ?? row.zeroRated ?? row.zero_rated)
     || /zero[ _-]?rated|tax[ _-]?exempt|vat[ _-]?exempt|non[ _-]?taxable/.test(text(row.vatSource || row.vat_source || row.taxStatus || row.tax_status).toLowerCase());
   const explicitVat = row.vatAmount ?? row.vat;

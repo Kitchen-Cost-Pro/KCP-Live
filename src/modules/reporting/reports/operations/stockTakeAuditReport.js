@@ -1,5 +1,5 @@
 import {
-  calculateVariancePercent,
+  calculateValueVariancePercent,
   calculateVarianceQty,
   calculateVarianceValue,
   safeNumber,
@@ -848,7 +848,7 @@ function enrichStockTakeLine(row = {}) {
     expectedValue,
     countedValue,
     varianceValue,
-    variancePercent: calculateVariancePercent(varianceValue, expectedValue),
+    variancePercent: calculateValueVariancePercent(varianceValue, expectedValue),
     reportSummaryRow: false,
   };
 }
@@ -880,7 +880,7 @@ function buildSessionRows(lines = []) {
       totalExpectedValue,
       totalCountedValue,
       varianceValue,
-      variancePercent: calculateVariancePercent(
+      variancePercent: calculateValueVariancePercent(
         varianceValue,
         totalExpectedValue,
       ),
@@ -917,7 +917,7 @@ function buildByCategoryRows(lines = []) {
       expectedValue,
       countedValue,
       varianceValue,
-      variancePercent: calculateVariancePercent(varianceValue, expectedValue),
+      variancePercent: calculateValueVariancePercent(varianceValue, expectedValue),
       positiveVarianceValue: sumBy(
         rows.filter((row) => safeNumber(row.varianceValue) > 0),
         "varianceValue",
@@ -962,7 +962,7 @@ function buildByItemRows(lines = []) {
       expectedValue,
       countedValue,
       varianceValue,
-      variancePercent: calculateVariancePercent(varianceValue, expectedValue),
+      variancePercent: calculateValueVariancePercent(varianceValue, expectedValue),
       stockTakeDate: first.stockTakeDate,
       committedBy: first.committedBy,
       sourceId: first.sourceId,
@@ -1048,7 +1048,7 @@ function getTotalsForView(view, rows = []) {
       totalExpectedValue,
       totalCountedValue,
       varianceValue,
-      variancePercent: calculateVariancePercent(
+      variancePercent: calculateValueVariancePercent(
         varianceValue,
         totalExpectedValue,
       ),
@@ -1064,7 +1064,7 @@ function getTotalsForView(view, rows = []) {
       expectedValue,
       countedValue,
       varianceValue,
-      variancePercent: calculateVariancePercent(varianceValue, expectedValue),
+      variancePercent: calculateValueVariancePercent(varianceValue, expectedValue),
       positiveVarianceValue: sumBy(rows, "positiveVarianceValue"),
       negativeVarianceValue: sumBy(rows, "negativeVarianceValue"),
     };
@@ -1080,7 +1080,7 @@ function getTotalsForView(view, rows = []) {
       expectedValue,
       countedValue,
       varianceValue,
-      variancePercent: calculateVariancePercent(varianceValue, expectedValue),
+      variancePercent: calculateValueVariancePercent(varianceValue, expectedValue),
     };
   }
   if (activeView === "count_detail") {

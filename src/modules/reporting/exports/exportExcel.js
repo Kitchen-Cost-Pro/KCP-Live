@@ -32,7 +32,7 @@ export async function reportToExcelBytes(result = {}, options = {}) {
 
 export async function downloadReportExcel(result = {}, options = {}) {
   const { XLSX, workbook } = await reportToExcelWorkbook(result, options);
-  const fileName = options.fileName || buildExportFileName(result, 'xlsx');
+  const fileName = options.fileName || buildExportFileName(result, 'xlsx', { workspaceName: options.workspaceName });
   XLSX.writeFile(workbook, fileName);
   return { fileName, workbook };
 }
@@ -69,7 +69,7 @@ export async function reportResultsToExcelBytes(results = [], options = {}) {
 export async function downloadReportAllViewsExcel(results = [], options = {}) {
   const { XLSX, workbook } = await reportResultsToExcelWorkbook(results, options);
   const first = (Array.isArray(results) ? results : [results]).find(Boolean) || {};
-  const fileName = options.fileName || buildExportFileName({ ...first, view: 'all_views' }, 'xlsx');
+  const fileName = options.fileName || buildExportFileName({ ...first, view: 'all_views' }, 'xlsx', { workspaceName: options.workspaceName });
   XLSX.writeFile(workbook, fileName);
   return { fileName, workbook };
 }

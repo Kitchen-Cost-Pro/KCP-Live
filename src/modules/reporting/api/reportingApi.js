@@ -1,4 +1,4 @@
-import { buildReportingEndpoint } from './reportingEndpoints.js';
+import { buildReportingEndpoint, buildReportingQuery } from './reportingEndpoints.js';
 import { collectCompleteReportPages } from './reportPageLoader.js';
 import {
   mapDetailedActivityLedgerResponse,
@@ -19,6 +19,16 @@ export async function fetchDetailedActivityLedger({ workspaceId, filters } = {})
 
 export async function fetchOperationsLedger({ workspaceId, filters } = {}) {
   return fetchDetailedActivityLedger({ workspaceId, filters });
+}
+
+// A small summary object (counts + a capped drill-down list), not a paginated row set, so this
+// deliberately calls fetchReportJson directly rather than fetchCompleteReportJson/collectCompleteReportPages.
+export async function fetchOperationsExcludedSummary({ workspaceId, filters } = {}) {
+  return fetchReportJson({
+    workspaceId,
+    resource: 'reports/operations-excluded',
+    query: buildReportingQuery(filters)
+  });
 }
 
 

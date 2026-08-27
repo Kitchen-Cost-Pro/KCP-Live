@@ -1,7 +1,7 @@
 import { escapeHtml } from '../engine/formatters.js';
 import { bindReportTooltips } from '../tooltips/tooltipBuilder.js';
 import { enhanceReportingSelects, refreshReportingSelect } from '../ui/customSelect.js';
-import { REPORT_DATE_RANGE_PRESETS } from './dateRangePresets.js';
+import { REPORT_DATE_RANGE_PRESETS, inferDateRangeType } from './dateRangePresets.js';
 import { formatViewLabel, getSchedulableReportCatalog, resolveCatalogReportSelection } from './reportCatalog.js';
 import {
   createReportSchedule,
@@ -501,19 +501,23 @@ function renderScheduleViewChoice(entry, view, checked, savedViews = [], selecte
   `;
 }
 
-function syncSavedViewSelectState(form, reportId, viewId, enabled) {
+export function syncSavedViewSelectState(form, reportId, viewId, enabled) {
   const select = [...form.querySelectorAll('[data-schedule-item-saved-view]')]
     .find((entry) => entry.dataset.reportId === reportId && entry.dataset.viewId === viewId);
   if (!select) return;
+  const wasDisabled = select.disabled;
   select.disabled = !enabled;
-  if (!enabled) {
-    select.value = '';
-    refreshReportingSelect(select);
-  }
+  if (!enabled) select.value = '';
+  // The enhanced (visible) control mirrors the native select, so it must be re-synced on BOTH
+  // branches of an actual transition. Refreshing only on the disable branch left the visible button
+  // permanently disabled after a view was re-enabled. Refreshing unconditionally is just as wrong:
+  // this function also runs on the saved-view select's own change handler, and rebuilding the
+  // button there would drop keyboard focus to <body> on every selection.
+  if (wasDisabled !== select.disabled) refreshReportingSelect(select);
   select.closest('[data-schedule-view-choice]')?.classList.toggle('is-selected', Boolean(enabled));
 }
 
-function renderScheduleModal(values, catalog, savedViews, editing) {
+export function renderScheduleModal(values, catalog, savedViews, editing) {
   const selectedViewsByReport = new Map();
   const selectedItemsByKey = new Map();
   for (const item of values.reportItems || []) {
@@ -638,9 +642,10 @@ function renderScheduleModal(values, catalog, savedViews, editing) {
             </header>
             <div class="reportScheduleSectionGrid">
               <label><span>Date range</span><select name="dateRangeType">${REPORT_DATE_RANGE_PRESETS.map((preset) => `<option value="${preset.value}" ${values.dateRangeType === preset.value ? 'selected' : ''}>${preset.label}</option>`).join('')}</select></label>
-              <label><span>Location</span><select name="locationSelection" ${!values.allowAllLocations && !values.locations.length ? 'disabled' : ''}>${values.allowAllLocations ? `<option value="all" ${values.locationSelection === 'all' ? 'selected' : ''}>All Locations</option>` : ''}${values.locations.map((location) => `<option value="${escapeHtml(location.id)}" ${values.locationSelection === location.id ? 'selected' : ''}>${escapeHtml(location.name)}</option>`).join('')}${!values.allowAllLocations && !values.locations.length ? '<option value="">No assigned locations</option>' : ''}</select></label>
-              <label data-schedule-custom-date><span>From</span><input type="date" name="customFrom" value="${escapeHtml(values.customFrom)}" /></label>
-              <label data-schedule-custom-date><span>To</span><input type="date" name="customTo" value="${escapeHtml(values.customTo)}" /></label>
+              <label><span>Location</span><select name="locationSelection" ${!values.allowAllLocations && !values.locations.length && !values.unresolvedLocationSelection ? 'disabled' : ''}>${!values.locationSelection && (values.locations.length || values.allowAllLocations) ? '<option value="" selected>Select a location…</option>' : ''}${values.allowAllLocations ? `<option value="all" ${values.locationSelection === 'all' ? 'selected' : ''}>All Locations</option>` : ''}${values.unresolvedLocationSelection ? `<option value="${escapeHtml(values.unresolvedLocationSelection)}" selected>${values.unresolvedLocationSelection === 'all' ? 'All Locations (current setting)' : `Current location (${escapeHtml(values.unresolvedLocationSelection)}) — not in your locations`}</option>` : ''}${values.locations.map((location) => `<option value="${escapeHtml(location.id)}" ${values.locationSelection === location.id ? 'selected' : ''}>${escapeHtml(location.name)}</option>`).join('')}${!values.allowAllLocations && !values.locations.length && !values.unresolvedLocationSelection ? '<option value="">No assigned locations</option>' : ''}</select></label>
+              <label data-schedule-custom-date><span>From</span><input type="date" name="customFrom" value="${escapeHtml(values.customFrom)}" data-initial-value="${escapeHtml(values.customFrom)}" /></label>
+              <label data-schedule-custom-date><span>To</span><input type="date" name="customTo" value="${escapeHtml(values.customTo)}" data-initial-value="${escapeHtml(values.customTo)}" /></label>
+              <input type="hidden" name="initialDateRangeType" value="${escapeHtml(values.dateRangeType)}" />
               <p class="reportScheduleLocationNote reportScheduleFull">Choose All Locations to generate a separate output for every active location, or choose one individual location to limit the complete pack to that site.</p>
             </div>
           </section>
@@ -700,7 +705,7 @@ function renderRecipientChips(recipients = []) {
   return recipients.map((email) => `<span class="reportScheduleRecipientChip"><span>${escapeHtml(email)}</span><button type="button" data-schedule-recipient-remove="${escapeHtml(email)}" aria-label="Remove ${escapeHtml(email)}">×</button></span>`).join('');
 }
 
-function readScheduleForm(form, catalog, savedViews = [], existingReportItems = []) {
+export function readScheduleForm(form, catalog, savedViews = [], existingReportItems = []) {
   const data = new FormData(form);
   const frequency = String(data.get('frequency') || 'weekly');
   const reportItems = [];
@@ -762,7 +767,7 @@ function readScheduleForm(form, catalog, savedViews = [], existingReportItems = 
     item.savedViewSnapshotId = selected.id;
     item.savedViewSnapshotName = selected.name || '';
     item.savedViewUpdatedAt = selected.updatedAt || '';
-    item.dateRangeType = selected.dateRangeType || selected.filters?.dateRangeType || 'custom';
+    item.dateRangeType = selected.dateRangeType || inferDateRangeType(selected.filters || {});
     item.filters = selected.filters && typeof selected.filters === 'object' ? { ...selected.filters } : {};
     item.sort = selected.sort && typeof selected.sort === 'object' ? { ...selected.sort } : null;
     item.visibleColumns = Array.isArray(selected.visibleColumns) ? [...selected.visibleColumns] : [];
@@ -790,12 +795,25 @@ function readScheduleForm(form, catalog, savedViews = [], existingReportItems = 
   const customFrom = String(data.get('customFrom') || '');
   const customTo = String(data.get('customTo') || '');
   const filters = { ...baseFilters };
-  if (dateRangeType === 'custom') {
-    if (!customFrom || !customTo) throw new Error('Select both custom dates.');
+  if (dateRangeType === 'custom' && customFrom && customTo) {
     filters.from = customFrom;
     filters.to = customTo;
     filters.startDate = customFrom;
     filters.endDate = customTo;
+  } else if (dateRangeType === 'custom') {
+    // Only demand both dates when the user is actually working on the range in this edit. A legacy
+    // schedule stored with half a custom range used to save fine (the incomplete range was dropped);
+    // hard-gating every save on it blocked unrelated edits such as changing recipients.
+    const initialDateRangeType = String(data.get('initialDateRangeType') || '');
+    const dateFieldsTouched = [...form.querySelectorAll('[data-schedule-custom-date] input')]
+      .some((input) => String(input.value || '') !== String(input.dataset.initialValue || ''));
+    if (!initialDateRangeType || dateFieldsTouched || dateRangeType !== initialDateRangeType) {
+      throw new Error('Select both custom dates.');
+    }
+    delete filters.from;
+    delete filters.to;
+    delete filters.startDate;
+    delete filters.endDate;
   } else {
     delete filters.from;
     delete filters.to;
@@ -829,7 +847,7 @@ function readScheduleForm(form, catalog, savedViews = [], existingReportItems = 
   };
 }
 
-function normalizeFormValues(values = {}, state = {}, catalog = [], availableLocations = null, allowAllLocations = true, savedViews = [], workspaceUsers = []) {
+export function normalizeFormValues(values = {}, state = {}, catalog = [], availableLocations = null, allowAllLocations = true, savedViews = [], workspaceUsers = []) {
   const settings = state.settings?.values || state.settings?.draft || {};
   // Once the Worker supplies a location list, it is the permission-filtered source of truth.
   // Do not merge broader app state back into it for location-restricted users.
@@ -839,19 +857,49 @@ function normalizeFormValues(values = {}, state = {}, catalog = [], availableLoc
   const reportItems = normalizeReportItems(values, catalog).map((item) => restoreSavedViewSnapshot(item, savedViews));
   const locationIds = Array.isArray(values.locationIds) ? values.locationIds.map(String).filter(Boolean) : values.locationId ? [String(values.locationId)] : [];
   const requestedMode = values.locationMode || (locationIds.length ? 'selected' : 'all');
-  const selectedLocationId = locationIds.find((id) => locations.some((location) => location.id === id)) || locations[0]?.id || '';
-  const locationSelection = requestedMode === 'selected' ? selectedLocationId : (allowAllLocations ? 'all' : selectedLocationId);
+  // A schedule that already targets a location (or all locations) must keep targeting it. Falling
+  // back to locations[0] silently redirected the schedule at whichever location happened to sort
+  // first whenever the stored one was outside the current user's permitted list, and silently
+  // narrowed an all-locations schedule to a single site for a location-restricted user. The stored
+  // selection is preserved here and surfaced as an explicit (out-of-scope) option in the dropdown,
+  // so only the user picking a different location can change what the schedule targets.
+  const hasStoredLocation = Boolean(values.locationMode) || locationIds.length > 0;
+  const resolvedLocationId = locationIds.find((id) => locations.some((location) => location.id === id)) || '';
+  let locationSelection = '';
+  let unresolvedLocationSelection = '';
+  if (requestedMode === 'selected') {
+    if (resolvedLocationId) locationSelection = resolvedLocationId;
+    else if (locationIds.length) {
+      locationSelection = locationIds[0];
+      unresolvedLocationSelection = locationIds[0];
+    } else if (!hasStoredLocation) locationSelection = allowAllLocations ? 'all' : locations[0]?.id || '';
+    // else: stored mode is 'selected' but no location id survives. There is no target to preserve,
+    // so neither widening to all locations nor picking one for the user is defensible — leave it
+    // blank and let the dropdown demand an explicit choice (readScheduleForm already rejects blank).
+
+  } else if (allowAllLocations) {
+    locationSelection = 'all';
+  } else if (hasStoredLocation) {
+    locationSelection = 'all';
+    unresolvedLocationSelection = 'all';
+  } else {
+    locationSelection = locations[0]?.id || '';
+  }
   return {
     name: values.name || '',
     reportItems,
     savedViewId: savedViews.some((view) => view.id === values.savedViewId && isCatalogViewAvailable(catalog, view.reportId, view.viewId)) ? values.savedViewId : '',
-    dateRangeType: values.dateRangeType || 'today',
+    // Same rule as toSchedulePayload: a legacy row with real dates but no stored type opens as the
+    // custom range it actually is. Showing "today" left the real dates sitting in filters unseen,
+    // and saving from that state destroyed them.
+    dateRangeType: values.dateRangeType || inferDateRangeType(values.filters || {}, { fallback: 'today' }),
     customFrom: values.filters?.from || values.filters?.startDate || '',
     customTo: values.filters?.to || values.filters?.endDate || '',
     filters: values.filters || {},
     locationMode: locationSelection === 'all' ? 'all' : 'selected',
     locationIds: locationSelection === 'all' ? [] : (locationSelection ? [locationSelection] : []),
     locationSelection,
+    unresolvedLocationSelection,
     allowAllLocations,
     frequency: values.scheduleFrequency || values.frequency || 'weekly',
     scheduleDay: String(values.scheduleDay ?? '1'),
@@ -930,9 +978,18 @@ function stableSnapshotJson(value) {
   return JSON.stringify(value ?? null);
 }
 
-function toSchedulePayload(schedule = {}, catalog = []) {
+export function toSchedulePayload(schedule = {}, catalog = []) {
   const reportItems = normalizeReportItems(schedule, catalog);
   const first = reportItems[0] || {};
+  // Enable/disable, run-now and duplicate all re-send a full payload rebuilt from the client-side
+  // schedule object, so this function must round-trip the schedule's REAL targeting rather than
+  // normalising it toward broader defaults. A legacy schedule with locationIds populated but no
+  // locationMode used to come back as locationMode: 'all', silently widening a single-location
+  // schedule to every location on an unrelated toggle click.
+  const locationIds = Array.isArray(schedule.locationIds) && schedule.locationIds.length
+    ? schedule.locationIds.map(String).filter(Boolean)
+    : schedule.locationId ? [String(schedule.locationId)] : [];
+  const locationMode = schedule.locationMode || (locationIds.length ? 'selected' : 'all');
   return {
     name: schedule.name,
     reportGroupId: first.reportGroupId || schedule.reportGroupId || '',
@@ -941,10 +998,12 @@ function toSchedulePayload(schedule = {}, catalog = []) {
     reportItems,
     savedViewId: '',
     filters: schedule.filters || {},
-    dateRangeType: schedule.dateRangeType || 'today',
-    locationMode: schedule.locationMode || 'all',
-    locationIds: schedule.locationIds || [],
-    locationId: schedule.locationId || '',
+    // A legacy row with neither a type nor dates keeps the historic 'today' window: a schedule that
+    // silently became unbounded would email the entire history.
+    dateRangeType: schedule.dateRangeType || inferDateRangeType(schedule.filters || {}, { fallback: 'today' }),
+    locationMode,
+    locationIds: locationMode === 'all' ? [] : locationIds,
+    locationId: schedule.locationId || (locationMode === 'selected' && locationIds.length === 1 ? locationIds[0] : ''),
     scheduleFrequency: schedule.scheduleFrequency,
     scheduleDay: schedule.scheduleDay,
     scheduleTime: schedule.scheduleTime,

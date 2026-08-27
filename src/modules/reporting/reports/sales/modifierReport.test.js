@@ -220,3 +220,14 @@ test('Modifier report does not misclassify missing modifier types as notes', () 
   assert.equal(model.views.summary[0].modifierType, 'Option');
   assert.equal(model.views.summary[0].stockAction, 'No stock change');
 });
+
+test('Modifier report does not fabricate VAT when the backend explicitly reports vatRate: 0 for a non-VAT-registered workspace', () => {
+  const model = buildModifierReportModel([{
+    modifierName: 'Extra Cheese',
+    grossAmount: 100,
+    vatRate: 0
+  }]);
+  const row = model.views.summary[0];
+  assert.equal(row.vat, 0);
+  assert.equal(row.netSales, 100);
+});

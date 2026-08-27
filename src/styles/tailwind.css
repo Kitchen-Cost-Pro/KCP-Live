@@ -1,0 +1,65 @@
+/*
+ * Tailwind CSS v4 + daisyUI v5, added for NEW component work going forward (see memory:
+ * kcp_frontend_daisyui_preference). Deliberately does NOT import Tailwind's `preflight` layer —
+ * this app already has its own global reset/typography/design tokens (main.css, yds-tokens.css)
+ * and every existing component's hand-written CSS assumes those defaults. Importing preflight
+ * would silently reset margins, headings, buttons, inputs etc. across the whole existing app.
+ * Only `theme` (design tokens Tailwind utilities read) and `utilities` (the utility classes
+ * themselves, plus daisyUI's component classes below) are imported.
+ */
+@import "tailwindcss/theme" layer(theme);
+@import "tailwindcss/utilities" layer(utilities);
+
+/* Tell Tailwind v4's automatic content detection where to look, since this isn't a standard
+   single-root Vite app (there's also a static admin console HTML file under public/). */
+@source "../../index.html";
+@source "../../src/**/*.js";
+@source "../../public/**/*.html";
+
+@plugin "daisyui" {
+  /* `false` disables daisyUI's built-in light/dark themes (their own generic color palette,
+     independent from this app's design tokens) — this app defines its OWN single theme below
+     instead, mapped straight onto main.css's existing CSS variables (--accent-indigo,
+     --surface-elevated, etc, defined in :root and :root[data-theme="dark"]). Since those
+     variables already flip when the app calls applyTheme() to set data-theme="dark" on <html>,
+     daisyUI components (modal, btn, badge, alert, ...) automatically pick up the app's real
+     accent colors AND correctly follow its light/dark toggle, with no daisyUI-side theme
+     switching logic needed at all. */
+  themes: false;
+}
+
+@plugin "daisyui/theme" {
+  name: "kcp";
+  default: true;
+  --color-base-100: var(--surface-elevated);
+  --color-base-200: var(--surface-primary);
+  --color-base-300: var(--surface-secondary);
+  --color-base-content: var(--text-main);
+  /* This app's own components (.settingsPrimaryButton, .stockModule__primary, etc.) all use
+     --accent-blue as THE primary/CTA color — that's also the color every restaurant theme
+     preset customizes most prominently (see themePresets.js). --accent-indigo was the wrong
+     pick for daisyUI's `primary` slot: it's a real, valid app color, but not the one actually
+     used for primary actions, so btn-primary looked like a different, off-brand color scheme. */
+  --color-primary: var(--accent-blue);
+  --color-primary-content: #ffffff;
+  --color-secondary: var(--accent-indigo);
+  --color-secondary-content: #ffffff;
+  --color-accent: var(--accent-cyan);
+  --color-accent-content: #ffffff;
+  --color-neutral: var(--text-muted);
+  --color-neutral-content: #ffffff;
+  --color-info: var(--accent-blue);
+  --color-info-content: #ffffff;
+  --color-success: var(--accent-emerald);
+  --color-success-content: #ffffff;
+  --color-warning: var(--accent-amber);
+  --color-warning-content: #1f2937;
+  --color-error: var(--accent-red);
+  --color-error-content: #ffffff;
+  /* More curvature than daisyUI's defaults, matching the request — applies to .modal-box
+     (radius-box), buttons/inputs (radius-field), and badges/steps (radius-selector). */
+  --radius-selector: 1rem;
+  --radius-field: 0.75rem;
+  --radius-box: 1.5rem;
+  --border: 1px;
+}

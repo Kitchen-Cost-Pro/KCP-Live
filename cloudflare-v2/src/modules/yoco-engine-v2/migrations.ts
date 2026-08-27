@@ -1031,3 +1031,115 @@ BEGIN
   SELECT RAISE(ABORT, 'yoco_v2_admin_actions are append-only');
 END;
 `;
+
+
+export const YOCO_V2_RECONCILIATION_BACKOFF_MIGRATION = `
+-- Stop the scheduled reconciliation write storm.
+--
+-- Root cause: runScheduledYocoV2Reconciliation only stamped last_hourly_run_at/last_daily_run_at
+-- AFTER runYocoV2Reconciliation returned, and that function re-throws on failure. A failing run
+-- therefore never recorded that it had run at all, so \`dailyDue = !Number.isFinite(lastDaily)\`
+-- stayed true forever and every single 15-minute cron tick re-ran the FULL deep scan (7-day
+-- window, up to 25 pages x 100 rows x 2 entity kinds, ~50 live Yoco calls). For a workspace with
+-- no live Yoco connection the API call always fails, which guaranteed the state never advanced --
+-- a self-sustaining loop that burned the whole daily Durable Object row-write allowance within a
+-- few hours of the 00:00 UTC quota reset, with no client traffic at all.
+--
+-- These columns let the scheduler record an ATTEMPT (not just a success) and back off after
+-- consecutive failures, mirroring the _kcp_migration_health pattern already proven in
+-- WorkspaceDO.migrate().
+ALTER TABLE yoco_v2_reconciliation_state ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE yoco_v2_reconciliation_state ADD COLUMN next_retry_at TEXT;
+ALTER TABLE yoco_v2_reconciliation_state ADD COLUMN last_failure_reason TEXT;
+ALTER TABLE yoco_v2_reconciliation_state ADD COLUMN last_attempt_at TEXT;
+
+-- Make findings idempotent ACROSS runs. The existing UNIQUE constraint includes
+-- reconciliation_run_id, and every run mints a fresh run id, so \`INSERT OR IGNORE\` could only
+-- ever dedupe within one run -- the same unresolved entity was re-inserted as a brand-new row on
+-- every tick, forever. Collapse the historical duplicates, then key uniqueness on the finding
+-- itself so recurrence bumps a counter instead of writing another row.
+ALTER TABLE yoco_v2_reconciliation_findings ADD COLUMN last_seen_at TEXT;
+ALTER TABLE yoco_v2_reconciliation_findings ADD COLUMN last_run_id TEXT;
+ALTER TABLE yoco_v2_reconciliation_findings ADD COLUMN occurrence_count INTEGER NOT NULL DEFAULT 1;
+
+UPDATE yoco_v2_reconciliation_findings
+   SET last_seen_at = COALESCE(last_seen_at, created_at),
+       last_run_id = COALESCE(last_run_id, reconciliation_run_id);
+
+-- Collapse the historical duplicates onto the EARLIEST row per finding (so created_at keeps
+-- meaning "first detected"), but carry the rest of the group's information onto the survivor first:
+-- how many times it was seen, when it was last seen, and — critically — whether any sighting was
+-- already repaired, so the dedupe cannot silently reopen resolved findings.
+UPDATE yoco_v2_reconciliation_findings
+   SET occurrence_count = MAX(1, (
+         SELECT COUNT(*) FROM yoco_v2_reconciliation_findings d
+          WHERE d.workspace_id = yoco_v2_reconciliation_findings.workspace_id
+            AND d.integration_id = yoco_v2_reconciliation_findings.integration_id
+            AND d.finding_type = yoco_v2_reconciliation_findings.finding_type
+            AND d.source_entity_type = yoco_v2_reconciliation_findings.source_entity_type
+            AND d.source_entity_id = yoco_v2_reconciliation_findings.source_entity_id)),
+       last_seen_at = COALESCE((
+         SELECT MAX(COALESCE(d.last_seen_at, d.created_at)) FROM yoco_v2_reconciliation_findings d
+          WHERE d.workspace_id = yoco_v2_reconciliation_findings.workspace_id
+            AND d.integration_id = yoco_v2_reconciliation_findings.integration_id
+            AND d.finding_type = yoco_v2_reconciliation_findings.finding_type
+            AND d.source_entity_type = yoco_v2_reconciliation_findings.source_entity_type
+            AND d.source_entity_id = yoco_v2_reconciliation_findings.source_entity_id), last_seen_at),
+       status = CASE WHEN EXISTS (
+         SELECT 1 FROM yoco_v2_reconciliation_findings d
+          WHERE d.workspace_id = yoco_v2_reconciliation_findings.workspace_id
+            AND d.integration_id = yoco_v2_reconciliation_findings.integration_id
+            AND d.finding_type = yoco_v2_reconciliation_findings.finding_type
+            AND d.source_entity_type = yoco_v2_reconciliation_findings.source_entity_type
+            AND d.source_entity_id = yoco_v2_reconciliation_findings.source_entity_id
+            AND d.status = 'REPAIRED') THEN 'REPAIRED' ELSE status END,
+       repaired_at = COALESCE(repaired_at, (
+         SELECT MAX(d.repaired_at) FROM yoco_v2_reconciliation_findings d
+          WHERE d.workspace_id = yoco_v2_reconciliation_findings.workspace_id
+            AND d.integration_id = yoco_v2_reconciliation_findings.integration_id
+            AND d.finding_type = yoco_v2_reconciliation_findings.finding_type
+            AND d.source_entity_type = yoco_v2_reconciliation_findings.source_entity_type
+            AND d.source_entity_id = yoco_v2_reconciliation_findings.source_entity_id));
+
+DELETE FROM yoco_v2_reconciliation_findings
+ WHERE rowid NOT IN (
+   SELECT MIN(rowid) FROM yoco_v2_reconciliation_findings
+    GROUP BY workspace_id, integration_id, finding_type, source_entity_type, source_entity_id
+ );
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_yoco_v2_reconciliation_findings_entity
+  ON yoco_v2_reconciliation_findings(workspace_id, integration_id, finding_type, source_entity_type, source_entity_id);
+`;
+
+export const YOCO_V2_EFFECT_GATE_MIGRATION = `
+-- Phase V2 14: unify yoco_v2_effect_controls (sale) and yoco_v2_refund_effect_controls (refund)
+-- into a single yoco_v2_effect_gate table covering all four effect types. The two tables were an
+-- identical copy-paste of the same runtime gate logic (cutover.ts / refund-cutover.ts), which is
+-- exactly the kind of duplication that let the real webhook-subscription cleanup bug go unnoticed
+-- in its sibling function. Existing rows are migrated, not dropped, so in-flight pause/resume
+-- state and cutover history are preserved; the old tables are left in place read-only.
+CREATE TABLE IF NOT EXISTS yoco_v2_effect_gate (
+  workspace_id TEXT NOT NULL,
+  integration_id TEXT NOT NULL,
+  effect_type TEXT NOT NULL,
+  feature_enabled INTEGER NOT NULL DEFAULT 0,
+  consumption_paused INTEGER NOT NULL DEFAULT 0,
+  pause_reason TEXT,
+  cutover_at TEXT,
+  activated_by TEXT,
+  updated_at TEXT NOT NULL,
+  updated_by TEXT,
+  PRIMARY KEY (workspace_id, integration_id, effect_type),
+  CHECK (effect_type IN ('SALE_REPORTING', 'SALE_STOCK', 'REFUND_REPORTING', 'REFUND_STOCK'))
+);
+
+INSERT OR IGNORE INTO yoco_v2_effect_gate
+  (workspace_id, integration_id, effect_type, feature_enabled, consumption_paused, pause_reason, cutover_at, activated_by, updated_at, updated_by)
+SELECT workspace_id, integration_id, effect_type, feature_enabled, consumption_paused, pause_reason, cutover_at, activated_by, updated_at, updated_by
+  FROM yoco_v2_effect_controls;
+
+INSERT OR IGNORE INTO yoco_v2_effect_gate
+  (workspace_id, integration_id, effect_type, feature_enabled, consumption_paused, pause_reason, cutover_at, activated_by, updated_at, updated_by)
+SELECT workspace_id, integration_id, effect_type, feature_enabled, consumption_paused, pause_reason, cutover_at, activated_by, updated_at, updated_by
+  FROM yoco_v2_refund_effect_controls;
+`;

@@ -4,6 +4,7 @@ import { text, toArray } from '../../engine/grouping.js';
 import { validateSalesFinancialRows } from '../../validators/salesUsageValidators.js';
 import { buildRowWarnings } from '../../validators/rowWarningUtils.js';
 import { buildPaymentModel, moneyTooltip, paymentTotals } from './salesReportHelpers.js';
+import { PAYOUT_TOLERANCE } from '../../engine/yocoFinancials.js';
 
 const paymentSummaryMoneyTooltip = (label, key) => (row) => moneyTooltip(key, `${label}: ${formatMoney(row[label] ?? row[key] ?? 0)}`);
 
@@ -237,7 +238,7 @@ function validatePaymentRows(rows = []) {
 
 function payoutReconciles(row = {}) {
   const expected = Number(row.netAmount || 0) + Number(row.tipAmount || 0) - Number(row.refundAmount || 0) - Number(row.feeAmount || 0);
-  return Math.abs(expected - Number(row.payoutAmount || 0)) <= 0.05;
+  return Math.abs(expected - Number(row.payoutAmount || 0)) <= PAYOUT_TOLERANCE;
 }
 
 function netSalesTooltip(row = {}) {

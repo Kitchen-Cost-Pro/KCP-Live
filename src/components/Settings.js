@@ -11,6 +11,7 @@ export function renderSettings({ state, onSettingsAction = {} } = {}) {
   const settingsState = state.settings || {};
   const draft = settingsState.draft || createDefaultSettings(state);
   const reportingDayHour = resolveReportingDayHour(draft);
+  const vatRegistered = draft.vatRegistered !== false;
   const workspaceName = state.workspace?.siteName || draft.siteName || 'Workspace';
   const isSaving = settingsState.actionStatus === 'saving';
   const isImporting = settingsState.actionStatus === 'importing';
@@ -33,126 +34,124 @@ export function renderSettings({ state, onSettingsAction = {} } = {}) {
     return view;
   }
   view.innerHTML = `
-    <div class="settingsShell">
-      <header class="settingsHeader">
-        <p>${escapeHtml(pageEyebrow)}</p>
-        <h1>${escapeHtml(pageTitle)}</h1>
-        <span>${escapeHtml(pageSubtitle)}</span>
+    <div class="max-w-[1680px] mx-auto px-6 py-7 md:px-8">
+      <header class="mb-6">
+        <p class="text-primary text-xs font-extrabold tracking-[0.16em] uppercase">${escapeHtml(pageEyebrow)}</p>
+        <h1 class="text-3xl font-bold mt-1 text-base-content">${escapeHtml(pageTitle)}</h1>
+        <p class="text-base-content/60 mt-1">${escapeHtml(pageSubtitle)}</p>
       </header>
 
       ${settingsState.error ? renderNotice(settingsState.error, 'error') : ''}
       ${settingsState.actionError ? renderNotice(settingsState.actionError, 'error') : ''}
 
-      <div class="settingsBentoGrid ${canManageSnapshots ? 'settingsBentoGrid--withTools' : 'settingsBentoGrid--standard'} ${isCustomization ? 'settingsBentoGrid--customization' : ''}">
-        ${!isCustomization ? `
-          <section class="settingsPanel settingsPanel--workspace">
-            <div class="settingsPanelHead">
-              <span>${icon('percent')}</span>
-              <div>
-                <p>Tax Settings</p>
-                <h2>Workspace Logic</h2>
-              </div>
-            </div>
+      ${!isCustomization ? `
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
+          <section class="card bg-base-100/70 backdrop-blur-md border border-base-300 shadow-sm lg:col-span-8">
+            <div class="card-body gap-5">
+              ${panelHead('percent', 'Tax Settings', 'Workspace Logic')}
 
-            <div class="settingsFormGrid">
-              <label>
-                <span>VAT Rate %</span>
-                <input type="text" inputmode="decimal" value="${escapeAttribute(draft.vatRate ?? 15)}" data-settings-field="vatRate" data-focus-key="settings-vat-rate" />
-              </label>
-              <label>
-                <span>Business Profile Name</span>
-                <input type="text" value="${escapeAttribute(draft.siteName || '')}" placeholder="e.g. Main Kitchen" data-settings-field="siteName" data-focus-key="settings-site-name" />
-              </label>
-              <div class="settingsFormField settingsFormField--wide settingsReportingHoursField">
-                <span>Reporting Day Hours</span>
-                <div class="settingsReportingHours" role="group" aria-label="Reporting day hours">
-                  <span class="settingsReportingHourLabel">From</span>
-                  <div class="settingsReportingHourControl">
-                    ${renderReportingHourSelector('reportingDayFromHour', reportingDayHour, openDropdown, 'Reporting day starts at')}
-                  </div>
-                  <span class="settingsReportingHoursArrow" aria-hidden="true">→</span>
-                  <span class="settingsReportingHourLabel">To</span>
-                  <div class="settingsReportingHourControl">
-                    ${renderReportingHourSelector('reportingDayToHour', reportingDayHour, openDropdown, 'Reporting day ends at on the next day')}
-                  </div>
-                  <span class="settingsReportingHoursNext">next day</span>
+              <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+                <label class="form-control w-full">
+                  <div class="label"><span class="label-text font-semibold">VAT Rate %</span></div>
+                  <input type="text" inputmode="decimal" class="input input-bordered w-full" value="${escapeAttribute(draft.vatRate ?? 15)}" data-settings-field="vatRate" data-focus-key="settings-vat-rate" />
+                </label>
+                <div class="form-control w-full">
+                  <div class="label"><span class="label-text font-semibold">VAT Registration</span></div>
+                  <label class="flex items-center gap-3 cursor-pointer">
+                    <input type="checkbox" class="toggle ${vatRegistered !== false ? 'toggle-success' : 'toggle-error'}" data-settings-vat-registered-toggle ${vatRegistered !== false ? 'checked' : ''} />
+                    <span class="text-sm font-medium ${vatRegistered !== false ? 'text-success' : 'text-error'}">${vatRegistered !== false ? 'VAT Registered' : 'Not VAT Registered'}</span>
+                  </label>
+                  <p class="text-xs text-base-content/60 mt-1">${vatRegistered !== false
+                    ? 'Reports and recipe costs show VAT (ex-VAT recipe costs, VAT column reflects real values).'
+                    : 'Reports show R0 VAT and recipe costs are treated as VAT-inclusive of what was actually paid.'}</p>
                 </div>
-                <p class="settingsFieldHint">Reports always cover a full 24-hour day. Selecting either hour keeps From and To aligned.</p>
+                <label class="form-control w-full">
+                  <div class="label"><span class="label-text font-semibold">Business Profile Name</span></div>
+                  <input type="text" class="input input-bordered w-full" value="${escapeAttribute(draft.siteName || '')}" placeholder="e.g. Main Kitchen" data-settings-field="siteName" data-focus-key="settings-site-name" />
+                </label>
+                <div class="form-control w-full sm:col-span-2 xl:col-span-3">
+                  <div class="label"><span class="label-text font-semibold">Reporting Day Hours</span></div>
+                  <div class="flex flex-wrap items-center gap-3" role="group" aria-label="Reporting day hours">
+                    <span class="text-xs uppercase tracking-wide text-base-content/50 font-semibold">From</span>
+                    ${renderReportingHourSelector('reportingDayFromHour', reportingDayHour, openDropdown, 'Reporting day starts at')}
+                    <span class="text-base-content/40" aria-hidden="true">→</span>
+                    <span class="text-xs uppercase tracking-wide text-base-content/50 font-semibold">To</span>
+                    ${renderReportingHourSelector('reportingDayToHour', reportingDayHour, openDropdown, 'Reporting day ends at on the next day')}
+                    <span class="text-xs text-base-content/50">next day</span>
+                  </div>
+                  <p class="text-xs text-base-content/60 mt-1">Reports always cover a full 24-hour day. Selecting either hour keeps From and To aligned.</p>
+                </div>
+                <label class="form-control w-full">
+                  <div class="label"><span class="label-text font-semibold">Auto Logout Timeout (Minutes)</span></div>
+                  <input type="text" inputmode="numeric" class="input input-bordered w-full" value="${escapeAttribute(draft.logoutTimeout ?? 30)}" data-settings-field="logoutTimeout" data-focus-key="settings-logout-timeout" />
+                </label>
+                <label class="form-control w-full">
+                  <div class="label"><span class="label-text font-semibold">Costing Method</span></div>
+                  ${renderSettingsDropdown({
+                    id: 'costingMethod',
+                    selectedValue: draft.costingMethod || 'last',
+                    openDropdown,
+                    options: [
+                      { value: 'last', label: 'Last Receive Price' },
+                      { value: 'wac', label: 'Weighted Average Cost' }
+                    ]
+                  })}
+                </label>
               </div>
-              <label>
-                <span>Auto Logout Timeout (Minutes)</span>
-                <input type="text" inputmode="numeric" value="${escapeAttribute(draft.logoutTimeout ?? 30)}" data-settings-field="logoutTimeout" data-focus-key="settings-logout-timeout" />
-              </label>
-              <label>
-                <span>Costing Method</span>
-                ${renderSettingsDropdown({
-                  id: 'costingMethod',
-                  selectedValue: draft.costingMethod || 'last',
-                  openDropdown,
-                  options: [
-                    { value: 'last', label: 'Last Receive Price' },
-                    { value: 'wac', label: 'Weighted Average Cost' }
-                  ]
-                })}
-              </label>
-            </div>
 
-            <div class="settingsActions">
-              <button type="button" class="settingsPrimaryButton" data-settings-save="workspace" ${isSaving ? 'disabled' : ''}>
-                ${isSaving ? 'Saving...' : 'Save Settings'}
-              </button>
+              <div class="card-actions justify-end pt-1">
+                <button type="button" class="btn btn-primary" data-settings-save="workspace" ${isSaving ? 'disabled' : ''}>
+                  ${isSaving ? 'Saving...' : 'Save Settings'}
+                </button>
+              </div>
             </div>
           </section>
 
-          ${renderGoLivePanel(draft, state, { isSaving })}
+          ${renderGoLivePanel(draft, state, { isSaving, onRelaunchOnboarding: onSettingsAction.onRelaunchOnboarding })}
           ${renderCompanyTaxPanel(draft, { isSaving })}
-          ${renderProfileLinkingPanel(draft)}
+          ${renderProfileLinkingPanel(draft, { fullWidth: !canManageSnapshots })}
 
           ${canManageSnapshots ? `
-            <section class="settingsPanel settingsPanel--infra">
-              <div class="settingsPanelHead">
-                <span>${icon('database')}</span>
-                <div>
-                  <p>Infrastructure</p>
-                  <h2>Snapshots</h2>
+            <section class="card bg-base-100/70 backdrop-blur-md border border-base-300 shadow-sm lg:col-span-6">
+              <div class="card-body gap-5">
+                ${panelHead('database', 'Infrastructure', 'Snapshots')}
+
+                <div class="flex flex-wrap gap-3">
+                  <button type="button" class="btn btn-success" data-settings-export ${isExporting ? 'disabled' : ''}>
+                    ${isExporting ? 'Preparing...' : 'Save Full Snapshot'}
+                  </button>
+                  <button type="button" class="btn btn-outline" data-settings-import-trigger ${isImporting ? 'disabled' : ''}>
+                    ${isImporting ? 'Importing...' : 'Import Full Snapshot'}
+                  </button>
+                  <input type="file" accept="application/json,.json" data-settings-import hidden />
                 </div>
-              </div>
 
-              <div class="settingsSnapshotActions">
-                <button type="button" class="settingsSuccessButton" data-settings-export ${isExporting ? 'disabled' : ''}>
-                  ${isExporting ? 'Preparing...' : 'Save Full Snapshot'}
-                </button>
-                <button type="button" class="settingsSecondaryButton" data-settings-import-trigger ${isImporting ? 'disabled' : ''}>
-                  ${isImporting ? 'Importing...' : 'Import Full Snapshot'}
-                </button>
-                <input type="file" accept="application/json,.json" data-settings-import hidden />
-              </div>
+                <div class="rounded-box border border-base-300 bg-base-200/50 p-4">
+                  <strong class="block text-sm font-semibold mb-1">Snapshot Import</strong>
+                  <p class="text-sm text-base-content/70">Imports operational workspace data from a KCP JSON snapshot. Membership and roles stay managed by the live workspace.</p>
+                </div>
 
-              <div class="settingsSnapshotNote">
-                <strong>Snapshot Import</strong>
-                <p>Imports operational workspace data from a KCP JSON snapshot. Membership and roles stay managed by the live workspace.</p>
-              </div>
-
-              <div class="settingsSnapshotNote settingsSnapshotNote--danger">
-                <strong>Super User Reset Tools</strong>
-                <p>Use reporting reset to clear reporting ledger/history data. Use reporting + stock reset when this store also needs all selling-location stock on hand set to zero. Products, recipes, stock items, and item costings are preserved.</p>
-                <div class="settingsResetActionGrid">
-                  <button type="button" class="settingsSecondaryButton settingsSecondaryButton--warning" data-settings-reset-reporting ${isResetting ? 'disabled' : ''}>
-                    ${icon('database')}
-                    <span>${isResetting ? 'Resetting...' : 'Reset Reporting'}</span>
-                  </button>
-                  <button type="button" class="settingsDangerButton" data-settings-reset-reporting-stock ${isResetting ? 'disabled' : ''}>
-                    ${icon('trash')}
-                    <span>${isResetting ? 'Resetting...' : 'Reset Reporting + Stock'}</span>
-                  </button>
+                <div class="rounded-box border border-error/30 bg-error/5 p-4">
+                  <strong class="block text-sm font-semibold text-error mb-1">Super User Reset Tools</strong>
+                  <p class="text-sm text-base-content/70">Use reporting reset to clear reporting ledger/history data. Use reporting + stock reset when this store also needs all selling-location stock on hand set to zero. Products, recipes, stock items, and item costings are preserved.</p>
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
+                    <button type="button" class="btn btn-warning btn-outline" data-settings-reset-reporting ${isResetting ? 'disabled' : ''}>
+                      ${smallIcon('database')}
+                      <span>${isResetting ? 'Resetting...' : 'Reset Reporting'}</span>
+                    </button>
+                    <button type="button" class="btn btn-error" data-settings-reset-reporting-stock ${isResetting ? 'disabled' : ''}>
+                      ${smallIcon('trash')}
+                      <span>${isResetting ? 'Resetting...' : 'Reset Reporting + Stock'}</span>
+                    </button>
+                  </div>
                 </div>
               </div>
             </section>
           ` : ''}
-        ` : `
-          ${renderAppearancePanel(draft, settingsState)}
-        `}
-      </div>
+        </div>
+      ` : `
+        ${renderAppearancePanel(draft, settingsState)}
+      `}
     </div>
 
     ${settingsState.appearanceModal === 'backgrounds' ? renderBackgroundModal(draft, settingsState) : ''}
@@ -165,18 +164,53 @@ export function renderSettings({ state, onSettingsAction = {} } = {}) {
   return view;
 }
 
-function renderGoLivePanel(draft = {}, state = {}, { isSaving = false } = {}) {
+// Shared card header used across the daisyUI-styled Business Settings panels: a small tinted
+// icon badge next to an eyebrow/title pair, matching daisyUI's card-title conventions.
+function panelHead(iconName, eyebrow, title) {
+  return `
+    <div class="flex items-center gap-3">
+      <span class="text-primary shrink-0">${smallIcon(iconName, 'w-6 h-6')}</span>
+      <div>
+        <p class="text-primary text-xs font-extrabold tracking-widest uppercase">${escapeHtml(eyebrow)}</p>
+        <h2 class="text-base font-semibold mt-0.5">${escapeHtml(title)}</h2>
+      </div>
+    </div>
+  `;
+}
+
+// Anchored to the bottom of the Yoco Integration card, set off from the main content by a
+// divider — deliberately its own section rather than sitting inline with the Go Live/Live copy.
+function renderRelaunchOnboardingSection(onboardingProgress, onRelaunchOnboarding) {
+  if (!onRelaunchOnboarding) return '';
+  return `
+    <div class="flex flex-wrap items-center justify-between gap-3 mt-2 pt-4 border-t border-base-200">
+      ${onboardingProgress ? `<p class="text-sm text-base-content/60 m-0">Setup: ${onboardingProgress.completed} of ${onboardingProgress.total} steps completed</p>` : '<span></span>'}
+      <button type="button" class="btn btn-outline btn-sm" data-settings-relaunch-onboarding>
+        Relaunch Setup Wizard
+      </button>
+    </div>
+  `;
+}
+
+function renderGoLivePanel(draft = {}, state = {}, { isSaving = false, onRelaunchOnboarding } = {}) {
+  // Feature: setup progress visible outside the wizard too, not only while it's open — the same
+  // 4-step completion count the wizard itself shows.
+  const onboardingProgress = state.settings?.onboardingProgress || null;
+  const relaunchSection = renderRelaunchOnboardingSection(onboardingProgress, onRelaunchOnboarding);
+
   if (draft.stockDepletionEnabled) {
     return `
-      <section class="settingsPanel settingsPanel--goLive">
-        <div class="settingsPanelHead">
-          <span>${icon('check')}</span>
-          <div>
-            <p>Yoco Integration</p>
-            <h2>Live</h2>
+      <section class="card bg-base-100/70 backdrop-blur-md border border-success/30 shadow-sm lg:col-span-4">
+        <div class="card-body gap-4 justify-between">
+          <div class="flex flex-col gap-4">
+            <div class="flex items-center justify-between gap-3">
+              ${panelHead('check', 'Yoco Integration', 'Live')}
+              <span class="badge badge-success gap-1 shrink-0">${smallIcon('check', 'w-3 h-3')} Live</span>
+            </div>
+            <p class="text-sm text-base-content/70">Completed Yoco sales are depleting stock.</p>
           </div>
+          ${relaunchSection}
         </div>
-        <p class="settingsFieldHint">Completed Yoco sales are depleting stock.</p>
       </section>
     `;
   }
@@ -190,28 +224,25 @@ function renderGoLivePanel(draft = {}, state = {}, { isSaving = false } = {}) {
   const isReady = checklist.every((item) => item.ready);
 
   return `
-    <section class="settingsPanel settingsPanel--goLive">
-      <div class="settingsPanelHead">
-        <span>${icon('rocket')}</span>
-        <div>
-          <p>Yoco Integration</p>
-          <h2>Go Live</h2>
+    <section class="card bg-base-100/70 backdrop-blur-md border border-base-300 shadow-sm lg:col-span-4">
+      <div class="card-body gap-4">
+        ${panelHead('rocket', 'Yoco Integration', 'Go Live')}
+        <p class="text-sm text-base-content/70">Once live, completed Yoco sales will start depleting stock automatically.</p>
+        <ul class="flex flex-col gap-2">
+          ${checklist.map((item) => `
+            <li class="flex items-center gap-2 text-sm ${item.ready ? 'text-success font-medium' : 'text-base-content/50'}">
+              <span class="grid place-items-center w-5 h-5 rounded-full border ${item.ready ? 'bg-success/15 border-success/40' : 'border-base-300'}">${item.ready ? '✓' : ''}</span>
+              <span>${escapeHtml(item.label)}</span>
+            </li>
+          `).join('')}
+        </ul>
+        ${!isReady ? '<p class="text-xs text-warning">Complete the checklist before enabling stock depletion.</p>' : ''}
+        <div class="card-actions">
+          <button type="button" class="btn btn-primary w-full" data-settings-go-live ${!isReady || isSaving ? 'disabled' : ''}>
+            ${isSaving ? 'Going Live...' : 'Go Live'}
+          </button>
         </div>
-      </div>
-      <p class="settingsFieldHint">Once live, completed Yoco sales will start depleting stock automatically.</p>
-      <ul class="settingsGoLiveChecklist">
-        ${checklist.map((item) => `
-          <li class="${item.ready ? 'is-ready' : ''}">
-            <span class="settingsGoLiveCheck">${item.ready ? '✓' : '○'}</span>
-            <span class="settingsGoLiveCheckLabel">${escapeHtml(item.label)}</span>
-          </li>
-        `).join('')}
-      </ul>
-      ${!isReady ? '<p class="settingsFieldHint settingsGoLiveBlockedHint">Complete the checklist before enabling stock depletion.</p>' : ''}
-      <div class="settingsActions settingsActions--goLive">
-        <button type="button" class="settingsPrimaryButton settingsGoLiveButton" data-settings-go-live ${!isReady || isSaving ? 'disabled' : ''}>
-          ${isSaving ? 'Going Live...' : 'Go Live'}
-        </button>
+        ${relaunchSection}
       </div>
     </section>
   `;
@@ -237,39 +268,36 @@ function renderCompanyTaxPanel(draft = {}, { isSaving = false } = {}) {
     ['Accounts Contact Phone', 'accountsContactPhone', '']
   ];
   return `
-    <section class="settingsPanel settingsPanel--taxInfo">
-      <div class="settingsPanelHead">
-        <span>${icon('receipt')}</span>
-        <div>
-          <p>Legal Details</p>
-          <h2>Company Tax Information</h2>
+    <section class="card bg-base-100/70 backdrop-blur-md border border-base-300 shadow-sm lg:col-span-12">
+      <div class="card-body gap-5">
+        ${panelHead('receipt', 'Legal Details', 'Company Tax Information')}
+
+        <div class="rounded-box border border-base-300 bg-base-200/50 p-4">
+          <strong class="block text-sm font-semibold mb-1">Workspace default</strong>
+          <p class="text-sm text-base-content/70">Used for supplier-facing documents unless a selling location has its own tax information enabled.</p>
         </div>
-      </div>
 
-      <div class="settingsSnapshotNote">
-        <strong>Workspace default</strong>
-        <p>Used for supplier-facing documents unless a selling location has its own tax information enabled.</p>
-      </div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          ${fields.map(([label, key, help]) => `
+            <label class="form-control w-full ${key === 'registeredAddressLine1' || key === 'registeredAddressLine2' ? 'sm:col-span-2' : ''}">
+              <div class="label"><span class="label-text font-semibold">${escapeHtml(label)}</span></div>
+              <input
+                type="${key === 'accountsContactEmail' ? 'email' : 'text'}"
+                class="input input-bordered w-full"
+                value="${escapeAttribute(taxInfo[key] || '')}"
+                placeholder="${escapeAttribute(help || label)}"
+                data-settings-tax-field="${escapeAttribute(key)}"
+                data-focus-key="settings-tax-${escapeAttribute(key)}"
+              />
+            </label>
+          `).join('')}
+        </div>
 
-      <div class="settingsFormGrid settingsFormGrid--tax">
-        ${fields.map(([label, key, help]) => `
-          <label class="${key === 'registeredAddressLine1' || key === 'registeredAddressLine2' ? 'settingsFormField--wide' : ''}">
-            <span>${escapeHtml(label)}</span>
-            <input
-              type="${key === 'accountsContactEmail' ? 'email' : 'text'}"
-              value="${escapeAttribute(taxInfo[key] || '')}"
-              placeholder="${escapeAttribute(help || label)}"
-              data-settings-tax-field="${escapeAttribute(key)}"
-              data-focus-key="settings-tax-${escapeAttribute(key)}"
-            />
-          </label>
-        `).join('')}
-      </div>
-
-      <div class="settingsActions settingsActions--legal">
-        <button type="button" class="settingsPrimaryButton" data-settings-save="legal" ${isSaving ? 'disabled' : ''}>
-          ${isSaving ? 'Saving...' : 'Save Legal Details'}
-        </button>
+        <div class="card-actions justify-end">
+          <button type="button" class="btn btn-primary" data-settings-save="legal" ${isSaving ? 'disabled' : ''}>
+            ${isSaving ? 'Saving...' : 'Save Legal Details'}
+          </button>
+        </div>
       </div>
     </section>
   `;
@@ -441,49 +469,45 @@ function normalizeLookup(value = '') {
   return String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
-function renderProfileLinkingPanel(draft = {}) {
+function renderProfileLinkingPanel(draft = {}, { fullWidth = false } = {}) {
   const orgId = String(draft.orgId || '').trim();
   const corpId = String(draft.corpId || '').trim();
   const status = orgId || corpId ? 'Linked' : 'Standalone';
   return `
-    <section class="settingsPanel settingsPanel--profileLinks">
-      <div class="settingsPanelHead">
-        <span>${icon('network')}</span>
-        <div>
-          <p>Profile Links</p>
-          <h2>Org / Corp Transfer Logic</h2>
+    <section class="card bg-base-100/70 backdrop-blur-md border border-base-300 shadow-sm ${fullWidth ? 'lg:col-span-12' : 'lg:col-span-6'}">
+      <div class="card-body gap-5">
+        ${panelHead('network', 'Profile Links', 'Org / Corp Transfer Logic')}
+
+        <div class="stats stats-vertical sm:stats-horizontal bg-base-100/70 backdrop-blur-md shadow-none border border-base-300 w-full">
+          <div class="stat py-3">
+            <div class="stat-title">Status</div>
+            <div class="stat-value text-lg">${escapeHtml(status)}</div>
+          </div>
+          <div class="stat py-3">
+            <div class="stat-title">External Transfers</div>
+            <div class="stat-value text-lg">${Number(draft.linkedSiteCount || 0) ? `${Number(draft.linkedSiteCount || 0)} Linked` : orgId || corpId ? 'Waiting for peer' : 'Off'}</div>
+          </div>
+          <div class="stat py-3">
+            <div class="stat-title">Access Mode</div>
+            <div class="stat-value text-lg">${draft.viewingOnly ? 'Viewing Only' : 'Full Workspace'}</div>
+          </div>
         </div>
-      </div>
 
-      <div class="settingsLinkSummary">
-        <article>
-          <small>Status</small>
-          <strong>${escapeHtml(status)}</strong>
-        </article>
-        <article>
-          <small>External Transfers</small>
-          <strong>${Number(draft.linkedSiteCount || 0) ? `${Number(draft.linkedSiteCount || 0)} Linked` : orgId || corpId ? 'Waiting for peer' : 'Off'}</strong>
-        </article>
-        <article>
-          <small>Access Mode</small>
-          <strong>${draft.viewingOnly ? 'Viewing Only' : 'Full Workspace'}</strong>
-        </article>
-      </div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <label class="form-control w-full">
+            <div class="label"><span class="label-text font-semibold">Org ID</span></div>
+            <input type="text" class="input input-bordered w-full" value="${escapeAttribute(orgId || 'Not linked')}" disabled />
+          </label>
+          <label class="form-control w-full">
+            <div class="label"><span class="label-text font-semibold">Corp ID</span></div>
+            <input type="text" class="input input-bordered w-full" value="${escapeAttribute(corpId || 'Not linked')}" disabled />
+          </label>
+        </div>
 
-      <div class="settingsFormGrid">
-        <label>
-          <span>Org ID</span>
-          <input type="text" value="${escapeAttribute(orgId || 'Not linked')}" disabled />
-        </label>
-        <label>
-          <span>Corp ID</span>
-          <input type="text" value="${escapeAttribute(corpId || 'Not linked')}" disabled />
-        </label>
-      </div>
-
-      <div class="settingsSnapshotNote">
-        <strong>Admin managed</strong>
-        <p>Org and Corp links are assigned from the Admin Portal so profile linking stays controlled. This workspace still uses Locations as selling locations inside one business profile.</p>
+        <div class="rounded-box border border-base-300 bg-base-200/50 p-4">
+          <strong class="block text-sm font-semibold mb-1">Admin managed</strong>
+          <p class="text-sm text-base-content/70">Org and Corp links are assigned from the Admin Portal so profile linking stays controlled. This workspace still uses Locations as selling locations inside one business profile.</p>
+        </div>
       </div>
     </section>
   `;
@@ -762,6 +786,17 @@ function getColorThemePreviewStyle(theme = {}) {
 }
 
 function bindSettingsEvents(view, onSettingsAction, draft = {}, settingsState = {}) {
+  view.querySelectorAll('[data-settings-vat-registered-toggle]').forEach((field) => {
+    field.addEventListener('change', () => {
+      const nextValue = field.checked;
+      // Revert the visual toggle immediately — the actual state only changes once the person
+      // confirms in the dialog (see requestVatRegisteredToggle in main.js), since this
+      // recalculates recipe costs and GRV VAT handling across the whole workspace.
+      field.checked = !nextValue;
+      onSettingsAction.onVatRegisteredToggle?.(nextValue);
+    });
+  });
+
   view.querySelectorAll('[data-settings-field]').forEach((field) => {
     const isTextLike = field.tagName === 'INPUT' && field.type !== 'checkbox' && field.type !== 'radio';
     if (isTextLike) {
@@ -952,6 +987,7 @@ function bindSettingsEvents(view, onSettingsAction, draft = {}, settingsState = 
   view.querySelectorAll('[data-settings-save-appearance]').forEach((button) => {
     button.addEventListener('click', () => onSettingsAction.onSaveAppearance?.());
   });
+  view.querySelector('[data-settings-relaunch-onboarding]')?.addEventListener('click', () => onSettingsAction.onRelaunchOnboarding?.());
   view.querySelector('[data-settings-go-live]')?.addEventListener('click', () => {
     onSettingsAction.onGoLive?.();
   });
@@ -1073,25 +1109,39 @@ function normalizeHourValue(value, fallback = 0) {
 function renderSettingsDropdown({ id, selectedValue, options = [], openDropdown = '', className = '', ariaLabel = '' }) {
   const selected = options.find((option) => String(option.value) === String(selectedValue));
   const isOpen = openDropdown === id;
+  const isCompact = className.includes('ReportingHour');
+  // Deliberately NOT using daisyUI's `dropdown`/`dropdown-content` classes: daisyUI v5's dropdown
+  // positioning relies on the CSS anchor-positioning API, which briefly renders the popup at its
+  // fallback position (screen center) before the anchor calculation resolves — very visible here
+  // since this whole component re-renders from scratch on every open/close rather than toggling
+  // an already-mounted element. Plain `relative`/`absolute` positioning has no such flash, and the
+  // menu is only rendered into the DOM at all while open, so there's nothing to mis-position.
   return `
-    <div class="settingsDropdown ${escapeAttribute(className)} ${isOpen ? 'settingsDropdown--open' : ''}" data-settings-dropdown-root>
-      <button type="button" data-settings-dropdown="${escapeAttribute(id)}" aria-expanded="${isOpen}" ${ariaLabel ? `aria-label="${escapeAttribute(ariaLabel)}"` : ''}>
-        <strong>${escapeHtml(selected?.label || 'Select')}</strong>
-        ${icon('chevronDown')}
+    <div class="relative ${isCompact ? '' : 'w-full'}" data-settings-dropdown-root>
+      <button type="button" class="btn btn-outline font-normal ${isCompact ? 'btn-sm w-28 justify-between gap-1 px-3' : 'btn-block justify-between'}" data-settings-dropdown="${escapeAttribute(id)}" aria-expanded="${isOpen}" ${ariaLabel ? `aria-label="${escapeAttribute(ariaLabel)}"` : ''}>
+        <span class="truncate">${escapeHtml(selected?.label || 'Select')}</span>
+        ${smallIcon('chevronDown', 'w-4 h-4 opacity-60')}
       </button>
-      <div class="settingsDropdownMenu">
-        ${options.map((option) => `
-          <button
-            type="button"
-            data-settings-option
-            data-settings-option-field="${escapeAttribute(id)}"
-            data-settings-option-value="${escapeAttribute(option.value)}"
-            class="${String(option.value) === String(selectedValue) ? 'is-active' : ''}"
-          >
-            ${escapeHtml(option.label)}
-          </button>
-        `).join('')}
-      </div>
+      ${isOpen ? `
+        <ul class="menu menu-sm gap-1 p-2 bg-base-100/80 backdrop-blur-md rounded-box shadow-lg border border-base-300/60 absolute top-full left-0 z-20 mt-1 flex-nowrap overflow-y-auto max-h-64 ${isCompact ? 'w-28' : 'w-full'}">
+          ${options.map((option) => {
+            const isSelected = String(option.value) === String(selectedValue);
+            return `
+            <li>
+              <button
+                type="button"
+                data-settings-option
+                data-settings-option-field="${escapeAttribute(id)}"
+                data-settings-option-value="${escapeAttribute(option.value)}"
+                class="btn btn-sm btn-block justify-start font-normal normal-case ${isSelected ? 'btn-primary' : 'btn-ghost'}"
+              >
+                ${escapeHtml(option.label)}
+              </button>
+            </li>
+          `;
+          }).join('')}
+        </ul>
+      ` : ''}
     </div>
   `;
 }
@@ -1126,7 +1176,8 @@ function createDefaultSettings(state = {}) {
 }
 
 function renderNotice(message, tone) {
-  return `<div class="settingsNotice settingsNotice--${tone}">${escapeHtml(message)}</div>`;
+  const toneClass = tone === 'error' ? 'alert-error' : tone === 'success' ? 'alert-success' : 'alert-warning';
+  return `<div class="alert ${toneClass} mb-4"><span>${escapeHtml(message)}</span></div>`;
 }
 
 function renderResetTotalsDialog(settingsState = {}) {
@@ -1185,6 +1236,12 @@ function renderToast(toast) {
       <button type="button" data-settings-toast-close aria-label="Dismiss">${icon('x')}</button>
     </div>
   `;
+}
+
+// Raw icon() SVGs carry no explicit width/height, so inside a flex/badge container they stretch
+// to fill the cross-axis instead of rendering at a sane icon size. This forces a fixed box.
+function smallIcon(name, cls = 'w-4 h-4') {
+  return `<span class="${cls} inline-flex shrink-0 [&>svg]:w-full [&>svg]:h-full">${icon(name)}</span>`;
 }
 
 function icon(name) {

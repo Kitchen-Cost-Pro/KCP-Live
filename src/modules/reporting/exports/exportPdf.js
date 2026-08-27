@@ -166,7 +166,7 @@ export async function reportResultsToPdfBytes(results = [], options = {}) {
 
 export async function downloadReportPdf(result = {}, options = {}) {
   const doc = await reportToPdfDocument(result, options);
-  const fileName = options.fileName || buildExportFileName(result, 'pdf');
+  const fileName = options.fileName || buildExportFileName(result, 'pdf', { workspaceName: options.workspaceName || options.branding?.companyName });
   const blob = doc.output('blob');
   triggerDownload(blob, fileName);
   return { fileName, document: doc };

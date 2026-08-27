@@ -10,7 +10,10 @@ test('Phase 58 reporting hours use aligned custom whole-hour dropdowns', () => {
   const service = read('src/services/settingsService.js');
   const main = read('src/main.js');
   const css = read('src/styles/settings.css');
-  assert.match(settings, /settingsFormField--wide settingsReportingHoursField/);
+  // Reporting Day Hours spans the full row width (sm:col-span-2 xl:col-span-3) instead of sharing
+  // a column with the other fields, and is grouped under one aria-label for the From/To pair.
+  assert.match(settings, /sm:col-span-2 xl:col-span-3/);
+  assert.match(settings, /role="group" aria-label="Reporting day hours"/);
   assert.match(settings, /settingsReportingHourDropdown/);
   assert.match(settings, /renderSettingsDropdown\(\{/);
   assert.doesNotMatch(settings, /class="settingsTimePart settingsReportingHourSelect"/);

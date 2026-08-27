@@ -32,8 +32,8 @@ import {
   calculateCostChangePercent,
   calculateExpectedClosingStock,
   calculatePriceRange,
+  calculateQuantityVariancePercent,
   calculateTheoreticalUsage,
-  calculateVariancePercent,
   calculateVolatilityPercent,
   calculateWeightedAverageCost
 } from '../engine/statistics.js';
@@ -191,7 +191,7 @@ export function auditPhase23FormulaContracts() {
     coefficientOfVariation: calculateCoefficientOfVariation([50, 55, 60]) > 0,
     theoreticalUsage: calculateTheoreticalUsage(25, 5, 10) === 40,
     theoreticalExpectedClosing: calculateExpectedClosingStock({ openingStock: 100, purchases: 20, transfersIn: 5, manufacturingIn: 0, theoreticalUsage: 35, wastage: 3, transfersOut: 5 }) === 82,
-    theoreticalVariancePercent: almostEqual(calculateVariancePercent(-3, 82), -3 / 82),
+    theoreticalVariancePercent: almostEqual(calculateQuantityVariancePercent(-3, 82), -3 / 82),
     accuracyPercent: almostEqual(calculateAccuracyPercent(79, 82), 1 - (3 / 82)),
     riskScore: calculateRiskScore({ probability: 90, financialImpact: 70, urgency: 80, dataConfidence: 100 }) > 0
   };
@@ -214,11 +214,11 @@ export function auditPhase23Exports() {
     theoreticalByItem: buildExportFileName({ report: getReportDefinition('theoretical_vs_actual'), view: 'by_item', filters: { from: '2026-07-01', to: '2026-07-31' } })
   };
   const expected = {
-    stockOnHand: 'stock-on-hand-2026-07-01-to-2026-07-31.csv',
-    grvLog: 'grv-log-2026-07-01-to-2026-07-31.csv',
-    purchaseOrders: 'purchase-orders-2026-07-01-to-2026-07-31.csv',
-    creditNotes: 'credit-notes-2026-07-01-to-2026-07-31.csv',
-    theoreticalByItem: 'theoretical-vs-actual-by-item-2026-07-01-to-2026-07-31.csv'
+    stockOnHand: 'KCP_Stock on Hand_2026-07-01-to-2026-07-31.csv',
+    grvLog: 'KCP_GRV Log_2026-07-01-to-2026-07-31.csv',
+    purchaseOrders: 'KCP_Purchase Orders_2026-07-01-to-2026-07-31.csv',
+    creditNotes: 'KCP_Credit Notes_2026-07-01-to-2026-07-31.csv',
+    theoreticalByItem: 'KCP_Theoretical vs Actual_by-item_2026-07-01-to-2026-07-31.csv'
   };
   const namingProblems = Object.keys(expected).filter((key) => fileNames[key] !== expected[key]).map((key) => `${key}: expected ${expected[key]}, got ${fileNames[key]}`);
   return { ok: baseAudit.ok && namingProblems.length === 0, problems: [...baseAudit.problems, ...namingProblems], fileNames };

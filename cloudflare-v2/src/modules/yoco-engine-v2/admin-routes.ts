@@ -1,14 +1,22 @@
 import type { AuthContext, Env } from '../../legacy/types';
-import type { YocoV2QueueMessage } from './contracts';
+import type { YocoV2QueueMessage, YocoV2EffectType } from './contracts';
 import type { YocoV2QueueEnv } from './capture';
-import { handleYocoV2ControlCentreRoute } from './admin-control-centre';
 import { yocoV2FeatureFlags } from './config';
 import { appendTimeline, markRawEventQueueFailure, markRawEventQueued, newId, nowIso, type Row } from './repository';
 import { recordYocoV2Diagnostic } from './observability';
 import { saveManualRefundAllocation } from './refund-resolver';
 import { runYocoV2Reconciliation, setYocoV2ReconciliationPause } from './reconciliation';
-import { getSaleEffectRuntime, pauseSaleEffect, resumeSaleEffect, type SaleEffectType } from './cutover';
-import { getRefundEffectRuntime, pauseRefundEffect, resumeRefundEffect, type RefundEffectType } from './refund-cutover';
+import { getEffectRuntime, pauseEffect, resumeEffect } from './effect-gate';
+import { countActiveYocoWebhookSubscriptions, disconnectYoco, getYocoConnection, reconcileYocoWebhookSubscription } from './integration-service';
+import { processYocoV2QueueMessage } from './processor';
+
+const RECEIPT_STATS_WINDOWS_MINUTES: Array<[string, number]> = [
+  ['last5m', 5],
+  ['last15m', 15],
+  ['last30m', 30],
+  ['last1h', 60],
+  ['last24h', 24 * 60]
+];
 
 function response(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
@@ -25,14 +33,12 @@ async function loadEvent(env: Env, workspaceId: string, rawEventId: string) {
   ).bind(workspaceId, rawEventId).first<Row>();
 }
 
-async function publishAdminReplay(
-  env: YocoV2QueueEnv,
+function buildAdminReplayMessage(
   event: Row,
   reason: string,
   options: Pick<YocoV2QueueMessage, 'force_refresh' | 'rerun_stage' | 'live_effects'> = {}
-): Promise<void> {
-  if (!env.YOCO_V2_EVENTS) throw new Error('YOCO_V2_EVENTS queue binding is not configured.');
-  const message: YocoV2QueueMessage = {
+): YocoV2QueueMessage {
+  return {
     raw_event_id: String(event.id),
     workspace_id: String(event.workspace_id),
     integration_id: String(event.integration_id),
@@ -42,6 +48,10 @@ async function publishAdminReplay(
     live_effects: false,
     ...options
   };
+}
+
+async function publishAdminReplay(env: YocoV2QueueEnv, message: YocoV2QueueMessage): Promise<void> {
+  if (!env.YOCO_V2_EVENTS) throw new Error('YOCO_V2_EVENTS queue binding is not configured.');
   await env.YOCO_V2_EVENTS.send(message, { contentType: 'json' });
 }
 
@@ -69,11 +79,11 @@ export async function handleYocoV2AdminRoute(
   if (!auth.uid) return response({ ok: false, error: 'Authentication required.' }, 401);
   if (auth.systemRole !== 'admin') return response({ ok: false, error: 'Administrator access required.' }, 403);
 
-  const suffix = resource.replace(/^yoco-v2\/admin\/?/, '');
+  // `resource` doubles as the routing key AND (for callWorkspaceDO-style fan-outs, unlike
+  // forwardToWorkspaceDO) may carry its own query string appended by the caller — strip it here
+  // so suffix matching below is exact; the actual query values still come from `url.searchParams`.
+  const suffix = resource.replace(/^yoco-v2\/admin\/?/, '').split('?')[0];
   const url = new URL(request.url);
-
-  const controlCentreResponse = await handleYocoV2ControlCentreRoute(request, env, auth, workspaceId, suffix);
-  if (controlCentreResponse) return controlCentreResponse;
 
   if (request.method === 'GET' && (suffix === '' || suffix === 'summary')) {
     const [summary, byType, ownership, shadow, runtime, refundShadow, reconciliation] = await Promise.all([
@@ -100,7 +110,16 @@ export async function handleYocoV2AdminRoute(
       env.DB.prepare(
         `SELECT
            (SELECT COUNT(*) FROM yoco_v2_domain_events WHERE workspace_id = ?1 AND event_type = 'sale.completed') AS canonical_sales,
+           -- A sale that resolved as UNSUPPORTED_ORDER_STATE never posts to reporting or stock —
+           -- correct behavior, but previously had zero visibility anywhere. Surfaced here so an
+           -- admin can tell "N sales were silently excluded from Operations" instead of assuming
+           -- Operations is complete by default.
+           (SELECT COUNT(*) FROM yoco_v2_domain_events WHERE workspace_id = ?1 AND event_type = 'sale.completed' AND resolution_status = 'UNSUPPORTED_ORDER_STATE') AS unsupported_order_state_sales,
            (SELECT COUNT(*) FROM yoco_v2_proposed_stock_movements WHERE workspace_id = ?1 AND COALESCE(warning_code, '') = '') AS stock_proposals,
+           -- Lines that resolved but never became a stock movement (unmapped item/modifier,
+           -- missing recipe, invalid UOM, etc.) — previously only visible one-by-one in each
+           -- order's processing timeline, never as an aggregate count.
+           (SELECT COUNT(*) FROM yoco_v2_proposed_stock_movements WHERE workspace_id = ?1 AND COALESCE(warning_code, '') <> '') AS unresolved_stock_proposals,
            (SELECT COUNT(*) FROM yoco_v2_sale_comparisons WHERE workspace_id = ?1) AS comparisons,
            (SELECT COUNT(*) FROM yoco_v2_sale_comparisons WHERE workspace_id = ?1 AND comparison_status = 'MATCHED') AS matched_comparisons,
            (SELECT COUNT(*) FROM yoco_v2_api_requests WHERE workspace_id = ?1) AS api_requests,
@@ -113,6 +132,7 @@ export async function handleYocoV2AdminRoute(
            (SELECT COUNT(*) FROM yoco_v2_manual_reviews WHERE workspace_id = ?1 AND status = 'OPEN') AS open_manual_reviews,
            (SELECT COUNT(*) FROM yoco_v2_proposed_refund_reporting WHERE workspace_id = ?1) AS refund_reporting_proposals,
            (SELECT COUNT(*) FROM yoco_v2_proposed_refund_stock_movements WHERE workspace_id = ?1 AND COALESCE(warning_code, '') = '') AS refund_stock_proposals,
+           (SELECT COUNT(*) FROM yoco_v2_proposed_refund_stock_movements WHERE workspace_id = ?1 AND COALESCE(warning_code, '') <> '') AS unresolved_refund_stock_proposals,
            (SELECT COUNT(*) FROM yoco_v2_refund_comparisons WHERE workspace_id = ?1) AS refund_comparisons`
       ).bind(workspaceId).first<Row>(),
       env.DB.prepare(
@@ -350,8 +370,16 @@ export async function handleYocoV2AdminRoute(
       if (!event) return response({ ok: false, error: 'Raw refund event was not found after allocation.' }, 409);
       if (!flags.yoco_v2_queue_enabled) return response({ ok: true, review, queued: false, message: 'Allocation saved. Queue is disabled, so re-resolution remains pending.' });
       await resetForAdminReplay(env, String(event.id), false);
-      await publishAdminReplay(env, event, 'manual-refund-allocation', { force_refresh: false, rerun_stage: 'all', live_effects: true });
+      const replayMessage = buildAdminReplayMessage(event, 'manual-refund-allocation', { force_refresh: false, rerun_stage: 'all', live_effects: true });
+      await publishAdminReplay(env, replayMessage);
       await markRawEventQueued(env.DB, String(event.id));
+      // Durable Cloudflare Queue delivery can lag well beyond its configured batch window (seen
+      // directly in production — see the sale replay action below for the full explanation), so
+      // also process inline here rather than leaving the admin waiting on queue latency alone. The
+      // publish above still lands as a durable, idempotent fallback if this inline attempt fails.
+      await processYocoV2QueueMessage(env, replayMessage).catch((cause) => {
+        console.error('[admin] inline manual-refund-allocation replay failed; durable queue fallback remains pending', cause);
+      });
       await appendTimeline(env.DB, {
         rawEventId: String(event.id),
         step: 'MANUAL_REFUND_ALLOCATION_SAVED',
@@ -402,47 +430,38 @@ export async function handleYocoV2AdminRoute(
 
   if (request.method === 'GET' && (suffix === 'cutover' || suffix === 'refund-cutover' || suffix === 'effects')) {
     const integrationId = String(url.searchParams.get('integrationId') || `yoco:${workspaceId}`);
-    const [saleReporting, saleStock, refundReporting, refundStock, ownership, saleControls, refundControls] = await Promise.all([
-      getSaleEffectRuntime(env, workspaceId, integrationId, 'SALE_REPORTING'),
-      getSaleEffectRuntime(env, workspaceId, integrationId, 'SALE_STOCK'),
-      getRefundEffectRuntime(env, workspaceId, integrationId, 'REFUND_REPORTING'),
-      getRefundEffectRuntime(env, workspaceId, integrationId, 'REFUND_STOCK'),
+    const [saleReporting, saleStock, refundReporting, refundStock, ownership, controls] = await Promise.all([
+      getEffectRuntime(env, workspaceId, integrationId, 'SALE_REPORTING'),
+      getEffectRuntime(env, workspaceId, integrationId, 'SALE_STOCK'),
+      getEffectRuntime(env, workspaceId, integrationId, 'REFUND_REPORTING'),
+      getEffectRuntime(env, workspaceId, integrationId, 'REFUND_STOCK'),
       env.DB.prepare(`SELECT * FROM integration_effect_ownership WHERE workspace_id=?1 AND integration_type='YOCO' ORDER BY effect_type`).bind(workspaceId).all<Row>(),
-      env.DB.prepare(`SELECT * FROM yoco_v2_effect_controls WHERE workspace_id=?1 AND integration_id=?2 ORDER BY effect_type`).bind(workspaceId, integrationId).all<Row>(),
-      env.DB.prepare(`SELECT * FROM yoco_v2_refund_effect_controls WHERE workspace_id=?1 AND integration_id=?2 ORDER BY effect_type`).bind(workspaceId, integrationId).all<Row>()
+      env.DB.prepare(`SELECT * FROM yoco_v2_effect_gate WHERE workspace_id=?1 AND integration_id=?2 ORDER BY effect_type`).bind(workspaceId, integrationId).all<Row>()
     ]);
+    const controlRows = controls.results || [];
     return response({
       ok: true,
       release: 'phase-v2-final-legacy-removal-reporting-audit',
       integrationId,
       ownership: ownership.results || [],
       runtimes: { SALE_REPORTING: saleReporting, SALE_STOCK: saleStock, REFUND_REPORTING: refundReporting, REFUND_STOCK: refundStock },
-      controls: { sales: saleControls.results || [], refunds: refundControls.results || [] },
+      controls: {
+        sales: controlRows.filter((r: Row) => String(r.effect_type).startsWith('SALE_')),
+        refunds: controlRows.filter((r: Row) => String(r.effect_type).startsWith('REFUND_'))
+      },
       historical_cutover_records_retained_for_audit: true
     });
   }
 
-  const saleEffectAction = suffix.match(/^(?:cutover\/)?effects\/(SALE_REPORTING|SALE_STOCK)\/(pause|resume)$/);
-  if (request.method === 'POST' && saleEffectAction) {
-    const effectType = saleEffectAction[1] as SaleEffectType;
-    const action = saleEffectAction[2];
+  const effectAction = suffix.match(/^(?:cutover\/|refund-cutover\/)?effects\/(SALE_REPORTING|SALE_STOCK|REFUND_REPORTING|REFUND_STOCK)\/(pause|resume)$/);
+  if (request.method === 'POST' && effectAction) {
+    const effectType = effectAction[1] as YocoV2EffectType;
+    const action = effectAction[2];
     const body = await request.json<{ integration_id?: string; reason?: string }>().catch(() => ({} as { integration_id?: string; reason?: string }));
     const integrationId = String(body.integration_id || `yoco:${workspaceId}`);
     const result = action === 'pause'
-      ? await pauseSaleEffect(env, { workspaceId, integrationId, effectType, actorId: auth.uid, reason: body.reason })
-      : await resumeSaleEffect(env, { workspaceId, integrationId, effectType, actorId: auth.uid });
-    return response({ ok: true, action, result });
-  }
-
-  const refundEffectAction = suffix.match(/^(?:refund-cutover\/)?effects\/(REFUND_REPORTING|REFUND_STOCK)\/(pause|resume)$/);
-  if (request.method === 'POST' && refundEffectAction) {
-    const effectType = refundEffectAction[1] as RefundEffectType;
-    const action = refundEffectAction[2];
-    const body = await request.json<{ integration_id?: string; reason?: string }>().catch(() => ({} as { integration_id?: string; reason?: string }));
-    const integrationId = String(body.integration_id || `yoco:${workspaceId}`);
-    const result = action === 'pause'
-      ? await pauseRefundEffect(env, { workspaceId, integrationId, effectType, actorId: auth.uid, reason: body.reason })
-      : await resumeRefundEffect(env, { workspaceId, integrationId, effectType, actorId: auth.uid });
+      ? await pauseEffect(env, { workspaceId, integrationId, effectType, actorId: auth.uid, reason: body.reason })
+      : await resumeEffect(env, { workspaceId, integrationId, effectType, actorId: auth.uid });
     return response({ ok: true, action, result });
   }
 
@@ -494,13 +513,48 @@ export async function handleYocoV2AdminRoute(
     return response({ ok: true, integrationId, ...result });
   }
 
-  const actionMatch = suffix.match(/^events\/([^/]+)\/(replay|requeue-dead-letter|manual-review|refetch|reresolve|repropose|recompare)$/);
+  const actionMatch = suffix.match(/^events\/([^/]+)\/(replay|requeue-dead-letter|manual-review|refetch|reresolve|repropose|recompare|discard-stock-effects)$/);
   if (request.method === 'POST' && actionMatch) {
     const rawEventId = decodeURIComponent(actionMatch[1]);
     const action = actionMatch[2];
     const event = await loadEvent(env, workspaceId, rawEventId);
     if (!event) return response({ ok: false, error: 'V2 raw event not found.' }, 404);
     if (Number(event.signature_valid || 0) !== 1) return response({ ok: false, error: 'Invalid-signature events cannot enter V2 processing.' }, 409);
+
+    // Cleans up a stock effect that was proposed but never actually applied to the stock ledger
+    // (e.g. a test order stuck by a since-fixed race condition) — deletes the unapplied proposal
+    // rows and marks the raw event for manual review so it's never auto-retried again. Refuses if
+    // a real stock_movements row already exists for this order, so this can never silently erase
+    // the record of an inventory change that genuinely happened. Does NOT touch the immutable raw
+    // event, the processing timeline, or the sale's reporting/financial record — those stay intact.
+    if (action === 'discard-stock-effects') {
+      const domainEvent = await env.DB.prepare(
+        `SELECT * FROM yoco_v2_domain_events WHERE raw_event_id = ?1 AND workspace_id = ?2 LIMIT 1`
+      ).bind(rawEventId, workspaceId).first<Row>();
+      if (!domainEvent) return response({ ok: false, error: 'No canonical sale found for this event.' }, 404);
+      const sourceOrderId = String(domainEvent.source_entity_id || '');
+      const existingMovements = await env.DB.prepare(
+        `SELECT COUNT(*) AS count FROM stock_movements
+          WHERE workspace_id = ?1 AND document_type = 'yoco_order' AND document_id = ?2 AND movement_type = 'sale_depletion'`
+      ).bind(workspaceId, sourceOrderId).first<Row>();
+      if (Number(existingMovements?.count || 0) > 0) {
+        return response({ ok: false, error: 'Refusing to discard: real stock movements already exist for this order.' }, 409);
+      }
+      await env.DB.batch([
+        env.DB.prepare(`DELETE FROM yoco_v2_proposed_stock_movements WHERE workspace_id = ?1 AND source_order_id = ?2`).bind(workspaceId, sourceOrderId),
+        env.DB.prepare(`DELETE FROM yoco_v2_live_sale_stock_effects WHERE workspace_id = ?1 AND source_order_id = ?2`).bind(workspaceId, sourceOrderId),
+        env.DB.prepare(`DELETE FROM yoco_v2_live_effect_outbox WHERE workspace_id = ?1 AND domain_event_id = ?2 AND effect_type = 'SALE_STOCK'`).bind(workspaceId, String(domainEvent.id)),
+        env.DB.prepare(`UPDATE yoco_v2_raw_events SET processing_status = 'MANUAL_REVIEW_REQUIRED', updated_at = ?2 WHERE id = ?1`).bind(rawEventId, nowIso())
+      ]);
+      await appendTimeline(env.DB, {
+        rawEventId,
+        step: 'ADMIN_STOCK_EFFECTS_DISCARDED',
+        status: 'MANUAL_REVIEW_REQUIRED',
+        message: 'Administrator discarded unapplied stock effect proposals for this order and marked the event for manual review. The immutable raw event, its timeline, and the sale reporting record are unaffected.',
+        metadata: { actor_uid: auth.uid, actor_email: auth.email, source_order_id: sourceOrderId }
+      });
+      return response({ ok: true, status: 'DISCARDED', sourceOrderId });
+    }
 
     if (action === 'manual-review') {
       await env.DB.prepare(
@@ -530,10 +584,11 @@ export async function handleYocoV2AdminRoute(
           : 'all';
     await resetForAdminReplay(env, rawEventId, action === 'requeue-dead-letter');
     try {
-      await publishAdminReplay(env, event, action, {
+      const replayMessage = buildAdminReplayMessage(event, action, {
         force_refresh: action === 'refetch',
         rerun_stage: rerunStage
       });
+      await publishAdminReplay(env, replayMessage);
       await markRawEventQueued(env.DB, rawEventId);
       await appendTimeline(env.DB, {
         rawEventId,
@@ -542,7 +597,17 @@ export async function handleYocoV2AdminRoute(
         message: `Administrator queued V2 shadow action ${action}.`,
         metadata: { actor_uid: auth.uid, actor_email: auth.email, action, rerun_stage: rerunStage, force_refresh: action === 'refetch', action_id: newId('yoco_v2_admin_action') }
       });
-      return response({ ok: true, status: 'QUEUED', action, rerunStage });
+      // The durable Cloudflare Queue message above is the fallback of record, but its delivery
+      // latency has been observed in production to run well past its configured 5s batch window
+      // (root cause not yet isolated — tracked separately). An admin waiting on a manual replay
+      // shouldn't be stuck on that: process inline here too and surface the real outcome now.
+      // Idempotent by design (same effect_key/proposal_key guards), so a later duplicate delivery
+      // from the queue is a harmless no-op.
+      const inlineResult = await processYocoV2QueueMessage(env, replayMessage).catch((cause) => {
+        console.error('[admin] inline replay failed; durable queue fallback remains pending', cause);
+        return null;
+      });
+      return response({ ok: true, status: 'QUEUED', action, rerunStage, inlineResult });
     } catch (cause) {
       const errorMessage = cause instanceof Error ? cause.message : String(cause);
       await markRawEventQueueFailure(env.DB, rawEventId, 'YOCO_V2_ADMIN_REPLAY_PUBLISH_FAILED', errorMessage);
@@ -565,6 +630,169 @@ export async function handleYocoV2AdminRoute(
         message: errorMessage
       });
       return response({ ok: false, error: 'Replay queue publication failed. The raw event remains available for retry.' }, 503);
+    }
+  }
+
+  // Workspace Health dashboard: per-workspace webhook call-rate + active subscription count.
+  if (request.method === 'GET' && suffix === 'receipt-stats') {
+    const [connection, subscriptions, outcome, ...windowCounts] = await Promise.all([
+      getYocoConnection(env, workspaceId),
+      countActiveYocoWebhookSubscriptions(env, workspaceId),
+      // A receipt counts as failed if signature verification rejected it, capture rejected it,
+      // or it was captured but never made it onto the processing queue. Everything else (including
+      // CAPTURE_DISABLED, a deliberate feature-flag state rather than a per-event failure) counts
+      // as successful — this mirrors what an operator actually needs to react to.
+      env.DB.prepare(
+        `SELECT
+           COUNT(*) AS total,
+           SUM(CASE
+             WHEN signature_status != 'VALID' THEN 1
+             WHEN capture_status IN ('REJECTED', 'FAILED', 'BUDGET_EXHAUSTED') THEN 1
+             WHEN queue_status = 'PUBLISH_FAILED' THEN 1
+             ELSE 0
+           END) AS failed
+         FROM yoco_v2_webhook_receipts
+        WHERE workspace_id = ?1 AND datetime(received_at) >= datetime('now', '-24 hours')`
+      ).bind(workspaceId).first<Row>(),
+      ...RECEIPT_STATS_WINDOWS_MINUTES.map(([, minutes]) =>
+        env.DB.prepare(
+          `SELECT COUNT(*) AS count FROM yoco_v2_webhook_receipts
+            WHERE workspace_id = ?1 AND datetime(received_at) >= datetime('now', ?2)`
+        ).bind(workspaceId, `-${minutes} minutes`).first<Row>()
+      )
+    ]);
+    const calls: Record<string, number> = {};
+    RECEIPT_STATS_WINDOWS_MINUTES.forEach(([key], index) => {
+      calls[key] = Number((windowCounts[index] as Row | null)?.count || 0);
+    });
+    const lastEvent = await env.DB.prepare(
+      `SELECT MAX(received_at) AS last_received_at FROM yoco_v2_webhook_receipts WHERE workspace_id = ?1`
+    ).bind(workspaceId).first<Row>();
+    const total24h = Number((outcome as Row | null)?.total || 0);
+    const failed24h = Number((outcome as Row | null)?.failed || 0);
+    return response({
+      ok: true,
+      workspaceId,
+      connectionStatus: String(connection?.status || 'disconnected'),
+      connectionActive: connection?.connection_active === 1,
+      lastError: String(connection?.last_error || ''),
+      activeSubscriptions: subscriptions.count,
+      subscriptionCheckError: subscriptions.error || '',
+      calls,
+      lastReceivedAt: String((lastEvent as Row | null)?.last_received_at || ''),
+      total24h,
+      failed24h,
+      succeeded24h: total24h - failed24h
+    });
+  }
+
+  // Workspace Health dashboard: bucketed call counts for the time-series chart. The central
+  // route computes bucket boundaries (so every workspace's series lines up on the same x-axis)
+  // and passes them here as windowStart/bucketMinutes/bucketCount; this is a single grouped query.
+  if (request.method === 'GET' && suffix === 'receipt-timeseries') {
+    const windowStart = String(url.searchParams.get('windowStart') || '');
+    const bucketMinutes = Math.max(1, Number(url.searchParams.get('bucketMinutes')) || 60);
+    const bucketCount = Math.min(500, Math.max(1, Number(url.searchParams.get('bucketCount')) || 24));
+    if (!windowStart) return response({ ok: false, error: 'windowStart is required.' }, 400);
+
+    const rows = await env.DB.prepare(
+      `SELECT CAST((julianday(received_at) - julianday(?2)) * 1440.0 / ?3 AS INTEGER) AS bucket_idx,
+              COUNT(*) AS count
+         FROM yoco_v2_webhook_receipts
+        WHERE workspace_id = ?1 AND datetime(received_at) >= datetime(?2)
+        GROUP BY bucket_idx`
+    ).bind(workspaceId, windowStart, bucketMinutes).all<Row>();
+
+    const buckets = new Array(bucketCount).fill(0);
+    for (const row of rows.results || []) {
+      const idx = Number((row as Row).bucket_idx);
+      if (Number.isInteger(idx) && idx >= 0 && idx < bucketCount) {
+        buckets[idx] = Number((row as Row).count || 0);
+      }
+    }
+    return response({ ok: true, workspaceId, buckets });
+  }
+
+  if (request.method === 'GET' && suffix === 'receipts') {
+    const limit = positiveInteger(url.searchParams.get('limit'), 50, 200);
+    const offset = positiveInteger(url.searchParams.get('offset'), 0, 100_000);
+    const rows = await env.DB.prepare(
+      `SELECT id, event_type, signature_status, capture_status, queue_status, source_reference,
+              trace_id, received_at
+         FROM yoco_v2_webhook_receipts
+        WHERE workspace_id = ?1
+        ORDER BY received_at DESC
+        LIMIT ?2 OFFSET ?3`
+    ).bind(workspaceId, limit, offset).all<Row>();
+    return response({ ok: true, rows: rows.results || [], limit, offset });
+  }
+
+  if (request.method === 'GET' && suffix === 'actions') {
+    const limit = positiveInteger(url.searchParams.get('limit'), 50, 200);
+    const rows = await env.DB.prepare(
+      `SELECT id, actor_uid, actor_email, action, target_type, target_id, reason, status,
+              created_at, completed_at
+         FROM yoco_v2_admin_actions
+        WHERE workspace_id = ?1
+        ORDER BY created_at DESC
+        LIMIT ?2`
+    ).bind(workspaceId, limit).all<Row>();
+    return response({ ok: true, rows: rows.results || [] });
+  }
+
+  // Manual trigger for the Phase 0 reconcile-to-one-subscription backstop. Not yet on a
+  // schedule (crons are disabled account-wide pending unrelated fixes) — callable on demand
+  // from the Webhook Health dashboard or directly for now.
+  if (request.method === 'POST' && suffix === 'reconcile-subscription') {
+    try {
+      const result = await reconcileYocoWebhookSubscription(env, workspaceId);
+      return response({ ...result, ok: true });
+    } catch (cause) {
+      return response({ ok: false, error: cause instanceof Error ? cause.message : String(cause) }, 503);
+    }
+  }
+
+  if (request.method === 'POST' && suffix === 'disconnect-all') {
+    const actionId = newId('yoco_v2_admin_action');
+    const startedAt = nowIso();
+    try {
+      const result = await disconnectYoco(env, workspaceId);
+      await env.DB.prepare(
+        `INSERT INTO yoco_v2_admin_actions
+          (id, workspace_id, integration_id, actor_uid, actor_email, action, target_type, target_id,
+           idempotency_key, previous_state_json, resulting_state_json, reason, status, trace_id, created_at, completed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'disconnect_all_subscriptions', 'yoco_connection', ?2,
+                 ?6, '{}', ?7, '', 'completed', ?6, ?8, ?8)`
+      ).bind(
+        actionId,
+        workspaceId,
+        `yoco:${workspaceId}`,
+        auth.uid || 'admin',
+        auth.email || '',
+        actionId,
+        JSON.stringify(result),
+        startedAt
+      ).run();
+      return response({ ok: true, ...result });
+    } catch (cause) {
+      const errorMessage = cause instanceof Error ? cause.message : String(cause);
+      await env.DB.prepare(
+        `INSERT INTO yoco_v2_admin_actions
+          (id, workspace_id, integration_id, actor_uid, actor_email, action, target_type, target_id,
+           idempotency_key, previous_state_json, resulting_state_json, reason, status, trace_id, created_at, completed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'disconnect_all_subscriptions', 'yoco_connection', ?2,
+                 ?6, '{}', '{}', ?7, 'failed', ?6, ?8, ?8)`
+      ).bind(
+        actionId,
+        workspaceId,
+        `yoco:${workspaceId}`,
+        auth.uid || 'admin',
+        auth.email || '',
+        actionId,
+        errorMessage,
+        startedAt
+      ).run();
+      return response({ ok: false, error: errorMessage }, 503);
     }
   }
 

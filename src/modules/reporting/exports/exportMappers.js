@@ -2,6 +2,7 @@ import { formatCell } from '../engine/formatters.js';
 import { zonedDateTimeStrings } from '../engine/timezone.js';
 import { safeNumber } from '../engine/calculations.js';
 import { text, toArray } from '../engine/grouping.js';
+import { buildExportFilename } from '../../../services/exportService.js';
 
 export const STANDARD_EXPORT_COLUMNS = [
   { key: 'date', label: 'Date', type: 'date' },
@@ -140,16 +141,18 @@ export function normalizeExportValue(value, column = {}, context = {}) {
   return String(value);
 }
 
-export function buildExportFileName(result = {}, extension = 'csv') {
-  const id = slugify(result.report?.exportFileNameBase || result.report?.id || result.id || 'report');
+export function buildExportFileName(result = {}, extension = 'csv', { workspaceName } = {}) {
+  const reportType = result.report?.title || result.report?.exportFileNameBase || result.report?.id || result.id || 'Report';
   const view = slugify(result.view);
   const includeView = shouldIncludeViewInFileName(result.report, result.view);
   const dateRange = buildDateRangeSlug(result.filters || {});
-  const parts = [id || 'report'];
-  if (includeView && view) parts.push(view);
-  if (dateRange) parts.push(dateRange);
-  else parts.push(new Date().toISOString().slice(0, 10));
-  return `${parts.join('-')}.${extension}`;
+  const filename = buildExportFilename({
+    workspaceName,
+    reportType,
+    suffix: includeView && view ? view : '',
+    date: dateRange
+  });
+  return `${filename}.${extension}`;
 }
 
 function mapRowToExport(row = {}, columns = [], result = {}, { formatted = true } = {}) {

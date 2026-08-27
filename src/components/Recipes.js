@@ -8,6 +8,15 @@ import { averageModifierOptionValue } from '../services/modifierCostService.js';
 let lastFocusedRecipeModalRequest = '';
 let _uomDocumentCloseHandler = null;
 
+// Matches the 'complete'/'missing' values normalizeRecipeItem() (recipeService.js) already sets
+// on every item's `status` field — filtering on the same field the rest of the app already uses
+// to decide "does this product have a usable recipe" (onboarding readiness, Go-Live checks).
+const RECIPE_STATUS_FILTER_OPTIONS = [
+  { value: '', label: 'All' },
+  { value: 'complete', label: 'Has Recipe' },
+  { value: 'missing', label: 'Missing Recipe' }
+];
+
 
 function getAccessibleSellingLocationOptions(locations = [], access = {}) {
   return getAccessibleLocationOptions(locations, access, { sellingOnly: true });
@@ -58,6 +67,7 @@ export function renderRecipes({ state, onRecipeFilterChange, onRecipeAction = {}
   const filters = {
     query: '',
     category: '',
+    recipeStatus: '',
     recipeView: 'products',
     ingredientQuery: '',
     ingredientCategory: '',
@@ -65,6 +75,7 @@ export function renderRecipes({ state, onRecipeFilterChange, onRecipeAction = {}
     locationId: '',
     openDropdown: '',
     categoryDropdownSearch: '',
+    recipeStatusDropdownSearch: '',
     ingredientCategoryDropdownSearch: '',
     locationIdDropdownSearch: '',
     modifierStockRuleOpen: false,
@@ -133,6 +144,14 @@ export function renderRecipes({ state, onRecipeFilterChange, onRecipeAction = {}
         searchValue: filters.categoryDropdownSearch,
         openDropdown: filters.openDropdown,
         options: categoryOptions
+      })}
+      ${renderDropdown({
+        id: 'recipeStatus',
+        label: 'Recipe Status',
+        value: filters.recipeStatus,
+        searchValue: filters.recipeStatusDropdownSearch,
+        openDropdown: filters.openDropdown,
+        options: RECIPE_STATUS_FILTER_OPTIONS
       })}
       ${locationOptions.length ? renderDropdown({
         id: 'locationId',
@@ -1265,7 +1284,11 @@ function renderRecipeSourceStockItemPanel(item = {}, stockItems = [], filters = 
     .sort((left, right) => Number(isRecipeSourceStockItem(right)) - Number(isRecipeSourceStockItem(left)) || String(left.name || '').localeCompare(String(right.name || '')))
     .slice(0, 100);
   const selectedLabel = selectedItem?.name || 'No non-stock item';
-  const warning = selectedItem && linkedRecipeLines.length === 0
+  // Only a sub-recipe/manufactured linked item builds its cost from its own recipe lines. A
+  // non-stock/raw/virtual item's cost comes straight from its unit_cost — zero recipe lines there
+  // is expected, not a problem, so the warning must not fire for it.
+  const linkedItemNeedsOwnRecipe = selectedItem && ['sub_recipe', 'manufactured'].includes(getIngredientTypeMeta(selectedItem).value);
+  const warning = linkedItemNeedsOwnRecipe && linkedRecipeLines.length === 0
     ? '<p class="recipesModule__sourceWarning">Linked stock item has no recipe lines.</p>'
     : '';
 
@@ -2024,7 +2047,7 @@ function renderRecipePickerModal(draftRecipe, recipes, filters) {
   const ingredientCategories = getCategories(ingredients);
   const selectedIds = new Set((recipes.pickerSelectedIds || []).map(String));
   const selectedIngredients = [...selectedIds]
-    .map((id) => ingredients.find((ingredient) => String(ingredient.id) === id))
+    .map((id) => findIngredientById(ingredients, id))
     .filter(Boolean)
     .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
   const isQuantityStep = recipes.pickerStep === 'quantity';
@@ -2166,13 +2189,28 @@ function getIngredientUomRatio(ingredient, selectedUnit) {
 }
 
 function renderRecipeLine(line, index, ingredients, options = {}) {
-  const ingredient = ingredients.find((item) => String(item.id) === String(line.ingId));
+  const ingredient = findIngredientById(ingredients, line.ingId);
   const readOnly = options.readOnly === true;
   if (!ingredient) {
+    // The ingredient is no longer in the active stock list. Rather than the item never having
+    // existed, this is almost always because the stock item was deleted after being used here —
+    // the backend still tells us its last-known name/unit (and whether it's deactivated vs. truly
+    // gone) via `line.name`/`line.active`, so surface that instead of a bare internal id.
+    // Keep the same column count/structure as a normal row (name+detail, qty, uom, cost, remove)
+    // so this doesn't blow up the recipesModule__line grid layout.
+    const lastKnownName = String(line.name || '').trim();
+    const reason = lastKnownName
+      ? (line.active === false ? `${lastKnownName} was deleted` : `${lastKnownName} is no longer available`)
+      : 'This ingredient no longer exists';
     return `
-      <article class="recipesModule__line">
-        <strong>Missing ingredient</strong>
-        <span>${escapeHtml(line.ingId)}</span>
+      <article class="recipesModule__line recipesModule__line--missing">
+        <div>
+          <strong>${escapeHtml(lastKnownName || 'Missing ingredient')}</strong>
+          <span>${escapeHtml(reason)}</span>
+        </div>
+        <span class="recipesModule__lineUomStatic">&mdash;</span>
+        <span class="recipesModule__lineUomStatic">${escapeHtml(String(line.unit || '').toUpperCase())}</span>
+        <strong>&mdash;</strong>
         ${readOnly ? '<span></span>' : `<button type="button" data-recipe-line-remove="${index}" aria-label="Remove missing ingredient">${icon('trash')}</button>`}
       </article>
     `;
@@ -2529,10 +2567,10 @@ function renderNoteRuleEditor(suggestion = {}, draft = {}, menuItems = [], ingre
   const needsSource = ['REMOVE_INGREDIENT', 'REPLACE_INGREDIENT'].includes(actionType);
   const needsReplacement = actionType === 'REPLACE_INGREDIENT';
   const needsQuantity = ['ADD_RECIPE', 'ADD_STOCK_ITEM'].includes(actionType);
-  const sourceIngredient = ingredients.find((item) => String(item.id) === String(draft.sourceStockItemId || ''));
-  const targetIngredient = ingredients.find((item) => String(item.id) === String(draft.targetOwnerId || ''));
+  const sourceIngredient = findIngredientById(ingredients, draft.sourceStockItemId);
+  const targetIngredient = findIngredientById(ingredients, draft.targetOwnerId);
   const targetRecipe = menuItems.find((item) => String(item.id) === String(draft.targetOwnerId || ''));
-  const replacementIngredient = ingredients.find((item) => String(item.id) === String(draft.replacementStockItemId || ''));
+  const replacementIngredient = findIngredientById(ingredients, draft.replacementStockItemId);
   const preview = actionType === 'ADD_RECIPE'
     ? `Deduct ${Number(draft.quantity || 1)} × ${targetRecipe?.name || 'selected recipe'}`
     : actionType === 'ADD_STOCK_ITEM'
@@ -2780,7 +2818,8 @@ function filterRecipeItems(items, filters) {
       String(item.yocoModifierGroupName || '').toLowerCase().includes(query) ||
       matchesBarcodeQuery(item, query);
     const matchesCategory = !filters.category || item.category === filters.category;
-    return matchesQuery && matchesCategory;
+    const matchesRecipeStatus = !filters.recipeStatus || item.status === filters.recipeStatus;
+    return matchesQuery && matchesCategory && matchesRecipeStatus;
   });
 }
 
@@ -2809,9 +2848,29 @@ function filterIngredients(ingredients, filters, draftRecipe) {
     .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
 }
 
+// Client-side dedup (dedupeStockItems in stockService.js) can merge two stock items that share a
+// name/category/unit into a single displayed entry, keeping one "primary" id and recording the
+// other id(s) in `mergedIds`. A saved recipe line can still reference the id that got merged away
+// — a plain `.id` match then fails even though the ingredient is clearly present in the list (just
+// under a different primary id), which is exactly what made a real ingredient look "missing" and
+// made the recipe screen's ingredient list look inconsistent with the Stock Items tab. Every
+// ingredient lookup by id must check `mergedIds` too, not just `.id`.
+function findIngredientById(ingredients = [], targetId) {
+  const id = String(targetId ?? '').trim();
+  if (!id) return null;
+  return ingredients.find((entry) => {
+    if (String(entry?.id ?? '') === id) return true;
+    const mergedIds = String(entry?.mergedIds || '')
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean);
+    return mergedIds.includes(id);
+  }) || null;
+}
+
 function calculateRecipeCost(recipe, ingredients, activeLocationId = '') {
   return (recipe || []).reduce((sum, line) => {
-    const ingredient = ingredients.find((item) => String(item.id) === String(line.ingId));
+    const ingredient = findIngredientById(ingredients, line.ingId);
     if (!ingredient) return sum;
     const yieldPct = ingredient.yieldFactor && ingredient.yieldFactor > 0 ? ingredient.yieldFactor / 100 : 1;
     const uomRatio = getIngredientUomRatio(ingredient, line.unit);

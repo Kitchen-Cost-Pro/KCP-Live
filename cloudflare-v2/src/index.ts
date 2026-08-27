@@ -23,6 +23,7 @@ import { normalizeYocoV2AdminActionPath } from './modules/yoco-engine-v2/admin-r
 
 export { WorkspaceDO } from './workspace-do';
 export { YocoV2RateGateDO } from './yoco-v2-rate-gate-do';
+export { YocoV2WriteBudgetDO } from './yoco-v2-write-budget-do';
 
 /** A legacy Env whose env.DB is the CENTRAL D1 — for central-plane handlers (auth/admin). */
 function centralLegacyEnv(env: Env): LegacyEnv {
@@ -67,7 +68,7 @@ async function dispatchCentral(request: Request, env: Env, url: URL): Promise<Re
     const workspaceId = decodeURIComponent(adminWorkspaceYocoM[1]);
     const action = decodeURIComponent(adminWorkspaceYocoM[2]);
     const allowedGetActions = new Set(['status', 'events']);
-    const allowedPostActions = new Set(['connect', 'disconnect', 'sync-catalogue', 'reset-webhook', 'test-webhook']);
+    const allowedPostActions = new Set(['connect', 'disconnect', 'sync-catalogue']);
     if ((request.method === 'GET' && allowedGetActions.has(action)) || (request.method === 'POST' && allowedPostActions.has(action))) {
       const adminSession = await requireAdmin(request, lenv);
       const auth = adminAuthContext(adminSession);
@@ -163,6 +164,98 @@ async function dispatchCentral(request: Request, env: Env, url: URL): Promise<Re
       return map;
     };
     return getAdminOverview(request, lenv, provider);
+  }
+
+  // Webhook & Workspace Health: one row per active workspace with call-rate windows and the
+  // live remote subscription count, so support can see subscription drift without opening Yoco.
+  if (request.method === 'GET' && url.pathname === '/api/admin/webhook-health') {
+    await requireAdmin(request, lenv);
+    const workspaceRows = await env.CENTRAL_DB.prepare(
+      `SELECT id, name, status FROM workspaces WHERE status = 'active' ORDER BY name COLLATE NOCASE ASC`
+    ).all<{ id: string; name: string; status: string }>();
+    const workspaces = workspaceRows.results || [];
+    const stats = await fanOutWorkspaceDOs(
+      env,
+      workspaces.map((row) => String(row.id)),
+      'yoco-v2/admin/receipt-stats',
+      { uid: 'admin', email: '', systemRole: 'admin' }
+    );
+    const statsByWorkspace = new Map(stats.map((r) => [r.workspaceId, r.data as any]));
+    const rows = workspaces.map((row) => {
+      const workspaceId = String(row.id);
+      const data = statsByWorkspace.get(workspaceId);
+      return {
+        workspaceId,
+        name: String(row.name || workspaceId),
+        connectionStatus: data?.ok ? data.connectionStatus : 'unknown',
+        connectionActive: Boolean(data?.connectionActive),
+        activeSubscriptions: Number(data?.activeSubscriptions || 0),
+        subscriptionCheckError: String(data?.subscriptionCheckError || (data?.ok ? '' : 'Could not reach workspace')),
+        calls: data?.calls || { last5m: 0, last15m: 0, last30m: 0, last1h: 0, last24h: 0 },
+        lastReceivedAt: String(data?.lastReceivedAt || ''),
+        lastError: String(data?.lastError || ''),
+        total24h: Number(data?.total24h || 0),
+        succeeded24h: Number(data?.succeeded24h || 0),
+        failed24h: Number(data?.failed24h || 0)
+      };
+    });
+    return json(request, env, { ok: true, workspaces: rows });
+  }
+
+  // Webhook & Workspace Health chart: bucketed call counts per workspace over a selectable
+  // window, aligned to shared bucket boundaries so every workspace's series shares one x-axis.
+  if (request.method === 'GET' && url.pathname === '/api/admin/webhook-health/timeseries') {
+    await requireAdmin(request, lenv);
+    const rangeParam = String(url.searchParams.get('range') || '24h');
+    const RANGE_CONFIG: Record<string, { bucketMinutes: number; bucketCount: number }> = {
+      '1h': { bucketMinutes: 5, bucketCount: 12 },
+      '24h': { bucketMinutes: 60, bucketCount: 24 },
+      '7d': { bucketMinutes: 1440, bucketCount: 7 }
+    };
+    const { bucketMinutes, bucketCount } = RANGE_CONFIG[rangeParam] || RANGE_CONFIG['24h'];
+    const range = RANGE_CONFIG[rangeParam] ? rangeParam : '24h';
+    const windowStartMs = Date.now() - bucketCount * bucketMinutes * 60_000;
+    const windowStart = new Date(windowStartMs).toISOString();
+    const labels: string[] = [];
+    for (let i = 0; i < bucketCount; i += 1) {
+      labels.push(new Date(windowStartMs + i * bucketMinutes * 60_000).toISOString());
+    }
+
+    const workspaceRows = await env.CENTRAL_DB.prepare(
+      `SELECT id, name FROM workspaces WHERE status = 'active' ORDER BY name COLLATE NOCASE ASC`
+    ).all<{ id: string; name: string }>();
+    const workspaces = workspaceRows.results || [];
+    const resource = `yoco-v2/admin/receipt-timeseries?windowStart=${encodeURIComponent(windowStart)}&bucketMinutes=${bucketMinutes}&bucketCount=${bucketCount}`;
+    const results = await fanOutWorkspaceDOs(env, workspaces.map((row) => String(row.id)), resource, { uid: 'admin', email: '', systemRole: 'admin' });
+    const resultsByWorkspace = new Map(results.map((r) => [r.workspaceId, r.data as any]));
+
+    const series = workspaces.map((row) => {
+      const workspaceId = String(row.id);
+      const data = resultsByWorkspace.get(workspaceId);
+      const buckets: number[] = Array.isArray(data?.buckets) ? data.buckets.map((n: unknown) => Number(n) || 0) : new Array(bucketCount).fill(0);
+      return {
+        workspaceId,
+        name: String(row.name || workspaceId),
+        data: buckets,
+        total: buckets.reduce((sum, n) => sum + n, 0)
+      };
+    });
+
+    return json(request, env, { ok: true, range, bucketMinutes, bucketCount, windowStart, labels, series });
+  }
+
+  // Write-budget observability: the gate is a single global Durable Object (not per-workspace),
+  // so this reads its state directly rather than fanning out to workspace DOs.
+  if (request.method === 'GET' && url.pathname === '/api/admin/webhook-health/write-budget') {
+    await requireAdmin(request, lenv);
+    if (!env.YOCO_V2_WRITE_BUDGET) {
+      return json(request, env, { ok: true, configured: false });
+    }
+    const stub = env.YOCO_V2_WRITE_BUDGET.get(env.YOCO_V2_WRITE_BUDGET.idFromName('global'));
+    const stateResponse = await stub.fetch('https://write-budget/state');
+    const state = await stateResponse.json<{ ok: boolean; state?: { dateKey: string; used: number } }>().catch(() => null);
+    const dailyCap = Math.max(1000, Math.min(100_000, Number(env.YOCO_V2_WRITE_BUDGET_DAILY_CAP) || 90_000));
+    return json(request, env, { ok: true, configured: true, dailyCap, ...(state?.state || { dateKey: '', used: 0 }) });
   }
 
   if (request.method === 'GET' && url.pathname === '/api/admin/org-sites') {
@@ -1088,11 +1181,23 @@ async function handle(request: Request, env: Env): Promise<Response> {
   // business effect executes in the request path.
   const yocoWebhookM = url.pathname.match(/^\/webhooks\/yoco\/([^/]+)$/);
   if (yocoWebhookM && request.method === 'POST') {
-    const wsId = decodeURIComponent(yocoWebhookM[1]);
-    const response = await forwardToWorkspaceDO(request, env, wsId, 'yoco-v2/webhook', { uid: 'yoco-webhook', email: '' });
-    const headers = new Headers(response.headers);
+    // Re-enabled 2026-08-21 after the Phase 0 (real subscription-dedup fix), Phase 1 (write-budget
+    // gate) and Phase 2 (unified effect gate) rebuild shipped and held clean in production. The DO
+    // cold-start migration crash that originally forced this off is already fixed (see
+    // WorkspaceDO.migrate()'s backoff handling). No reconciliation backfill was run for the outage
+    // window (2026-08-20 → today) — reconciliation's normal scheduled sweep will pick up anything
+    // missed on its own lookback window; a dedicated backfill can still be run later if needed.
+    const workspaceId = decodeURIComponent(yocoWebhookM[1]);
+    const doResponse = await forwardToWorkspaceDO(
+      request,
+      env,
+      workspaceId,
+      'yoco-v2/webhook',
+      { uid: 'yoco-webhook', email: '' }
+    );
+    const headers = new Headers(doResponse.headers);
     for (const [k, v] of Object.entries(corsHeaders(request, env))) headers.set(k, v);
-    return new Response(response.body, { status: response.status, headers });
+    return new Response(doResponse.body, { status: doResponse.status, headers });
   }
 
   // Gmail OAuth returns to a global callback URL, but the connected account is stored in the
@@ -1132,6 +1237,17 @@ async function handle(request: Request, env: Env): Promise<Response> {
   if (apiMatch) {
     const workspaceId = decodeURIComponent(apiMatch[1]);
     const resource = apiMatch[2];
+
+    // The Workforce module was removed from this Worker entirely (no route below handles
+    // `workforce/*` — grep confirms zero remaining references), but shared-device kiosk terminals
+    // running an older mobile app build still poll `workforce/shared/schedule` every 30s forever,
+    // waking this workspace's Durable Object for a route that can never succeed. Short-circuit
+    // before auth/DO so that dead client-side polling stops costing DO invocations, without
+    // needing every kiosk device redeployed first.
+    if (resource === 'workforce' || resource.startsWith('workforce/')) {
+      return withCors(request, env, json(request, env, { ok: false, error: 'Workforce is not available.' }, 410));
+    }
+
     const auth = await requireAuth(request, env);
     if (!auth) return json(request, env, { ok: false, error: 'Sign in required.' }, 401);
     const allowed = await assertWorkspaceAccess(env, auth, workspaceId);
@@ -1172,7 +1288,13 @@ export default {
         : /token|sign in|session|expired|missing bearer|authentication/i.test(raw)
           ? 401
           : 500;
-      const message = /token|session|expired|access|permission|denied|invalid|required|not found|sign in|password|email|already exists|duplicate|unique/i.test(raw)
+      // Deliberate validation errors thrown by route handlers (e.g. "X cannot be assigned as a
+      // recipe ingredient.", "A stock item named X already exists.") are safe and useful to show
+      // verbatim. The previous keyword list was too narrow and silently replaced clear, specific
+      // validation messages with a useless generic one, hiding the real (and actionable) reason.
+      // The denylist guards against ever surfacing a raw runtime/DB exception incidentally.
+      const looksLikeInternalException = /sqlite|d1_error|TypeError:|ReferenceError:|SyntaxError:|RangeError:|at Object\.|at async|stack trace|\bundefined is not\b/i.test(raw);
+      const message = !looksLikeInternalException && /token|session|expired|access|permission|denied|invalid|required|not found|sign in|password|email|already exists|duplicate|unique|cannot be|must be|not allowed|not permitted|is not configured|could not|non-stock item|no longer/i.test(raw)
         ? raw
         : 'Something went wrong. Please try again.';
       return json(request, env, { ok: false, error: message }, status);
@@ -1193,6 +1315,7 @@ export default {
     ).all<{ id: string }>();
     const ids = (list.results || []).map((r) => String(r.id)).filter(Boolean);
     console.log(`[low-stock-cron] evaluating ${ids.length} active workspaces`);
+    const isCatalogueSyncTick = _event.cron === '*/45 * * * *';
     await Promise.all(
       ids.flatMap((id) => [
         callWorkspaceDO(env, id, 'admin-action/low-stock-due', { uid: 'system', email: '' }, 'POST', {})
@@ -1200,7 +1323,13 @@ export default {
         callWorkspaceDO(env, id, 'admin-action/report-schedules-due', { uid: 'system', email: '' }, 'POST', {})
           .catch((cause) => { console.error(`[report-schedule-cron] ws=${id} failed: ${cause}`); return null; }),
         callWorkspaceDO(env, id, 'yoco-v2/reconciliation/scheduled', { uid: 'system', email: '', systemRole: 'queue' }, 'POST', {})
-          .catch((cause) => { console.error(`[yoco-v2-reconciliation-cron] ws=${id} failed: ${cause}`); return null; })
+          .catch((cause) => { console.error(`[yoco-v2-reconciliation-cron] ws=${id} failed: ${cause}`); return null; }),
+        // Menu/catalogue sync only needs to run on the 45-minute schedule, not every 15 minutes
+        // alongside the other jobs above — this guard keeps it from firing 3x as often as intended.
+        isCatalogueSyncTick
+          ? callWorkspaceDO(env, id, 'admin-action/catalogue-sync-due', { uid: 'system', email: '' }, 'POST', {})
+              .catch((cause) => { console.error(`[catalogue-sync-cron] ws=${id} failed: ${cause}`); return null; })
+          : Promise.resolve(null)
       ])
     );
   }

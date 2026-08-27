@@ -1,3 +1,4 @@
+import './styles/tailwind.css';
 import './styles/main.css';
 import './styles/chat.css';
 import './styles/reporting.css';
@@ -28,18 +29,32 @@ import {
 import {
   exportWorkspaceSnapshot,
   getGoLiveReadiness,
+  getOnboardingReadiness,
   getStockCategoryOptions,
   getYocoCategoryOptions,
   getWorkspaceSettingsSnapshot,
   importWorkspaceSnapshot,
   normalizeSettings,
   savePersonalSettings,
+  saveOnboardingState,
   saveWorkspaceSettings
 } from './services/settingsService.js';
+import {
+  bindOnboardingResumeButtonEvents,
+  bindOnboardingWizardShellEvents,
+  firstIncompleteOnboardingStep,
+  getOnboardingProgress,
+  getWizardStep,
+  isOnboardingStepComplete,
+  renderOnboardingResumeButton,
+  renderOnboardingWizardShell,
+  updateOnboardingWizardContent
+} from './components/OnboardingWizard.js';
 import { ACTION_PERMISSION_MAP, canManagePermissionSets, ensureExplicitDataPermissionSchema, getAccessRenderRevision, hasPermission, hasSectionAccess, normalizeRoleName, resolveRoleDefinition, toRoleLabel } from './services/roleService.js';
 import { buildSupplierPurchaseOrderPdfFile as buildSupplierPurchaseOrderPdfDocument, buildManufacturingBuilderXlsx, downloadFileBlob, downloadStyledRecipeTemplateXlsx, downloadStyledStockTemplateXlsx, parseDataFile } from './services/dataService.js';
 import { KCP_PDF_THEME } from './utils/pdfTheme.js';
 import {
+  buildExportFilename,
   buildMenuCatalogueRows,
   buildGoodsReceiptDocumentRows,
   buildManufacturingRows,
@@ -53,7 +68,7 @@ import {
   exportSchemas,
 } from './services/exportService.js';
 import { callCloudflareWorkspaceRoute, clearApiCache } from './services/cloudflareApi.js';
-import { sendSupplierEmailWithGmail, syncYocoCatalogue, syncYocoSales } from './services/integrationService.js';
+import { sendSupplierEmailWithGmail, subscribeYocoIntegration, syncYocoCatalogue, syncYocoCatalogueIfDue, syncYocoSales } from './services/integrationService.js';
 import { fetchSystemBroadcast } from './services/systemBroadcastService.js';
 import { DEFAULT_STOCK_LOCATION_ID, DEFAULT_STOCK_LOCATION_NAME } from './services/locationModel.js';
 import {
@@ -71,6 +86,7 @@ import {
   scheduleAppDropdownPortalRefresh
 } from './utils/appDropdownPortal.js';
 import { isStockCountableItem, isTransferEligibleStockItem } from './services/stockCountEligibility.js';
+import { deriveStockItemType } from './utils/stockItemType.js';
 // Canonical per-location balance resolver (same one the Transfers UI uses to show before/after),
 // so the transfer insufficient-stock validation resolves the source balance identically.
 import { getLocationStock as resolveLocationStock } from './utils/stockBalances.js';
@@ -198,6 +214,7 @@ export const appState = {
   workspaceError: '',
   systemBroadcast: null,
   importNotification: null,
+  onboarding: null,
   access: createAccessState('idle'),
   route: {
     active: getInitialRoute()
@@ -234,8 +251,18 @@ let systemBroadcastRefreshTimer = null;
 let integrationAutoSyncTimer = null;
 let catalogueAutoSyncTimer = null;
 let dataVersionPollTimer = null;
+// Consecutive data-version poll failures. Used to back off the poll interval so a struggling or
+// backed-off backend (e.g. a Durable Object waiting out a migration circuit-breaker) isn't
+// hammered at full 15-second cadence forever, from every open browser tab, on every workspace —
+// that amplification is exactly what turned one backend issue into a much bigger one previously.
+let dataVersionPollFailures = 0;
 let dataVersionPollVisibilityHandler = null;
 let lastSeenDataVersion = null;
+// Monotonic guard against out-of-order background stock refreshes. Any in-flight
+// stock fetch that was started BEFORE the most recent local mutation (delete/save)
+// is stale by the time it resolves and must never be allowed to overwrite state —
+// this is what caused deleted items to silently reappear after a live poll landed late.
+let stockMutationToken = 0;
 let _integrationVisibilityHandler = null;
 let _globalSavingOverlay = null;
 let accessSubscriptionToken = 0;
@@ -593,7 +620,881 @@ function hideGlobalSaving() {
   }
 }
 
+// Called once per login/workspace-open (see selectWorkspace). The backend only actually reaches
+// out to Yoco when the catalogue is stale — see postSyncCatalogueIfDue — so this is cheap to call
+// on every login: most of the time it costs one D1 read on the worker and nothing else, and it's
+// what keeps the menu up to date for someone opening the app after being away, without needing the
+// (currently disabled) cron trigger.
+function requestCatalogueSyncIfDue(workspaceId) {
+  if (!workspaceId) return;
+  syncYocoCatalogueIfDue(workspaceId).catch(() => { /* best-effort, silent */ });
+}
+
+// Onboarding wizard: sequences the EXISTING supplier/stock/recipe bulk-import tools and the Yoco
+// connect/sync flow for a brand-new, fully-empty workspace. No new import/sync logic lives here —
+// every action below delegates straight to the same functions the standalone Suppliers/StockItems/
+// Recipes/Integrations screens already use.
+
+// One-shot promise wrapper around subscribeYocoIntegration (which is subscribe-shaped for
+// consistency with the other integration status feeds, but only ever calls back once — there is
+// no ongoing polling underneath it).
+function fetchYocoStatusOnce(workspaceId) {
+  return new Promise((resolve) => {
+    const unsubscribe = subscribeYocoIntegration(workspaceId, (status) => {
+      unsubscribe();
+      resolve(status);
+    });
+  });
+}
+
+async function maybeOpenOnboardingWizard(workspaceId, settings) {
+  if (!workspaceId || settings?.onboarding?.dismissed) return;
+  try {
+    const [readiness, yoco] = await Promise.all([
+      getOnboardingReadiness(workspaceId),
+      fetchYocoStatusOnce(workspaceId)
+    ]);
+    if (readiness.productCount > 0 || readiness.supplierCount > 0 || readiness.stockItemCount > 0) return;
+    if (appState.workspace?.id !== workspaceId) return; // workspace changed while this was in flight
+    appState.onboarding = {
+      open: true,
+      welcome: true,
+      // Feature: skip straight past whichever steps are already done (e.g. Yoco was connected in
+      // a previous session) instead of always starting at step 1.
+      wizardStep: firstIncompleteOnboardingStep({ counts: readiness, yoco }),
+      actionStatus: '',
+      actionError: '',
+      counts: readiness,
+      yoco,
+      pendingImport: null,
+      quickAdd: null,
+      recipeBuilder: null,
+      // Admin-console-only flag (workspace_settings.raw_json.ai_onboarding_enabled) — workspace
+      // users can't turn this on themselves. See postWorkspaceAiExtract in the worker.
+      aiOnboardingEnabled: settings?.ai_onboarding_enabled === true
+    };
+    renderApp();
+  } catch {
+    /* best-effort — never block login on this */
+  }
+}
+
+async function refreshOnboardingYocoStatus(workspaceId) {
+  const status = await fetchYocoStatusOnce(workspaceId);
+  if (!appState.onboarding || appState.workspace?.id !== workspaceId) return;
+  appState.onboarding = { ...appState.onboarding, yoco: status };
+  renderApp();
+}
+
+async function refreshOnboardingCounts() {
+  const workspaceId = appState.workspace?.id;
+  if (!workspaceId || !appState.onboarding) return;
+  try {
+    const counts = await getOnboardingReadiness(workspaceId);
+    if (!appState.onboarding || appState.workspace?.id !== workspaceId) return;
+    appState.onboarding = { ...appState.onboarding, counts };
+    renderApp();
+  } catch {
+    /* live counts are a nice-to-have; leave the previous values on failure */
+  }
+}
+
+// Direct jump — used by clicking a step number in the steps nav. Always honors exactly what was
+// clicked, no skipping: an explicit choice overrides the "skip completed steps" behavior below.
+function setOnboardingStep(step) {
+  if (!appState.onboarding) return;
+  appState.onboarding = { ...appState.onboarding, wizardStep: Math.min(5, Math.max(1, Number(step) || 1)), pendingImport: null };
+  renderApp();
+}
+
+// Next/Back — skip forward past any step that's already done (feature: don't make someone click
+// through an import step for data that's already there). Only Next skips; Back always goes to the
+// immediately previous step, since landing on a completed step to review it is reasonable, but
+// skipping past one on the way back isn't.
+function onboardingGoNext() {
+  if (!appState.onboarding) return;
+  let next = getWizardStep(appState.onboarding) + 1;
+  while (next < 5 && isOnboardingStepComplete(next, appState.onboarding)) next += 1;
+  setOnboardingStep(Math.min(5, next));
+}
+
+function onboardingGoBack() {
+  if (!appState.onboarding) return;
+  setOnboardingStep(Math.max(1, getWizardStep(appState.onboarding) - 1));
+}
+
+// Closing via X, clicking the backdrop, or "Skip for now" — none of these mean "done", just "not
+// right now". They must NOT persist a dismissed flag: the whole point of this wizard is that it
+// keeps coming back on every login while the workspace is still genuinely empty (see
+// maybeOpenOnboardingWizard's zero-counts check), so a closed tab or a skipped session doesn't
+// lose the nudge. Only finishOnboardingWizard (the actual "Finish" button on step 5) persists.
+function closeOnboardingWizard() {
+  appState.onboarding = null;
+  renderApp();
+}
+
+// Brings the wizard back after it was minimized (not dismissed) — e.g. via "Resume Setup" after
+// navigating away for "Add one manually instead". Refreshes counts/connection status so anything
+// just added by hand is reflected immediately, on the same step it was left on.
+async function reopenOnboardingWizard() {
+  if (!appState.onboarding) return;
+  appState.onboarding = { ...appState.onboarding, open: true };
+  renderApp();
+  const workspaceId = appState.workspace?.id;
+  if (workspaceId) refreshOnboardingYocoStatus(workspaceId);
+  await refreshOnboardingCounts();
+}
+
+async function finishOnboardingWizard() {
+  const workspaceId = appState.workspace?.id;
+  const lastStep = appState.onboarding?.wizardStep || 1;
+  appState.onboarding = null;
+  renderApp();
+  if (!workspaceId) return;
+  try {
+    await saveOnboardingState(workspaceId, { dismissed: true, completedAt: new Date().toISOString(), lastStep: String(lastStep) });
+  } catch {
+    /* if this write fails, the wizard simply reopens on the next login — acceptable */
+  }
+}
+
+async function onboardingSyncNow() {
+  const workspaceId = appState.workspace?.id;
+  if (!workspaceId || !appState.onboarding) return;
+  appState.onboarding = { ...appState.onboarding, actionStatus: 'syncing', actionError: '' };
+  renderApp();
+  try {
+    await syncYocoCatalogue(workspaceId, { resetWebhook: false });
+    appState.onboarding = { ...appState.onboarding, actionStatus: '' };
+    refreshOnboardingYocoStatus(workspaceId);
+    await refreshOnboardingCounts();
+  } catch (error) {
+    appState.onboarding = { ...appState.onboarding, actionStatus: '', actionError: error.message || 'Catalogue sync failed.' };
+  }
+  renderApp();
+}
+
+function startOnboardingWizard() {
+  if (!appState.onboarding) return;
+  appState.onboarding = { ...appState.onboarding, welcome: false };
+  renderApp();
+}
+
+// Yoco connect is a plain API call (no OAuth redirect — see connectYocoIntegration), so it can
+// happen right here inline instead of sending the user to Settings > Integrations.
+async function onboardingConnectYoco(apiKey) {
+  const workspaceId = appState.workspace?.id;
+  if (!workspaceId || !appState.onboarding) return;
+  if (!apiKey) {
+    appState.onboarding = { ...appState.onboarding, actionError: 'Enter your Yoco API key first.' };
+    renderApp();
+    return;
+  }
+  appState.onboarding = { ...appState.onboarding, actionStatus: 'connecting', actionError: '' };
+  renderApp();
+  try {
+    const { connectYocoIntegration } = await import('./services/integrationService.js');
+    await connectYocoIntegration(workspaceId, apiKey);
+    appState.onboarding = appState.onboarding ? { ...appState.onboarding, actionStatus: '' } : null;
+    refreshOnboardingYocoStatus(workspaceId);
+    await refreshOnboardingCounts();
+  } catch (error) {
+    appState.onboarding = appState.onboarding ? { ...appState.onboarding, actionStatus: '', actionError: error.message || 'Could not connect Yoco.' } : null;
+  }
+  renderApp();
+}
+
+// "Add one manually instead" for Suppliers/Stock Items used to navigate to the real screen and
+// open its full editor. Only `name` is required by upsertSupplier/upsertStockItem — everything
+// else on the real editors is optional/defaulted — so a small inline quick-add form here, calling
+// the same service functions those editors use, covers onboarding without leaving the modal.
+function onboardingToggleQuickAdd(kind) {
+  if (!appState.onboarding) return;
+  appState.onboarding = { ...appState.onboarding, quickAdd: { kind }, actionError: '' };
+  renderApp();
+}
+
+function onboardingCancelQuickAdd() {
+  if (!appState.onboarding) return;
+  appState.onboarding = { ...appState.onboarding, quickAdd: null };
+  renderApp();
+}
+
+async function onboardingSubmitQuickAddSupplier(fields) {
+  const workspaceId = appState.workspace?.id;
+  if (!workspaceId || !appState.onboarding) return;
+  const name = String(fields.name || '').trim();
+  if (!name) {
+    appState.onboarding = { ...appState.onboarding, actionError: 'Enter a supplier name.' };
+    renderApp();
+    return;
+  }
+  appState.onboarding = { ...appState.onboarding, actionStatus: 'importing', actionError: '' };
+  renderApp();
+  try {
+    const { upsertSupplier } = await import('./services/supplierService.js');
+    await upsertSupplier(workspaceId, { name, contactPerson: fields.contactPerson || '', phone: fields.phone || '' });
+    appState.onboarding = appState.onboarding ? { ...appState.onboarding, actionStatus: '', quickAdd: null } : null;
+    await refreshOnboardingCounts();
+    showOnboardingToast(`✅ "${name}" added.`, 'success');
+  } catch (error) {
+    appState.onboarding = appState.onboarding ? { ...appState.onboarding, actionStatus: '', actionError: error.message || 'Could not add supplier.' } : null;
+  }
+  renderApp();
+}
+
+async function onboardingSubmitQuickAddStock(fields) {
+  const workspaceId = appState.workspace?.id;
+  if (!workspaceId || !appState.onboarding) return;
+  const name = String(fields.name || '').trim();
+  if (!name) {
+    appState.onboarding = { ...appState.onboarding, actionError: 'Enter a stock item name.' };
+    renderApp();
+    return;
+  }
+  appState.onboarding = { ...appState.onboarding, actionStatus: 'importing', actionError: '' };
+  renderApp();
+  try {
+    const { upsertStockItem } = await import('./services/stockService.js');
+    await upsertStockItem(workspaceId, { name, cost: fields.cost || 0 });
+    appState.onboarding = appState.onboarding ? { ...appState.onboarding, actionStatus: '', quickAdd: null } : null;
+    await refreshOnboardingCounts();
+    showOnboardingToast(`✅ "${name}" added.`, 'success');
+  } catch (error) {
+    appState.onboarding = appState.onboarding ? { ...appState.onboarding, actionStatus: '', actionError: error.message || 'Could not add stock item.' } : null;
+  }
+  renderApp();
+}
+
+// "Build recipes one at a time in Recipes" used to navigate to the real Recipes screen and open
+// its full recipe editor. This builds a recipe for an EXISTING product (already synced from
+// Yoco, just missing a recipe) via updateRecipe — no new product is created — capped at a fixed
+// 4 ingredient rows rather than reproducing the real editor's dynamic row table.
+async function onboardingToggleRecipeBuilder() {
+  if (!appState.onboarding) return;
+  const workspaceId = appState.workspace?.id;
+  if (!workspaceId) return;
+  appState.onboarding = { ...appState.onboarding, recipeBuilder: { loading: true, products: [], stockItems: [] }, actionError: '' };
+  renderApp();
+  try {
+    const { fetchRecipeItems } = await import('./services/recipeService.js');
+    const { items, ingredients } = await fetchRecipeItems(workspaceId);
+    const products = (items || [])
+      .filter((item) => item.id && item.name && String(item.status || '').toLowerCase() === 'missing')
+      .map((item) => ({ id: item.id, name: item.name }));
+    const stockItems = (ingredients || [])
+      .filter((ing) => ing.id && ing.name)
+      .map((ing) => ({ id: ing.id, name: ing.name }));
+    if (!appState.onboarding) return;
+    appState.onboarding = { ...appState.onboarding, recipeBuilder: { loading: false, products, stockItems, itemsById: Object.fromEntries((items || []).map((item) => [item.id, item])) } };
+  } catch (error) {
+    if (!appState.onboarding) return;
+    appState.onboarding = { ...appState.onboarding, recipeBuilder: null, actionError: error.message || 'Could not load products.' };
+  }
+  renderApp();
+}
+
+function onboardingCancelRecipeBuilder() {
+  if (!appState.onboarding) return;
+  appState.onboarding = { ...appState.onboarding, recipeBuilder: null };
+  renderApp();
+}
+
+async function onboardingSubmitQuickRecipe({ productId, ingredients }) {
+  const workspaceId = appState.workspace?.id;
+  if (!workspaceId || !appState.onboarding?.recipeBuilder) return;
+  const product = appState.onboarding.recipeBuilder.itemsById?.[productId];
+  if (!product) {
+    appState.onboarding = { ...appState.onboarding, actionError: 'Select a product first.' };
+    renderApp();
+    return;
+  }
+  if (!ingredients.length) {
+    appState.onboarding = { ...appState.onboarding, actionError: 'Add at least one ingredient with a quantity.' };
+    renderApp();
+    return;
+  }
+  appState.onboarding = { ...appState.onboarding, actionStatus: 'savingRecipe', actionError: '' };
+  renderApp();
+  try {
+    const { updateRecipe } = await import('./services/recipeService.js');
+    const recipeLines = ingredients.map((row) => ({ stockItemId: row.stockItemId, qty: Number(row.qty) || 0 }));
+    await updateRecipe(workspaceId, product, recipeLines);
+    appState.onboarding = appState.onboarding ? { ...appState.onboarding, actionStatus: '', recipeBuilder: null } : null;
+    await refreshOnboardingCounts();
+    showOnboardingToast(`✅ Recipe saved for "${product.name}".`, 'success');
+  } catch (error) {
+    appState.onboarding = appState.onboarding ? { ...appState.onboarding, actionStatus: '', actionError: error.message || 'Could not save recipe.' } : null;
+  }
+  renderApp();
+}
+
+let onboardingToastTimer = null;
+function showOnboardingToast(message, type = 'success') {
+  if (!appState.onboarding) return;
+  if (onboardingToastTimer) window.clearTimeout(onboardingToastTimer);
+  appState.onboarding = { ...appState.onboarding, toast: { message, type } };
+  renderApp();
+  onboardingToastTimer = window.setTimeout(() => {
+    onboardingToastTimer = null;
+    if (!appState.onboarding?.toast || appState.onboarding.toast.message !== message) return;
+    appState.onboarding = { ...appState.onboarding, toast: null };
+    renderApp();
+  }, 4200);
+}
+
+const ONBOARDING_IMPORT_NOUNS = { suppliers: 'supplier', stock: 'stock item', recipes: 'recipe' };
+
+async function onboardingRunImport(importFn, { kind, count } = {}) {
+  if (!appState.onboarding) return;
+  appState.onboarding = { ...appState.onboarding, actionStatus: 'importing', actionError: '' };
+  renderApp();
+  try {
+    await importFn();
+    appState.onboarding = appState.onboarding ? { ...appState.onboarding, actionStatus: '' } : null;
+    await refreshOnboardingCounts();
+    const noun = ONBOARDING_IMPORT_NOUNS[kind] || 'item';
+    const n = Number(count) || 0;
+    showOnboardingToast(n > 0 ? `✅ ${n} ${noun}${n === 1 ? '' : 's'} imported.` : 'Import complete.', 'success');
+  } catch (error) {
+    appState.onboarding = appState.onboarding ? { ...appState.onboarding, actionStatus: '', actionError: error.message || 'Import failed.' } : null;
+    renderApp();
+  }
+}
+
+// Feature: preview before committing. A selected file is parsed and mapped/validated FIRST
+// (reusing the exact same mapping functions the real import already calls internally — no
+// duplicated validation logic), and shown as "N ready, M will be skipped" before anything is
+// written. Only onboardingConfirmImportPreview actually calls the real import function.
+let onboardingPendingImportFile = null;
+// Set only when the current pendingImport preview came from an AI scan rather than a spreadsheet
+// (see onboardingScanWithAi below) — holds the already-mapped rows ready to commit directly,
+// since there's no file to re-parse the way onboardingConfirmImportPreview normally does.
+let onboardingAiScannedRows = null;
+
+const ONBOARDING_AI_MAX_FILE_BYTES = 8 * 1024 * 1024; // generous for a compressed phone photo
+
+async function buildOnboardingImportPreview(kind, file) {
+  if (kind === 'suppliers') {
+    const rows = await parseDataFile(file, { preferredSheetNames: ['Supplier_Import'] });
+    const { rows: mapped, review } = mapSupplierImportRows(rows);
+    return {
+      readyCount: mapped.length,
+      skippedCount: Number(review.skippedCount || review.errors?.length || 0),
+      errorSummary: formatImportErrors(review.errors || [], 5)
+    };
+  }
+  if (kind === 'stock') {
+    const rows = await parseDataFile(file, { preferredSheetNames: ['Stock_Import'] });
+    const { items, review } = mapLegacyStockRows(rows);
+    return {
+      readyCount: items.length,
+      skippedCount: Number(review.skippedCount || review.errors?.length || 0),
+      errorSummary: formatImportErrors(review.errors || [], 5)
+    };
+  }
+  const rows = await parseDataFile(file, { preferredSheetNames: ['Recipe_Import'] });
+  const { recipes, review } = mapLegacyRecipeRows(rows);
+  return {
+    readyCount: recipes.length,
+    skippedCount: Number(review.skippedCount || review.errors?.length || 0),
+    errorSummary: formatImportErrors(review.errors || [], 5)
+  };
+}
+
+async function onboardingPreviewImport(kind, file) {
+  if (!appState.onboarding || !file) return;
+  appState.onboarding = { ...appState.onboarding, actionStatus: 'importing', actionError: '', pendingImport: null };
+  renderApp();
+  try {
+    const preview = await buildOnboardingImportPreview(kind, file);
+    onboardingPendingImportFile = file;
+    appState.onboarding = appState.onboarding
+      ? { ...appState.onboarding, actionStatus: '', pendingImport: { kind, fileName: file.name, ...preview } }
+      : null;
+  } catch (error) {
+    appState.onboarding = appState.onboarding
+      ? { ...appState.onboarding, actionStatus: '', actionError: error.message || 'Could not read that file.' }
+      : null;
+  }
+  renderApp();
+}
+
+// mapLegacyStockRows rejects a whole row if a UOM_1/UOM_2 pack tier has a name but no valid
+// matching Qty_In_Base (or vice versa) — correct behavior for a human-filled template, since that
+// combination can only mean a typo. But an AI extraction can legitimately be confident about a
+// pack name while unsure of its quantity (or the model just didn't follow instructions), and in
+// that case we still want the rest of the row (name, category, base UOM, other pack tier) — so
+// drop any incomplete pack tier here rather than let it reject the whole item.
+function sanitizeAiStockPackRows(rows) {
+  return (rows || []).map((row) => {
+    if (!row || typeof row !== 'object') return row;
+    const clean = { ...row };
+    [1, 2, 3].forEach((slot) => {
+      const nameKey = `UOM_${slot}_Name`;
+      const qtyKey = `UOM_${slot}_Qty_In_Base`;
+      const name = String(clean[nameKey] ?? '').trim();
+      const qty = Number(String(clean[qtyKey] ?? '').trim());
+      if (!name || !Number.isFinite(qty) || qty <= 0) {
+        delete clean[nameKey];
+        delete clean[qtyKey];
+      }
+    });
+    return clean;
+  });
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+// Gemini's free tier returns 429/503 under load, which the Worker route re-tags with an
+// "AI_BUSY:" marker (see postWorkspaceAiExtract) rather than treating it as a real failure. This
+// retries automatically with backoff, updating actionNote so the wizard shows "queued, retrying
+// in Xs…" instead of the user seeing a raw server-busy error and having to manually try again.
+const AI_BUSY_MARKER = 'AI_BUSY:';
+const AI_BUSY_RETRY_DELAYS_MS = [4000, 8000, 15000, 25000];
+
+async function extractDataWithAiRetrying(workspaceId, kind, file, options) {
+  const { extractDataWithAi } = await import('./services/aiExtractionService.js');
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await extractDataWithAi(workspaceId, kind, file, options);
+    } catch (error) {
+      const isBusy = String(error?.message || '').includes(AI_BUSY_MARKER);
+      if (!isBusy || attempt >= AI_BUSY_RETRY_DELAYS_MS.length) {
+        if (isBusy) throw new Error('The AI service is still busy after several retries — please try again in a minute.');
+        throw error;
+      }
+      const waitMs = AI_BUSY_RETRY_DELAYS_MS[attempt];
+      if (appState.onboarding) {
+        appState.onboarding = {
+          ...appState.onboarding,
+          actionNote: `AI is busy — queued, retrying in ${Math.round(waitMs / 1000)}s (attempt ${attempt + 2} of ${AI_BUSY_RETRY_DELAYS_MS.length + 1})…`
+        };
+        renderApp();
+      }
+      await sleep(waitMs);
+    }
+  }
+}
+
+function levenshteinDistance(a, b) {
+  const m = a.length;
+  const n = b.length;
+  if (!m) return n;
+  if (!n) return m;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i += 1) {
+    const curr = [i];
+    for (let j = 1; j <= n; j += 1) {
+      curr[j] = a[i - 1] === b[j - 1]
+        ? prev[j - 1]
+        : 1 + Math.min(prev[j], curr[j - 1], prev[j - 1]);
+    }
+    prev = curr;
+  }
+  return prev[n];
+}
+
+function normalizeMatchKey(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function stringSimilarity(a, b) {
+  const normA = normalizeMatchKey(a);
+  const normB = normalizeMatchKey(b);
+  if (!normA || !normB) return 0;
+  if (normA === normB) return 1;
+  return 1 - levenshteinDistance(normA, normB) / Math.max(normA.length, normB.length);
+}
+
+// Keeps an AI-guessed category from fragmenting an already-existing category list (e.g. landing a
+// new "Dairy Products" next to an existing "Dairy") — snaps it to the closest existing category
+// when they're clearly the same thing, otherwise leaves the AI's guess as a legitimate new one.
+function reconcileCategory(rawCategory, existingCategories) {
+  const normRaw = normalizeMatchKey(rawCategory);
+  if (!normRaw || !existingCategories?.length) return rawCategory;
+  let best = null;
+  let bestScore = 0;
+  existingCategories.forEach((existing) => {
+    const normExisting = normalizeMatchKey(existing);
+    if (!normExisting) return;
+    if (normExisting === normRaw) { best = existing; bestScore = 1; return; }
+    const substringMatch = normExisting.includes(normRaw) || normRaw.includes(normExisting);
+    const score = substringMatch ? Math.max(stringSimilarity(rawCategory, existing), 0.85) : stringSimilarity(rawCategory, existing);
+    if (score > bestScore) { bestScore = score; best = existing; }
+  });
+  return bestScore >= 0.84 ? best : rawCategory;
+}
+
+// Flags (never blocks) a row whose name closely matches something already in the workspace, so
+// the HITL preview can surface "you might already have this" instead of silently letting a
+// near-duplicate get created. Purely a preview-time annotation — stripped before the row is
+// actually imported (see onboardingConfirmImportPreview).
+function flagPossibleDuplicates(rows, existingNames, nameKey) {
+  rows.forEach((row) => {
+    const rowName = row[nameKey];
+    if (!rowName) return;
+    let bestMatch = null;
+    let bestScore = 0;
+    (existingNames || []).forEach((existingName) => {
+      const score = stringSimilarity(rowName, existingName);
+      if (score > bestScore) { bestScore = score; bestMatch = existingName; }
+    });
+    if (bestScore >= 0.86 && bestMatch) {
+      row._dupWarning = `Possible duplicate of existing "${bestMatch}"`;
+    }
+  });
+}
+
+// Safety net for AI-scanned recipe rows: mapLegacyRecipeRows does a strict lookup of Product_Name
+// against real menu items and rejects any row that doesn't match with an "Import the menu item
+// first" error — correct for a human-typed template, but an AI extraction can go wrong in a way
+// that repeats across every row (e.g. it grabs a generic page heading like "Ingredients List" as
+// Product_Name for every ingredient line), which would otherwise surface as dozens of duplicate
+// error lines instead of one clear one. This pre-filters against the real known-product list
+// (rescuing near-matches — case/spacing/minor typos — the strict lookup would also have accepted)
+// and reports anything left over as a single summarized skip reason.
+function reconcileAiRecipeProductNames(rows, knownProductNames) {
+  if (!knownProductNames?.length) return { rows, unmatchedCount: 0, unmatchedSample: [] };
+  const knownByNorm = new Map(knownProductNames.map((n) => [normalizeMatchKey(n), n]));
+  const kept = [];
+  const unmatchedSample = [];
+  let unmatchedCount = 0;
+  rows.forEach((row) => {
+    const rawName = String(row?.Product_Name || '').trim();
+    let matched = knownByNorm.get(normalizeMatchKey(rawName));
+    if (!matched && rawName) {
+      let best = null;
+      let bestScore = 0;
+      knownProductNames.forEach((known) => {
+        const score = stringSimilarity(rawName, known);
+        if (score > bestScore) { bestScore = score; best = known; }
+      });
+      if (bestScore >= 0.88) matched = best;
+    }
+    if (matched) {
+      kept.push({ ...row, Product_Name: matched });
+    } else {
+      unmatchedCount += 1;
+      if (rawName && unmatchedSample.length < 5 && !unmatchedSample.includes(rawName)) unmatchedSample.push(rawName);
+    }
+  });
+  return { rows: kept, unmatchedCount, unmatchedSample };
+}
+
+// AI-onboarding counterpart to onboardingPreviewImport — same "preview before committing"
+// pattern, just with Gemini as the row source instead of a parsed spreadsheet. The Worker route
+// (postWorkspaceAiExtract) already returns rows shaped like the bulk-import template columns, so
+// they run through the exact same mapper functions a CSV import uses; only the already-mapped
+// result is kept (onboardingAiScannedRows) since there's no file to re-parse on confirm.
+async function onboardingScanWithAi(kind, file) {
+  if (!appState.onboarding || !file) return;
+  if (file.size > ONBOARDING_AI_MAX_FILE_BYTES) {
+    appState.onboarding = { ...appState.onboarding, actionError: 'That photo is too large — please use one under 8MB.' };
+    renderApp();
+    return;
+  }
+  appState.onboarding = { ...appState.onboarding, actionStatus: 'scanningAi', actionError: '', actionNote: '', pendingImport: null };
+  renderApp();
+  try {
+    const workspaceId = appState.workspace?.id;
+    let knownProductNames = [];
+    let recipeIngredients = appState.recipes?.ingredients || [];
+    if (kind === 'recipes') {
+      const { fetchRecipeItems } = await import('./services/recipeService.js');
+      const { items, ingredients } = await fetchRecipeItems(workspaceId);
+      knownProductNames = (items || [])
+        .filter((item) => item.name && String(item.status || '').toLowerCase() === 'missing')
+        .map((item) => item.name);
+      recipeIngredients = ingredients || recipeIngredients;
+    }
+
+    const { rows } = await extractDataWithAiRetrying(workspaceId, kind, file, { knownProductNames });
+
+    let preview;
+    let data;
+    let previewRows;
+    if (kind === 'suppliers') {
+      const { rows: mapped, review } = mapSupplierImportRows(rows);
+      data = mapped;
+      previewRows = mapped;
+      preview = { readyCount: mapped.length, skippedCount: Number(review.skippedCount || review.errors?.length || 0), errorSummary: formatImportErrors(review.errors || [], 5) };
+      try {
+        const { fetchSuppliers } = await import('./services/supplierService.js');
+        const { items: existingSuppliers } = await fetchSuppliers(workspaceId);
+        const existingCategories = [...new Set((existingSuppliers || []).map((s) => s.category).filter(Boolean))];
+        const existingNames = (existingSuppliers || []).map((s) => s.name).filter(Boolean);
+        mapped.forEach((row) => { row.Category = reconcileCategory(row.Category, existingCategories); });
+        flagPossibleDuplicates(mapped, existingNames, 'Name');
+      } catch {
+        /* category/duplicate reconciliation is a nice-to-have; leave the AI's raw guesses on failure */
+      }
+    } else if (kind === 'stock') {
+      const { items, review } = mapLegacyStockRows(sanitizeAiStockPackRows(rows));
+      data = items;
+      previewRows = items;
+      preview = { readyCount: items.length, skippedCount: Number(review.skippedCount || review.errors?.length || 0), errorSummary: formatImportErrors(review.errors || [], 5) };
+      try {
+        const { fetchStock } = await import('./services/stockService.js');
+        const { items: existingStock, categories: existingCategoryUsage } = await fetchStock(workspaceId);
+        const existingCategories = (existingCategoryUsage || []).map((c) => c.name).filter(Boolean);
+        const existingNames = (existingStock || []).map((s) => s.name).filter(Boolean);
+        items.forEach((row) => { row.category = reconcileCategory(row.category, existingCategories); });
+        flagPossibleDuplicates(items, existingNames, 'name');
+      } catch {
+        /* category/duplicate reconciliation is a nice-to-have; leave the AI's raw guesses on failure */
+      }
+    } else {
+      const { rows: matchedRows, unmatchedCount, unmatchedSample } = reconcileAiRecipeProductNames(rows, knownProductNames);
+      const { recipes, review } = mapLegacyRecipeRows(matchedRows);
+      data = recipes;
+      const ingredientById = new Map((recipeIngredients || []).map((ing) => [String(ing.id || '').trim(), ing]));
+      previewRows = recipes.map((recipe) => ({
+        ...recipe,
+        ingredientsText: (recipe.recipe || [])
+          .map((line) => `${line.qty} ${line.unit} ${ingredientById.get(String(line.ingId))?.name || line.ingId}`)
+          .join(', ')
+      }));
+      const unmatchedSummary = unmatchedCount
+        ? `${unmatchedCount} row${unmatchedCount === 1 ? '' : 's'} skipped — could not confidently match a known menu item${unmatchedSample.length ? ` (e.g. "${unmatchedSample.join('", "')}")` : ''}. Try a clearer photo of the product name, or add the recipe manually.`
+        : '';
+      preview = {
+        readyCount: recipes.length,
+        skippedCount: Number(review.skippedCount || review.errors?.length || 0) + unmatchedCount,
+        errorSummary: [unmatchedSummary, formatImportErrors(review.errors || [], 5)].filter(Boolean).join(' ')
+      };
+    }
+
+    onboardingAiScannedRows = { kind, data };
+    appState.onboarding = appState.onboarding
+      ? { ...appState.onboarding, actionStatus: '', actionNote: '', pendingImport: { kind, source: 'ai', fileName: `AI Scan (${file.name})`, rows: previewRows, ...preview } }
+      : null;
+  } catch (error) {
+    appState.onboarding = appState.onboarding
+      ? { ...appState.onboarding, actionStatus: '', actionNote: '', actionError: error.message || 'Could not scan that photo.' }
+      : null;
+  }
+  renderApp();
+}
+
+// Writes DOM-collected preview-table edits (see readPreviewFieldEdits in OnboardingWizard.js)
+// back onto both the displayed rows and the actual data that will be imported. For
+// suppliers/stock these are literally the same array (onboardingScanWithAi sets pendingImport.rows
+// to the exact same array as onboardingAiScannedRows.data), so this is belt-and-braces rather
+// than strictly required — but written generically so it stays correct if that ever changes.
+function applyPreviewFieldEdits(fieldUpdates) {
+  const rows = appState.onboarding?.pendingImport?.rows;
+  const data = onboardingAiScannedRows?.data;
+  (fieldUpdates || []).forEach(({ index, key, value }) => {
+    if (!key || !Number.isInteger(index)) return;
+    if (rows?.[index]) rows[index][key] = value;
+    if (data?.[index] && data[index] !== rows[index]) data[index][key] = value;
+  });
+}
+
+function onboardingEditPreviewRow(index, fieldUpdates) {
+  if (!appState.onboarding?.pendingImport) return;
+  applyPreviewFieldEdits(fieldUpdates);
+  appState.onboarding = { ...appState.onboarding, pendingImport: { ...appState.onboarding.pendingImport, editingIndex: index >= 0 ? index : null } };
+  renderApp();
+}
+
+function onboardingSavePreviewRow(index, fieldUpdates) {
+  if (!appState.onboarding?.pendingImport) return;
+  applyPreviewFieldEdits(fieldUpdates);
+  appState.onboarding = { ...appState.onboarding, pendingImport: { ...appState.onboarding.pendingImport, editingIndex: null } };
+  renderApp();
+}
+
+function onboardingDeletePreviewRow(index, fieldUpdates) {
+  const pending = appState.onboarding?.pendingImport;
+  if (!pending || !Number.isInteger(index)) return;
+  applyPreviewFieldEdits(fieldUpdates);
+  const rows = (pending.rows || []).filter((_, i) => i !== index);
+  if (onboardingAiScannedRows) onboardingAiScannedRows.data = (onboardingAiScannedRows.data || []).filter((_, i) => i !== index);
+  appState.onboarding = {
+    ...appState.onboarding,
+    pendingImport: { ...pending, rows, readyCount: rows.length, editingIndex: null }
+  };
+  renderApp();
+}
+
+function onboardingCancelImportPreview() {
+  onboardingPendingImportFile = null;
+  onboardingAiScannedRows = null;
+  if (!appState.onboarding) return;
+  appState.onboarding = { ...appState.onboarding, pendingImport: null };
+  renderApp();
+}
+
+async function onboardingConfirmImportPreview(fieldUpdates) {
+  const pending = appState.onboarding?.pendingImport;
+  if (!pending || !appState.onboarding) return;
+  applyPreviewFieldEdits(fieldUpdates);
+
+  if (pending.source === 'ai') {
+    const scanned = onboardingAiScannedRows;
+    onboardingAiScannedRows = null;
+    if (!scanned) return;
+    appState.onboarding = { ...appState.onboarding, pendingImport: null };
+    const workspaceId = appState.workspace?.id;
+    // _dupWarning is a preview-only annotation (see flagPossibleDuplicates) — never send it through
+    // to the real import payload.
+    const cleanData = (scanned.data || []).map(({ _dupWarning, ...rest }) => rest);
+    await onboardingRunImport(async () => {
+      if (scanned.kind === 'suppliers') {
+        const { importSuppliers } = await import('./services/supplierService.js');
+        await importSuppliers(workspaceId, cleanData);
+      } else if (scanned.kind === 'stock') {
+        const { importStockItems } = await import('./services/stockService.js');
+        await importStockItems(workspaceId, cleanData);
+      } else {
+        const { importRecipes } = await import('./services/recipeService.js');
+        await importRecipes(workspaceId, cleanData);
+      }
+    }, { kind: scanned.kind, count: pending.readyCount });
+    return;
+  }
+
+  const file = onboardingPendingImportFile;
+  onboardingPendingImportFile = null;
+  if (!file) return;
+  appState.onboarding = { ...appState.onboarding, pendingImport: null };
+  const importFn = pending.kind === 'suppliers' ? importSupplierFile
+    : pending.kind === 'stock' ? importStockFile
+    : importRecipeFile;
+  await onboardingRunImport(() => importFn(file), { kind: pending.kind, count: pending.readyCount });
+}
+
+async function onboardingDownloadRecipeTemplate() {
+  const workspaceId = appState.workspace?.id;
+  if (!workspaceId || !appState.onboarding) return;
+  appState.onboarding = { ...appState.onboarding, actionStatus: 'exporting', actionError: '' };
+  renderApp();
+  try {
+    const { fetchRecipeItems } = await import('./services/recipeService.js');
+    const { items, ingredients } = await fetchRecipeItems(workspaceId);
+    const { products, prefillProducts, ingredientObjects } = buildRecipeTemplateExportOptions(items, ingredients);
+    const filename = buildExportFilename({ workspaceName: appState.workspace?.siteName, reportType: 'Recipe Template Export' });
+    await downloadStyledRecipeTemplateXlsx(filename, { products, ingredientObjects, platform: 'excel', prefillProducts });
+    appState.onboarding = appState.onboarding ? { ...appState.onboarding, actionStatus: '' } : null;
+    showRecipeToast(
+      `Recipe template exported${prefillProducts.length ? ` — pre-filled with ${prefillProducts.length} product${prefillProducts.length === 1 ? '' : 's'} missing a recipe` : ''}.`,
+      'success'
+    );
+  } catch (error) {
+    appState.onboarding = appState.onboarding ? { ...appState.onboarding, actionStatus: '', actionError: error.message || 'Could not export recipe template.' } : null;
+  }
+  renderApp();
+}
+
+const onOnboardingAction = {
+  onStepChange: setOnboardingStep,
+  onGoNext: onboardingGoNext,
+  onGoBack: onboardingGoBack,
+  onResume: reopenOnboardingWizard,
+  onDismiss: closeOnboardingWizard,
+  onFinish: finishOnboardingWizard,
+  onStartWizard: startOnboardingWizard,
+  onSyncNow: onboardingSyncNow,
+  onConnectYoco: onboardingConnectYoco,
+  onDownloadRecipeTemplate: onboardingDownloadRecipeTemplate,
+  onDownloadSupplierTemplate: () => exportSupplierTemplate('xlsx'),
+  onDownloadStockTemplate: () => exportStockTemplate('xlsx'),
+  onToggleQuickAdd: onboardingToggleQuickAdd,
+  onCancelQuickAdd: onboardingCancelQuickAdd,
+  onSubmitQuickAddSupplier: onboardingSubmitQuickAddSupplier,
+  onSubmitQuickAddStock: onboardingSubmitQuickAddStock,
+  onToggleRecipeBuilder: onboardingToggleRecipeBuilder,
+  onCancelRecipeBuilder: onboardingCancelRecipeBuilder,
+  onSubmitQuickRecipe: onboardingSubmitQuickRecipe,
+  onImportSuppliers: (file) => onboardingPreviewImport('suppliers', file),
+  onImportStock: (file) => onboardingPreviewImport('stock', file),
+  onImportRecipes: (file) => onboardingPreviewImport('recipes', file),
+  onScanSuppliersWithAi: (file) => onboardingScanWithAi('suppliers', file),
+  onScanStockWithAi: (file) => onboardingScanWithAi('stock', file),
+  onScanRecipesWithAi: (file) => onboardingScanWithAi('recipes', file),
+  onCancelImportPreview: onboardingCancelImportPreview,
+  onConfirmImportPreview: onboardingConfirmImportPreview,
+  onEditPreviewRow: onboardingEditPreviewRow,
+  onSavePreviewRow: onboardingSavePreviewRow,
+  onDeletePreviewRow: onboardingDeletePreviewRow
+};
+
+async function relaunchOnboardingWizard() {
+  const workspaceId = appState.workspace?.id;
+  if (!workspaceId) return;
+  appState.onboarding = {
+    open: true, welcome: true, wizardStep: 1, actionStatus: '', actionError: '',
+    counts: null, yoco: null, pendingImport: null, quickAdd: null, recipeBuilder: null,
+    aiOnboardingEnabled: appState.settings?.values?.ai_onboarding_enabled === true
+  };
+  renderApp();
+  const [yoco, counts] = await Promise.all([
+    fetchYocoStatusOnce(workspaceId),
+    getOnboardingReadiness(workspaceId).catch(() => null)
+  ]);
+  if (!appState.onboarding || appState.workspace?.id !== workspaceId) return;
+  // Skip straight to the first incomplete step here too, same as the auto-open path.
+  appState.onboarding = { ...appState.onboarding, yoco, counts, wizardStep: firstIncompleteOnboardingStep({ counts, yoco }) };
+  renderApp();
+}
+
+function mountOnboardingWizard() {
+  // Mounted on document.body, a SIBLING of #app — never inside it. replaceApp() does
+  // `app.replaceChildren(...)` on every single render, which would destroy this container (and
+  // any "reuse the existing shell" logic below) every time if it lived inside #app, since it'd
+  // already be gone by the time this function runs. That's what was actually still causing the
+  // modal to flicker closed-then-open after the first fix attempt: the shell/content-patch split
+  // never got a chance to run because there was never an "existing" node to find.
+  const existingModal = document.body.querySelector('[data-onboarding-wizard-mount]');
+  const existingResume = document.body.querySelector('[data-onboarding-resume-mount]');
+
+  if (!appState.onboarding) {
+    existingModal?.remove();
+    existingResume?.remove();
+    return;
+  }
+
+  if (!appState.onboarding.open) {
+    // Minimized (e.g. "Add one manually instead" navigated away) rather than dismissed — show a
+    // way back instead of just vanishing, since the whole point is to stay reachable until the
+    // workspace is actually set up.
+    existingModal?.remove();
+    if (!existingResume) {
+      const resumeButton = document.createElement('div');
+      resumeButton.dataset.onboardingResumeMount = 'true';
+      resumeButton.innerHTML = renderOnboardingResumeButton();
+      bindOnboardingResumeButtonEvents(resumeButton.firstElementChild, onOnboardingAction);
+      document.body.appendChild(resumeButton);
+    }
+    return;
+  }
+
+  existingResume?.remove();
+
+  if (existingModal) {
+    updateOnboardingWizardContent(existingModal, appState.onboarding, onOnboardingAction);
+    return;
+  }
+
+  const container = document.createElement('div');
+  container.dataset.onboardingWizardMount = 'true';
+  container.innerHTML = renderOnboardingWizardShell();
+  bindOnboardingWizardShellEvents(container, onOnboardingAction);
+  updateOnboardingWizardContent(container, appState.onboarding, onOnboardingAction);
+  document.body.appendChild(container);
+}
+
 function startIntegrationAutoSync() {
+  // NOTE: this client-side timer is now a convenience/fast-path only, for whoever currently has
+  // the app open — it is no longer the sole mechanism for menu/catalogue sync. The cron path
+  // (`*/45 * * * *` in wrangler.toml, dispatched to `admin-action/catalogue-sync-due`) is
+  // currently disabled account-wide; `requestCatalogueSyncIfDue` (called from `selectWorkspace` on
+  // every login/workspace-open) is the real guarantee today that the catalogue doesn't go stale
+  // for longer than one login cycle.
   const runSync = async () => {
     if (!appState.user || !appState.workspace) return;
     if (isUserBusy()) return;
@@ -684,11 +1585,16 @@ let stockLiveRefreshInstalled = false;
 async function refreshStockFromDataVersion(workspaceId) {
   if (appState.route.active !== 'ingredients') return;
   if (!workspaceId || appState.workspace?.id !== workspaceId) return;
+  const requestToken = stockMutationToken;
   try {
     clearApiCache();
     const { fetchStock } = await import('./services/stockService.js');
     const stock = await fetchStock(workspaceId);
     if (appState.route.active !== 'ingredients' || appState.workspace?.id !== workspaceId) return;
+    // A delete/save that started AFTER this fetch began bumps the token. If that
+    // happened, this response is stale (it was captured before that mutation) and
+    // must be dropped instead of overwriting the now-correct local state.
+    if (requestToken !== stockMutationToken) return;
     applyRealtimeSnapshot('stock', () => {
       appState.stock = {
         ...appState.stock,
@@ -723,6 +1629,7 @@ function startDataVersionPoll() {
     if (!workspaceId) return;
     try {
       const response = await callCloudflareWorkspaceRoute(workspaceId, 'data-version', { query: { t: Date.now() } });
+      dataVersionPollFailures = 0;
       const version = String(response?.version ?? '');
       // First observation establishes the baseline without refetching.
       if (lastSeenDataVersion === null) {
@@ -737,14 +1644,22 @@ function startDataVersionPoll() {
           detail: { workspaceId, version }
         }));
       }
-    } catch { /* silent — a failed poll should never disrupt the app */ }
+    } catch {
+      // Back off on repeated failures rather than retrying at full cadence indefinitely — see
+      // currentPollInterval() below.
+      dataVersionPollFailures = Math.min(dataVersionPollFailures + 1, 8);
+    }
   };
 
-  const currentPollInterval = () => (
-    appState.route.active === 'ingredients'
+  const currentPollInterval = () => {
+    const base = appState.route.active === 'ingredients'
       ? STOCK_DATA_VERSION_POLL_INTERVAL_MS
-      : DATA_VERSION_POLL_INTERVAL_MS
-  );
+      : DATA_VERSION_POLL_INTERVAL_MS;
+    if (!dataVersionPollFailures) return base;
+    // Exponential backoff, capped at 5 minutes: 1 failure -> 2x, 2 -> 4x, ... so a struggling
+    // backend gets breathing room instead of being retried every 15 seconds from every open tab.
+    return Math.min(base * (2 ** dataVersionPollFailures), 5 * 60 * 1000);
+  };
   const startTimer = () => {
     if (dataVersionPollTimer) window.clearTimeout(dataVersionPollTimer);
     const scheduleNext = () => {
@@ -896,6 +1811,11 @@ async function selectWorkspace(workspace, options = {}) {
 
   cleanupAccessSubscription();
   syncAutoLoginPreferenceForWorkspace(workspace, options);
+  // A workspace switch mid-session must close any onboarding wizard opened for the PREVIOUS
+  // workspace — otherwise it keeps showing stale counts/Yoco status and its actions (import,
+  // sync) would run against the wrong workspace's data. maybeOpenOnboardingWizard re-decides
+  // fresh for the new workspace once its settings load below.
+  appState.onboarding = null;
   appState.workspace = { ...workspace };
   appState.workspaceError = '';
   appState.access = createAccessState('loading');
@@ -920,6 +1840,7 @@ async function selectWorkspace(workspace, options = {}) {
   // Chat widget mounted later, after workspace settings load (chat_enabled must be true)
   startSystemBroadcastRefresh();
   startIntegrationAutoSync();
+  requestCatalogueSyncIfDue(workspace.id);
   startDataVersionPoll();
   startAccessSubscription(workspace.id);
   bootstrapActiveRouteForWorkspace(workspace.id);
@@ -947,6 +1868,7 @@ async function selectWorkspace(workspace, options = {}) {
       ));
       renderApp();
     }
+    maybeOpenOnboardingWizard(workspace.id, settings);
   } catch (error) {
     console.warn('[Workspace] Settings prefetch failed:', error);
   }
@@ -960,7 +1882,16 @@ function navigateTo(sectionId) {
 
   const nextSection = resolveAccessibleRoute(sectionId || 'dashboard');
 
-  if (nextSection === 'reporting') clearReportingNavigationParameters();
+  if (nextSection === 'reporting') {
+    clearReportingNavigationParameters();
+  } else {
+    // clearReportingNavigationParameters() stamps `?route=reporting` into the URL on every visit
+    // to Reporting, but nothing ever removed it again on navigating elsewhere — so once a user
+    // visited Reporting even once, the URL stayed pinned to `?route=reporting` forever, and
+    // getInitialRoute() (URL always wins over the persisted localStorage route) forced every
+    // later page refresh straight back to Reporting regardless of what the user was actually on.
+    clearStaleReportingRouteParam();
+  }
   if (appState.route.active === nextSection) {
     if (nextSection === 'reporting') renderApp();
     return;
@@ -1457,7 +2388,13 @@ async function refreshActiveTabFromApi() {
 
     if (appState.route.active === 'ingredients') {
       const { fetchStock } = await import('./services/stockService.js');
+      // A delete that completes AFTER this fetch started already bumped stockMutationToken and
+      // pruned appState.stock locally (see confirmStockDelete). If this fetch's snapshot predates
+      // that delete, applying it here would resurrect the just-deleted row — drop it instead,
+      // mirroring the same guard refreshStockFromDataVersion already uses.
+      const requestToken = stockMutationToken;
       const stock = await fetchStock(workspaceId);
+      if (requestToken !== stockMutationToken) return;
       appState.stock = {
         ...appState.stock,
         status: 'ready',
@@ -1587,15 +2524,20 @@ async function loadSettings(workspaceId) {
   };
 
   try {
-    const [settingsSnapshot, siteConfig, yocoCategories, stockCategories, goLiveReadiness] = await Promise.all([
+    const [settingsSnapshot, siteConfig, yocoCategories, stockCategories, goLiveReadiness, onboardingCounts, onboardingYoco] = await Promise.all([
       getWorkspaceSettingsSnapshot(workspaceId),
       import('./services/orgTransferService.js')
         .then(({ getSiteConfiguration }) => getSiteConfiguration(workspaceId))
         .catch(() => null),
       getYocoCategoryOptions(workspaceId).catch(() => []),
       getStockCategoryOptions(workspaceId).catch(() => []),
-      getGoLiveReadiness(workspaceId).catch(() => ({ productCount: 0, recipeCount: 0, locationCount: 0 }))
+      getGoLiveReadiness(workspaceId).catch(() => ({ productCount: 0, recipeCount: 0, locationCount: 0 })),
+      // Feature: show setup progress outside the wizard too, in Settings' Go-Live panel —
+      // reuses the exact same readiness/status calls the wizard itself uses.
+      getOnboardingReadiness(workspaceId).catch(() => null),
+      fetchYocoStatusOnce(workspaceId).catch(() => null)
     ]);
+    const onboardingProgress = getOnboardingProgress({ counts: onboardingCounts, yoco: onboardingYoco });
     const settings = normalizeSettings({
       ...settingsSnapshot,
       orgId: siteConfig?.orgId || settingsSnapshot.orgId || '',
@@ -1617,6 +2559,7 @@ async function loadSettings(workspaceId) {
       yocoCategories,
       stockCategories,
       goLiveReadiness,
+      onboardingProgress,
       error: ''
     };
     applyWorkspaceSettingsEffects(settings);
@@ -1857,10 +2800,15 @@ async function startStockSubscription(workspaceId) {
       appState.workspace?.id !== workspaceId
     ) return;
 
+    // subscribeStockItems fires exactly one fetch on subscribe (load-on-open, no background
+    // polling). If a delete completes and bumps stockMutationToken while that fetch is still in
+    // flight, this snapshot predates the delete and would resurrect the just-deleted row.
+    const requestToken = stockMutationToken;
     unsubscribeStock = subscribeStockItems(workspaceId, {
       onSnapshot: ({ status, items, sites, locations, categories, uoms, loaded, updatedAt }) => {
         if (
           subscriptionToken !== stockSubscriptionToken ||
+          requestToken !== stockMutationToken ||
           appState.route.active !== 'ingredients' ||
           appState.workspace?.id !== workspaceId
         ) return;
@@ -3829,7 +4777,6 @@ async function exportMenuCatalogue(format = 'csv') {
   }
 
   const items = getFilteredMenuItems(appState.menu.items || [], appState.menu.filters || {});
-  const timestamp = getExportTimestamp();
 
   if (!items.length) {
     showMenuToast('No filtered menu items are available to export.', 'warning');
@@ -3841,7 +4788,7 @@ async function exportMenuCatalogue(format = 'csv') {
   try {
     await exportObjectRows({
       format,
-      filename: `kcp-menu-catalogue-${timestamp}`,
+      filename: buildExportFilename({ workspaceName: appState.workspace?.siteName, reportType: 'Menu Catalogue Export' }),
       sheetName: 'Menu Catalogue',
       title: 'Menu Catalogue',
       subtitle: `${appState.workspace?.siteName || 'KCP'} · ${items.length} filtered item${items.length === 1 ? '' : 's'}`,
@@ -3857,12 +4804,11 @@ async function exportMenuCatalogue(format = 'csv') {
 
 async function exportMenuTemplate(format = 'csv') {
   const normalizedFormat = ['csv', 'xlsx', 'pdf'].includes(format) ? format : 'csv';
-  const timestamp = getExportTimestamp();
 
   try {
     await exportObjectRows({
       format: normalizedFormat,
-      filename: `kcp-menu-catalogue-template-${timestamp}`,
+      filename: buildExportFilename({ workspaceName: appState.workspace?.siteName, reportType: 'Menu Catalogue Template Export' }),
       sheetName: 'Menu_Import',
       title: 'Menu Catalogue Import Template',
       subtitle: 'Use these columns for menu product import and export parity.',
@@ -4445,7 +5391,12 @@ function updateRecipeLineUom(index, unit) {
 function removeRecipeLine(index) {
   const line = appState.recipes.draftRecipe?.[index];
   if (!line) return;
-  const ingredient = (appState.recipes.ingredients || []).find((item) => String(item.id) === String(line.ingId));
+  const targetId = String(line.ingId || '').trim();
+  const ingredient = (appState.recipes.ingredients || []).find((item) => {
+    if (String(item.id) === targetId) return true;
+    const mergedIds = String(item.mergedIds || '').split(',').map((v) => v.trim()).filter(Boolean);
+    return mergedIds.includes(targetId);
+  });
 
   appState.recipes = {
     ...appState.recipes,
@@ -4908,11 +5859,18 @@ function updateRecipeSourceStockItem(stockItemId = '') {
   const recipeSourceRecipeLines = stockItem ? structuredCloneSafe(stockItem.recipe || stockItem.recipeLines || []) : [];
   const directRecipe = structuredCloneSafe(appState.recipes.draftRecipe || item.recipe || []);
   const hasDirectRecipe = directRecipe.some((line) => String(line.ingId || line.stockItemId || '').trim() && parseDecimalInputValue(line.qty ?? line.quantity, 0) > 0);
+  // Only sub-recipe/manufactured stock items build their cost from their OWN recipe lines. A
+  // standard, recipe-source, or virtual (non-stock) item's cost comes straight from its unit_cost
+  // (see stockCostResolver.js) — it has no BOM of its own by design, so an empty
+  // recipeSourceRecipeLines here is expected, not a "missing recipe" error.
+  const linkedItemNeedsOwnRecipe = stockItem && ['sub_recipe', 'manufactured'].includes(deriveStockItemType(stockItem));
   const nextStatus = hasDirectRecipe
     ? 'COMPLETE'
-    : recipeSourceRecipeLines.length
-      ? 'COMPLETE_VIA_LINKED_STOCK_ITEM'
-      : 'MISSING_RECIPE';
+    : !stockItem
+      ? 'MISSING_RECIPE'
+      : (recipeSourceRecipeLines.length || !linkedItemNeedsOwnRecipe)
+        ? 'COMPLETE_VIA_LINKED_STOCK_ITEM'
+        : 'MISSING_RECIPE';
 
   appState.recipes = {
     ...appState.recipes,
@@ -5364,7 +6322,6 @@ async function exportRecipes(format = 'csv') {
 
   const items = getFilteredRecipeItems(appState.recipes.items || [], appState.recipes.filters || {});
   const ingredients = appState.recipes.ingredients || [];
-  const timestamp = getExportTimestamp();
 
   if (!items.length) {
     showRecipeToast('No filtered recipes are available to export.', 'warning');
@@ -5376,7 +6333,7 @@ async function exportRecipes(format = 'csv') {
   try {
     await exportObjectRows({
       format,
-      filename: `kcp-recipes-${timestamp}`,
+      filename: buildExportFilename({ workspaceName: appState.workspace?.siteName, reportType: 'Recipe Export' }),
       sheetName: 'Recipes',
       title: 'Recipes',
       subtitle: `${appState.workspace?.siteName || 'KCP'} · ${items.length} filtered recipe${items.length === 1 ? '' : 's'}`,
@@ -5390,28 +6347,52 @@ async function exportRecipes(format = 'csv') {
   }
 }
 
+// Shared by exportRecipeTemplate (uses whatever's already loaded in appState.recipes) and the
+// onboarding wizard's template download (fetches fresh via recipeService.fetchRecipeItems,
+// independent of whether the Recipes tab has ever been opened this session).
+//
+// Pre-fills Product Name with real, already-synced products that still need a recipe, so the
+// import's exact-name-match can't fail on a name the user re-typed from memory. `status ===
+// 'missing'` is set by recipeService.js's normalizeRecipeItem for every product with no usable
+// recipe yet.
+function buildRecipeTemplateExportOptions(items = [], ingredients = []) {
+  const products = [...new Set(
+    (items || []).map((item) => item.name || '').filter(Boolean)
+  )].sort((a, b) => a.localeCompare(b));
+  const missingRecipeNames = new Set();
+  const prefillProducts = (items || [])
+    .filter((item) => item.name && String(item.status || '').toLowerCase() === 'missing' && !missingRecipeNames.has(item.name))
+    .map((item) => { missingRecipeNames.add(item.name); return { name: item.name, sku: item.sku || '' }; })
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const ingredientObjects = (ingredients || [])
+    .filter((ing) => ing.name)
+    .map((ing) => ({
+      name: String(ing.name || '').trim(),
+      uom: String(ing.uom || ing.unit || '').trim(),
+      customUoms: (ing.uomConfigurations || [])
+        .map((cfg) => String(cfg.customUom || cfg.custom_uom || '').trim())
+        .filter(Boolean)
+    }));
+  return { products, prefillProducts, ingredientObjects };
+}
+
 async function exportRecipeTemplate(format = 'csv') {
   // format may be 'xlsx:sheets', 'xlsx:excel', or just 'xlsx'/'csv'
   const [baseFormat, platform = 'excel'] = String(format || 'csv').split(':');
   const normalizedFormat = ['csv', 'xlsx'].includes(baseFormat) ? baseFormat : 'csv';
-  const timestamp = getExportTimestamp();
 
   if (normalizedFormat === 'xlsx') {
     try {
-      const products = [...new Set(
-        (appState.recipes.items || []).map((item) => item.name || '').filter(Boolean)
-      )].sort((a, b) => a.localeCompare(b));
-      const ingredientObjects = (appState.recipes.ingredients || [])
-        .filter((ing) => ing.name)
-        .map((ing) => ({
-          name: String(ing.name || '').trim(),
-          uom: String(ing.uom || ing.unit || '').trim(),
-          customUoms: (ing.uomConfigurations || [])
-            .map((cfg) => String(cfg.customUom || cfg.custom_uom || '').trim())
-            .filter(Boolean)
-        }));
-      await downloadStyledRecipeTemplateXlsx(`kcp-recipes-template-${timestamp}`, { products, ingredientObjects, platform });
-      showRecipeToast(`Recipe template exported for ${platform === 'sheets' ? 'Google Sheets' : 'Excel'}.`, 'success');
+      const { products, prefillProducts, ingredientObjects } = buildRecipeTemplateExportOptions(
+        appState.recipes.items || [],
+        appState.recipes.ingredients || []
+      );
+      const filename = buildExportFilename({ workspaceName: appState.workspace?.siteName, reportType: 'Recipe Template Export' });
+      await downloadStyledRecipeTemplateXlsx(filename, { products, ingredientObjects, platform, prefillProducts });
+      const prefillNote = prefillProducts.length
+        ? ` — pre-filled with ${prefillProducts.length} product${prefillProducts.length === 1 ? '' : 's'} missing a recipe`
+        : '';
+      showRecipeToast(`Recipe template exported for ${platform === 'sheets' ? 'Google Sheets' : 'Excel'}${prefillNote}.`, 'success');
     } catch (error) {
       showRecipeToast(error.message || 'Recipe template export failed.', 'error');
     }
@@ -5421,7 +6402,7 @@ async function exportRecipeTemplate(format = 'csv') {
   try {
     await exportObjectRows({
       format: normalizedFormat,
-      filename: `kcp-recipes-template-${timestamp}`,
+      filename: buildExportFilename({ workspaceName: appState.workspace?.siteName, reportType: 'Recipe Template Export' }),
       sheetName: 'Recipe_Import',
       title: 'Recipes Import Template',
       subtitle: 'Use Product_Name, Ingredient_Name and Quantity_Needed columns.',
@@ -6026,6 +7007,9 @@ async function saveStockItem(item) {
       cost: Number(item.cost || 0) || 0,
       id: item.id || undefined
     });
+    // Same staleness guard as delete — a save must invalidate any in-flight background
+    // stock fetch so it can't overwrite the freshly-saved state with pre-save data.
+    stockMutationToken += 1;
     appState.stock = {
       ...appState.stock,
       editingItem: null,
@@ -6058,6 +7042,22 @@ function getDuplicateStockItemNameError(item = {}, stockItems = []) {
       .map((id) => id.trim())
       .filter(Boolean)
   );
+
+  // Only block the save if the NAME is actually changing. Some workspaces already have
+  // pre-existing items that share a name but differ by UOM (e.g. imported from a POS
+  // catalogue). Re-checking uniqueness on every save — including saves that only touch
+  // UOM, cost, category, etc. — would permanently block editing those items. Comparing
+  // against the item's own currently-saved name lets those records keep being edited.
+  if (currentIds.size) {
+    const original = (stockItems || []).find((entry = {}) => {
+      const entryIds = String(entry.mergedIds || entry.id || '')
+        .split(',')
+        .map((id) => id.trim())
+        .filter(Boolean);
+      return entryIds.some((id) => currentIds.has(id));
+    });
+    if (original && normalizeStockItemDuplicateName(original.name) === nextKey) return '';
+  }
 
   const duplicate = (stockItems || []).find((entry = {}) => {
     if (normalizeStockItemDuplicateName(entry.name) !== nextKey) return false;
@@ -6336,13 +7336,30 @@ async function confirmStockDelete() {
   renderApp();
 
   try {
-    const { deleteStockItem, deleteMultipleStockItems } = await import('./services/stockService.js');
-    if (items.length === 1) {
-      await deleteStockItem(appState.workspace?.id, items[0].id);
-    } else {
-      await deleteMultipleStockItems(appState.workspace?.id, items.map((item) => item.id));
+    const { deleteStockItem, deleteMultipleStockItems, resolveStockItemPersistedIds } = await import('./services/stockService.js');
+    // A displayed row can stand for several database rows: dedupeStockItems merges items sharing
+    // name+category+unit and keeps the group in `mergedIds`. Deleting only the primary id left the
+    // siblings active, so the next refresh rebuilt the merged row and the item reappeared. Delete
+    // every id the row represents.
+    const targetIds = [...new Set(items.flatMap((item) => resolveStockItemPersistedIds(item)))];
+    if (!targetIds.length) {
+      appState.stock = { ...appState.stock, confirmDelete: null, actionStatus: '', actionError: '' };
+      renderApp();
+      showStockToast('Selected stock items could not be found.', 'error');
+      return;
     }
-    const deletedIds = new Set(items.map((item) => String(item.id)));
+    if (targetIds.length === 1) {
+      await deleteStockItem(appState.workspace?.id, targetIds[0]);
+    } else {
+      await deleteMultipleStockItems(appState.workspace?.id, targetIds);
+    }
+    // Invalidate any stock fetch that was already in flight before this delete completed —
+    // it captured pre-delete data and would otherwise reintroduce the deleted item when it
+    // resolves (see refreshStockFromDataVersion / applyRealtimeSnapshot).
+    stockMutationToken += 1;
+    // Prune local state by every deleted id AND by the visible row ids, since merged rows are keyed
+    // in state by their primary id.
+    const deletedIds = new Set([...targetIds, ...items.map((item) => String(item.id))].map(String));
     appState.stock = {
       ...appState.stock,
       items: removeRowsByIds(appState.stock.items, deletedIds),
@@ -6625,7 +7642,7 @@ async function exportLocationCostingPdf({ stockItems = [], locations = [], locat
 
   await exportObjectRows({
     format: 'pdf',
-    filename: `kcp-location-costing-${slugifyExportName(locationName)}-${getExportTimestamp()}`,
+    filename: buildExportFilename({ workspaceName, reportType: 'Location Costing Report', suffix: locationName }),
     sheetName: 'Location Costing',
     title: 'Location Costing Report',
     subtitle: `${workspaceName || 'KCP'} | ${locationName} | ${new Date().toLocaleString('en-ZA')}`,
@@ -6787,7 +7804,6 @@ async function exportStockItems(format = 'csv') {
   const items = selectedIds.size
     ? visibleItems.filter((item) => selectedIds.has(String(item.id)))
     : visibleItems;
-  const timestamp = getExportTimestamp();
 
   if (!items.length) {
     showStockToast(selectedIds.size ? 'No selected stock items are available to export.' : 'No visible stock items are available to export.', 'warning');
@@ -6806,7 +7822,7 @@ async function exportStockItems(format = 'csv') {
   try {
     await exportObjectRows({
       format,
-      filename: `kcp-stock-items-${timestamp}`,
+      filename: buildExportFilename({ workspaceName: appState.workspace?.siteName, reportType: 'Stock Item Export' }),
       sheetName: 'Stock Items',
       title: 'Stock Items',
       subtitle: `${appState.workspace?.siteName || 'KCP'} · ${exportItems.length} item/location row${exportItems.length === 1 ? '' : 's'}`,
@@ -6850,11 +7866,11 @@ function buildLocationAwareStockExportItems(items = [], { locationId = '', locat
 
 async function exportStockTemplate(format = 'csv') {
   const normalizedFormat = ['csv', 'xlsx', 'pdf'].includes(format) ? format : 'csv';
-  const timestamp = getExportTimestamp();
+  const filename = buildExportFilename({ workspaceName: appState.workspace?.siteName, reportType: 'Stock Item Template Export' });
 
   try {
     if (normalizedFormat === 'xlsx') {
-      await downloadStyledStockTemplateXlsx(`kcp-stock-items-template-${timestamp}`, {
+      await downloadStyledStockTemplateXlsx(filename, {
         columns: exportSchemas.stock,
         rows: buildTemplateRows(exportSchemas.stock),
         columnWidths: getStockImportTemplateColumnWidths(),
@@ -6865,7 +7881,7 @@ async function exportStockTemplate(format = 'csv') {
     }
     await exportObjectRows({
       format: normalizedFormat,
-      filename: `kcp-stock-items-template-${timestamp}`,
+      filename,
       sheetName: 'Stock_Import',
       title: 'Stock Items Import Template',
       subtitle: 'Client-friendly stock import with base UOM, opening stock, and up to three alternate UOMs per item.',
@@ -7213,7 +8229,6 @@ async function exportSuppliers(format = 'csv') {
   }
 
   const items = getFilteredSuppliers(appState.suppliers.items || [], appState.suppliers.filters || {});
-  const timestamp = getExportTimestamp();
 
   if (!items.length) {
     showSupplierToast('No filtered suppliers are available to export.', 'warning');
@@ -7225,7 +8240,7 @@ async function exportSuppliers(format = 'csv') {
   try {
     await exportObjectRows({
       format,
-      filename: `kcp-suppliers-${timestamp}`,
+      filename: buildExportFilename({ workspaceName: appState.workspace?.siteName, reportType: 'Supplier Export' }),
       sheetName: 'Suppliers',
       title: 'Suppliers',
       subtitle: `${appState.workspace?.siteName || 'KCP'} · ${items.length} supplier${items.length === 1 ? '' : 's'}`,
@@ -7299,12 +8314,11 @@ async function importSupplierFile(file) {
 
 async function exportSupplierTemplate(format = 'csv') {
   const normalizedFormat = ['csv', 'xlsx', 'pdf'].includes(format) ? format : 'csv';
-  const timestamp = getExportTimestamp();
 
   try {
     await exportObjectRows({
       format: normalizedFormat,
-      filename: `kcp-suppliers-template-${timestamp}`,
+      filename: buildExportFilename({ workspaceName: appState.workspace?.siteName, reportType: 'Supplier Template Export' }),
       sheetName: 'Supplier_Import',
       title: 'Supplier Import Template',
       subtitle: 'Simple supplier import form. Only Supplier_Name is required; contact, terms, address, and notes are optional.',
@@ -8504,7 +9518,6 @@ function exportPurchaseOrderPdf(orderId) {
 }
 
 async function exportPurchaseOrdersFixed(format = 'csv', orderId = '') {
-  const timestamp = getExportTimestamp();
   const orders = orderId ? [getPurchaseOrderById(orderId)].filter(Boolean) : getPurchaseOrderExportData().orders;
 
   if (!orders.length) {
@@ -8523,7 +9536,7 @@ async function exportPurchaseOrdersFixed(format = 'csv', orderId = '') {
     try {
       const context = getPurchaseOrderDocumentContext(orders[0], supplierMap.get(String(orders[0]?.supplierId || '')) || null);
       const pdfFile = await buildSupplierPurchaseOrderPdfFile(
-        `PO_${orders[0].reference || orders[0].poNumber || timestamp}`,
+        buildExportFilename({ workspaceName: appState.workspace?.siteName, reportType: 'Purchase Order Export', suffix: orders[0].reference || orders[0].poNumber }),
         documentOrders[0],
         context
       );
@@ -8543,7 +9556,11 @@ async function exportPurchaseOrdersFixed(format = 'csv', orderId = '') {
   try {
     await exportAoaRows({
       format,
-      filename: orderId ? `PO_${orders[0].reference || orders[0].poNumber || timestamp}` : `kcp-purchase-orders-${timestamp}`,
+      filename: buildExportFilename({
+        workspaceName: appState.workspace?.siteName,
+        reportType: 'Purchase Order Export',
+        suffix: orderId ? (orders[0].reference || orders[0].poNumber) : ''
+      }),
       sheetName: 'Purchase Order',
       title: orderId ? orders[0].poNumber : 'Purchase Orders',
       subtitle: `${baseContext.companyName} · ${orders.length} order${orders.length === 1 ? '' : 's'}`,
@@ -9856,7 +10873,6 @@ async function saveGrvReceipt(options = {}) {
 
 async function exportGrvReceipts(format = 'csv') {
   const receipts = getFilteredGrvReceipts(appState.grv.receipts || [], appState.grv.filters || {});
-  const timestamp = getExportTimestamp();
 
   if (!receipts.length) {
     showGrvToast('No GRV entries are available to export.', 'warning');
@@ -9872,7 +10888,7 @@ async function exportGrvReceipts(format = 'csv') {
   try {
     await exportAoaRows({
       format,
-      filename: `kcp-grv-${timestamp}`,
+      filename: buildExportFilename({ workspaceName: appState.workspace?.siteName, reportType: 'GRV Export' }),
       sheetName: 'GRV',
       title: 'Goods Received Vouchers',
       subtitle: `${appState.workspace?.siteName || 'KCP'} · ${receipts.length} GRV entr${receipts.length === 1 ? 'y' : 'ies'}`,
@@ -11348,6 +12364,29 @@ function clearRestaurantBackground() {
   showSettingsToast('Custom background removed. Save settings to publish it.', 'success');
 }
 
+async function requestVatRegisteredToggle(nextValue) {
+  const draft = appState.settings.draft || createDefaultSettingsDraft();
+  const currentlyRegistered = draft.vatRegistered !== false;
+  if (currentlyRegistered === nextValue) return;
+
+  const vatRate = Number(draft.vatRate ?? 15) || 15;
+  const message = nextValue
+    ? `Switching to VAT Registered will recalculate recipe costs and stock item costs to be ex-VAT (removing ${vatRate}% VAT from currently VAT-inclusive costs). Reports will start showing real VAT values instead of R0.`
+    : `Switching to Not VAT Registered will recalculate recipe costs and stock item costs to be VAT-inclusive (adding ${vatRate}% VAT back into currently ex-VAT costs, since it can no longer be reclaimed). Reports will show R0 VAT going forward.`;
+
+  const confirmed = await showBrandConfirmDialog({
+    eyebrow: 'VAT Registration',
+    title: nextValue ? 'Switch to VAT Registered?' : 'Switch to Not VAT Registered?',
+    message: `${message} This applies to all VAT-enabled stock items and cannot be automatically undone by toggling back (it will recalculate again in the opposite direction).`,
+    confirmLabel: nextValue ? 'Switch to VAT Registered' : 'Switch to Not VAT Registered',
+    cancelLabel: 'Cancel',
+    tone: 'danger'
+  });
+  if (!confirmed) return;
+
+  await saveSettingsDraft({ draftPatch: { vatRegistered: nextValue } });
+}
+
 async function saveSettingsDraft(options = {}) {
   if (settingsDraftRenderTimer) {
     clearTimeout(settingsDraftRenderTimer);
@@ -11381,6 +12420,8 @@ async function saveSettingsDraft(options = {}) {
 
   try {
     const saved = await saveWorkspaceSettings(appState.workspace?.id, draft, { includePersonal: false });
+    const vatRegistrationRecompute = saved.__vatRegistrationRecompute || null;
+    delete saved.__vatRegistrationRecompute;
     appState.settings = {
       ...appState.settings,
       status: 'ready',
@@ -11397,7 +12438,15 @@ async function saveSettingsDraft(options = {}) {
     if (options.syncSiteName !== false && nextSiteName && nextSiteName !== previousSiteName) {
       await syncDefaultWorkspaceSiteName(nextSiteName);
     }
-    showSettingsToast(options.successMessage || 'Settings saved.', 'success');
+    if (vatRegistrationRecompute) {
+      const { itemsRescaled = 0, locationPricesRescaled = 0 } = vatRegistrationRecompute;
+      showSettingsToast(
+        `VAT registration updated. Recalculated costs for ${itemsRescaled} item${itemsRescaled === 1 ? '' : 's'}${locationPricesRescaled ? ` (${locationPricesRescaled} location price${locationPricesRescaled === 1 ? '' : 's'})` : ''}.`,
+        'success'
+      );
+    } else {
+      showSettingsToast(options.successMessage || 'Settings saved.', 'success');
+    }
     return true;
   } catch (error) {
     appState.settings = {
@@ -12264,7 +13313,6 @@ function transferItemMatchesQuery(item = {}, query = '') {
 
 async function exportTransferTemplate(format = 'csv', templateId = '') {
   const normalizedFormat = ['csv', 'xlsx'].includes(String(format || '').toLowerCase()) ? String(format).toLowerCase() : 'csv';
-  const timestamp = getExportTimestamp();
   const template = (appState.transfers.templates || []).find((entry) => String(entry.id) === String(templateId || ''));
   const locationHelper = getTransferLocationHelperList();
   const stockById = new Map((appState.transfers.stockItems || []).map((item) => [String(item.id), item]));
@@ -12293,9 +13341,11 @@ async function exportTransferTemplate(format = 'csv', templateId = '') {
   try {
     await exportObjectRows({
       format: normalizedFormat,
-      filename: template?.name
-        ? `kcp-bulk-transfer-${template.name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${timestamp}`
-        : `kcp-bulk-transfer-template-${timestamp}`,
+      filename: buildExportFilename({
+        workspaceName: appState.workspace?.siteName,
+        reportType: 'Bulk Transfer Template Export',
+        suffix: template?.name || ''
+      }),
       sheetName: 'Transfer_Import',
       title: template?.name || 'Bulk Transfer Template',
       subtitle: 'Use Item_ID/SKU plus source and destination location IDs or names.',
@@ -12307,10 +13357,6 @@ async function exportTransferTemplate(format = 'csv', templateId = '') {
   } catch (error) {
     showTransferToast(error.message || 'Could not export bulk transfer template.', 'error');
   }
-}
-
-function slugifyExportName(value = '') {
-  return String(value || 'export').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'export';
 }
 
 function getTransferLocationHelperList() {
@@ -14411,11 +15457,10 @@ async function exportManufacturingItems(format = 'csv') {
     return;
   }
 
-  const timestamp = getExportTimestamp();
   try {
     await exportObjectRows({
       format: normalizedFormat,
-      filename: `kcp-manufacturing-${timestamp}`,
+      filename: buildExportFilename({ workspaceName: appState.workspace?.siteName, reportType: 'Manufacturing Export' }),
       sheetName: 'Manufacturing',
       title: 'Manufacturing Blueprints',
       subtitle: `${appState.workspace?.siteName || 'KCP'} · ${items.length} manufactured item${items.length === 1 ? '' : 's'}`,
@@ -14432,7 +15477,6 @@ async function exportManufacturingItems(format = 'csv') {
 async function exportManufacturingTemplate(format = 'csv') {
   const [baseFormat, platform = 'excel'] = String(format || 'csv').split(':');
   const normalizedFormat = ['csv', 'xlsx', 'pdf'].includes(baseFormat) ? baseFormat : 'csv';
-  const timestamp = getExportTimestamp();
 
   if (normalizedFormat === 'xlsx') {
     try {
@@ -14444,7 +15488,7 @@ async function exportManufacturingTemplate(format = 'csv') {
       await buildManufacturingBuilderXlsx({
         manufacturedItems,
         stockItems,
-        filename: `kcp-manufacturing-builder-${timestamp}`
+        filename: buildExportFilename({ workspaceName: appState.workspace?.siteName, reportType: 'Manufacturing Builder Export' })
       });
       showManufacturingToast(`Manufacturing builder exported as XLSX.`, 'success');
     } catch (error) {
@@ -14456,7 +15500,7 @@ async function exportManufacturingTemplate(format = 'csv') {
   try {
     await exportObjectRows({
       format: normalizedFormat,
-      filename: `kcp-manufacturing-template-${timestamp}`,
+      filename: buildExportFilename({ workspaceName: appState.workspace?.siteName, reportType: 'Manufacturing Template Export' }),
       sheetName: 'Manufacturing_Import',
       title: 'Manufacturing Import Template',
       subtitle: 'Use one row per component. Leave Component_Name blank to create a blueprint shell.',
@@ -16202,7 +17246,11 @@ async function exportStockTakeTemplatePdf(templateId, selectedLocationId = '') {
   try {
     await exportAoaRows({
       format: 'pdf',
-      filename: `kcp-stock-count-sheet-${slugifyExportName(template.name || 'template')}-${slugifyExportName(locationName)}`,
+      filename: buildExportFilename({
+        workspaceName: appState.workspace?.siteName || appState.workspace?.name,
+        reportType: 'Stock Take Count Sheet',
+        suffix: [template.name, locationName].filter(Boolean).join(' - ')
+      }),
       sheetName: 'Stock Count Sheet',
       title: 'Stock Count Sheet',
       subtitle: `${template.name || 'Template'} | ${appState.workspace?.siteName || appState.workspace?.name || 'KCP'} | ${locationName} | ${new Date().toLocaleString('en-ZA')}`,
@@ -16295,7 +17343,6 @@ function openStockTakeCountTemplateLocationPicker(format = 'xlsx') {
 
 async function exportStockTakeCountTemplate(format = 'csv', locationId = '') {
   const normalizedFormat = ['csv', 'xlsx'].includes(String(format || '').toLowerCase()) ? String(format).toLowerCase() : 'csv';
-  const timestamp = getExportTimestamp();
   const locations = (appState.stockTake.locations || []).length ? appState.stockTake.locations : [{ id: 'main', name: 'Main Store' }];
   if (!String(locationId || '').trim()) {
     openStockTakeCountTemplateLocationPicker(normalizedFormat);
@@ -16328,7 +17375,7 @@ async function exportStockTakeCountTemplate(format = 'csv', locationId = '') {
   try {
     await exportObjectRows({
       format: normalizedFormat,
-      filename: `kcp-stock-take-count-template-${slugifyExportName(locationName)}-${timestamp}`,
+      filename: buildExportFilename({ workspaceName: appState.workspace?.siteName || appState.workspace?.name, reportType: 'Stock Take Count Template Export', suffix: locationName }),
       sheetName: 'Stock_Take_Import',
       title: `Stock Take Count Template - ${locationName}`,
       subtitle: `Location: ${locationName}. Enter counts only in Base_Count and the custom UOM count columns. Unit columns are labels and should not be edited.`,
@@ -18230,6 +19277,7 @@ function renderApp() {
     // Dashboard and Reporting both manage their own async data, filters, charts, and
     // interaction state. Unrelated background snapshots must not replace their DOM.
     mountImportNotificationModal();
+    mountOnboardingWizard();
     syncAppModalScrollLock();
     return;
   }
@@ -18783,8 +19831,10 @@ function renderApp() {
       onBackgroundUpload: uploadRestaurantBackground,
       onBackgroundClear: clearRestaurantBackground,
       onSave: saveSettingsDraft,
+      onVatRegisteredToggle: requestVatRegisteredToggle,
       onSaveAppearance: saveAppearanceSettingsDraft,
       onGoLive: confirmGoLiveStockDepletion,
+      onRelaunchOnboarding: relaunchOnboardingWizard,
       onExportSnapshot: exportSettingsSnapshot,
       onImportSnapshot: importSettingsSnapshot,
       onRequestResetTotals: requestResetStockTotals,
@@ -18795,6 +19845,7 @@ function renderApp() {
     }
   }));
   mountImportNotificationModal();
+  mountOnboardingWizard();
   restoreActiveField(activeField);
   restoreScrollSnapshots(scrollSnapshots);
   syncAppModalScrollLock();
@@ -20404,7 +21455,8 @@ function getFilteredRecipeItems(items, filters = {}) {
       String(item.category || '').toLowerCase().includes(query) ||
       matchesBarcodeQuery(item, query);
     const matchesCategory = !filters.category || item.category === filters.category;
-    return matchesQuery && matchesCategory;
+    const matchesRecipeStatus = !filters.recipeStatus || item.status === filters.recipeStatus;
+    return matchesQuery && matchesCategory && matchesRecipeStatus;
   });
 }
 
@@ -20425,13 +21477,11 @@ function getFilteredStockItems(items, filters = {}) {
   });
 }
 
+// Shared canonical derivation — see src/utils/stockItemType.js. Filtering has always grouped
+// 'virtual' with Non Stock, so the fine-grained type is collapsed here.
 function getStockItemTypeForFilter(item = {}) {
-  const explicit = String(item.itemType || item.stockItemType || item.specificationType || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
-  const category = String(item.category || '').toLowerCase();
-  if (['sub_recipe', 'subrecipe'].includes(explicit) || item.isSubRecipe === true || category.includes('sub recipe') || category.includes('sub-recipe')) return 'sub_recipe';
-  if (['manufactured', 'prep', 'prepared', 'manufactured_item'].includes(explicit) || item.isManufactured === true || category.includes('manufactured')) return 'manufactured';
-  if (['recipe_source', 'non_stock', 'virtual'].includes(explicit) || category.includes('recipe source') || category.includes('non-stock') || category.includes('non stock') || category.includes('virtual')) return 'recipe_source';
-  return 'standard';
+  const type = deriveStockItemType(item);
+  return type === 'virtual' ? 'recipe_source' : type;
 }
 
 function normalizeStockCategory(value = '') {
@@ -20625,7 +21675,14 @@ function getDefaultGrvLocationId(order = null) {
 }
 
 function getVatRate() {
-  return Number(appState.source?.settings?.vatRate ?? appState.source?.settings?.vatPercentage ?? 15) || 15;
+  // NOTE: this previously read appState.source?.settings, but appState.source is never assigned
+  // anywhere (it stays null for the app's entire lifetime) — so this was silently, permanently
+  // hardcoded to 15% regardless of the workspace's actual configured VAT rate. Read the real,
+  // live settings instead, and respect VAT-registration status: a non-registered workspace never
+  // shows VAT on any live entry-form preview.
+  const settings = appState.settings?.draft || appState.settings?.values || {};
+  if (settings.vatRegistered === false) return 0;
+  return Number(settings.vatRate ?? settings.vatPercentage ?? 15) || 15;
 }
 
 function getPdfBranding() {
@@ -20736,10 +21793,6 @@ function reconcileCreditNoteDraft(draft, live = {}) {
       };
     })
   };
-}
-
-function getExportTimestamp() {
-  return new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
 }
 
 function parseBarcodeInput(value) {
@@ -20894,6 +21947,31 @@ function clearReportingNavigationParameters() {
     window.history.replaceState({}, '', url);
   } catch (error) {
     console.warn('[Reporting] Could not reset stale report navigation state:', error);
+  }
+}
+
+// Companion to clearReportingNavigationParameters(): removes `route=reporting` (and any leftover
+// reporting deep-link filter params) from the URL when navigating to any OTHER section, so a
+// later page refresh doesn't re-read a stale reporting URL and get forced back into Reporting.
+function clearStaleReportingRouteParam() {
+  if (typeof window === 'undefined' || !window.history?.replaceState) return;
+  try {
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has('route')) return;
+    const keys = [
+      'route', 'report', 'view', 'from', 'to', 'startDate', 'endDate', 'dateRangeType',
+      'search', 'time', 'locationId', 'category', 'source', 'sourceType',
+      'paymentMethod', 'status', 'receiptNumber', 'menuCategory', 'menuItemId',
+      'inventoryCategory', 'inventoryItemId', 'modifierGroupId', 'modifierType',
+      'modifierName', 'stockDeductionStatus', 'yocoCategory', 'recipeStatus',
+      'riskStatus', 'warningSeverity', 'supplierId', 'itemType', 'onlyCritical',
+      'onlyBelowPar', 'missingSupplier', 'missingCost', 'user', 'action',
+      'entityType', 'entityName'
+    ];
+    keys.forEach((key) => url.searchParams.delete(key));
+    window.history.replaceState({}, '', url);
+  } catch (error) {
+    console.warn('[Route] Could not clear stale reporting route param:', error);
   }
 }
 

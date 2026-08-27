@@ -11,6 +11,7 @@ import {
 import { groupBy, sumBy, text, toArray } from '../../engine/grouping.js';
 import { DEFAULT_REPORT_TIMEZONE, formatReportTime, resolveReportTimestamp, zonedDateTimeStrings } from '../../engine/timezone.js';
 import { buildRowFormulaTooltip } from '../../tooltips/tooltipBuilder.js';
+import { CENT_TOLERANCE } from '../../engine/yocoFinancials.js';
 
 export const DEFAULT_VAT_RATE = 0.15;
 
@@ -31,10 +32,13 @@ function resolveSalesDateTime(row = {}) {
 export function normalizeSalesFinancialRow(row = {}) {
   const saleDateTime = resolveSalesDateTime(row);
   const sourceGrossAmount = safeNumber(row.grossAmount ?? row.gross_amount);
-  const suppliedVatRate = row.vatRate !== undefined || row.vat_rate !== undefined
-    ? normalizeRate(row.vatRate ?? row.vat_rate)
-    : 0;
-  const vatRate = suppliedVatRate > 0 ? suppliedVatRate : DEFAULT_VAT_RATE;
+  // A non-VAT-registered workspace legitimately supplies vatRate: 0 — that must not collapse
+  // into "not supplied" and fall back to the 15% default below, or every sale on that workspace
+  // would show fabricated VAT instead of the R0 the backend already correctly calculated.
+  const vatRateSupplied = row.vatRate !== undefined || row.vat_rate !== undefined;
+  const suppliedVatRate = vatRateSupplied ? normalizeRate(row.vatRate ?? row.vat_rate) : NaN;
+  const vatRate = vatRateSupplied ? suppliedVatRate : DEFAULT_VAT_RATE;
+  const isExplicitZeroRate = vatRateSupplied && suppliedVatRate === 0;
   const status = text(row.status) || 'Unknown';
   const isRefund = status.toLowerCase().includes('refund') || text(row.orderType || row.order_type).toLowerCase() === 'refund';
   const sourcePaymentMethod = text(row.paymentMethod || row.payment_method);
@@ -51,7 +55,7 @@ export function normalizeSalesFinancialRow(row = {}) {
   const explicitVat = row.vatAmount ?? row.vat_amount;
   const explicitVatAmount = safeNumber(explicitVat);
   const explicitVatUsable = hasValue(explicitVat)
-    && (explicitVatAmount !== 0 || (!sourceGrossAmount && !refundGrossAmount) || isVatExempt);
+    && (explicitVatAmount !== 0 || (!sourceGrossAmount && !refundGrossAmount) || isVatExempt || isExplicitZeroRate);
   const accountingVatAmount = isRefund
     ? explicitVatUsable
       ? (explicitVatAmount > 0 ? -explicitVatAmount : explicitVatAmount)
@@ -62,8 +66,8 @@ export function normalizeSalesFinancialRow(row = {}) {
   const explicitNet = row.netAmount ?? row.net_amount;
   const explicitNetAmount = safeNumber(explicitNet);
   const explicitNetReconciles = hasValue(explicitNet) && (isRefund
-    ? Math.abs(roundMoney(refundGrossAmount - Math.abs(accountingVatAmount)) - Math.abs(roundMoney(explicitNetAmount))) <= 0.011
-    : Math.abs(roundMoney(sourceGrossAmount - accountingVatAmount) - roundMoney(explicitNetAmount)) <= 0.011);
+    ? Math.abs(roundMoney(refundGrossAmount - Math.abs(accountingVatAmount)) - Math.abs(roundMoney(explicitNetAmount))) <= CENT_TOLERANCE
+    : Math.abs(roundMoney(sourceGrossAmount - accountingVatAmount) - roundMoney(explicitNetAmount)) <= CENT_TOLERANCE);
   const accountingNetAmount = isRefund
     ? explicitNetReconciles
       ? (explicitNetAmount > 0 ? -explicitNetAmount : explicitNetAmount)
@@ -139,20 +143,22 @@ export function normalizeSaleUsageRow(row = {}) {
     : roundMoney(qtyUsed * unitCostExVat);
   const qtySold = safeNumber(row.qtySold ?? row.qty_sold ?? row.lineQuantity ?? row.line_quantity, 1) || 1;
   const grossSaleAmount = safeNumber(row.grossSaleAmount ?? row.gross_sale_amount);
-  const suppliedVatRate = row.vatRate !== undefined || row.vat_rate !== undefined
-    ? normalizeRate(row.vatRate ?? row.vat_rate)
-    : 0;
-  const vatRate = suppliedVatRate > 0 ? suppliedVatRate : DEFAULT_VAT_RATE;
+  // Same fix as normalizeSalesFinancialRow: an explicitly-supplied vatRate: 0 (non-VAT-registered
+  // workspace) must not fall back to the 15% default.
+  const vatRateSupplied = row.vatRate !== undefined || row.vat_rate !== undefined;
+  const suppliedVatRate = vatRateSupplied ? normalizeRate(row.vatRate ?? row.vat_rate) : NaN;
+  const vatRate = vatRateSupplied ? suppliedVatRate : DEFAULT_VAT_RATE;
+  const isExplicitZeroRate = vatRateSupplied && suppliedVatRate === 0;
   const isVatExempt = booleanValue(row.isVatExempt ?? row.is_vat_exempt ?? row.vatExempt ?? row.vat_exempt ?? row.zeroRated ?? row.zero_rated)
     || /zero[ _-]?rated|tax[ _-]?exempt|vat[ _-]?exempt|non[ _-]?taxable/.test(text(row.vatSource || row.vat_source || row.taxStatus || row.tax_status).toLowerCase());
   const explicitVat = row.vatAmount ?? row.vat_amount;
   const explicitVatAmount = safeNumber(explicitVat);
-  const explicitVatUsable = hasValue(explicitVat) && (explicitVatAmount > 0 || !grossSaleAmount || isVatExempt);
+  const explicitVatUsable = hasValue(explicitVat) && (explicitVatAmount > 0 || !grossSaleAmount || isVatExempt || isExplicitZeroRate);
   const vatAmount = explicitVatUsable ? explicitVatAmount : calculateVatFromGross(grossSaleAmount, vatRate);
   const explicitNet = row.netSaleAmount ?? row.net_sale_amount;
   const explicitNetAmount = safeNumber(explicitNet);
   const explicitNetReconciles = hasValue(explicitNet)
-    && Math.abs(roundMoney(grossSaleAmount - vatAmount) - roundMoney(explicitNetAmount)) <= 0.011;
+    && Math.abs(roundMoney(grossSaleAmount - vatAmount) - roundMoney(explicitNetAmount)) <= CENT_TOLERANCE;
   const netSaleAmount = explicitNetReconciles ? explicitNetAmount : roundMoney(grossSaleAmount - vatAmount);
   const recipeLineType = text(row.recipeLineType || row.recipe_line_type) || defaultRecipeLineType(row);
   const totalQtyUsed = hasValue(row.totalQtyUsed ?? row.total_qty_used) ? safeNumber(row.totalQtyUsed ?? row.total_qty_used) : qtyUsed;
@@ -270,38 +276,37 @@ export function buildSaleStockMovementModel(rows = []) {
 export function paymentTotals(rows = [], includeAverage = false) {
   const totals = {
     label: 'Totals',
-    grossSales: sumBy(rows, (row) => row.grossSales ?? row.grossAmount),
-    discounts: sumBy(rows, (row) => row.discounts ?? row.discountAmount),
-    refunds: sumBy(rows, (row) => row.refunds ?? row.refundAmount),
-    refundVat: sumBy(rows, (row) => row.refundVat ?? row.refundVatAmount),
-    refundNet: sumBy(rows, (row) => row.refundNet ?? row.refundNetAmount),
-    vat: sumBy(rows, (row) => row.vat ?? row.vatAmount),
-    netSales: sumBy(rows, (row) => row.netSales ?? row.netAmount),
-    tips: sumBy(rows, (row) => row.tips ?? row.tipAmount),
-    fees: sumBy(rows, (row) => row.fees ?? row.feeAmount),
+    grossSales: roundMoney(sumBy(rows, (row) => row.grossSales ?? row.grossAmount)),
+    discounts: roundMoney(sumBy(rows, (row) => row.discounts ?? row.discountAmount)),
+    refunds: roundMoney(sumBy(rows, (row) => row.refunds ?? row.refundAmount)),
+    refundVat: roundMoney(sumBy(rows, (row) => row.refundVat ?? row.refundVatAmount)),
+    refundNet: roundMoney(sumBy(rows, (row) => row.refundNet ?? row.refundNetAmount)),
+    vat: roundMoney(sumBy(rows, (row) => row.vat ?? row.vatAmount)),
+    netSales: roundMoney(sumBy(rows, (row) => row.netSales ?? row.netAmount)),
+    tips: roundMoney(sumBy(rows, (row) => row.tips ?? row.tipAmount)),
+    fees: roundMoney(sumBy(rows, (row) => row.fees ?? row.feeAmount)),
     payoutAmount: 0,
     transactionCount: sumBy(rows, (row) => row.transactionCount ?? 1)
   };
-  totals.grossSales = roundMoney(totals.grossSales);
   totals.payoutAmount = roundMoney(totals.netSales + totals.tips - totals.refunds - totals.fees);
   if (includeAverage) totals.averageTransactionValue = totals.transactionCount ? roundMoney(totals.grossSales / totals.transactionCount) : 0;
   return totals;
 }
 
 export function stockMovementTotals(rows = []) {
-  const recipeStockValueUsed = sumBy(rows, (row) => row.recipeStockValueUsed ?? row.recipeStockCost ?? (row.sourceType === 'Modifier Usage' ? 0 : row.stockValueUsed));
-  const modifierStockValueUsed = sumBy(rows, (row) => row.modifierStockValueUsed ?? row.modifierStockCost ?? (row.sourceType === 'Modifier Usage' ? row.stockValueUsed : 0));
-  const totalStockValueUsed = sumBy(rows, (row) => row.totalStockValueUsed ?? row.totalStockCost ?? row.stockValueUsed) || addMoney(recipeStockValueUsed, modifierStockValueUsed);
-  const netSales = sumBy(rows, (row) => row.netSales ?? row.netSaleAmount);
+  const recipeStockValueUsed = roundMoney(sumBy(rows, (row) => row.recipeStockValueUsed ?? row.recipeStockCost ?? (row.sourceType === 'Modifier Usage' ? 0 : row.stockValueUsed)));
+  const modifierStockValueUsed = roundMoney(sumBy(rows, (row) => row.modifierStockValueUsed ?? row.modifierStockCost ?? (row.sourceType === 'Modifier Usage' ? row.stockValueUsed : 0)));
+  const totalStockValueUsed = roundMoney(sumBy(rows, (row) => row.totalStockValueUsed ?? row.totalStockCost ?? row.stockValueUsed)) || addMoney(recipeStockValueUsed, modifierStockValueUsed);
+  const netSales = roundMoney(sumBy(rows, (row) => row.netSales ?? row.netSaleAmount));
   const grossProfit = calculateGrossProfit(netSales, totalStockValueUsed);
   return {
     label: 'Totals',
     salesCount: sumBy(rows, (row) => row.salesCount ?? row.saleCount ?? 1),
-    qtySold: sumBy(rows, (row) => row.qtySold),
-    grossSales: sumBy(rows, (row) => row.grossSales ?? row.grossSaleAmount),
-    vat: sumBy(rows, (row) => row.vat ?? row.vatAmount),
+    qtySold: roundMoney(sumBy(rows, (row) => row.qtySold)),
+    grossSales: roundMoney(sumBy(rows, (row) => row.grossSales ?? row.grossSaleAmount)),
+    vat: roundMoney(sumBy(rows, (row) => row.vat ?? row.vatAmount)),
     netSales,
-    qtyUsed: sumBy(rows, (row) => row.qtyUsed),
+    qtyUsed: roundMoney(sumBy(rows, (row) => row.qtyUsed)),
     recipeStockValueUsed,
     modifierStockValueUsed,
     totalStockValueUsed,
@@ -321,15 +326,15 @@ export function moneyTooltip(key, values = '') {
 
 function summarizePayments(rows, keySelector, baseSelector) {
   return Array.from(groupBy(rows, (row) => toArray(keySelector(row)).map(text).join('::')).entries()).map(([key, groupRows], index) => {
-    const grossSales = sumBy(groupRows, 'grossAmount');
-    const vat = sumBy(groupRows, 'vatAmount');
-    const netSales = sumBy(groupRows, 'netAmount');
-    const tips = sumBy(groupRows, 'tipAmount');
-    const refunds = sumBy(groupRows, 'refundAmount');
-    const refundVat = sumBy(groupRows, 'refundVatAmount');
-    const refundNet = sumBy(groupRows, 'refundNetAmount');
-    const discounts = sumBy(groupRows, 'discountAmount');
-    const fees = sumBy(groupRows, 'feeAmount');
+    const grossSales = roundMoney(sumBy(groupRows, 'grossAmount'));
+    const vat = roundMoney(sumBy(groupRows, 'vatAmount'));
+    const netSales = roundMoney(sumBy(groupRows, 'netAmount'));
+    const tips = roundMoney(sumBy(groupRows, 'tipAmount'));
+    const refunds = roundMoney(sumBy(groupRows, 'refundAmount'));
+    const refundVat = roundMoney(sumBy(groupRows, 'refundVatAmount'));
+    const refundNet = roundMoney(sumBy(groupRows, 'refundNetAmount'));
+    const discounts = roundMoney(sumBy(groupRows, 'discountAmount'));
+    const fees = roundMoney(sumBy(groupRows, 'feeAmount'));
     const payoutAmount = roundMoney(netSales + tips - refunds - fees);
     return {
       id: `payment-summary:${key || index}`,

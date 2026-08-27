@@ -65,6 +65,7 @@ export interface Env {
   YOCO_V2_EVENTS?: Queue<import('../modules/yoco-engine-v2/contracts').YocoV2QueueMessage>;
   YOCO_V2_EVENTS_DLQ?: Queue<import('../modules/yoco-engine-v2/contracts').YocoV2QueueMessage>;
   YOCO_V2_RATE_GATE?: DurableObjectNamespace;
+  YOCO_V2_WRITE_BUDGET?: DurableObjectNamespace;
   YOCO_V2_WAIT_UNTIL?: (promise: Promise<unknown>) => void;
   YOCO_V2_CAPTURE_ENABLED?: string;
   YOCO_V2_QUEUE_ENABLED?: string;

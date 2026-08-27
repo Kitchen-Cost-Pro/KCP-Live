@@ -123,14 +123,32 @@ export class FacadeDatabase {
         // from ever completing the remaining migration statements. Treat only this known,
         // idempotent ALTER TABLE ADD COLUMN case as already applied; every other SQL error remains
         // fatal so genuine schema problems are never hidden.
-        const message = String((cause as Error)?.message || cause || '');
-        const isAddColumn = /^ALTER\s+TABLE\s+[^\s]+\s+ADD\s+COLUMN\s+/i.test(statement);
-        const isDuplicateColumn = /duplicate column name|already exists/i.test(message);
-        if (isAddColumn && isDuplicateColumn) continue;
+        if (isRetryableAddColumnError(statement, cause)) continue;
         throw cause;
       }
     }
   }
+}
+
+/**
+ * True when `cause` is the specific, safe-to-ignore SQLite error a retried `ALTER TABLE ... ADD
+ * COLUMN` throws after that exact statement already committed on a prior, interrupted attempt.
+ * Exported (rather than kept private to execScript) so tests can exercise the real classification
+ * logic against real migration text instead of re-implementing — and risk drifting from — it.
+ *
+ * splitSqlStatements() deliberately keeps a leading line or block comment glued to the statement
+ * that follows it (there is no statement-terminating semicolon inside a comment), so a documented
+ * migration like `-- Stop the write storm...\nALTER TABLE ...` must have its leading comment
+ * stripped before checking that the statement starts with ALTER — otherwise a real interrupted
+ * migration with an explanatory header comment would fail this check and turn a routine, expected
+ * retry into a fatal error.
+ */
+export function isRetryableAddColumnError(statement: string, cause: unknown): boolean {
+  const withoutLeadingComments = statement.replace(/^(?:\s*(?:--[^\n]*\n|\/\*[\s\S]*?\*\/))+/, '').trimStart();
+  const isAddColumn = /^ALTER\s+TABLE\s+[^\s]+\s+ADD\s+COLUMN\s+/i.test(withoutLeadingComments);
+  const message = String((cause as Error)?.message || cause || '');
+  const isDuplicateColumn = /duplicate column name|already exists/i.test(message);
+  return isAddColumn && isDuplicateColumn;
 }
 
 /**

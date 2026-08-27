@@ -13,6 +13,24 @@ import { normalizeModifierNote, observeLineNotes } from '../modifier-engine/reli
 import { resolveYocoStockLocation } from './location-routing';
 
 const SALE_SCHEMA_VERSION = '1.0.0';
+// Resolution "completeness" ranking, most-complete first. Yoco delivers order.updated,
+// payment.created and order.completed independently and asynchronously, and our own queue can
+// retry/reorder them, so a webhook for an EARLIER lifecycle stage (e.g. order.updated captured
+// while the order was still open) can be *processed* after a LATER stage already resolved the sale
+// completely (e.g. order.completed). Ranking lets the upsert refuse to regress a domain event from
+// a more-complete resolution to a less-complete one just because that call happened to run last.
+const SALE_RESOLUTION_RANK: Record<string, number> = {
+  RESOLVED: 3,
+  PARTIALLY_RESOLVED: 2,
+  LOCATION_MAPPING_MISSING: 2,
+  ITEM_MAPPING_MISSING: 2,
+  MODIFIER_MAPPING_MISSING: 2,
+  WAITING_FOR_YOCO: 1,
+  UNSUPPORTED_ORDER_STATE: 0
+};
+function saleResolutionRank(status: unknown): number {
+  return SALE_RESOLUTION_RANK[String(status || '')] ?? 0;
+}
 const FINAL_STATUSES = new Set(['approved', 'captured', 'closed', 'complete', 'completed', 'fulfilled', 'paid', 'settled', 'success', 'successful', 'succeeded', 'partially refunded', 'refunded']);
 const LINE_KEYS = ['line_items', 'lineItems', 'items', 'order_lines', 'orderLines'];
 const MODIFIER_KEYS = ['modifiers', 'selected_modifiers', 'selectedModifiers', 'line_modifiers', 'lineModifiers', 'modifier_lines', 'modifierLines', 'applied_modifiers', 'appliedModifiers', 'modifier_selections', 'modifierSelections'];
@@ -300,7 +318,20 @@ function resolutionStatus(input: { completed: boolean; locationId: string; sourc
 }
 
 async function workspaceVatRate(env: Env, workspaceId: string): Promise<number> {
-  const row = await env.DB.prepare(`SELECT vat_rate FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`).bind(workspaceId).first<Row>();
+  // A non-VAT-registered workspace must resolve to 0 here, not just fall through to the
+  // default 15 — otherwise live sale processing keeps charging VAT on every order regardless
+  // of the toggle. `vat_registered` is a newer column than `vat_rate`, so tolerate it still
+  // being missing on a workspace whose per-DO migration hasn't applied yet (see
+  // WorkspaceDO.ensureMigrated) rather than failing sale processing outright.
+  let row: Row | null = null;
+  try {
+    row = await env.DB.prepare(
+      `SELECT vat_rate, vat_registered FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`,
+    ).bind(workspaceId).first<Row>();
+  } catch {
+    row = await env.DB.prepare(`SELECT vat_rate FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`).bind(workspaceId).first<Row>();
+  }
+  if (row && numberValue(row.vat_registered, 1) === 0) return 0;
   const value = numberValue(row?.vat_rate, 15);
   return value > 0 ? value : 15;
 }
@@ -325,6 +356,18 @@ async function upsertCanonicalSaleDomainEvent(
   }
 ): Promise<Row> {
   const now = nowIso();
+  // Rank expression mirrored from SALE_RESOLUTION_RANK — must stay in sync. Guards the update so a
+  // webhook resolved to a LESS complete state (e.g. order.updated seeing a still-open order) can
+  // never clobber an already-more-complete resolution (e.g. order.completed) just by running last.
+  const rankCase = (column: string) => `CASE ${column}
+    WHEN 'RESOLVED' THEN 3
+    WHEN 'PARTIALLY_RESOLVED' THEN 2
+    WHEN 'LOCATION_MAPPING_MISSING' THEN 2
+    WHEN 'ITEM_MAPPING_MISSING' THEN 2
+    WHEN 'MODIFIER_MAPPING_MISSING' THEN 2
+    WHEN 'WAITING_FOR_YOCO' THEN 1
+    ELSE 0
+  END`;
   await env.DB.prepare(
     `INSERT INTO yoco_v2_domain_events
       (id, workspace_id, integration_id, raw_event_id, processing_run_id, event_key,
@@ -337,13 +380,22 @@ async function upsertCanonicalSaleDomainEvent(
        occurred_at = excluded.occurred_at,
        payload_json = excluded.payload_json,
        resolution_status = excluded.resolution_status,
-       updated_at = excluded.updated_at`
+       updated_at = excluded.updated_at
+     WHERE ${rankCase('excluded.resolution_status')} >= ${rankCase('yoco_v2_domain_events.resolution_status')}`
   ).bind(
     input.eventId, input.workspaceId, input.integrationId, input.rawEventId, input.processingRunId,
     `sale:${input.sourceOrderId}`, SALE_SCHEMA_VERSION, input.sourceOrderId, input.occurredAt,
     JSON.stringify(input.canonical), input.canonical.resolution_status, now
   ).run();
-  const domainEvent = await env.DB.prepare(`SELECT * FROM yoco_v2_domain_events WHERE id = ?1 LIMIT 1`).bind(input.eventId).first<Row>();
+  // Yoco sends both payment.created and order.completed for the same sale, and each is processed
+  // as its own raw event with its own idempotency lock — so two calls into this function for the
+  // same order can race. The caller that commits second hits the ON CONFLICT branch and updates
+  // the FIRST caller's row (conflict target is the natural key below, not id), leaving its own
+  // freshly-generated `eventId` unused by any row. Reading back by the natural key (rather than
+  // by the possibly-orphaned `eventId`) always finds whichever row actually persisted.
+  const domainEvent = await env.DB.prepare(
+    `SELECT * FROM yoco_v2_domain_events WHERE workspace_id = ?1 AND integration_id = ?2 AND event_key = ?3 LIMIT 1`
+  ).bind(input.workspaceId, input.integrationId, `sale:${input.sourceOrderId}`).first<Row>();
   if (!domainEvent) throw new Error('Canonical sale domain event could not be stored.');
   return domainEvent;
 }
@@ -510,6 +562,14 @@ export async function resolveCanonicalYocoSale(env: YocoV2ApiClientEnv, input: R
     occurredAt,
     canonical
   });
+  // The upsert above refuses to regress an already-more-complete resolution, so if a DIFFERENT
+  // (better) resolution is already stored, use IT — not this call's own locally-computed, less
+  // complete `canonical` — for proposal building / effect application below. Otherwise a webhook
+  // for an earlier lifecycle stage that loses this race would still try to apply effects (or skip
+  // them) based on its own stale view instead of the authoritative stored outcome.
+  const storedCanonical = saleResolutionRank(domainEvent.resolution_status) > saleResolutionRank(canonical.resolution_status)
+    ? (JSON.parse(String(domainEvent.payload_json || '{}')) as CanonicalSaleCompletedEvent)
+    : canonical;
   await Promise.all(lines.flatMap((line) => line.modifiers.map((modifier) => observeModifier(env as Env, {
     workspaceId,
     sourceOrderId,
@@ -533,13 +593,17 @@ export async function resolveCanonicalYocoSale(env: YocoV2ApiClientEnv, input: R
     notes: Array.isArray(line.metadata?.raw_note_texts) ? line.metadata.raw_note_texts.map((value) => text(value)).filter(Boolean) : [],
     observedAt: occurredAt
   })));
+  // Log the AUTHORITATIVE stored outcome (domainEvent), not this call's own local `status` — if
+  // the upsert guard above rejected this call's write because a better resolution already existed,
+  // `status` no longer describes what's actually in the database and would leave a misleading
+  // timeline entry (e.g. "stored ... UNSUPPORTED_ORDER_STATE" for an order that's really RESOLVED).
   await appendTimeline(env.DB, {
     rawEventId,
     processingRunId,
     step: 'CANONICAL_SALE_STORED',
-    status,
-    message: `Canonical sale ${sourceOrderId} stored once with resolution status ${status}.`,
-    metadata: { domain_event_id: eventId, source_order_id: sourceOrderId, line_count: lines.length, resolution_status: status }
+    status: String(domainEvent.resolution_status || status),
+    message: `Canonical sale ${sourceOrderId} stored once with resolution status ${domainEvent.resolution_status || status}.`,
+    metadata: { domain_event_id: domainEvent.id, source_order_id: sourceOrderId, line_count: lines.length, resolution_status: domainEvent.resolution_status || status }
   });
-  return { domainEvent, canonical };
+  return { domainEvent, canonical: storedCanonical };
 }

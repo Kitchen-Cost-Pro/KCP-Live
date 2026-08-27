@@ -2,12 +2,13 @@ import type { AuthContext } from '../../legacy/types';
 import type { YocoV2QueueEnv } from './capture';
 import { captureVerifiedYocoV2Event } from './capture';
 import { recordYocoV2WebhookReceipt, sha256Hex } from './admin-security';
-import { verifyYocoV2WebhookSignature } from './webhook-signature';
+import { verifyYocoV2WebhookSignature, normalizeStandardWebhookSecret } from './webhook-signature';
 import { KCP_WORKER_RELEASE } from '../../release';
 import type { Row } from './repository';
 import { migrateYocoV2EffectOwnershipForConnection } from './ownership';
 import { processYocoV2QueueMessage } from './processor';
 import { scheduleImmediateYocoV2Processing } from './queue-consumer';
+import { yocoV2WriteBudgetConfig } from './config';
 
 function text(value: unknown, fallback = ''): string {
   return String(value ?? fallback).trim();
@@ -39,9 +40,13 @@ function eventFields(payload: Row, headers: Headers): { eventType: string; event
   return { eventType: eventType || 'unknown', eventId, sourceReference };
 }
 
+// Normalise on read as well as on write: secrets stored before the write-side normalisation existed
+// are still sitting in yoco_connections without the `whsec_` prefix, and the verifier fails closed on
+// those — so every delivery for an already-connected workspace stayed unverifiable. Doing it here
+// repairs existing connections without requiring anyone to disconnect and reconnect Yoco.
 function activeWebhookSecrets(connection: Row | null): string[] {
-  const secrets = [text(connection?.webhook_secret)];
-  const previousSecret = text(connection?.webhook_previous_secret);
+  const secrets = [normalizeStandardWebhookSecret(connection?.webhook_secret)];
+  const previousSecret = normalizeStandardWebhookSecret(connection?.webhook_previous_secret);
   const previousUntil = Date.parse(text(connection?.webhook_previous_until));
   if (previousSecret && Number.isFinite(previousUntil) && previousUntil > Date.now()) secrets.push(previousSecret);
   return secrets.filter(Boolean);
@@ -80,6 +85,34 @@ async function recordRejectedReceipt(
     headers: input.headers,
     receivedAt: new Date().toISOString()
   }).catch(() => undefined);
+}
+
+/**
+ * Reserve today's write-budget before capturing a verified event. Fails OPEN (allows the write)
+ * if the DO binding isn't configured yet, or if the reservation call itself errors — a missing
+ * safety net for a rollout in progress must never itself become an outage. A reachable, working
+ * budget gate is what turns hard-stop into a deliberate choice rather than an accident.
+ */
+async function reserveYocoV2WriteBudget(env: YocoV2QueueEnv, estimatedWrites: number): Promise<{ allowed: boolean; softWarn: boolean }> {
+  if (!env.YOCO_V2_WRITE_BUDGET) return { allowed: true, softWarn: false };
+  try {
+    const { dailyCap, softWarnRatio } = yocoV2WriteBudgetConfig(env);
+    const stub = env.YOCO_V2_WRITE_BUDGET.get(env.YOCO_V2_WRITE_BUDGET.idFromName('global'));
+    const response = await stub.fetch('https://write-budget/reserve', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ estimatedWrites, dailyCap, softWarnRatio })
+    });
+    const result = await response.json<{ allowed?: boolean; softWarn?: boolean }>().catch(() => null);
+    if (!result || typeof result.allowed !== 'boolean') return { allowed: true, softWarn: false };
+    if (result.softWarn) {
+      console.error(`[yoco-v2-write-budget] soft-warn threshold reached (allowed=${result.allowed})`);
+    }
+    return { allowed: result.allowed, softWarn: Boolean(result.softWarn) };
+  } catch (cause) {
+    console.error('[yoco-v2-write-budget] reserve call failed, failing open:', cause);
+    return { allowed: true, softWarn: false };
+  }
 }
 
 /**
@@ -141,6 +174,37 @@ export async function handleYocoV2WebhookIngress(
         WHERE workspace_id = ?1`
     ).bind(workspaceId, 'Yoco webhook signature could not be verified.', new Date().toISOString()).run().catch(() => undefined);
     return response({ ok: false, error: 'Yoco webhook signature could not be verified.' }, 401);
+  }
+
+  // A verified event is roughly 2 writes at capture (raw event + receipt), before any queue
+  // processing. Deferring here — rather than after capture — is what actually saves the write
+  // budget; letting capture happen and only gating the queue publish would spend the writes we're
+  // trying to protect. Yoco does not publish a retry window, so this deliberately does NOT assume
+  // a 503 here will be redelivered later — reconciliation is the real backstop for anything
+  // deferred, not Yoco's undocumented retries.
+  const budget = await reserveYocoV2WriteBudget(env, 2);
+  if (!budget.allowed) {
+    await recordYocoV2WebhookReceipt(env.DB, {
+      workspaceId,
+      integrationId: `yoco:${workspaceId}`,
+      yocoEventId: fields.eventId,
+      eventType: fields.eventType,
+      sourceReference: fields.sourceReference,
+      payloadHash: await sha256Hex(rawBody),
+      signatureStatus: 'VALID',
+      captureStatus: 'BUDGET_EXHAUSTED',
+      queueStatus: 'NOT_REQUESTED',
+      traceId: fields.eventId,
+      headers: request.headers,
+      receivedAt: new Date().toISOString()
+    }).catch(() => undefined);
+    return response({
+      ok: false,
+      error: 'YOCO_V2_WRITE_BUDGET_EXHAUSTED',
+      message: 'Daily write budget exhausted. This event was logged but not processed; reconciliation will catch it up.',
+      retryable: true,
+      workerRelease: KCP_WORKER_RELEASE
+    }, 503);
   }
 
   try {

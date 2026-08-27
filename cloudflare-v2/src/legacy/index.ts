@@ -1,5 +1,6 @@
 import type { Env, AuthContext } from "./types";
 import { postWorkspaceChat } from "./chat-routes";
+import { postWorkspaceAiExtract } from "./ai-extract-routes";
 import { requireAuth } from "./auth";
 import { corsHeaders, error, json } from "./http";
 import { ensureWorkspaceLocationNames } from "./location-display";
@@ -52,7 +53,6 @@ import {
   postAdminWorkspaceEmailQueue,
   postAdminYocoConnect,
   postAdminYocoDisconnect,
-  postAdminYocoResetWebhook,
   postAdminYocoSyncCatalogue,
   requireAdmin,
   putAdminEmailConfig,
@@ -177,10 +177,13 @@ import {
   postYocoConnect,
   postYocoDisconnect,
   postYocoSyncCatalogue,
+  postRunDueCatalogueSync,
+  postSyncCatalogueIfDue,
 } from "./routes";
 import { sendWorkspaceLowStockNow } from "./low-stock-email";
 import {
   getDetailedActivityReport,
+  getOperationsExcludedSummary,
   getLedgerIntegrityAudit,
   getInventoryAuditReport,
   getMenuRecipeHealthReport,
@@ -595,8 +598,6 @@ export async function dispatchCentralRoute(
       return postAdminYocoConnect(request, env, workspaceId);
     if (action === "disconnect")
       return postAdminYocoDisconnect(request, env, workspaceId);
-    if (action === "reset-webhook")
-      return postAdminYocoResetWebhook(request, env, workspaceId);
     if (action === "sync-catalogue")
       return postAdminYocoSyncCatalogue(request, env, workspaceId);
   }
@@ -740,6 +741,12 @@ export async function dispatchWorkspaceRoute(
     resource === "admin-action/report-schedules-due"
   )
     return postRunDueReportSchedules(request, env, auth, workspaceId);
+
+  if (
+    request.method === "POST" &&
+    resource === "admin-action/catalogue-sync-due"
+  )
+    return postRunDueCatalogueSync(request, env, auth, workspaceId);
   const transactionDetailMatch = routePattern(
     resource,
     /^reports\/transactions\/([^/]+)$/,
@@ -756,6 +763,10 @@ export async function dispatchWorkspaceRoute(
 
   if (request.method === "GET" && resource === "reports/detailed-activity") {
     return getDetailedActivityReport(request, env, auth, workspaceId);
+  }
+
+  if (request.method === "GET" && resource === "reports/operations-excluded") {
+    return getOperationsExcludedSummary(request, env, auth, workspaceId);
   }
 
   if (request.method === "GET" && resource === "reports/stock-take-audit") {
@@ -1476,6 +1487,13 @@ export async function dispatchWorkspaceRoute(
     return postYocoSyncCatalogue(request, env, auth, workspaceId);
   }
 
+  // Called once per login/app-load (see requestCatalogueSyncIfDue in the frontend). Unlike the
+  // manual button above, this only actually syncs when the catalogue is stale — see
+  // postSyncCatalogueIfDue's due-check.
+  if (request.method === "POST" && resource === "yoco/sync-catalogue-if-due") {
+    return postSyncCatalogueIfDue(request, env, auth, workspaceId);
+  }
+
   if (request.method === "GET" && resource === "gmail-oauth-callback") {
     if (auth.uid !== "gmail-oauth-callback") {
       return error(request, env, 403, "Invalid Gmail OAuth callback route.");
@@ -1503,6 +1521,10 @@ export async function dispatchWorkspaceRoute(
     return postWorkspaceChat(request, env, auth, workspaceId);
   }
 
+  if (request.method === "POST" && resource === "ai-extract") {
+    return postWorkspaceAiExtract(request, env, auth, workspaceId);
+  }
+
   return notFound(request, env);
 }
 
@@ -1521,8 +1543,20 @@ export default {
         raw,
         cause instanceof Error ? cause.stack : undefined,
       );
+      // Deliberate validation errors thrown by route handlers (e.g. "X cannot be assigned as a
+      // recipe ingredient.", "A stock item named X already exists.") are safe and useful to show
+      // verbatim. The keyword list below was previously too narrow — clear, specific validation
+      // messages that didn't happen to contain one of these exact words were silently replaced
+      // with a useless generic message, hiding the real (and actionable) reason from the user.
+      // The denylist guards against ever surfacing a raw runtime/DB exception that happens to
+      // contain one of these words incidentally.
+      const looksLikeInternalException =
+        /sqlite|d1_error|TypeError:|ReferenceError:|SyntaxError:|RangeError:|at Object\.|at async|stack trace|\bundefined is not\b/i.test(
+          raw,
+        );
       const isUserFacing =
-        /token|session|expired|access|permission|denied|invalid|required|not found|sign in|password|email|already exists|duplicate|unique/i.test(
+        !looksLikeInternalException &&
+        /token|session|expired|access|permission|denied|invalid|required|not found|sign in|password|email|already exists|duplicate|unique|cannot be|must be|not allowed|not permitted|is not configured|could not|non-stock item|no longer/i.test(
           raw,
         );
       const message = isUserFacing

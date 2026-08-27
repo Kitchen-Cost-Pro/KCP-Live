@@ -3,7 +3,7 @@ import {
   calculateExpectedClosingQty,
   calculateExpectedClosingValue,
   calculateStockValue,
-  calculateVariancePercent,
+  calculateValueVariancePercent,
   calculateVarianceQty,
   calculateVarianceValue,
   safeNumber
@@ -13,6 +13,8 @@ import { buildRowWarnings } from '../../validators/rowWarningUtils.js';
 import { buildRowFormulaTooltip } from '../../tooltips/tooltipBuilder.js';
 import { reconcileDetailedActivityToOperationsDashboard } from '../../validators/reconciliationChecks.js';
 import { detailedActivityReport } from './detailedActivityReport.js';
+import { fetchOperationsExcludedSummary } from '../../api/reportingApi.js';
+import { isReportingMockDataEnabled } from '../../api/reportingEndpoints.js';
 
 const VALUE_TOLERANCE = 0.01;
 const QTY_TOLERANCE = 0.0001;
@@ -135,6 +137,18 @@ export const operationsDashboardReport = {
   getTotals: ({ rows, view }) => getTotalsForView(view, rows),
 
   validate: ({ rows, view }) => validateOperationsDashboardRows(rows, view),
+
+  // Sales that are structurally invisible to the ledger this report is built from (an order
+  // that never completed, a line that couldn't map to a recipe/stock item) — see
+  // getOperationsExcludedSummary in cloudflare-v2/src/legacy/reporting-routes.ts. Skipped for
+  // mock/demo data (there's no live workspace to query) or when no workspaceId is available.
+  getExcludedSummary: async ({ workspaceId, filters, services = {} }) => {
+    if (!workspaceId || isReportingMockDataEnabled(services)) return null;
+    if (services.reporting?.getOperationsExcludedSummary) {
+      return services.reporting.getOperationsExcludedSummary({ workspaceId, filters });
+    }
+    return fetchOperationsExcludedSummary({ workspaceId, filters });
+  },
 
   exportMapping: {
     overview: {
@@ -318,7 +332,7 @@ function buildByCategoryRows(ledgerRows = [], snapshotResolver) {
         expectedClosing,
         actualClosing: snapshot.hasActual ? snapshot.actualValue : null,
         variance,
-        variancePercent: calculateVariancePercent(variance, expectedClosing),
+        variancePercent: calculateValueVariancePercent(variance, expectedClosing),
         stockIn,
         stockOut,
         positiveAdjustments: metrics.positiveAdjustments,
@@ -497,7 +511,7 @@ function getTotalsForView(view = 'overview', rows = []) {
       expectedClosing,
       actualClosing,
       variance,
-      variancePercent: calculateVariancePercent(variance, expectedClosing)
+      variancePercent: calculateValueVariancePercent(variance, expectedClosing)
     };
   }
 

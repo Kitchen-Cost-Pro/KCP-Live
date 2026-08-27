@@ -1,6 +1,9 @@
 import { absoluteValue, safeNumber } from '../engine/calculations.js';
 import { groupBy, sumBy, text, toArray } from '../engine/grouping.js';
 
+// Stock-ledger value tolerance — intentionally separate from the money-reconciliation
+// CENT_TOLERANCE/PAYOUT_TOLERANCE constants in engine/yocoFinancials.js, which cover
+// Yoco sale/refund totals, not stock movement values.
 const VALUE_TOLERANCE = 0.01;
 const QTY_TOLERANCE = 0.0001;
 

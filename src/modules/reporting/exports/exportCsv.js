@@ -16,7 +16,7 @@ export function reportToCsv(result = {}, options = {}) {
 
 export function downloadReportCsv(result = {}, options = {}) {
   const csv = reportToCsv(result, options);
-  const fileName = options.fileName || buildExportFileName(result, 'csv');
+  const fileName = options.fileName || buildExportFileName(result, 'csv', { workspaceName: options.workspaceName });
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
   triggerDownload(blob, fileName);
   return { fileName, csv };

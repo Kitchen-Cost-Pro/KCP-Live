@@ -139,10 +139,12 @@ async function executeRequest(url, requestMethod, payload, token, headers, timeo
   return result;
 }
 
+// Capped at 180s (not the old 120s) to give the AI-extraction route room for its two sequential
+// Gemini calls (first pass + confidence-weighted re-ask) on a slow/busy page.
 function normalizeRequestTimeoutMs(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return REQUEST_TIMEOUT_MS;
-  return Math.min(120000, Math.max(1000, Math.round(parsed)));
+  return Math.min(180000, Math.max(1000, Math.round(parsed)));
 }
 
 function requiresFreshGet(pathname = '') {

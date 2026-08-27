@@ -71,7 +71,7 @@ export interface YocoV2ReceiptInput {
   sourceReference?: string | null;
   payloadHash: string;
   signatureStatus: 'VALID' | 'INVALID' | 'SECRET_MISSING';
-  captureStatus: 'CAPTURED' | 'CAPTURE_DISABLED' | 'REJECTED' | 'FAILED';
+  captureStatus: 'CAPTURED' | 'CAPTURE_DISABLED' | 'REJECTED' | 'FAILED' | 'BUDGET_EXHAUSTED';
   queueStatus?: string;
   duplicateIdentity?: string | null;
   traceId?: string | null;

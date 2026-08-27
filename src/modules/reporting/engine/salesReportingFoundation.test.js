@@ -42,6 +42,42 @@ test('recipe explosion converts units and returns final ingredient usage rows', 
   assert.deepEqual(result.warnings, []);
 });
 
+test('a genuinely zero-cost ingredient is costed at zero and is not reported as a missing unit cost', () => {
+  // Regression: cost resolution used truthiness, so a real 0 was indistinguishable from "no cost
+  // captured" — it raised a missing-unit-cost warning instead of standing as a real zero cost.
+  const result = explodeRecipeToIngredients({
+    menuItemId: 'water-glass',
+    quantitySold: 2,
+    recipeData: {
+      recipes: [{ id: 'recipe-water', owner_type: 'product', owner_id: 'water-glass', yield_qty: 1 }],
+      recipeLines: [
+        { id: 'line-water', recipe_id: 'recipe-water', stock_item_id: 'tap-water', quantity: 250, unit: 'ml', unit_cost_ex_vat: 0 },
+        { id: 'line-mystery', recipe_id: 'recipe-water', stock_item_id: 'mystery', quantity: 1, unit: 'ea' }
+      ],
+      stockItems: [
+        { id: 'tap-water', name: 'Tap Water', category: 'Beverage', unit: 'l', item_type: 'raw' },
+        { id: 'mystery', name: 'Mystery', category: 'Other', unit: 'ea', item_type: 'raw' }
+      ]
+    }
+  });
+  const waterRow = result.rows.find((row) => row.inventoryItemId === 'tap-water');
+  assert.equal(waterRow.unitCostExVat, 0);
+  assert.ok(!result.warnings.some((warning) => warning.code === 'missing-unit-cost' && warning.details?.stockItemId === 'tap-water'));
+  assert.ok(result.warnings.some((warning) => warning.code === 'missing-unit-cost' && warning.details?.stockItemId === 'mystery'));
+});
+
+test('a mapped modifier with a genuine zero unit cost keeps a zero stock value', () => {
+  const result = mapModifierUsageRows({
+    modifierSelections: [{ id: 'no-ice', type: 'note', name: 'No Ice', quantity: 2 }],
+    stockMappings: [{ modifierId: 'no-ice', inventoryItemId: 'ice', inventoryItemName: 'Ice', qtyPerSelection: 1, unitCostExVat: 0, baseUom: 'ea' }],
+    saleContext: { workspaceId: 'ws-1', saleId: 'sale-1' }
+  });
+  assert.equal(result.rows.length, 1);
+  assert.equal(result.rows[0].unitCostExVat, 0);
+  assert.equal(result.rows[0].qtyUsed, 2);
+  assert.equal(result.rows[0].stockValueUsed, 0);
+});
+
 test('sub-recipe explosion prevents parent and child double counting', () => {
   const result = explodeRecipeToIngredients({
     menuItemId: 'pizza',
@@ -167,6 +203,22 @@ test('sales financial API mapper preserves refunds, discounts, tips, fees, and p
   assert.equal(row.payoutAmount, 113);
 });
 
+test('sales financial API mapper preserves an explicit vatRate: 0 rather than coercing it to a falsy default', () => {
+  const suppliedZero = normalizeApiSalesFinancialRow({ id: 'sale-2', gross_amount: 100, vat_rate: 0 });
+  assert.equal(suppliedZero.vatRate, 0);
+
+  const notSupplied = normalizeApiSalesFinancialRow({ id: 'sale-3', gross_amount: 100 });
+  assert.equal(notSupplied.vatRate, undefined);
+});
+
+test('sales financial report does not fabricate VAT when the API mapper reports an explicit vatRate: 0 for a non-VAT-registered workspace', async () => {
+  const { normalizeSalesFinancialRow } = await import('../reports/sales/salesReportHelpers.js');
+  const mapped = normalizeApiSalesFinancialRow({ id: 'sale-4', gross_amount: 100, vat_rate: 0 });
+  const row = normalizeSalesFinancialRow(mapped);
+  assert.equal(row.vatAmount, 0);
+  assert.equal(row.netAmount, 100);
+});
+
 test('GP, GP percent, food cost percent, and stock value calculations are shared', () => {
   const stockCost = calculateStockValue(2.5, 10);
   const gp = calculateGrossProfit(100, stockCost);
@@ -180,21 +232,25 @@ test('reporting mock data is not used by default', () => {
   assert.equal(isReportingMockDataEnabled({}), false);
 });
 
-test('payment and sale usage reporting repair zero workspace VAT rates consistently', async () => {
+test('payment and sale usage reporting keep an explicit zero workspace VAT rate at zero, and repair a genuinely missing one to the 15% default', async () => {
   const { normalizeSalesFinancialRow, normalizeSaleUsageRow } = await import('../reports/sales/salesReportHelpers.js');
 
-  const payment = normalizeSalesFinancialRow({
+  // The backend's buildVatRateSqlExpression() (reporting-routes.ts) applies NULLIF(vat_rate, 0)
+  // before a row is ever emitted, so a real API row only ever carries a literal vatRate: 0 when the
+  // workspace is genuinely non-VAT-registered. The frontend must trust that zero rather than
+  // re-defaulting it to 15%, or it fabricates VAT the backend never charged.
+  const nonVatRegisteredPayment = normalizeSalesFinancialRow({
     grossAmount: 560,
     vatAmount: 0,
     netAmount: 560,
     vatRate: 0,
     status: 'completed'
   });
-  assert.equal(payment.vatRate, 0.15);
-  assert.equal(payment.vatAmount, 73.04);
-  assert.equal(payment.netAmount, 486.96);
+  assert.equal(nonVatRegisteredPayment.vatRate, 0);
+  assert.equal(nonVatRegisteredPayment.vatAmount, 0);
+  assert.equal(nonVatRegisteredPayment.netAmount, 560);
 
-  const usage = normalizeSaleUsageRow({
+  const nonVatRegisteredUsage = normalizeSaleUsageRow({
     grossSaleAmount: 560,
     vatAmount: 0,
     netSaleAmount: 560,
@@ -202,7 +258,19 @@ test('payment and sale usage reporting repair zero workspace VAT rates consisten
     qtyUsed: 1,
     unitCostExVat: 20
   });
-  assert.equal(usage.vatRate, 0.15);
-  assert.equal(usage.vatAmount, 73.04);
-  assert.equal(usage.netSaleAmount, 486.96);
+  assert.equal(nonVatRegisteredUsage.vatRate, 0);
+  assert.equal(nonVatRegisteredUsage.vatAmount, 0);
+  assert.equal(nonVatRegisteredUsage.netSaleAmount, 560);
+
+  // A row that genuinely omits vatRate (rather than supplying an explicit 0) still repairs to
+  // the 15% default — this is the "not supplied" branch, distinct from the case above.
+  const missingRatePayment = normalizeSalesFinancialRow({
+    grossAmount: 560,
+    vatAmount: 0,
+    netAmount: 560,
+    status: 'completed'
+  });
+  assert.equal(missingRatePayment.vatRate, 0.15);
+  assert.equal(missingRatePayment.vatAmount, 73.04);
+  assert.equal(missingRatePayment.netAmount, 486.96);
 });

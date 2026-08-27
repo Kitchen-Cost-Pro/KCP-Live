@@ -122,6 +122,104 @@ test('zero or invalid Yoco tax falls back to VAT-inclusive calculation unless ex
   assert.equal(zeroRated.isVatExempt, true);
 });
 
+test('sale and refund rows of the same zero-rated order resolve identical VAT and flag the contradictory stored value', () => {
+  // Regression: the sale path used to consult the stored VAT before the zero-rated marker while
+  // the refund path consulted the marker first, so one order reported VAT 73.04 on its sale row
+  // and 0 on its refund row. Both paths now apply the same priority (zero-rated wins).
+  const raw = { tax_status: 'zero-rated' };
+  const sale = deriveYocoFinancialAmounts({
+    persistedTotal: 560,
+    persistedVatTotal: 73.04,
+    configuredVatRate: 15,
+    raw
+  });
+  const refund = deriveYocoFinancialAmounts({
+    persistedTotal: -560,
+    persistedVatTotal: 73.04,
+    orderType: 'refund',
+    status: 'refunded',
+    configuredVatRate: 15,
+    raw
+  });
+  assert.equal(sale.vatAmount, 0);
+  assert.equal(refund.vatAmount, 0);
+  assert.equal(refund.refundVatAmount, 0);
+  assert.equal(Math.abs(sale.vatAmount), Math.abs(refund.vatAmount));
+  assert.equal(sale.vatSource, 'zero-rated');
+  assert.equal(refund.vatSource, 'zero-rated');
+  assert.equal(sale.netAmount, 560);
+  for (const result of [sale, refund]) {
+    assert.ok(result.issues.some((issue) => issue.code === 'yoco-zero-rated-with-stored-vat' && issue.level === 'warning'));
+  }
+});
+
+test('a stored VAT value without a zero-rated marker is still authoritative on both sale and refund paths', () => {
+  const sale = deriveYocoFinancialAmounts({ persistedTotal: 560, persistedVatTotal: 73.04, configuredVatRate: 15, raw: {} });
+  const refund = deriveYocoFinancialAmounts({
+    persistedTotal: -560, persistedVatTotal: 73.04, orderType: 'refund', status: 'refunded', configuredVatRate: 15, raw: {}
+  });
+  assert.equal(sale.vatAmount, 73.04);
+  assert.equal(refund.vatAmount, -73.04);
+  assert.equal(sale.vatSource, 'persisted');
+  assert.equal(refund.vatSource, 'persisted-refund');
+  for (const result of [sale, refund]) {
+    assert.ok(!result.issues.some((issue) => issue.code === 'yoco-zero-rated-with-stored-vat'));
+  }
+});
+
+test('a contradictory zero-rated order discards the stale persisted net so gross, VAT and net still reconcile', () => {
+  // Regression: the persisted net was derived from the stale nonzero VAT, so honouring it while
+  // forcing VAT to 0 left gross != net + VAT and raised a critical reconciliation issue.
+  const persisted = { persistedVatTotal: 73.04, persistedNetTotal: 486.96, configuredVatRate: 15, raw: { tax_status: 'zero-rated' } };
+  const sale = deriveYocoFinancialAmounts({ ...persisted, persistedTotal: 560 });
+  assert.equal(sale.grossAmount, 560);
+  assert.equal(sale.vatAmount, 0);
+  assert.equal(sale.netAmount, 560);
+  assert.equal(sale.diagnostics.grossNetVatReconciles, true);
+
+  const refund = deriveYocoFinancialAmounts({ ...persisted, persistedTotal: -560, orderType: 'refund', status: 'refunded' });
+  assert.equal(refund.vatAmount, 0);
+  assert.equal(refund.netAmount, -560);
+  assert.equal(refund.refundAmount, 560);
+  assert.equal(refund.refundNetAmount, 560);
+  assert.equal(refund.diagnostics.grossNetVatReconciles, true);
+
+  for (const result of [sale, refund]) {
+    assert.ok(result.issues.some((issue) => issue.code === 'yoco-zero-rated-with-stored-vat' && issue.level === 'warning'));
+    assert.ok(!result.issues.some((issue) => issue.code === 'yoco-gross-net-vat-mismatch'));
+  }
+});
+
+test('a persisted net total is still honoured when nothing contradicts it', () => {
+  const sale = deriveYocoFinancialAmounts({
+    persistedTotal: 560, persistedVatTotal: 73.04, persistedNetTotal: 486.96, configuredVatRate: 15, raw: {}
+  });
+  assert.equal(sale.grossAmount, 560);
+  assert.equal(sale.vatAmount, 73.04);
+  assert.equal(sale.netAmount, 486.96);
+  assert.equal(sale.diagnostics.grossNetVatReconciles, true);
+
+  const refund = deriveYocoFinancialAmounts({
+    persistedTotal: -560, persistedVatTotal: 73.04, persistedNetTotal: 486.96, orderType: 'refund', status: 'refunded', configuredVatRate: 15, raw: {}
+  });
+  assert.equal(refund.vatAmount, -73.04);
+  assert.equal(refund.netAmount, -486.96);
+  assert.equal(refund.refundNetAmount, 486.96);
+  assert.equal(refund.diagnostics.grossNetVatReconciles, true);
+});
+
+test('a zero-rated order with a stored VAT of exactly zero is not treated as contradictory', () => {
+  const result = deriveYocoFinancialAmounts({
+    persistedTotal: 560,
+    persistedVatTotal: 0,
+    configuredVatRate: 15,
+    raw: { tax_status: 'zero-rated' }
+  });
+  assert.equal(result.vatAmount, 0);
+  assert.equal(result.netAmount, 560);
+  assert.ok(!result.issues.some((issue) => issue.code === 'yoco-zero-rated-with-stored-vat'));
+});
+
 test('Yoco processing fees can be summed from nested payment fee Money objects', () => {
   const order = { payments: [{ processing_fees: [{ amount: { amount: 840, currency: 'ZAR' } }, { amount: { amount: 160, currency: 'ZAR' } }] }] };
   assert.equal(sumYocoProcessingFees(order), 10);
@@ -176,18 +274,7 @@ test('known Checkout scalar fields are converted from cents without magnitude gu
   assert.equal(result.discountAmount, 12);
 });
 
-test('zero or missing workspace VAT rate falls back to 15 percent for taxable Yoco sales', () => {
-  const zeroConfigured = deriveYocoFinancialAmounts({
-    persistedTotal: 560,
-    configuredVatRate: 0,
-    raw: {}
-  });
-  assert.equal(zeroConfigured.vatRate, 15);
-  assert.equal(zeroConfigured.vatAmount, 73.04);
-  assert.equal(zeroConfigured.netAmount, 486.96);
-  assert.equal(zeroConfigured.diagnostics.vatRateSource, 'default');
-  assert.ok(zeroConfigured.issues.some((issue) => issue.code === 'yoco-vat-rate-fallback-applied'));
-
+test('missing workspace VAT rate falls back to 15 percent for taxable Yoco sales', () => {
   const missingConfigured = deriveYocoFinancialAmounts({
     persistedTotal: 140,
     configuredVatRate: null,
@@ -198,10 +285,26 @@ test('zero or missing workspace VAT rate falls back to 15 percent for taxable Yo
   assert.equal(missingConfigured.netAmount, 121.74);
 });
 
+test('an explicit zero configured VAT rate (business not VAT registered) is authoritative and never falls back', () => {
+  // A workspace that is explicitly not VAT registered configures a rate of exactly 0. This must
+  // never be treated the same as "no rate configured" — it must not fall back to the 15% default,
+  // and it must not be overridden even when Yoco's own payload reports a positive tax amount,
+  // since a non-registered business does not charge or reclaim VAT at all.
+  const zeroConfigured = deriveYocoFinancialAmounts({
+    persistedTotal: 560,
+    configuredVatRate: 0,
+    raw: {}
+  });
+  assert.equal(zeroConfigured.vatRate, 0);
+  assert.equal(zeroConfigured.vatAmount, 0);
+  assert.equal(zeroConfigured.netAmount, 560);
+  assert.equal(zeroConfigured.diagnostics.vatRateSource, 'workspace-not-registered');
+});
+
 test('explicit Yoco zero-rated markers still override the default VAT fallback', () => {
   const result = deriveYocoFinancialAmounts({
     persistedTotal: 560,
-    configuredVatRate: 0,
+    configuredVatRate: 15,
     raw: { tax_status: 'zero-rated', amounts: { tax_amount: { amount: 0, currency: 'ZAR' } } }
   });
   assert.equal(result.vatRate, 15);

@@ -1697,7 +1697,14 @@ function getPositivePackSize(value) {
 }
 
 function getVatRate(state) {
-  return (Number(state.source?.settings?.vatRate ?? state.source?.settings?.vatPercentage ?? 15) || 15) / 100;
+  // NOTE: this previously read state.source?.settings, but appState.source is never assigned
+  // anywhere in the app (it stays null permanently) — so this was silently, permanently hardcoded
+  // to 15% regardless of the workspace's actual configured VAT rate. Read the real, live settings
+  // instead, and respect VAT-registration status: a non-registered workspace never shows VAT on
+  // any live entry-form preview (GRV pack prices, line VAT, totals).
+  const settings = state.settings?.draft || state.settings?.values || {};
+  if (settings.vatRegistered === false) return 0;
+  return (Number(settings.vatRate ?? settings.vatPercentage ?? 15) || 15) / 100;
 }
 
 function roundValue(value) {

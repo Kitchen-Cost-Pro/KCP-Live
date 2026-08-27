@@ -217,17 +217,13 @@ export async function downloadWorkbookXlsx(filename, sheets = []) {
 
 const STANDARD_UOMS = ['kg', 'g', 'L', 'ml', 'pcs', 'box', 'bunch', 'pack'];
 
-function sanitizeNamedRange(name) {
-  // Must match exactly what the INDIRECT formula does: spaces→_ and hyphens→_
-  // Other invalid chars are stripped (not replaced) so the formula still resolves correctly
-  return String(name || '')
-    .replace(/[\s]+/g, '_')
-    .replace(/[-]+/g, '_')
-    .replace(/[^A-Za-z0-9_]/g, '')
-    .replace(/^([0-9])/, '_$1') || '_range';
-}
+// Generous per-ingredient UOM slot count for the Col C dropdown OFFSET range below — real
+// ingredients rarely have more than 2-3 UOMs, so this just needs to be "clearly enough", not
+// exact. Trailing blank cells within an Excel list-validation range are silently skipped, so
+// padding past an ingredient's real UOM count is harmless.
+const UOM_DROPDOWN_MAX_ROWS = 20;
 
-export async function downloadStyledRecipeTemplateXlsx(filename, { products = [], ingredientObjects = [], platform = 'excel' } = {}) {
+export async function downloadStyledRecipeTemplateXlsx(filename, { products = [], ingredientObjects = [], platform = 'excel', prefillProducts = [] } = {}) {
   const ExcelJSModule = await import('exceljs');
   const ExcelJS = ExcelJSModule.default || ExcelJSModule;
   const workbook = new ExcelJS.Workbook();
@@ -301,6 +297,13 @@ export async function downloadStyledRecipeTemplateXlsx(filename, { products = []
         cell.alignment = { horizontal: 'right' };
       }
     });
+    // Pre-fill Product Name with real, already-synced products that still need a recipe, so the
+    // import's exact-name-match against existing products can't fail (see onboarding wizard) —
+    // the user only has to fill in Ingredient Name/UOM/Quantity for these rows.
+    const prefill = prefillProducts[r - 2];
+    if (prefill?.name) {
+      row.getCell('A').value = prefill.name;
+    }
   }
 
   // ── Hidden Dropdown_Lists sheet ─────────────────────────────────────────────
@@ -322,30 +325,26 @@ export async function downloadStyledRecipeTemplateXlsx(filename, { products = []
   }
   const allUomList = [...allUoms].sort();
 
-  // Columns C onward: one column per ingredient with its valid UOMs.
-  // Each column is registered as an Excel defined name (named range) matching the
-  // ingredient name (spaces/hyphens → underscores) so the INDIRECT formula below
-  // resolves to that ingredient's list. This is the approach that reliably filters
-  // UOMs per ingredient in Excel.
+  // Columns C onward: one column per ingredient with its valid UOMs, headed by that ingredient's
+  // exact name (row 1). The Col C validation below finds the right column via MATCH against
+  // these headers rather than a derived Excel named range — named ranges only allow
+  // letters/digits/underscores, so any ingredient name with other punctuation (parentheses, "&",
+  // apostrophes, "/", ...) couldn't round-trip through a sanitized name without ambiguity.
+  // Matching the literal name sidesteps that entirely: it works for any ingredient name, because
+  // Col B's own dropdown is sourced from these same names, so the two always match exactly.
   let colIndex = 3; // Start at column C (1-based: 3 = C)
   for (const ing of uniqueIngredients) {
     const uoms = ingUomMap.get(ing.name) || STANDARD_UOMS;
     const colLetter = columnIndexToLetter(colIndex);
-    const rangeName = sanitizeNamedRange(ing.name);
 
     ref.getCell(`${colLetter}1`).value = ing.name;
     uoms.forEach((uom, i) => {
       ref.getCell(`${colLetter}${i + 2}`).value = uom;
     });
 
-    const endRow = uoms.length + 1;
-    workbook.definedNames.add(
-      `Dropdown_Lists!$${colLetter}$2:$${colLetter}$${endRow}`,
-      rangeName
-    );
-
     colIndex++;
   }
+  const lastIngredientColLetter = columnIndexToLetter(colIndex - 1);
 
   // A dedicated fallback column (after all ingredient columns) holds the flat UOM
   // list — only referenced by the Google Sheets validation path.
@@ -381,13 +380,14 @@ export async function downloadStyledRecipeTemplateXlsx(filename, { products = []
       formulae: [`'Dropdown_Lists'!$${fallbackColLetter}$2:$${fallbackColLetter}$${uomEnd}`]
     });
   } else if (uniqueIngredients.length > 0) {
-    // Excel: INDIRECT resolves the named range for the ingredient chosen in Col B.
+    // Excel: OFFSET + MATCH finds the ingredient's own column on Dropdown_Lists by its exact
+    // name (row 1) and returns that ingredient's UOM cells as the list source.
     for (let r = 2; r <= 100; r++) {
       main.dataValidations.add(`C${r}`, {
         type: 'list', allowBlank: true, showErrorMessage: true,
         errorStyle: 'stop', errorTitle: 'Invalid Unit',
         error: 'This unit is not valid for the selected ingredient.',
-        formulae: [`INDIRECT(SUBSTITUTE(SUBSTITUTE($B${r}," ","_"),"-","_"))`]
+        formulae: [`OFFSET(Dropdown_Lists!$C$2,0,MATCH($B${r},Dropdown_Lists!$C$1:$${lastIngredientColLetter}$1,0)-1,${UOM_DROPDOWN_MAX_ROWS},1)`]
       });
     }
   } else {
@@ -505,19 +505,18 @@ export async function buildManufacturingBuilderXlsx({ manufacturedItems = [], st
   for (const uoms of compUomMap.values()) uoms.forEach((u) => allUoms.add(u));
   const allUomList = [...allUoms].sort();
 
-  // Cols C+: one column per component with its valid UOMs, each registered as a
-  // defined name (named range) so the INDIRECT formula resolves per component.
+  // Cols C+: one column per component with its valid UOMs, headed by that component's exact
+  // name (row 1) — see the matching comment in downloadStyledRecipeTemplateXlsx above for why
+  // this uses MATCH against the literal name rather than a derived named range.
   let colIndex = 3;
   for (const name of componentNames) {
     const uoms = compUomMap.get(name) || STANDARD_UOMS;
     const colLetter = columnIndexToLetter(colIndex);
-    const rangeName = sanitizeNamedRange(name);
     ref.getCell(`${colLetter}1`).value = name;
     uoms.forEach((uom, i) => { ref.getCell(`${colLetter}${i + 2}`).value = uom; });
-    const endRow = uoms.length + 1;
-    workbook.definedNames.add(`Dropdown_Lists!$${colLetter}$2:$${colLetter}$${endRow}`, rangeName);
     colIndex++;
   }
+  const lastComponentColLetter = columnIndexToLetter(colIndex - 1);
 
   const fallbackColLetter = columnIndexToLetter(colIndex);
   ref.getCell(`${fallbackColLetter}1`).value = 'UOM_All';
@@ -542,13 +541,13 @@ export async function buildManufacturingBuilderXlsx({ manufacturedItems = [], st
   });
 
   if (componentNames.length > 0) {
-    // INDIRECT resolves the named range for the component chosen in Col B.
+    // OFFSET + MATCH finds the component's own column by its exact name (row 1).
     for (let r = 2; r <= 100; r++) {
       main.dataValidations.add(`C${r}`, {
         type: 'list', allowBlank: true, showErrorMessage: true,
         errorStyle: 'stop', errorTitle: 'Invalid Unit',
         error: 'This unit is not valid for the selected component.',
-        formulae: [`INDIRECT(SUBSTITUTE(SUBSTITUTE($B${r}," ","_"),"-","_"))`]
+        formulae: [`OFFSET(Dropdown_Lists!$C$2,0,MATCH($B${r},Dropdown_Lists!$C$1:$${lastComponentColLetter}$1,0)-1,${UOM_DROPDOWN_MAX_ROWS},1)`]
       });
     }
   } else {
@@ -568,10 +567,6 @@ export async function buildManufacturingBuilderXlsx({ manufacturedItems = [], st
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
-}
-
-function MATCH_COL_FORMULA(cellRef) {
-  return `MATCH(${cellRef},'Dropdown_Lists'!$1:$1,0)`;
 }
 
 function columnIndexToLetter(index) {

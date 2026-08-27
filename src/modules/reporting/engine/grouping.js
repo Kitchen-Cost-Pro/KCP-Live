@@ -92,9 +92,54 @@ export function getRowTime(row = {}) {
   return formatReportTime(raw, timeZone);
 }
 
+const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+const LOOSE_ISO_DATE_PATTERN = /^(\d{4})-(\d{1,2})-(\d{1,2})$/;
+const DIGITS_ONLY_PATTERN = /^\d+$/;
+
+// Date-range filtering compares ISO `YYYY-MM-DD` strings, so a row's raw date value is normalized
+// to that shape first. Date instances, epoch milliseconds and other parseable shapes are real
+// dates and must keep filtering correctly; only a value that cannot be normalized at all (missing,
+// blank, or unparseable) returns '' and counts as unresolvable.
+export function normalizeComparableDate(value) {
+  if (value === null || value === undefined || typeof value === 'boolean') return '';
+  if (value instanceof Date) return fromTimestamp(value.getTime());
+  if (typeof value === 'number') return Number.isFinite(value) ? fromTimestamp(value) : '';
+  if (typeof value !== 'string') return '';
+  const raw = value.trim();
+  if (!raw) return '';
+  // An ISO date or datetime is taken verbatim so no timezone shift is introduced.
+  const isoPrefix = raw.slice(0, 10);
+  if (ISO_DATE_PATTERN.test(isoPrefix)) return isoPrefix;
+  const loose = LOOSE_ISO_DATE_PATTERN.exec(raw);
+  if (loose) return `${loose[1]}-${loose[2].padStart(2, '0')}-${loose[3].padStart(2, '0')}`;
+  if (DIGITS_ONLY_PATTERN.test(raw)) return fromTimestamp(Number(raw));
+  return fromTimestamp(Date.parse(raw));
+}
+
+export function isResolvableRowDate(value) {
+  return Boolean(normalizeComparableDate(value));
+}
+
+// Mirrors getRowDate's `date || timestamp || createdAt` precedence, but keeps looking when a
+// candidate is blank or unusable, and returns '' only when none of them resolves.
+export function getComparableRowDate(row = {}) {
+  for (const candidate of [row.date, row.timestamp, row.createdAt]) {
+    const normalized = normalizeComparableDate(candidate);
+    if (normalized) return normalized;
+  }
+  return '';
+}
+
+function fromTimestamp(milliseconds) {
+  if (!Number.isFinite(milliseconds)) return '';
+  const date = new Date(milliseconds);
+  return Number.isNaN(date.getTime()) ? '' : date.toISOString().slice(0, 10);
+}
+
 export function applyReportFilters(rows = [], filters = {}) {
   const startDate = text(filters.startDate || filters.dateFrom);
   const endDate = text(filters.endDate || filters.dateTo);
+  const hasDateRange = Boolean(startDate || endDate);
   const time = text(filters.time).slice(0, 5);
   const locationId = text(filters.locationId);
   const category = normalizeKey(filters.category);
@@ -102,9 +147,16 @@ export function applyReportFilters(rows = [], filters = {}) {
   const search = normalizeKey(filters.search);
 
   return toArray(rows).filter((row) => {
-    const rowDate = getRowDate(row);
-    if (startDate && rowDate && rowDate < startDate) return false;
-    if (endDate && rowDate && rowDate > endDate) return false;
+    // Normalize the raw value (not the sliced string) so a Date instance, epoch milliseconds or an
+    // unpadded `YYYY-M-D` still compares correctly instead of being dropped as unresolvable.
+    const rowDate = hasDateRange ? getComparableRowDate(row) : getRowDate(row);
+    // A row whose date cannot be resolved must not silently survive a date-scoped report: when a
+    // range filter is active it is excluded rather than kept, so out-of-period or undated rows can
+    // never inflate a period's totals. (There is no warnings channel on this helper, so the
+    // exclusion is silent by design.)
+    if (hasDateRange && !rowDate) return false;
+    if (startDate && rowDate < startDate) return false;
+    if (endDate && rowDate > endDate) return false;
     if (time && getRowTime(row) !== time) return false;
     if (locationId && ![row.locationId, row.fromLocationId, row.toLocationId].map(text).includes(locationId)) return false;
     if (category && normalizeKey(row.category || row.itemCategory || row.stockCategory) !== category) return false;

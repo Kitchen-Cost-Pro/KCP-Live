@@ -3497,6 +3497,22 @@ body.dark .reportModalCard .reportScheduleReportCard { background: #0f1116; }
 .advancedFormulaPanel__body code { overflow-wrap: anywhere; color: #a78bfa; font-size: .62rem; white-space: normal; }
 .advancedFormulaPanel__body p { margin: 0; color: var(--report-muted); font-size: .59rem; }
 .advancedFormulaPanel__body aside { grid-column: 1/-1; padding: .52rem .62rem; border-left: 3px solid rgba(168,85,247,.45); background: rgba(168,85,247,.055); }
+
+.excludedSummaryBanner { overflow: hidden; border: 1px solid rgba(251,191,36,.35); border-radius: .92rem; background: rgba(251,191,36,.06); margin-bottom: .7rem; }
+.excludedSummaryBanner > summary { display: flex; align-items: center; justify-content: space-between; gap: .8rem; padding: .72rem .82rem; cursor: pointer; list-style: none; }
+.excludedSummaryBanner > summary::-webkit-details-marker { display: none; }
+.excludedSummaryBanner > summary > span:first-child { display: grid; gap: .12rem; }
+.excludedSummaryBanner > summary strong { color: var(--report-text); font-size: .76rem; }
+.excludedSummaryBanner > summary small { color: var(--report-muted); font-size: .62rem; }
+.excludedSummaryBanner > summary span[aria-hidden] { color: var(--report-amber); }
+.excludedSummaryBanner__body { padding: 0 .82rem .82rem; }
+.excludedSummaryBanner__truncated { margin: 0 0 .5rem; color: var(--report-amber); font-size: .6rem; }
+.excludedSummaryBanner__list { display: grid; gap: .4rem; margin: 0; padding: 0; list-style: none; max-height: 260px; overflow-y: auto; }
+.excludedSummaryBanner__list li { display: grid; grid-template-columns: 130px minmax(0,1fr); gap: .1rem .7rem; padding: .5rem .6rem; border: 1px solid var(--report-border); border-radius: .6rem; background: rgba(148,163,184,.045); }
+.excludedSummaryBanner__when { color: var(--report-muted); font-size: .6rem; }
+.excludedSummaryBanner__what { color: var(--report-text); font-size: .68rem; grid-column: 2; }
+.excludedSummaryBanner__what code { margin-left: .4rem; color: var(--report-muted); font-size: .58rem; }
+.excludedSummaryBanner__why { grid-column: 2; color: var(--report-muted); font-size: .62rem; }
 .advancedFormulaPanel__body aside p { margin: .12rem 0; color: var(--report-muted); font-size: .61rem; }
 
 .reportRiskBadge { display: inline-flex; align-items: center; min-height: 1.45rem; border: 1px solid var(--report-border); border-radius: 999px; padding: .18rem .46rem; background: rgba(148,163,184,.08); color: var(--report-text); font-size: .59rem; font-weight: 800; white-space: nowrap; }

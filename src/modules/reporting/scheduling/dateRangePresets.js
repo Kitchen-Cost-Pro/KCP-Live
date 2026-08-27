@@ -72,7 +72,9 @@ export function applyDateRangePreset(
   filters = {},
   { now = new Date(), timeZone = 'Africa/Johannesburg', tradingDayStartMinutes = 0 } = {},
 ) {
-  const type = normalizeDateRangeType(filters.dateRangeType || inferDateRangeType(filters));
+  // Threaded explicitly: this helper's semantics predate the unbounded-vs-bounded distinction and
+  // must keep resolving a range-less filters object to 'today', exactly as it always did.
+  const type = normalizeDateRangeType(filters.dateRangeType || inferDateRangeType(filters, { fallback: 'today' }));
   if (type === 'custom') return { ...filters, dateRangeType: 'custom' };
   const range = resolveDateRangePreset(type, { now, timeZone, tradingDayStartMinutes });
   return {
@@ -85,8 +87,32 @@ export function applyDateRangePreset(
   };
 }
 
-export function inferDateRangeType(filters = {}) {
-  return filters.dateRangeType || filters.date_range_type || 'today';
+const DATE_RANGE_CONTEXT_KEYS = ['dateRangeType', 'date_range_type', 'startDate', 'endDate', 'from', 'to', 'dateFrom', 'dateTo'];
+
+/**
+ * Does this filters object come from a report/schedule that does date filtering at all?
+ * A report with no date-range filter enabled carries none of these keys, and its correct
+ * range is the unbounded blank 'custom' one (see resolveScheduledRelativeRange), never 'today'.
+ */
+export function hasDateRangeContext(filters = {}) {
+  const source = filters && typeof filters === 'object' ? filters : {};
+  return DATE_RANGE_CONTEXT_KEYS.some((key) => key in source);
+}
+
+export function inferDateRangeType(filters = {}, { fallback = '' } = {}) {
+  const explicit = String(filters.dateRangeType || filters.date_range_type || '').trim();
+  if (explicit) return explicit;
+  // Explicit dates with no stored range type are a custom range. Defaulting to 'today' here made the
+  // filter bar render "Today" with the custom-date row hidden while those real dates stayed in the
+  // hidden fields — so the dates shown never matched the dates queried.
+  const startDate = String(filters.startDate || filters.from || filters.dateFrom || '').trim();
+  const endDate = String(filters.endDate || filters.to || filters.dateTo || '').trim();
+  if (startDate || endDate) return 'custom';
+  if (fallback) return fallback;
+  // No dates at all: 'today' only for something that actually does date filtering (the user simply
+  // has not chosen a range yet). A date-less report must stay unbounded, so it keeps blank 'custom'
+  // — defaulting it to 'today' silently turned an all-time saved view into a one-day one.
+  return hasDateRangeContext(filters) ? 'today' : 'custom';
 }
 
 function startOfWeek(date) {
