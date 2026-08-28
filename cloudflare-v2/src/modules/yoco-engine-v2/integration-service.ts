@@ -1594,7 +1594,9 @@ export async function syncYocoCatalogue(env: Env, workspaceId: string, options: 
        VALUES (?1, ?2, ?3, ?4, ?5)
        ON CONFLICT(workspace_id, yoco_category_id) DO UPDATE SET
         name = excluded.name,
-        raw_json = excluded.raw_json`
+        raw_json = excluded.raw_json
+       WHERE yoco_categories.name IS NOT excluded.name
+          OR yoco_categories.raw_json IS NOT excluded.raw_json`
     ).bind(id('yc'), workspaceId, yocoId, name, jsonString(category)));
   }
 
@@ -1606,7 +1608,9 @@ export async function syncYocoCatalogue(env: Env, workspaceId: string, options: 
        VALUES (?1, ?2, ?3, ?4, ?5)
        ON CONFLICT(workspace_id, yoco_brand_id) DO UPDATE SET
         name = excluded.name,
-        raw_json = excluded.raw_json`
+        raw_json = excluded.raw_json
+       WHERE yoco_brands.name IS NOT excluded.name
+          OR yoco_brands.raw_json IS NOT excluded.raw_json`
     ).bind(id('yb'), workspaceId, yocoId, normalizeName(brand, yocoId), jsonString(brand)));
   }
 
@@ -1638,7 +1642,12 @@ export async function syncYocoCatalogue(env: Env, workspaceId: string, options: 
         max_selections = excluded.max_selections,
         product_modifier_count = excluded.product_modifier_count,
         raw_json = excluded.raw_json,
-        updated_at = datetime('now')`
+        updated_at = datetime('now')
+       WHERE yoco_modifier_groups.name IS NOT excluded.name
+          OR yoco_modifier_groups.min_selections IS NOT excluded.min_selections
+          OR yoco_modifier_groups.max_selections IS NOT excluded.max_selections
+          OR yoco_modifier_groups.product_modifier_count IS NOT excluded.product_modifier_count
+          OR yoco_modifier_groups.raw_json IS NOT excluded.raw_json`
     ).bind(
       id('ymg'),
       workspaceId,
@@ -1713,7 +1722,15 @@ export async function syncYocoCatalogue(env: Env, workspaceId: string, options: 
           yoco_category_id = excluded.yoco_category_id,
           yoco_category_name = excluded.yoco_category_name,
           raw_json = excluded.raw_json,
-          updated_at = datetime('now')`
+          updated_at = datetime('now')
+         WHERE products.name IS NOT excluded.name
+            OR products.sku IS NOT excluded.sku
+            OR products.category IS NOT excluded.category
+            OR products.price IS NOT excluded.price
+            OR products.active IS NOT excluded.active
+            OR products.yoco_category_id IS NOT excluded.yoco_category_id
+            OR products.yoco_category_name IS NOT excluded.yoco_category_name
+            OR products.raw_json IS NOT excluded.raw_json`
       ).bind(
         productId,
         workspaceId,

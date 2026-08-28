@@ -2,6 +2,7 @@ import type { Env } from '../../legacy/types';
 import type { CanonicalSaleCompletedEvent } from './contracts';
 import { appendTimeline, newId, nowIso, type Row } from './repository';
 import { getApplicableModifierRule } from '../modifier-engine/rules';
+import { UNSPECIFIED_LINE_UOM, standardUomFactor } from '../../inventory/uom';
 import { getApplicableNoteRules, getModifierEngineControl, recordModifierEngineComparison, snapshotSaleAction, snapshotSaleMovement } from '../modifier-engine/reliability';
 
 function text(value: unknown, fallback = ''): string { return String(value ?? fallback).trim(); }
@@ -28,11 +29,41 @@ interface IngredientProposal {
   ruleSnapshot?: Row;
 }
 
+// See inventory/uom.ts for the shared unit contract this implements.
+//
+// Resolution order, deliberately mirroring convertMenuRecipeQty in legacy/reporting-routes.ts so
+// stock and reporting can never disagree about the same recipe line again:
+//   1. no unit, or the item's own base unit          -> 1
+//   2. a standard same-family conversion (g -> kg)   -> that factor
+//   3. a custom UOM configured on the stock item     -> its ratio
+//   4. the 'ea' unspecified sentinel                 -> 1 (the item's base unit)
+//   5. anything else                                 -> null, a real misconfiguration
+//
+// Step 4 sits AFTER the custom lookup on purpose: an item that genuinely has 'ea' configured as a
+// custom UOM (e.g. 1 ea = 0.25 kg portion) must keep using that ratio rather than the sentinel.
 function resolveCustomUomFactor(item: Row, unit: string): number | null {
   const baseUnit = normalized(item.unit);
   const requested = normalized(unit || item.unit);
   if (!requested || requested === baseUnit) return 1;
+
+  const standard = standardUomFactor(requested, baseUnit);
+  if (standard !== null) return standard;
+
   const raw = parseJson(item.raw_json);
+  // `uomConfigurations` (customUom/custom_uom + ratio) is the schema the stock-item editor
+  // frontend actually writes (see inventory/recipe-expansion.ts resolveUomRatio and Recipes.js
+  // getIngredientUomRatio) — check it first. The other collections below were never populated
+  // by any writer we found; they are kept only as a defensive fallback for any legacy/manually
+  // imported data that might use those key names, not as the primary schema.
+  const uomConfigurations = Array.isArray(raw.uomConfigurations) ? raw.uomConfigurations : [];
+  for (const entryValue of uomConfigurations) {
+    const entry = objectValue(entryValue);
+    const entryName = normalized(entry.customUom || entry.custom_uom);
+    if (entryName !== requested) continue;
+    const factor = numberValue(entry.ratio, 0);
+    if (factor > 0) return factor;
+    break;
+  }
   const collections = [raw.uoms, raw.customUoms, raw.custom_uoms, raw.units, raw.alternateUoms, raw.alternate_uoms];
   for (const collection of collections) {
     if (!Array.isArray(collection)) continue;
@@ -41,14 +72,15 @@ function resolveCustomUomFactor(item: Row, unit: string): number | null {
       const entryName = normalized(entry.name || entry.unit || entry.uom || entry.label);
       if (entryName !== requested) continue;
       const factor = numberValue(entry.ratio ?? entry.qtyInBase ?? entry.qty_in_base ?? entry.factor ?? entry.baseQty ?? entry.packSize, 0);
-      return factor > 0 ? factor : null;
+      if (factor > 0) return factor;
+      break;
     }
   }
-  return null;
-}
-
-function customUomFactor(item: Row, unit: string): number {
-  return resolveCustomUomFactor(item, unit) ?? 1;
+  // Unspecified means "use the item's base unit" — which is exactly what the recipe editor already
+  // shows the user for such a line. A genuinely named-but-unconfigured unit (e.g. "box" with no
+  // ratio) stays a hard failure: silently deducting 1 base unit instead of 12 is the
+  // under-deduction this null exists to prevent.
+  return requested === UNSPECIFIED_LINE_UOM ? 1 : null;
 }
 
 async function locationUnitCost(env: Env, workspaceId: string, locationId: string, item: Row): Promise<number> {
@@ -379,6 +411,27 @@ async function explodeRecipe(env: Env, input: {
       raw_json: line.stock_item_raw_json,
       is_stocked: line.is_stocked
     };
+    // A recipe line recorded in a custom UOM (e.g. "1 box" where 1 box = 12 base units) must
+    // resolve a real ratio before it is used as a stock-deduction multiplier. Silently defaulting
+    // to a factor of 1 here (as `customUomFactor` does) would deduct 1 base unit instead of 12
+    // with no indication anything went wrong — surface it as a WARNING instead, matching how
+    // `directStockProposal` already handles the identical lookup failure.
+    const uomFactor = resolveCustomUomFactor(stockItem, text(line.unit));
+    if (uomFactor === null) {
+      output.push({
+        sourceLineId: input.sourceLineId,
+        menuItemId: input.menuItemId,
+        modifierId: input.modifierId,
+        ingredientItemId: text(line.stock_item_id),
+        locationId: input.locationId,
+        quantity: 0,
+        baseUom: text(line.base_unit || stockItem.unit, 'ea'),
+        unitCost: 0,
+        warningCode: 'MODIFIER_STOCK_UOM_INVALID',
+        resolutionStatus: 'WARNING'
+      });
+      continue;
+    }
     const subRecipe = await loadRecipe(env, input.workspaceId, 'stock_item', text(line.stock_item_id));
     const isSubRecipe = ['subrecipe', 'subrecipeitem', 'prep'].includes(normalized(line.item_type)) || numberValue(line.is_stocked, 1) === 0;
     if (subRecipe && isSubRecipe) {
@@ -386,12 +439,12 @@ async function explodeRecipe(env: Env, input: {
         ...input,
         ownerType: 'stock_item',
         ownerId: text(line.stock_item_id),
-        multiplier: requestedQty * customUomFactor(stockItem, text(line.unit)),
+        multiplier: requestedQty * uomFactor,
         stack
       }));
       continue;
     }
-    const quantityBase = requestedQty * customUomFactor(stockItem, text(line.unit));
+    const quantityBase = requestedQty * uomFactor;
     const unitCost = await locationUnitCost(env, input.workspaceId, text(input.locationId), stockItem);
     output.push({
       sourceLineId: input.sourceLineId,

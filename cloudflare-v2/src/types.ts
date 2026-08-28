@@ -11,6 +11,13 @@ export interface Env {
   YOCO_V2_WRITE_BUDGET?: DurableObjectNamespace;
 
   ENVIRONMENT?: string;
+  // Emergency kill switch: when "true", WorkspaceDO.migrate() skips entirely (no reads, no
+  // writes) instead of attempting pending tenant migrations. Safe by design — a workspace with
+  // pending migrations already just keeps serving on its existing schema (see workspace-do.ts's
+  // own comment) — added 2026-08-27 after a tenant's backlog of pending migrations, run in one
+  // shot against months of accumulated Yoco order history, exhausted the account's entire daily
+  // Durable Objects free-tier row-read quota within a couple of hours.
+  WORKSPACE_MIGRATIONS_DISABLED?: string;
   ALLOWED_ORIGINS?: string;
   APP_BASE_URL?: string;
   YOCO_API_BASE_URL?: string;

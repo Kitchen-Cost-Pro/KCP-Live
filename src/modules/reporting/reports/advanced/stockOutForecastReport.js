@@ -4,6 +4,7 @@ import { groupBy, sumBy, text, toArray } from '../../engine/grouping.js';
 import { calculateRiskScore } from '../../engine/riskScoring.js';
 import { buildDailySeries } from '../../engine/trendAnalysis.js';
 import { applyAdvancedFilters, attachModelMeta, countWarning, isUsageLedgerRow, itemLocationKey, loadAdvancedSources, normalizeDate, normalizeUsageQty, sourceWarnings } from './advancedReportHelpers.js';
+import { DEFAULT_REPORT_TIMEZONE, zonedDateTimeStrings } from '../../engine/timezone.js';
 
 const money = (key, label, tooltipKey = '') => ({ key, label, type: 'money', align: 'right', sortable: true, ...(tooltipKey ? { tooltipKey } : {}) });
 const qty = (key, label, tooltipKey = '') => ({ key, label, type: 'number', align: 'right', sortable: true, ...(tooltipKey ? { tooltipKey } : {}) });
@@ -82,12 +83,23 @@ export const stockOutForecastReport = {
 
 export async function buildStockOutForecastModel({ workspaceId = '', filters = {}, services = {}, dataSet = {} } = {}) {
   const lookbackDays = normalizeLookback(filters.lookbackPeriod);
-  const asOfDate = text(filters.endDate) || new Date().toISOString().slice(0, 10);
-  const sourceFilters = { ...filters, startDate: dateDaysAgo(asOfDate, Math.max(lookbackDays, 30) - 1), endDate: asOfDate, riskStatus: '', onlyCritical: '', onlyHighRisk: '' };
+  // `sources.stock`'s `currentStock` (used below for daysUntilStockOut/coveragePercent/
+  // recommendedReorderQty) comes from the live stock-on-hand feed, which has no point-in-time
+  // query — it always reflects the balance AS OF RIGHT NOW, computed in the report's own business
+  // timezone rather than UTC (a UTC "today" can be off by the timezone's offset around local
+  // midnight). The USAGE window may still be legitimately scoped to a historical `filters.endDate`
+  // (e.g. drilling into the usage_detail view for a past period, which only filters ledger rows),
+  // but the forecast's stock-out projection itself must always be anchored to today's real stock,
+  // not to whatever `endDate` happens to be set to — otherwise a leftover historical date filter
+  // silently treats today's live stock as if it were valid for that past date (the same bug
+  // already fixed in theoreticalVsActualReport.js and operationsDashboardReport.js).
+  const todayDate = zonedDateTimeStrings(new Date(), DEFAULT_REPORT_TIMEZONE).date;
+  const usageAsOfDate = text(filters.endDate) || todayDate;
+  const sourceFilters = { ...filters, startDate: dateDaysAgo(usageAsOfDate, Math.max(lookbackDays, 30) - 1), endDate: usageAsOfDate, riskStatus: '', onlyCritical: '', onlyHighRisk: '' };
   const sources = await loadAdvancedSources({ workspaceId, filters: sourceFilters, services, dataSet, sources: ['stock', 'ledger'] });
   const usageRows = toArray(sources.ledger).filter(isUsageLedgerRow).map(normalizeUsageRow);
   const usageByItemLocation = groupBy(usageRows, itemLocationKey);
-  const baseRows = toArray(sources.stock).map((stockRow) => buildForecastRow(stockRow, usageByItemLocation.get(itemLocationKey(stockRow)) || [], { lookbackDays, asOfDate }));
+  const baseRows = toArray(sources.stock).map((stockRow) => buildForecastRow(stockRow, usageByItemLocation.get(itemLocationKey(stockRow)) || [], { lookbackDays, usageAsOfDate, asOfDate: todayDate }));
   const maxReorderValue = Math.max(...baseRows.map((row) => row.estimatedReorderValue), 1);
   const scoredRows = baseRows.map((row) => scoreForecastRow(row, maxReorderValue));
   let filteredRows = applyAdvancedFilters(scoredRows, filters);
@@ -96,9 +108,9 @@ export async function buildStockOutForecastModel({ workspaceId = '', filters = {
   const filteredKeys = new Set(filteredRows.map(itemLocationKey));
   const filteredUsageRows = applyAdvancedFilters(usageRows.filter((row) => filteredKeys.has(itemLocationKey(row))), filters, { riskField: 'riskStatus' });
   return {
-    id: `stock-out:${asOfDate}:${lookbackDays}`,
+    id: `stock-out:${usageAsOfDate}:${lookbackDays}`,
     lookbackDays,
-    asOfDate,
+    asOfDate: todayDate,
     baseRows: scoredRows,
     filteredRows,
     usageRows: filteredUsageRows,
@@ -115,11 +127,11 @@ export async function buildStockOutForecastModel({ workspaceId = '', filters = {
   };
 }
 
-function buildForecastRow(stockRow, usageRows, { lookbackDays, asOfDate }) {
-  const usageLast7Days = usageWithinDays(usageRows, asOfDate, 7);
-  const usageLast14Days = usageWithinDays(usageRows, asOfDate, 14);
-  const usageLast30Days = usageWithinDays(usageRows, asOfDate, 30);
-  const totalUsage = usageWithinDays(usageRows, asOfDate, lookbackDays);
+function buildForecastRow(stockRow, usageRows, { lookbackDays, usageAsOfDate, asOfDate }) {
+  const usageLast7Days = usageWithinDays(usageRows, usageAsOfDate, 7);
+  const usageLast14Days = usageWithinDays(usageRows, usageAsOfDate, 14);
+  const usageLast30Days = usageWithinDays(usageRows, usageAsOfDate, 30);
+  const totalUsage = usageWithinDays(usageRows, usageAsOfDate, lookbackDays);
   const averageDailyUsage = calculateAverageDailyUsage(totalUsage, lookbackDays);
   const weightedDailyUsage = calculateWeightedAverageUsage({ usage7Day: usageLast7Days, usage14Day: usageLast14Days, usage30Day: usageLast30Days });
   const effectiveDailyUsage = weightedDailyUsage || averageDailyUsage;
@@ -143,7 +155,7 @@ function buildForecastRow(stockRow, usageRows, { lookbackDays, asOfDate }) {
     estimatedReorderValue: calculateEstimatedReorderValue(recommendedReorderQty, stockRow.unitCostExVat),
     dataConfidence,
     riskStatus,
-    usageTrend: buildDailySeries(usageRows, { dateSelector: normalizeDate, valueSelector: (row) => row.qtyUsed, from: dateDaysAgo(asOfDate, 13), to: asOfDate }).map((point) => point.value)
+    usageTrend: buildDailySeries(usageRows, { dateSelector: normalizeDate, valueSelector: (row) => row.qtyUsed, from: dateDaysAgo(usageAsOfDate, 13), to: usageAsOfDate }).map((point) => point.value)
   };
 }
 

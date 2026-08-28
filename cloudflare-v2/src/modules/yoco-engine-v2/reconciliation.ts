@@ -272,11 +272,32 @@ export async function runYocoV2Reconciliation(env: YocoV2ApiClientEnv, workspace
       mismatches += 1;
       await addFinding(env, { runId, workspaceId, integrationId, entityType: 'REFUND', entityId: text(workflow.refund_id), findingType: text(workflow.overall_status) === 'MANUAL_REVIEW_REQUIRED' ? 'MANUAL_REVIEW_REQUIRED' : 'INCOMPLETE_WORKFLOW', severity: 'MEDIUM', details: workflow, repairAction: 'RERUN_REFUND_RESOLVER', repaired: false });
     }
-    const unresolvedSales = await env.DB.prepare(
-      `SELECT source_entity_id, event_type, resolution_status, payload_json FROM yoco_v2_domain_events
-        WHERE workspace_id = ?1 AND integration_id = ?2 AND event_type = 'sale.completed'
-          AND resolution_status IN ('PARTIALLY_RESOLVED', 'LOCATION_MAPPING_MISSING', 'ITEM_MAPPING_MISSING', 'MODIFIER_MAPPING_MISSING', 'MANUAL_REVIEW_REQUIRED')`
-    ).bind(workspaceId, integrationId).all<Row>();
+    // INDEXED BY is required, not just the index existing: SQLite's planner declines to use a
+    // composite index against a multi-value `IN (...)` on the last column and falls back to a full
+    // table scan (confirmed with a local benchmark 2026-08-28) — without this hint the migration 40
+    // index below silently does nothing and this stays an unbounded per-workspace history scan.
+    //
+    // But INDEXED BY throws "no such index" if the named index doesn't exist yet, and this worker
+    // applies at most one pending migration per DO invocation (see workspace-do.ts:266) — a
+    // workspace that hasn't yet caught up to migration 40 would otherwise fail this entire
+    // reconciliation run (and hit the exponential-backoff path) on every tick until it catches up.
+    // Fall back to the unhinted query for that transient window instead of failing the run.
+    let unresolvedSales: { results?: Row[] };
+    try {
+      unresolvedSales = await env.DB.prepare(
+        `SELECT source_entity_id, event_type, resolution_status, payload_json FROM yoco_v2_domain_events
+          INDEXED BY idx_yoco_v2_domain_events_workspace_status
+          WHERE workspace_id = ?1 AND integration_id = ?2 AND event_type = 'sale.completed'
+            AND resolution_status IN ('PARTIALLY_RESOLVED', 'LOCATION_MAPPING_MISSING', 'ITEM_MAPPING_MISSING', 'MODIFIER_MAPPING_MISSING', 'MANUAL_REVIEW_REQUIRED')`
+      ).bind(workspaceId, integrationId).all<Row>();
+    } catch (cause) {
+      if (!/no such index/i.test(cause instanceof Error ? cause.message : String(cause))) throw cause;
+      unresolvedSales = await env.DB.prepare(
+        `SELECT source_entity_id, event_type, resolution_status, payload_json FROM yoco_v2_domain_events
+          WHERE workspace_id = ?1 AND integration_id = ?2 AND event_type = 'sale.completed'
+            AND resolution_status IN ('PARTIALLY_RESOLVED', 'LOCATION_MAPPING_MISSING', 'ITEM_MAPPING_MISSING', 'MODIFIER_MAPPING_MISSING', 'MANUAL_REVIEW_REQUIRED')`
+      ).bind(workspaceId, integrationId).all<Row>();
+    }
     const unresolvedRefunds = await env.DB.prepare(
       `SELECT refund_id AS source_entity_id, 'sale.refunded' AS event_type, inventory_status AS resolution_status,
               json_object('workflow_id', id, 'overall_status', overall_status, 'current_step', current_step) AS payload_json
@@ -367,10 +388,15 @@ export async function runScheduledYocoV2Reconciliation(env: YocoV2ApiClientEnv, 
   const nextRetryAt = Date.parse(text(state.next_retry_at));
   if (Number.isFinite(nextRetryAt) && now < nextRetryAt) return null;
 
+  // Reconciliation now runs once per day, not hourly (2026-08-28: hourly ticks were the dominant
+  // rows-read cost across the account — see idx_yoco_v2_domain_events_workspace_status above).
+  // `hourlyDue`'s name is legacy; it shares the daily interval so a "shallow" tick can no longer
+  // fire on its own — when either goes due, both go due at once and the `dailyDue` branch below
+  // always wins, so this collapses to a single deep (7-day lookback) run per workspace per day.
   const lastHourly = Date.parse(text(state.last_hourly_run_at));
   const lastDaily = Date.parse(text(state.last_daily_run_at));
   const dailyDue = !Number.isFinite(lastDaily) || now - lastDaily >= 24 * 60 * 60_000;
-  const hourlyDue = !Number.isFinite(lastHourly) || now - lastHourly >= 60 * 60_000;
+  const hourlyDue = !Number.isFinite(lastHourly) || now - lastHourly >= 24 * 60 * 60_000;
   if (!dailyDue && !hourlyDue) return null;
 
   // Never scan back past Go Live — before that boundary there is nothing this workspace considers

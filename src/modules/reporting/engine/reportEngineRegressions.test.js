@@ -5,6 +5,7 @@ import {
   mapGenericLedgerRows,
   mapGrvLedgerRows,
   mapManufacturingLedgerRows,
+  mapPurchaseOrderReceiveLedgerRows,
   mapSaleUsageLedgerRows,
   mapTransferLedgerRows
 } from './stockLedgerMapper.js';
@@ -48,6 +49,36 @@ test('carried running balances stay scoped to their own item and location', () =
     { id: 'local', timestamp: '2026-07-02T08:00:00Z', locationId: 'loc-2', itemId: 'item-1', netQty: 3, unitCost: 1 }
   ]);
   assert.equal(indexById(rows).local.runningQty, 3);
+});
+
+test('a PO received via the purchaseOrderReceives feed is not also derived a second time from the order itself', () => {
+  // Regression guard: the order-derived fallback below only excluded POs already linked to a GRV
+  // (via `grvPoIds`) — it never checked whether the PO already had an explicit
+  // `purchaseOrderReceives` entry. A PO received through the PO-receive flow (not a GRV) got
+  // counted once from `purchaseOrderReceives` and again re-derived from `order.items[].receivedQty`,
+  // doubling its received qty/value in the shared stock ledger.
+  const dataSet = {
+    purchaseOrderReceives: [
+      {
+        id: 'po-500',
+        poNumber: 'PO-500',
+        date: '2026-07-01',
+        items: [{ stockItemId: 'item-1', receivedQty: 10, unitCost: 20 }]
+      }
+    ],
+    purchaseOrders: [
+      {
+        id: 'po-500',
+        poNumber: 'PO-500',
+        receivedAt: '2026-07-01',
+        items: [{ id: 'line-1', stockItemId: 'item-1', receivedQty: 10, unitCost: 20 }]
+      }
+    ],
+    grvs: []
+  };
+  const rows = mapPurchaseOrderReceiveLedgerRows(dataSet);
+  assert.equal(rows.length, 1, 'the order-derived duplicate must be excluded, leaving only the explicit receive row');
+  assert.equal(rows[0].qtyIn, 10);
 });
 
 test('a genuine zero unit cost is returned as zero and only a missing cost falls through to the lookup', () => {

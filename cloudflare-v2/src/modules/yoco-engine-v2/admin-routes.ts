@@ -18,6 +18,26 @@ const RECEIPT_STATS_WINDOWS_MINUTES: Array<[string, number]> = [
   ['last24h', 24 * 60]
 ];
 
+/**
+ * Date-only floor ('YYYY-MM-DD') of an instant, for use as a SARGABLE prefilter alongside an exact
+ * datetime() predicate.
+ *
+ * The receipt-stats queries below all filter `datetime(received_at) >= datetime(<bound>)`. Wrapping
+ * the column in datetime() makes it non-sargable, so idx_yoco_v2_webhook_receipts_workspace_received
+ * (workspace_id, received_at DESC) cannot be used and each query degrades to a full scan of the
+ * receipts table. getReceiptStats issues SIX of them per workspace (a 24h aggregate plus one per
+ * window), and /api/admin/webhook-health fans that out across EVERY workspace — so opening the admin
+ * webhook page cost roughly six full receipt-table scans per workspace, all at once.
+ *
+ * Keeping the exact datetime() predicate preserves behaviour for any legacy row whose timestamp
+ * format differs; the added bare-column bound only has to be a guaranteed superset, which a
+ * date-only floor is, because ISO-8601 sorts lexicographically and any timestamp on or after the
+ * bound shares or exceeds that date prefix.
+ */
+function sargableDayFloor(isoInstant: string): string {
+  return String(isoInstant || '').slice(0, 10);
+}
+
 function response(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
 }
@@ -652,13 +672,21 @@ export async function handleYocoV2AdminRoute(
              ELSE 0
            END) AS failed
          FROM yoco_v2_webhook_receipts
-        WHERE workspace_id = ?1 AND datetime(received_at) >= datetime('now', '-24 hours')`
-      ).bind(workspaceId).first<Row>(),
+        WHERE workspace_id = ?1
+          AND datetime(received_at) >= datetime('now', '-24 hours')
+          AND received_at >= ?2`
+      ).bind(workspaceId, sargableDayFloor(new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())).first<Row>(),
       ...RECEIPT_STATS_WINDOWS_MINUTES.map(([, minutes]) =>
         env.DB.prepare(
           `SELECT COUNT(*) AS count FROM yoco_v2_webhook_receipts
-            WHERE workspace_id = ?1 AND datetime(received_at) >= datetime('now', ?2)`
-        ).bind(workspaceId, `-${minutes} minutes`).first<Row>()
+            WHERE workspace_id = ?1
+              AND datetime(received_at) >= datetime('now', ?2)
+              AND received_at >= ?3`
+        ).bind(
+          workspaceId,
+          `-${minutes} minutes`,
+          sargableDayFloor(new Date(Date.now() - minutes * 60 * 1000).toISOString()),
+        ).first<Row>()
       )
     ]);
     const calls: Record<string, number> = {};
@@ -699,9 +727,11 @@ export async function handleYocoV2AdminRoute(
       `SELECT CAST((julianday(received_at) - julianday(?2)) * 1440.0 / ?3 AS INTEGER) AS bucket_idx,
               COUNT(*) AS count
          FROM yoco_v2_webhook_receipts
-        WHERE workspace_id = ?1 AND datetime(received_at) >= datetime(?2)
+        WHERE workspace_id = ?1
+          AND datetime(received_at) >= datetime(?2)
+          AND received_at >= ?4
         GROUP BY bucket_idx`
-    ).bind(workspaceId, windowStart, bucketMinutes).all<Row>();
+    ).bind(workspaceId, windowStart, bucketMinutes, sargableDayFloor(String(windowStart))).all<Row>();
 
     const buckets = new Array(bucketCount).fill(0);
     for (const row of rows.results || []) {

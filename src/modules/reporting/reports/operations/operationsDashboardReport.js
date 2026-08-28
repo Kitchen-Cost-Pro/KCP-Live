@@ -9,6 +9,7 @@ import {
   safeNumber
 } from '../../engine/calculations.js';
 import { groupBy, sumBy, text, toArray } from '../../engine/grouping.js';
+import { DEFAULT_REPORT_TIMEZONE, zonedDateTimeStrings } from '../../engine/timezone.js';
 import { buildRowWarnings } from '../../validators/rowWarningUtils.js';
 import { buildRowFormulaTooltip } from '../../tooltips/tooltipBuilder.js';
 import { reconcileDetailedActivityToOperationsDashboard } from '../../validators/reconciliationChecks.js';
@@ -232,13 +233,13 @@ async function getTrustedLedgerRows({ workspaceId, filters, services, dataSet })
   return detailedActivityReport.getRows({ workspaceId, filters, services, dataSet, view: 'ledger' });
 }
 
-function buildOperationsDashboardModel({ ledgerRows = [], filters = {}, dataSet = {} }) {
+export function buildOperationsDashboardModel({ ledgerRows = [], filters = {}, dataSet = {} }) {
   const reportLedgerRows = toArray(ledgerRows);
   const includedRows = reportLedgerRows
     .filter((row) => isStockHoldingLedgerRow(row, dataSet))
     .map((row) => normalizeOperationsLedgerRow(row, dataSet));
   const dateRange = buildDateRangeLabel(filters, reportLedgerRows);
-  const snapshotResolver = createSnapshotResolver(includedRows, dataSet);
+  const snapshotResolver = createSnapshotResolver(includedRows, dataSet, filters);
   const meta = buildOperationsMeta(reportLedgerRows, includedRows, snapshotResolver);
 
   return {
@@ -676,7 +677,7 @@ function getItemLocationKey(row = {}) {
   return [row.itemId || row.itemName || 'unknown-item', row.locationId || row.locationName || 'unassigned'].map(text).join('::');
 }
 
-function createSnapshotResolver(ledgerRows = [], dataSet = {}) {
+function createSnapshotResolver(ledgerRows = [], dataSet = {}, filters = {}) {
   const rowsByItemLocation = groupBy(ledgerRows, getItemLocationKey);
   const stockSnapshotLookup = buildStockSnapshotLookup(dataSet);
 
@@ -685,8 +686,8 @@ function createSnapshotResolver(ledgerRows = [], dataSet = {}) {
     const rows = rowsByItemLocation.get(key) || [row];
     const first = rows[0] || row;
     const unitCost = resolveDisplayUnitCost(rows);
-    const opening = resolveQuantitySnapshot('opening', first, rows, dataSet, stockSnapshotLookup);
-    const actual = resolveQuantitySnapshot('actual', first, rows, dataSet, stockSnapshotLookup);
+    const opening = resolveQuantitySnapshot('opening', first, rows, dataSet, stockSnapshotLookup, filters);
+    const actual = resolveQuantitySnapshot('actual', first, rows, dataSet, stockSnapshotLookup, filters);
     return {
       key,
       itemId: first.itemId || '',
@@ -742,7 +743,7 @@ function createSnapshotResolver(ledgerRows = [], dataSet = {}) {
   };
 }
 
-function resolveQuantitySnapshot(kind = 'opening', first = {}, rows = [], dataSet = {}, stockSnapshotLookup = new Map()) {
+function resolveQuantitySnapshot(kind = 'opening', first = {}, rows = [], dataSet = {}, stockSnapshotLookup = new Map(), filters = {}) {
   const directRowValue = findFirstNumber(rows, kind === 'opening'
     ? ['openingQty', 'openingStockQty', 'opening_stock_qty', 'openingStock']
     : ['actualClosingQty', 'closingQty', 'currentStock', 'stockOnHand', 'onHandQty', 'countedQty']);
@@ -756,13 +757,30 @@ function resolveQuantitySnapshot(kind = 'opening', first = {}, rows = [], dataSe
     : ['actualClosingQty', 'closingQty', 'currentStock', 'stockOnHand', 'onHandQty', 'countedQty']);
   if (snapshotValue.available) return snapshotValue;
 
-  const locationStockValue = getLocationStockQuantity(stockItem, locationId, kind);
-  if (locationStockValue.available) return locationStockValue;
+  // `stockItem` (dataSet.stockItems) is the live, "as of right now" stock-item feed with no
+  // point-in-time query — the same live figure `stockOnHandReport.js` reads as `currentStock`.
+  // It can only be trusted as this period's actual/opening basis when the filter's end date is
+  // today (or unbounded/future); for an earlier endDate this would silently blend today's live
+  // quantity into a historical snapshot, fabricating a variance for any past-period dashboard run
+  // (the same bug already fixed in theoreticalVsActualReport.js). The stock-take fallback below
+  // is unaffected — a committed stock take is itself a point-in-time count.
+  const endDateFilter = text(filters.endDate || filters.dateTo).slice(0, 10);
+  // Computed in the report's own business timezone, not UTC — a UTC "today" can be off by up to
+  // the timezone's offset around local midnight (e.g. ~2 hours for Africa/Johannesburg, UTC+2),
+  // occasionally admitting or rejecting the live balance incorrectly right at the day boundary.
+  // Matches the same gate in theoreticalVsActualReport.js and stockOutForecastReport.js.
+  const todayDate = zonedDateTimeStrings(new Date(), DEFAULT_REPORT_TIMEZONE).date;
+  const liveStockUsableAsOfPeriodEnd = !endDateFilter || endDateFilter >= todayDate;
 
-  const itemValue = getQuantityFromObject(stockItem, kind === 'opening'
-    ? ['openingQty', 'openingStockQty', 'opening_stock_qty', 'openingStock']
-    : ['actualClosingQty', 'closingQty', 'currentStock', 'stockOnHand', 'onHandQty', 'countedQty']);
-  if (itemValue.available && (!locationId || toArray(dataSet.locations).length <= 1)) return itemValue;
+  if (liveStockUsableAsOfPeriodEnd) {
+    const locationStockValue = getLocationStockQuantity(stockItem, locationId, kind);
+    if (locationStockValue.available) return locationStockValue;
+
+    const itemValue = getQuantityFromObject(stockItem, kind === 'opening'
+      ? ['openingQty', 'openingStockQty', 'opening_stock_qty', 'openingStock']
+      : ['actualClosingQty', 'closingQty', 'currentStock', 'stockOnHand', 'onHandQty', 'countedQty']);
+    if (itemValue.available && (!locationId || toArray(dataSet.locations).length <= 1)) return itemValue;
+  }
 
   if (kind === 'actual') {
     const stockTakeValue = getLatestStockTakeCount(rows);

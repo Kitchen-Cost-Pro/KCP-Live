@@ -1582,9 +1582,35 @@ let stockLiveRefreshInstalled = false;
 // When the data-version poll detects a change (a Yoco/POS webhook bumped stock_movements), silently
 // re-fetch stock while the Stock Items tab is open. Uses applyRealtimeSnapshot so the update is
 // deferred while the user is editing and never remounts the page (no "refresh" flicker).
+// The data-version poll itself is cheap (the worker answers it with 3 indexed rows), but the
+// refresh it triggers re-reads the whole stock catalogue. On a trading day a POS webhook bumps the
+// version almost every tick, so a 15s poll meant ~240 full catalogue refreshes per hour from a
+// single open Stock tab — measured at ~4,100 rows read each, roughly 984,000 rows/hour, which
+// exhausts the entire account-wide daily Durable Objects read allowance in about an hour.
+//
+// The poll stays at 15s so the tab still reacts quickly to a quiet-period change; what is throttled
+// is the expensive refresh. A change arriving inside the cooldown is NOT dropped — it schedules a
+// single trailing refresh for the moment the window closes, so the tab still converges on fresh
+// data and bursts of POS writes collapse into one fetch instead of one per tick.
+const STOCK_LIVE_REFRESH_MIN_INTERVAL_MS = 60000;
+let stockLiveRefreshLastAt = 0;
+let stockLiveRefreshTrailingTimer = null;
+
 async function refreshStockFromDataVersion(workspaceId) {
   if (appState.route.active !== 'ingredients') return;
   if (!workspaceId || appState.workspace?.id !== workspaceId) return;
+
+  const sinceLast = Date.now() - stockLiveRefreshLastAt;
+  if (sinceLast < STOCK_LIVE_REFRESH_MIN_INTERVAL_MS) {
+    if (stockLiveRefreshTrailingTimer) return;
+    stockLiveRefreshTrailingTimer = setTimeout(() => {
+      stockLiveRefreshTrailingTimer = null;
+      refreshStockFromDataVersion(workspaceId);
+    }, STOCK_LIVE_REFRESH_MIN_INTERVAL_MS - sinceLast);
+    return;
+  }
+  stockLiveRefreshLastAt = Date.now();
+
   const requestToken = stockMutationToken;
   try {
     clearApiCache();

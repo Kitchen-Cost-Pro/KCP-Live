@@ -1627,6 +1627,7 @@ export async function getStockControlReport(
     "grvs",
     "grv_lines",
     "stock_item_location_prices",
+    "stock_item_latest_purchase",
   ];
   const tableStatus: Record<string, boolean> = {};
   for (const table of requiredTables)
@@ -1661,8 +1662,29 @@ export async function getStockControlReport(
     filters,
     tableStatus,
   );
+  // Reads the maintained stock_item_latest_purchase summary (one row per stock_item+location,
+  // kept current at write time — see migration 41's comment in tenant-migrations.ts) instead of
+  // recomputing "most recent purchase" from full GRV history on every report load. Falls back to
+  // the old full-history window-function scan only for a tenant that hasn't been repaired/
+  // backfilled yet (see workspace-do.ts) — this keeps the report correct throughout that rollout
+  // window rather than showing blank purchase data, at the old (known, bounded-in-time) cost.
   const latestPurchaseCte =
-    tableStatus.grv_lines && tableStatus.grvs
+    tableStatus.stock_item_latest_purchase
+      ? `latest_purchase AS (
+        SELECT
+            lp.workspace_id,
+            lp.stock_item_id,
+            lp.location_id,
+            lp.supplier_id,
+            ${tableStatus.suppliers ? "s.name" : "''"} AS supplier_name,
+            lp.unit AS last_purchase_uom,
+            lp.unit_price AS last_purchase_cost,
+            lp.received_at AS last_purchased_date
+          FROM stock_item_latest_purchase lp
+          ${tableStatus.suppliers ? "LEFT JOIN suppliers s ON s.id = lp.supplier_id AND s.workspace_id = lp.workspace_id" : ""}
+         WHERE lp.workspace_id = ?1
+      )`
+      : tableStatus.grv_lines && tableStatus.grvs
       ? `latest_purchase AS (
         SELECT * FROM (
           SELECT
@@ -3297,6 +3319,14 @@ function convertMenuRecipeQty({ qty, fromUom, toUom, stockRawJson }: Row) {
     );
     if (factor) return { qty: quantity * factor, factor };
   }
+  // `ea` here is not the unit "each": it is the sentinel the recipe editor writes into
+  // recipe_lines.unit when no explicit UOM was chosen (normalizeRecipeLines in
+  // services/recipeService.js), and it means "use the stock item's base unit" — which is exactly
+  // what the recipe screen renders for such a line. Reporting it as a missing conversion produced
+  // a permanent, unactionable "Missing UOM conversion from ea to kg." warning on every recipe line
+  // measured in kg/g/L/ml, telling merchants to configure a conversion that should not exist. See
+  // inventory/uom.ts, which holds the same contract for the stock-deduction path.
+  if (from === "ea") return { qty: quantity, factor: 1 };
   return { qty: quantity, factor: 1, missingConversion: true };
 }
 
@@ -8297,13 +8327,40 @@ function addZonedDateRange(
     timeZone,
     tradingDayStartMinutes: numberValue((filters as Row).tradingDayStartMinutes, 0),
   });
+  // The datetime(...) predicates below are the EXACT, authoritative bounds and are kept as-is:
+  // datetime() normalises both sides, so they stay correct even if stored timestamps mix ISO
+  // 'T' and SQLite ' ' separators. But wrapping the column in a function makes it non-sargable —
+  // SQLite cannot use idx_stock_movements_workspace_date and full-scans the ledger, which is why
+  // reports/detailed-activity (13 LEFT JOINs, called on every dashboard load) was one of the
+  // heaviest reads in the system.
+  //
+  // So each exact predicate is paired with a deliberately WIDER, index-usable prefilter on the
+  // bare column. It only has to be a guaranteed superset — the exact predicate still removes
+  // anything extra it lets through, so results are unchanged while the planner gets a range it
+  // can seek on. Comparing against a date-only bound is safe for any separator because the first
+  // ten characters are the date, and a longer string sharing that prefix always sorts after it:
+  // both '2026-08-27T09:00Z' and '2026-08-27 09:00' sort >= '2026-08-27' and < '2026-08-28'.
+  // The upper bound uses the day AFTER toExclusiveUtc's date, since rows earlier on that final
+  // day are still legitimately in range.
+  const utcDay = (value: unknown): string => String(value ?? "").slice(0, 10);
+  const dayAfter = (day: string): string => {
+    const parsed = new Date(`${day}T00:00:00Z`);
+    if (Number.isNaN(parsed.getTime())) return "9999-12-31";
+    parsed.setUTCDate(parsed.getUTCDate() + 1);
+    return parsed.toISOString().slice(0, 10);
+  };
+
   if (fromUtc) {
     binds.push(fromUtc);
     clauses.push(`datetime(${column}) >= datetime(?${binds.length})`);
+    binds.push(utcDay(fromUtc));
+    clauses.push(`${column} >= ?${binds.length}`);
   }
   if (toExclusiveUtc) {
     binds.push(toExclusiveUtc);
     clauses.push(`datetime(${column}) < datetime(?${binds.length})`);
+    binds.push(dayAfter(utcDay(toExclusiveUtc)));
+    clauses.push(`${column} < ?${binds.length}`);
   }
 }
 

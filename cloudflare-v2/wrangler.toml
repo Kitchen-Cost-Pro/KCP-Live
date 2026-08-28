@@ -50,6 +50,16 @@ database_id = "279a7882-ca9d-4bae-b308-e47fe6d24071"
 
 [vars]
 ENVIRONMENT = "production"
+# Emergency kill switch (2026-08-27). Set to "true" to stop WorkspaceDO attempting ANY pending
+# migration on wake-up; safe at any time, since a workspace with pending migrations simply keeps
+# serving on its existing schema. Left "false" because the two causes behind the incident it was
+# added for are now fixed at source: migrate() applies at most ONE migration per invocation
+# (never a whole backlog in one request), and migration 33's dedupe is a single-pass rollup rather
+# than a quadratic correlated-subquery UPDATE. Migration 37 also has to run for the new hot-path
+# indexes to exist, so leaving this "true" would hold back part of the fix. If the row-read quota
+# is still exhausted when this deploys, migrations fail fast and back off on their own, then apply
+# cleanly once the daily quota resets — no manual step needed. Flip to "true" only as an emergency.
+WORKSPACE_MIGRATIONS_DISABLED = "false"
 ALLOWED_ORIGINS = "http://localhost:*,http://127.0.0.1:*,https://kcp-live.pages.dev,https://*.kcp-live.pages.dev"
 ADMIN_BOOTSTRAP_EMAILS = "superuser@yoco.com"
 APP_BASE_URL = "https://kcp-live.pages.dev"

@@ -1382,6 +1382,23 @@ export function validateTransferRows(model = {}) {
   ].filter(Boolean);
 }
 
+// Internal transfers write both legs (Transfer Out + Transfer In) atomically in the same
+// database batch (see the transfer-creation route) — there is no genuine multi-hour "in transit"
+// state for an internal transfer, so a persistently orphaned leg is a real data-integrity problem
+// worth a critical alert. A *very recently* written leg with no visible match yet, though, could
+// reflect the report's read path racing the write (e.g. a paginated ledger fetch that hasn't yet
+// picked up the sibling row) rather than genuine corruption — only that narrow, recent window is
+// downgraded to a warning instead of critical, so a leg that's still orphaned minutes later still
+// escalates loudly.
+const RECENT_TRANSFER_LEG_GRACE_MS = 15 * 60 * 1000;
+function isRecentTransferLeg(rows = []) {
+  const latest = rows.reduce((max, row) => {
+    const parsed = Date.parse(row.timestamp || row.date || "");
+    return Number.isFinite(parsed) ? Math.max(max, parsed) : max;
+  }, 0);
+  return latest > 0 && Date.now() - latest < RECENT_TRANSFER_LEG_GRACE_MS;
+}
+
 function validateTransferPairs(pairRows = []) {
   const warnings = [];
   Array.from(
@@ -1402,17 +1419,23 @@ function validateTransferPairs(pairRows = []) {
         "external",
     );
     if (!isExternal && outRows.length && !inRows.length) {
+      const recent = isRecentTransferLeg(outRows);
       warnings.push({
         code: "stock-transfer-out-without-in",
-        level: "critical",
-        message: `Transfer Out exists without matching Transfer In for ${label} / ${first.itemName || "unknown item"}.`,
+        level: recent ? "warning" : "critical",
+        message: recent
+          ? `Transfer Out was recorded moments ago with no matching Transfer In yet for ${label} / ${first.itemName || "unknown item"} — re-check shortly before treating this as a data error.`
+          : `Transfer Out exists without matching Transfer In for ${label} / ${first.itemName || "unknown item"}.`,
       });
     }
     if (!isExternal && inRows.length && !outRows.length) {
+      const recent = isRecentTransferLeg(inRows);
       warnings.push({
         code: "stock-transfer-in-without-out",
-        level: "critical",
-        message: `Transfer In exists without matching Transfer Out for ${label} / ${first.itemName || "unknown item"}.`,
+        level: recent ? "warning" : "critical",
+        message: recent
+          ? `Transfer In was recorded moments ago with no matching Transfer Out yet for ${label} / ${first.itemName || "unknown item"} — re-check shortly before treating this as a data error.`
+          : `Transfer In exists without matching Transfer Out for ${label} / ${first.itemName || "unknown item"}.`,
       });
     }
     if (inRows.length && outRows.length) {

@@ -3,6 +3,7 @@ import { groupBy, sumBy, text, toArray } from "../../engine/grouping.js";
 import { fetchGrvLogRows } from "../../api/reportingApi.js";
 import {
   firstText,
+  hasValue,
   latestText,
   mapColumns,
   rememberPayload,
@@ -280,6 +281,14 @@ export const grvLogReport = {
     addCountWarning(
       rows,
       warnings,
+      "grv-missing-vat",
+      "warning",
+      "GRV line(s) have a received value but no VAT figure — VAT was reported as R0 rather than calculated.",
+      (row) => !row.hasVat,
+    );
+    addCountWarning(
+      rows,
+      warnings,
       "grv-missing-stock-movement",
       "critical",
       "committed GRV line(s) have no stock movement row.",
@@ -342,6 +351,7 @@ function normalizeLine(row = {}, index = 0) {
     row.lineValueExVat !== undefined
       ? safeNumber(row.lineValueExVat)
       : roundMoney(receivedQty * unitCostExVat);
+  const vatSupplied = hasValue(row.vat) || hasValue(row.lineVat) || hasValue(row.line_vat);
   const vat = safeNumber(row.vat ?? row.lineVat ?? row.line_vat);
   const lineValueInclVat =
     row.lineValueInclVat !== undefined
@@ -349,6 +359,10 @@ function normalizeLine(row = {}, index = 0) {
       : roundMoney(lineValueExVat + vat);
   return {
     ...row,
+    // A GRV line with a real ex-VAT value but no VAT field at all is a data gap, not a genuine
+    // zero — flagged by the `grv-missing-vat` validator below instead of silently understating
+    // `lineValueInclVat`/workspace totals with no indication anything is wrong.
+    hasVat: vatSupplied || lineValueExVat <= 0,
     id: text(row.id) || `grv-line:${text(row.sourceId || row.grvId)}:${index}`,
     grvId: text(row.grvId || row.grv_id || row.sourceId),
     sourceId: text(row.sourceId || row.grvId || row.grv_id),
@@ -401,7 +415,12 @@ function normalizeLine(row = {}, index = 0) {
     committedAt: text(
       row.committedAt || row.committed_at || row.receivedAt || row.received_at,
     ),
-    ledgerQty: safeNumber(row.ledgerQty ?? row.ledger_qty),
+    // Normalized the same way as ledgerValue below — both feed parallel reconciliation checks
+    // (grv-ledger-qty-mismatch / grv-ledger-value-mismatch) against receivedQty/lineValueExVat,
+    // which are themselves always positive magnitudes. A signed ledger quantity (e.g. a
+    // correction/reversal) would otherwise fail the qty check while the value check on the exact
+    // same row correctly reconciled.
+    ledgerQty: Math.abs(safeNumber(row.ledgerQty ?? row.ledger_qty)),
     ledgerValue: Math.abs(safeNumber(row.ledgerValue ?? row.ledger_value)),
     ledgerRowCount: safeNumber(row.ledgerRowCount ?? row.ledger_row_count),
   };

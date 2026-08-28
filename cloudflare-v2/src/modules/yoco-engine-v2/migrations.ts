@@ -1070,42 +1070,61 @@ UPDATE yoco_v2_reconciliation_findings
 -- meaning "first detected"), but carry the rest of the group's information onto the survivor first:
 -- how many times it was seen, when it was last seen, and — critically — whether any sighting was
 -- already repaired, so the dedupe cannot silently reopen resolved findings.
+--
+-- This is deliberately done via a single-pass GROUP BY rollup table rather than the obvious
+-- correlated-subquery UPDATE. Production incident, 2026-08-27: the original form ran FOUR
+-- correlated subqueries per row, each filtering on
+-- (workspace_id, integration_id, finding_type, source_entity_type, source_entity_id) — a tuple no
+-- index covered at this point in the migration (the only index on the table is
+-- idx_yoco_v2_reconciliation_findings_open on (workspace_id, status, severity, created_at), useless
+-- here, and the covering UNIQUE index is created at the END of this migration, after the dedupe).
+-- Every subquery therefore full-scanned the table, making the statement O(rows x group size) — and
+-- the very bug this migration fixes is one that re-inserted the SAME finding on every 15-minute
+-- tick forever, so group size is precisely what had grown pathological. On a tenant carrying that
+-- backlog it read millions of rows in one statement and exhausted the account's entire daily
+-- Durable Objects free-tier row-read quota, taking every workspace down (all reads fail once the
+-- quota is gone, not just this migration).
+--
+-- The rollup below computes every group's aggregates in ONE indexed-free but single pass, then
+-- applies them via primary-key lookups, and only touches the surviving row per group instead of
+-- rewriting every duplicate before deleting it. Same end state, linear instead of quadratic, and
+-- far fewer writes.
+DROP TABLE IF EXISTS _kcp_v2_findings_rollup;
+CREATE TABLE _kcp_v2_findings_rollup (
+  keep_rowid INTEGER PRIMARY KEY,
+  occurrence_count INTEGER NOT NULL,
+  last_seen_at TEXT,
+  any_repaired INTEGER NOT NULL,
+  repaired_at TEXT
+);
+INSERT INTO _kcp_v2_findings_rollup (keep_rowid, occurrence_count, last_seen_at, any_repaired, repaired_at)
+SELECT MIN(rowid),
+       COUNT(*),
+       MAX(COALESCE(last_seen_at, created_at)),
+       MAX(CASE WHEN status = 'REPAIRED' THEN 1 ELSE 0 END),
+       MAX(repaired_at)
+  FROM yoco_v2_reconciliation_findings
+ GROUP BY workspace_id, integration_id, finding_type, source_entity_type, source_entity_id;
+
 UPDATE yoco_v2_reconciliation_findings
    SET occurrence_count = MAX(1, (
-         SELECT COUNT(*) FROM yoco_v2_reconciliation_findings d
-          WHERE d.workspace_id = yoco_v2_reconciliation_findings.workspace_id
-            AND d.integration_id = yoco_v2_reconciliation_findings.integration_id
-            AND d.finding_type = yoco_v2_reconciliation_findings.finding_type
-            AND d.source_entity_type = yoco_v2_reconciliation_findings.source_entity_type
-            AND d.source_entity_id = yoco_v2_reconciliation_findings.source_entity_id)),
+         SELECT r.occurrence_count FROM _kcp_v2_findings_rollup r
+          WHERE r.keep_rowid = yoco_v2_reconciliation_findings.rowid)),
        last_seen_at = COALESCE((
-         SELECT MAX(COALESCE(d.last_seen_at, d.created_at)) FROM yoco_v2_reconciliation_findings d
-          WHERE d.workspace_id = yoco_v2_reconciliation_findings.workspace_id
-            AND d.integration_id = yoco_v2_reconciliation_findings.integration_id
-            AND d.finding_type = yoco_v2_reconciliation_findings.finding_type
-            AND d.source_entity_type = yoco_v2_reconciliation_findings.source_entity_type
-            AND d.source_entity_id = yoco_v2_reconciliation_findings.source_entity_id), last_seen_at),
-       status = CASE WHEN EXISTS (
-         SELECT 1 FROM yoco_v2_reconciliation_findings d
-          WHERE d.workspace_id = yoco_v2_reconciliation_findings.workspace_id
-            AND d.integration_id = yoco_v2_reconciliation_findings.integration_id
-            AND d.finding_type = yoco_v2_reconciliation_findings.finding_type
-            AND d.source_entity_type = yoco_v2_reconciliation_findings.source_entity_type
-            AND d.source_entity_id = yoco_v2_reconciliation_findings.source_entity_id
-            AND d.status = 'REPAIRED') THEN 'REPAIRED' ELSE status END,
+         SELECT r.last_seen_at FROM _kcp_v2_findings_rollup r
+          WHERE r.keep_rowid = yoco_v2_reconciliation_findings.rowid), last_seen_at),
+       status = CASE WHEN (
+         SELECT r.any_repaired FROM _kcp_v2_findings_rollup r
+          WHERE r.keep_rowid = yoco_v2_reconciliation_findings.rowid) = 1 THEN 'REPAIRED' ELSE status END,
        repaired_at = COALESCE(repaired_at, (
-         SELECT MAX(d.repaired_at) FROM yoco_v2_reconciliation_findings d
-          WHERE d.workspace_id = yoco_v2_reconciliation_findings.workspace_id
-            AND d.integration_id = yoco_v2_reconciliation_findings.integration_id
-            AND d.finding_type = yoco_v2_reconciliation_findings.finding_type
-            AND d.source_entity_type = yoco_v2_reconciliation_findings.source_entity_type
-            AND d.source_entity_id = yoco_v2_reconciliation_findings.source_entity_id));
+         SELECT r.repaired_at FROM _kcp_v2_findings_rollup r
+          WHERE r.keep_rowid = yoco_v2_reconciliation_findings.rowid))
+ WHERE rowid IN (SELECT keep_rowid FROM _kcp_v2_findings_rollup);
 
 DELETE FROM yoco_v2_reconciliation_findings
- WHERE rowid NOT IN (
-   SELECT MIN(rowid) FROM yoco_v2_reconciliation_findings
-    GROUP BY workspace_id, integration_id, finding_type, source_entity_type, source_entity_id
- );
+ WHERE rowid NOT IN (SELECT keep_rowid FROM _kcp_v2_findings_rollup);
+
+DROP TABLE _kcp_v2_findings_rollup;
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_yoco_v2_reconciliation_findings_entity
   ON yoco_v2_reconciliation_findings(workspace_id, integration_id, finding_type, source_entity_type, source_entity_id);

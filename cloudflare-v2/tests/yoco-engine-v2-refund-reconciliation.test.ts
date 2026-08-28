@@ -12,6 +12,8 @@ import type {
   YocoV2RateGateResponse,
 } from "../src/modules/yoco-engine-v2/contracts";
 import {
+  YOCO_V2_CONTROLLED_CUTOVER_MIGRATION,
+  YOCO_V2_EFFECT_GATE_MIGRATION,
   YOCO_V2_FOUNDATION_MIGRATION,
   YOCO_V2_REFUND_RECONCILIATION_MIGRATION,
   YOCO_V2_REFUND_CONTROLLED_CUTOVER_MIGRATION,
@@ -154,13 +156,23 @@ function createDb() {
     ALTER TABLE yoco_orders ADD COLUMN gross_total REAL;
     ALTER TABLE yoco_orders ADD COLUMN vat_total REAL;
     ALTER TABLE yoco_orders ADD COLUMN net_total REAL;
+    ALTER TABLE yoco_orders ADD COLUMN vat_rate REAL;
+    ALTER TABLE yoco_orders ADD COLUMN vat_registered INTEGER;
   `);
   db.database.exec(YOCO_V2_FOUNDATION_MIGRATION);
   db.database.exec(YOCO_V2_SALE_SHADOW_MIGRATION);
   db.database.exec(YOCO_V2_REFUND_RECONCILIATION_MIGRATION);
+  // The sale-side cutover table must exist before the effect-gate unification below, which reads
+  // from BOTH yoco_v2_effect_controls and yoco_v2_refund_effect_controls. Production applies them
+  // in this order (TENANT_MIGRATIONS 25, 26, then 35), so the harness must too.
+  db.database.exec(YOCO_V2_CONTROLLED_CUTOVER_MIGRATION);
   db.database.exec(YOCO_V2_REFUND_CONTROLLED_CUTOVER_MIGRATION);
   db.database.exec(MODIFIER_ENGINE_REFUNDS_RELIABILITY_NOTES_MIGRATION);
   db.database.exec(YOCO_V2_RECONCILIATION_BACKOFF_MIGRATION);
+  // See the note in yoco-v2-ownership-connect-migration.test.ts: the live effect gate lives in
+  // yoco_v2_effect_gate (TENANT_MIGRATIONS 35 + the runtime schema repair), so a harness that omits
+  // it does not represent any real tenant.
+  db.database.exec(YOCO_V2_EFFECT_GATE_MIGRATION);
   return db;
 }
 
@@ -607,6 +619,53 @@ test("amount-only and custom amount refunds record reporting and skip stock with
       0,
     );
   }
+});
+
+test("a full-order-remainder refund prorates VAT/gross/net to what's actually left, not the original line's full amount", async () => {
+  // Regression guard: when a prior partial refund already reduced how much of "line_1" (2
+  // Burgers) remains, and a later refund event covers the FULL remainder as one lump sum with no
+  // return-line detail, the FULL_ORDER_REMAINDER path used to build a synthetic "returned line"
+  // that carried the ORIGINAL (unscaled) line's gross/tax/net regardless of how much was actually
+  // remaining — so a 1-of-2-Burgers remainder was refunded as if all 2 were still outstanding.
+  const { canonical } = await setupFixture("full-refund-after-partial");
+  assert.equal(canonical.refund_type, "FULL");
+  const burgerLine = canonical.lines.find((line) => line.source_original_line_id === "line_1");
+  assert.ok(burgerLine, "the remaining Burger quantity should still be allocated a line");
+  assert.equal(burgerLine.quantity, 1, "only the 1 remaining Burger should be refunded, not the original 2");
+  assert.equal(burgerLine.tax_amount, 13.05, "VAT should be prorated to the 1 remaining Burger, not the full 2-Burger line");
+  // Total refund tax = prorated Burger (13.05) + the untouched Chips line's own tax (6.52).
+  assert.equal(canonical.tax_amount, 19.57);
+});
+
+test("an amount-only refund reverses the VAT rate recorded at sale time, not the workspace's current rate", async () => {
+  // Regression guard: an amount-only refund (no explicit tax figure on Yoco's own refund
+  // resource) used to recompute VAT at whatever the CURRENT workspace_settings rate is. If the
+  // workspace's VAT registration changes between the sale and the refund, that silently
+  // corrupts the reversal. It must instead reuse the rate snapshotted on the original sale's
+  // yoco_orders row.
+  const db = createDb();
+  seedCore(db);
+  await configureApiKey(db);
+  db.database
+    .prepare(
+      `INSERT INTO yoco_orders (id, workspace_id, yoco_order_id, order_type, status, total, occurred_at, raw_json, created_at, gross_total, vat_total, net_total, vat_rate, vat_registered)
+       VALUES ('order_db_1', 'ws_1', 'ord_ref_1', 'sale', 'completed', 250, '2026-07-15T08:00:00.000Z', '{}', '2026-07-15T08:00:00.000Z', 250, 32.61, 217.39, 15, 1)`,
+    )
+    .run();
+  // The workspace becomes VAT-unregistered AFTER the sale, before the refund is processed.
+  db.database
+    .prepare(`UPDATE workspace_settings SET vat_rate = 0 WHERE workspace_id = 'ws_1'`)
+    .run();
+
+  const data = fixture("amount-only-refund");
+  const env = envFor(db, fixtureGate(data));
+  const { canonical } = await resolveCanonicalYocoRefund(env, {
+    rawEvent: rawEvent(data),
+    processingRun: processingRun("run_refund", 4),
+  });
+  assert.equal(canonical.refund_type, "AMOUNT_ONLY");
+  // R50 refund at the sale-time 15% rate: 50 - 50/1.15 = 6.52, NOT 0.
+  assert.equal(canonical.tax_amount, 6.52);
 });
 
 test("refund lines nested in the refund order returns[] with variant-only ids resolve and allocate stock", async () => {
@@ -1752,9 +1811,12 @@ test("a failing scheduled run records the attempt and backs off instead of re-ru
     "a tick inside the backoff window must not start another run",
   );
 
-  // Past the 15-minute backoff, it is allowed to try again — and a success clears the counters.
+  // Past both the 15-minute backoff AND the (now daily, not hourly) run interval, it is allowed
+  // to try again — and a success clears the counters. 2026-08-28: reconciliation moved to once a
+  // day (see reconciliation.ts's hourlyDue/dailyDue), so this needs a >24h gap from the first
+  // attempt to actually be due, not just past the backoff window.
   const okEnv = envFor(db, fixtureGate(data, { listOrders: [], listRefunds: [] }));
-  await runScheduledYocoV2Reconciliation(okEnv, "ws_1", "integration_1", new Date("2026-07-15T04:00:00.000Z"));
+  await runScheduledYocoV2Reconciliation(okEnv, "ws_1", "integration_1", new Date("2026-07-16T03:00:00.000Z"));
   const afterRecovery = db.database
     .prepare(`SELECT consecutive_failures, next_retry_at FROM yoco_v2_reconciliation_state`)
     .get() as any;

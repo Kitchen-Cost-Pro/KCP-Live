@@ -123,6 +123,29 @@ test('Stock Control mapper keeps required quantity, purchase UOM and reorder val
   assert.equal(row.purchaseUomQty, 1.8);
 });
 
+test('a deliberately-zeroed par level is respected instead of silently falling back to the low-stock threshold', () => {
+  // Regression guard: `parLevel || lowStockThreshold` treated an explicit `parLevel: 0`
+  // (a discontinued item that should never be reordered) the same as "not set," fabricating a
+  // nonzero required-qty/reorder-value recommendation. This bug existed independently in both
+  // the API mapper (normalizeApiStockControlRow) and the report's own normalizeStockControlItem.
+  const mapped = normalizeApiStockControlRow({
+    stock_item_id: 'discontinued-item',
+    item_name: 'Discontinued Sauce',
+    location_id: 'main',
+    current_stock: 2,
+    low_stock_threshold: 10,
+    par_level: 0,
+    unit_cost_ex_vat: 5
+  });
+  assert.equal(mapped.requiredQty, 0, 'an explicit par level of 0 must not be overridden by the low-stock threshold');
+  assert.equal(mapped.estimatedReorderValue, 0);
+
+  const model = buildStockControlViews({ rows: [mapped], warningRows: [] });
+  const item = model.item_detail[0];
+  assert.equal(item.requiredQty, 0);
+  assert.equal(item.estimatedReorderValue, 0);
+});
+
 test('Stock Control warning view exposes only customer-actionable setup issues', () => {
   const model = buildStockControlViews({
     rows,

@@ -1,5 +1,6 @@
 import type { DbStatementLike, Env } from '../legacy/types';
 import { fallbackStockItemUnitCost } from '../legacy/inventory-costing';
+import { UNSPECIFIED_LINE_UOM, standardUomFactor } from './uom';
 
 type Row = Record<string, unknown>;
 
@@ -38,6 +39,7 @@ interface UomConfiguration {
 interface DepletionLine {
   stockItem: StockItemRow;
   quantity: number;
+  uomResolved: boolean;
 }
 
 export interface IngredientDepletion {
@@ -46,6 +48,12 @@ export interface IngredientDepletion {
   unit: string;
   unitCost: number;
   totalQty: number;
+  // False when the recipe line's custom UOM (e.g. "1 box") could not be matched to a configured
+  // ratio on the stock item. `totalQty` still uses the same 1:1 fallback as before for backward
+  // compatibility with callers that only check ingredient presence (see rules.ts
+  // assertRemovalScope), but any caller that actually MUTATES stock (e.g. the wastage endpoint)
+  // must check this flag and skip the deduction rather than trust an unresolved quantity.
+  uomResolved: boolean;
 }
 
 function text(value: unknown, fallback = '') {
@@ -79,10 +87,17 @@ function normalizeText(value: unknown) {
 // ratio lookup the frontend already applies for cost preview (getIngredientUomRatio in
 // Recipes.js) — that logic was never mirrored here, which is what let base-unit deductions go out
 // unconverted.
-function resolveUomRatio(stockItem: StockItemRow, lineUnit: string): number {
+function resolveUomRatio(stockItem: StockItemRow, lineUnit: string): { ratio: number; resolved: boolean } {
   const baseUnit = text(stockItem.unit, 'ea').toLowerCase();
   const requestedUnit = text(lineUnit).toLowerCase();
-  if (!requestedUnit || requestedUnit === baseUnit) return 1;
+  if (!requestedUnit || requestedUnit === baseUnit) return { ratio: 1, resolved: true };
+
+  // Same resolution order as resolveCustomUomFactor in the sale-deduction engine (see
+  // inventory/uom.ts): standard same-family conversion, then the item's configured custom UOMs,
+  // then the 'ea' unspecified sentinel. The two resolvers disagreeing is what let a sale deduct
+  // nothing while the wastage path deducted fine.
+  const standard = standardUomFactor(requestedUnit, baseUnit);
+  if (standard !== null) return { ratio: standard, resolved: true };
 
   const rawJson = objectValue(stockItem.raw_json);
   const configs = Array.isArray(rawJson.uomConfigurations) ? (rawJson.uomConfigurations as UomConfiguration[]) : [];
@@ -91,7 +106,14 @@ function resolveUomRatio(stockItem: StockItemRow, lineUnit: string): number {
     return customUom && customUom === requestedUnit;
   });
   const ratio = match ? numberValue(match.ratio, 0) : 0;
-  return ratio > 0 ? ratio : 1;
+  // A custom UOM that can't be resolved to a real ratio must not be silently treated as 1:1 by
+  // any caller that mutates stock — the 1:1 fallback below exists only so presence-only checks
+  // (rules.ts assertRemovalScope) keep working; `resolved: false` is what tells a stock-mutating
+  // caller (the wastage endpoint) to skip the deduction instead of trusting this fallback.
+  if (ratio > 0) return { ratio, resolved: true };
+  // Unspecified means "use the item's base unit". Anything else named but unconfigured stays
+  // unresolved so a stock-mutating caller skips it rather than trusting a 1:1 guess.
+  return { ratio: 1, resolved: requestedUnit === UNSPECIFIED_LINE_UOM };
 }
 
 function stockItemType(item: StockItemRow) {
@@ -130,7 +152,7 @@ function expandRecipeLines(
 
     // Convert the recipe line's recorded quantity (which may be in a custom UOM, e.g. "1 box")
     // into the stock item's base unit (e.g. "12 ea") before it's used for depletion.
-    const uomRatio = resolveUomRatio(stockItem, text(line.unit));
+    const { ratio: uomRatio, resolved: uomResolved } = resolveUomRatio(stockItem, text(line.unit));
     const quantity = numberValue(line.quantity, 0) * uomRatio * multiplier;
     if (stockItemType(stockItem) === 'sub_recipe' && !seen.has(stockItemId)) {
       const nestedRecipe = recipeFor('stock_item', stockItemId, recipes);
@@ -138,19 +160,23 @@ function expandRecipeLines(
         const nextSeen = new Set(seen);
         nextSeen.add(stockItemId);
         const yieldQty = Math.max(numberValue(nestedRecipe.yield_qty || stockItem.batch_yield, 1), 1);
-        expanded.push(...expandRecipeLines(
+        const nested = expandRecipeLines(
           linesForRecipe(text(nestedRecipe.id), allRecipeLines),
           stockItemsById,
           recipes,
           allRecipeLines,
           quantity / yieldQty,
           nextSeen,
-        ));
+        );
+        // An unresolved UOM on the sub-recipe's own line means `quantity` (its multiplier into
+        // the nested recipe) is already unreliable — every ingredient the nested recipe expands
+        // to is equally unreliable, not just this one line.
+        expanded.push(...(uomResolved ? nested : nested.map((entry) => ({ ...entry, uomResolved: false }))));
         continue;
       }
     }
 
-    expanded.push({ stockItem, quantity });
+    expanded.push({ stockItem, quantity, uomResolved });
   }
   return expanded;
 }
@@ -193,5 +219,6 @@ export async function expandProductIngredients(
     unit: text(depletion.stockItem.unit),
     unitCost: fallbackStockItemUnitCost(depletion.stockItem, 0),
     totalQty: depletion.quantity * quantity,
+    uomResolved: depletion.uomResolved,
   }));
 }

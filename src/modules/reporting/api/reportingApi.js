@@ -1,5 +1,6 @@
 import { buildReportingEndpoint, buildReportingQuery } from './reportingEndpoints.js';
 import { collectCompleteReportPages } from './reportPageLoader.js';
+import { getCachedReport, setCachedReport } from './reportCache.js';
 import {
   mapDetailedActivityLedgerResponse,
   mapMenuRecipeHealthResponse,
@@ -112,8 +113,12 @@ export async function fetchInventoryAuditRows({ workspaceId, filters } = {}) {
 }
 
 export async function fetchReportJson({ workspaceId, resource, query } = {}) {
+  const cached = getCachedReport({ workspaceId, resource, query });
+  if (cached) return cached;
   const { callCloudflareWorkspaceRoute } = await import('../../../services/cloudflareApi.js');
-  return callCloudflareWorkspaceRoute(workspaceId, resource, { query });
+  const response = await callCloudflareWorkspaceRoute(workspaceId, resource, { query });
+  setCachedReport({ workspaceId, resource, query }, response);
+  return response;
 }
 
 export async function fetchCompleteReportJson(endpoint = {}) {

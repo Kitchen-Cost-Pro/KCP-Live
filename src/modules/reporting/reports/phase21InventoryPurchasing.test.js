@@ -50,6 +50,20 @@ test('Purchase Orders calculate outstanding quantities and values from linked GR
   assert.equal(summary[0].receivedValue, 80);
 });
 
+test('Purchase Orders flag a real PO/GRV value mismatch even when the API omits grvReceivedValue', async () => {
+  // Regression guard: grvReceivedValue used to fall back to the PO's own receivedValue when the
+  // API didn't supply it, which made both sides of the mismatch check always equal — silently
+  // defeating the very check meant to catch a real receiving discrepancy. It must now default to
+  // 0 like any other missing numeric field, so an actual mismatch is still caught.
+  const services = { reporting: { getPurchaseOrderReportRows: async () => ({ rows: [
+    { id: 'line-3', poId: 'po-3', sourceId: 'po-3', poDate: '2026-07-03', poNumber: 'PO-3', supplierName: 'Supplier A', locationName: 'Main', itemId: 'flour', itemName: 'Flour', qtyOrdered: 10, qtyReceived: 4, baseUom: 'kg', unitCostExVat: 20, lineValueExVat: 200, vat: 30, lineValueInclVat: 230, receivedValue: 80, grvCount: 1, status: 'Partially Received' }
+  ], warnings: [], meta: {} }) } };
+  const detail = await purchaseOrdersReport.getRows({ workspaceId: 'WS-1', filters: {}, services, view: 'line_detail' });
+  assert.equal(detail[0].grvReceivedValue, 0, 'a missing grvReceivedValue must not silently mirror receivedValue');
+  const warnings = purchaseOrdersReport.validate({ rows: detail, services, view: 'line_detail' });
+  assert.ok(warnings.some((warning) => warning.code === 'purchase-order-grv-value-mismatch'), 'the PO/GRV value mismatch must be caught, not silently masked');
+});
+
 test('Purchase Orders retain header-only records and emit a single no-line warning', async () => {
   const services = { reporting: { getPurchaseOrderReportRows: async () => ({ rows: [
     { id: 'po-header:po-2', hasLine: false, poId: 'po-2', sourceId: 'po-2', poDate: '2026-07-02', poNumber: 'PO-2', supplierName: 'Supplier A', locationName: 'Main', status: 'Draft', lineValueExVat: 0, vat: 0, lineValueInclVat: 0 }
@@ -90,6 +104,38 @@ test('GRV and stock-impacting credit note rows expose ledger reconciliation fiel
   assert.equal(credit.line_detail[0].stockImpact, 'Stock Removed');
   assert.equal(credit.line_detail[0].ledgerQty, -2);
   assert.equal(credit.summary[0].creditValueExVat, 40);
+});
+
+test('a signed GRV ledger quantity still reconciles instead of spuriously failing the qty-mismatch check', async () => {
+  // Regression guard: ledgerValue was normalized with Math.abs() but ledgerQty was not, so a
+  // signed ledger quantity (e.g. from a correction/reversal) would fail grv-ledger-qty-mismatch
+  // while the value-side check on the exact same row correctly reconciled.
+  const services = { reporting: { getGrvLogRows: async () => ({ rows: [
+    { id: 'gl-signed', grvId: 'g-signed', sourceId: 'g-signed', grvDate: '2026-07-07', grvNumber: 'GRV-7', supplierName: 'Supplier A', locationName: 'Main', itemName: 'Flour', receivedQty: 5, baseUom: 'kg', unitCostExVat: 20, lineValueExVat: 100, vat: 15, ledgerQty: -5, ledgerValue: -100, ledgerRowCount: 1, status: 'Committed' }
+  ], warnings: [], meta: {} }) } };
+  const rows = await grvLogReport.getRows({ workspaceId: 'WS-1', filters: {}, services, view: 'line_detail' });
+  assert.equal(rows[0].ledgerQty, 5, 'ledgerQty must be normalized to a magnitude, matching ledgerValue');
+  const warnings = grvLogReport.validate({ rows, services, view: 'line_detail' });
+  assert.equal(warnings.some((warning) => warning.code === 'grv-ledger-qty-mismatch'), false);
+});
+
+test('GRV and credit note lines flag a missing VAT figure instead of silently reporting R0', async () => {
+  // Regression guard: `vat = safeNumber(row.vat ?? ...)` silently became 0 when the source
+  // integration omitted VAT entirely, understating lineValueInclVat/workspace totals with no
+  // signal anything was wrong. A genuine zero-value line (nothing to tax) must NOT be flagged.
+  const grvServices = { reporting: { getGrvLogRows: async () => ({ rows: [
+    { id: 'gl-novat', grvId: 'g-novat', sourceId: 'g-novat', grvDate: '2026-07-05', grvNumber: 'GRV-5', supplierName: 'Supplier A', locationName: 'Main', itemName: 'Flour', receivedQty: 10, baseUom: 'kg', unitCostExVat: 20, lineValueExVat: 200, ledgerQty: 10, ledgerValue: 200, ledgerRowCount: 1, status: 'Committed' }
+  ], warnings: [], meta: {} }) } };
+  const grvRows = await grvLogReport.getRows({ workspaceId: 'WS-1', filters: {}, services: grvServices, view: 'line_detail' });
+  const grvWarnings = grvLogReport.validate({ rows: grvRows, services: grvServices, view: 'line_detail' });
+  assert.ok(grvWarnings.some((warning) => warning.code === 'grv-missing-vat'));
+
+  const creditServices = { reporting: { getCreditNoteReportRows: async () => ({ rows: [
+    { id: 'cl-novat', creditNoteId: 'c-novat', sourceId: 'c-novat', creditNoteDate: '2026-07-06', creditNoteNumber: 'CN-5', supplierName: 'Supplier A', locationName: 'Main', itemName: 'Flour', reason: 'Damaged', qtyCredited: 2, baseUom: 'kg', unitCostExVat: 20, lineCreditExVat: 40, stockImpact: 'Financial Only' }
+  ], warnings: [], meta: {} }) } };
+  const creditRows = await creditNotesReport.getRows({ workspaceId: 'WS-1', filters: {}, services: creditServices, view: 'line_detail' });
+  const creditWarnings = creditNotesReport.validate({ rows: creditRows, services: creditServices, view: 'line_detail' });
+  assert.ok(creditWarnings.some((warning) => warning.code === 'credit-note-missing-vat'));
 });
 
 test('Phase 21 report definitions use real API services and no mock data imports', () => {

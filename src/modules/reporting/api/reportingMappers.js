@@ -562,11 +562,18 @@ export function mapStockControlResponse(response = {}) {
 export function normalizeApiStockControlRow(row = {}, index = 0, meta = {}) {
   const currentStock = safeNumber(row.currentStock ?? row.current_stock ?? row.quantity);
   const lowStockThreshold = safeNumber(row.lowStockThreshold ?? row.low_stock_threshold ?? row.threshold_qty);
+  // A deliberately-set `parLevel: 0` (e.g. a discontinued item that should never be reordered) is
+  // falsy in JS — `parLevel || lowStockThreshold` would silently replace it with the low-stock
+  // threshold instead of respecting the explicit zero, fabricating a nonzero reorder recommendation.
+  // Check presence on the raw field before it's coerced, since `safeNumber` already collapses
+  // "missing" and "zero" to the same 0.
+  const parLevelSupplied = (row.parLevel !== undefined && row.parLevel !== null && text(row.parLevel) !== '')
+    || (row.par_level !== undefined && row.par_level !== null && text(row.par_level) !== '');
   const parLevel = safeNumber(row.parLevel ?? row.par_level ?? row.par_level_qty);
   const unitCostExVat = safeNumber(row.unitCostExVat ?? row.unit_cost_ex_vat ?? row.unitCost ?? row.unit_cost);
   const requiredQty = row.requiredQty !== undefined || row.required_qty !== undefined
     ? safeNumber(row.requiredQty ?? row.required_qty)
-    : Math.max((parLevel || lowStockThreshold) - currentStock, 0);
+    : Math.max((parLevelSupplied ? parLevel : lowStockThreshold) - currentStock, 0);
   const purchaseUomRatio = safeNumber(row.purchaseUomRatio ?? row.purchase_uom_ratio, 1) || 1;
   return {
     ...row,

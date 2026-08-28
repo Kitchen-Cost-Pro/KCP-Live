@@ -15,6 +15,8 @@ import {
 } from './legacy/admin-routes';
 import type { AdminTenantSummary } from './legacy/admin-routes';
 import { dispatchCentralRoute } from './legacy/index';
+import { checkRateLimit, clientIp } from './legacy/rate-limit';
+import { runWithConcurrencyLimit } from './legacy/concurrency';
 import { KCP_WORKER_RELEASE, KCP_WORKER_RELEASE_DATE, KCP_REFUND_PIPELINE_VERSION } from './release';
 import { consumeYocoV2QueueBatch } from './modules/yoco-engine-v2/queue-consumer';
 import type { YocoV2QueueDispatchResult, YocoV2QueueMessage } from './modules/yoco-engine-v2/contracts';
@@ -258,6 +260,101 @@ async function dispatchCentral(request: Request, env: Env, url: URL): Promise<Re
     return json(request, env, { ok: true, configured: true, dailyCap, ...(state?.state || { dateKey: '', used: 0 }) });
   }
 
+  // Diagnostic (2026-08-28): which workspace(s) actually account for the account's total SQL
+  // storage. Queries EVERY workspace regardless of status — a workspace marked inactive/deleted
+  // in CENTRAL_DB doesn't necessarily mean its Durable Object storage was ever purged (that's a
+  // separate explicit 'admin-purge' action), so a stale never-purged workspace is a real
+  // candidate for unaccounted-for storage.
+  if (request.method === 'GET' && url.pathname === '/api/admin/workspace-storage') {
+    await requireAdmin(request, lenv);
+    const workspaceRows = await env.CENTRAL_DB.prepare(
+      `SELECT id, name, status FROM workspaces ORDER BY name COLLATE NOCASE ASC`
+    ).all<{ id: string; name: string; status: string }>();
+    const workspaces = workspaceRows.results || [];
+    const results = await fanOutWorkspaceDOs(
+      env,
+      workspaces.map((row) => String(row.id)),
+      'admin-database-size',
+      { uid: 'admin', email: '', systemRole: 'admin' }
+    );
+    const sizeByWorkspace = new Map(results.map((r) => [r.workspaceId, r.data as any]));
+    const rows = workspaces
+      .map((row) => {
+        const workspaceId = String(row.id);
+        const data = sizeByWorkspace.get(workspaceId);
+        const databaseSizeBytes = Number(data?.databaseSizeBytes || 0);
+        return {
+          workspaceId,
+          name: String(row.name || workspaceId),
+          status: String(row.status || ''),
+          databaseSizeBytes,
+          databaseSizeMb: Math.round((databaseSizeBytes / (1024 * 1024)) * 100) / 100
+        };
+      })
+      .sort((a, b) => b.databaseSizeBytes - a.databaseSizeBytes);
+    const totalBytes = rows.reduce((sum, row) => sum + row.databaseSizeBytes, 0);
+    return json(request, env, {
+      ok: true,
+      totalBytes,
+      totalMb: Math.round((totalBytes / (1024 * 1024)) * 100) / 100,
+      workspaces: rows
+    });
+  }
+
+  // Follow-up to /api/admin/workspace-storage: which table(s) inside ONE workspace actually
+  // account for its storage. ?workspaceId=WS-... required.
+  if (request.method === 'GET' && url.pathname === '/api/admin/workspace-table-sizes') {
+    await requireAdmin(request, lenv);
+    const workspaceId = String(url.searchParams.get('workspaceId') || '').trim();
+    if (!workspaceId) return json(request, env, { ok: false, error: 'workspaceId is required' }, 400);
+    const result = await callWorkspaceDO(env, workspaceId, 'admin-table-sizes', { uid: 'admin', email: '', systemRole: 'admin' });
+    return json(request, env, result || { ok: false, error: 'Could not reach workspace' });
+  }
+
+  // Confirms whether a workspace's yoco_v2_reconciliation_findings dedup migration actually took
+  // effect, or whether it's a drifted tenant still on the pre-fix one-row-per-run-forever
+  // behavior. ?workspaceId=WS-... required.
+  if (request.method === 'GET' && url.pathname === '/api/admin/workspace-findings-dedup-check') {
+    await requireAdmin(request, lenv);
+    const workspaceId = String(url.searchParams.get('workspaceId') || '').trim();
+    if (!workspaceId) return json(request, env, { ok: false, error: 'workspaceId is required' }, 400);
+    const result = await callWorkspaceDO(env, workspaceId, 'admin-findings-dedup-check', { uid: 'admin', email: '', systemRole: 'admin' });
+    return json(request, env, result || { ok: false, error: 'Could not reach workspace' });
+  }
+
+  // Wipes yoco_v2_reconciliation_findings for one workspace — see admin-findings-purge's comment
+  // in workspace-do.ts for why this is safe. ?workspaceId=WS-... required.
+  if (request.method === 'POST' && url.pathname === '/api/admin/workspace-findings-purge') {
+    await requireAdmin(request, lenv);
+    const workspaceId = String(url.searchParams.get('workspaceId') || '').trim();
+    if (!workspaceId) return json(request, env, { ok: false, error: 'workspaceId is required' }, 400);
+    const result = await callWorkspaceDO(env, workspaceId, 'admin-findings-purge', { uid: 'admin', email: '', systemRole: 'admin' }, 'POST', {});
+    return json(request, env, result || { ok: false, error: 'Could not reach workspace' });
+  }
+
+  // Which specific gate is blocking SALE_STOCK from deducting when SALE_REPORTING works fine —
+  // calls the real getEffectRuntime() logic the live-sale path itself uses.
+  // ?workspaceId=WS-... required.
+  if (request.method === 'GET' && url.pathname === '/api/admin/workspace-effect-runtime-check') {
+    await requireAdmin(request, lenv);
+    const workspaceId = String(url.searchParams.get('workspaceId') || '').trim();
+    if (!workspaceId) return json(request, env, { ok: false, error: 'workspaceId is required' }, 400);
+    const result = await callWorkspaceDO(env, workspaceId, 'admin-effect-runtime-check', { uid: 'admin', email: '', systemRole: 'admin' });
+    return json(request, env, result || { ok: false, error: 'Could not reach workspace' });
+  }
+
+  // Follow-up to workspace-effect-runtime-check: shows recent proposed stock movements and their
+  // resolution_status/warning_code, to see whether items are legitimately unresolved (unmapped
+  // modifier/item, missing recipe, invalid UOM) rather than the gate being closed.
+  // ?workspaceId=WS-... required.
+  if (request.method === 'GET' && url.pathname === '/api/admin/workspace-recent-stock-proposals') {
+    await requireAdmin(request, lenv);
+    const workspaceId = String(url.searchParams.get('workspaceId') || '').trim();
+    if (!workspaceId) return json(request, env, { ok: false, error: 'workspaceId is required' }, 400);
+    const result = await callWorkspaceDO(env, workspaceId, 'admin-recent-stock-proposals', { uid: 'admin', email: '', systemRole: 'admin' });
+    return json(request, env, result || { ok: false, error: 'Could not reach workspace' });
+  }
+
   if (request.method === 'GET' && url.pathname === '/api/admin/org-sites') {
     return getAdminOrgSites(request, lenv, async (workspaceIds) => getAdminWorkspaceSettingsMap(env, workspaceIds));
   }
@@ -308,6 +405,40 @@ async function dispatchCentral(request: Request, env: Env, url: URL): Promise<Re
       const r = await callWorkspaceDO(env, id, 'admin-settings', adminAuth, 'PATCH', payload);
       return ((r as any)?.settings as Record<string, any>) || {};
     });
+  }
+
+  // Diagnoses/unblocks a workspace whose tenant schema migration is silently stuck in a backoff
+  // window (see workspace-do.ts's migrate()) — the failure mode that produces no error log at all,
+  // so it is otherwise invisible from outside the Durable Object. Superuser-only: this reads/clears
+  // internal migration bookkeeping, not ordinary workspace data.
+  const migrationHealthM = url.pathname.match(/^\/api\/admin\/workspaces\/([^/]+)\/migration-health$/);
+  if (migrationHealthM && request.method === 'GET') {
+    const adminSession = await requireAdmin(request, lenv);
+    if (!adminSession.admin?.isSuper) return json(request, env, { ok: false, error: 'Superuser only.' }, 403);
+    const wsId = decodeURIComponent(migrationHealthM[1]);
+    const r = await callWorkspaceDO(env, wsId, 'admin-migration-health', { uid: 'admin', email: '' }, 'GET');
+    return json(request, env, r as Record<string, unknown>);
+  }
+  // Read-only comparison of the two ways of computing opening stock balances — see
+  // getAdminWorkspaceOpeningBalanceCheck for why. Superuser-only: it reports per-item stock
+  // discrepancies, and it reads the full ledger once, so it is a deliberate diagnostic rather than
+  // something routine traffic should be able to trigger.
+  const openingBalanceCheckM = url.pathname.match(/^\/api\/admin\/workspaces\/([^/]+)\/opening-balance-check$/);
+  if (openingBalanceCheckM && request.method === 'GET') {
+    const adminSession = await requireAdmin(request, lenv);
+    if (!adminSession.admin?.isSuper) return json(request, env, { ok: false, error: 'Superuser only.' }, 403);
+    const wsId = decodeURIComponent(openingBalanceCheckM[1]);
+    const resource = `admin-opening-balance-check${url.search}`;
+    const r = await callWorkspaceDO(env, wsId, resource, { uid: 'admin', email: '' }, 'GET');
+    return json(request, env, r as Record<string, unknown>);
+  }
+  const migrationRetryM = url.pathname.match(/^\/api\/admin\/workspaces\/([^/]+)\/migration-retry$/);
+  if (migrationRetryM && request.method === 'POST') {
+    const adminSession = await requireAdmin(request, lenv);
+    if (!adminSession.admin?.isSuper) return json(request, env, { ok: false, error: 'Superuser only.' }, 403);
+    const wsId = decodeURIComponent(migrationRetryM[1]);
+    const r = await callWorkspaceDO(env, wsId, 'admin-migration-retry', { uid: 'admin', email: '' }, 'POST', {});
+    return json(request, env, r as Record<string, unknown>);
   }
 
   return dispatchCentralRoute(request, lenv);
@@ -1158,6 +1289,24 @@ async function handle(request: Request, env: Env): Promise<Response> {
     });
   }
 
+  // Backstop only — every route except login/register/reset (which have their own tighter,
+  // purpose-specific limits) had NOTHING stopping a client from hammering it as fast as raw HTTP
+  // allows: every read endpoint, every write outside auth, everything. This is deliberately
+  // generous (a real page load fires many concurrent requests) — it exists to catch a runaway
+  // client/script/bot, not to meaningfully throttle normal usage. Cloudflare dashboard-level WAF
+  // rate-limit rules are the real first line of defense; this is only a fallback for when those
+  // aren't configured or don't cover this specific path.
+  // Excludes /webhooks/yoco/*: Yoco's webhook senders may share a small egress IP pool across many
+  // merchants, so a global per-IP limit here could throttle legitimate payment webhook delivery for
+  // unrelated workspaces. That path already has its own dedicated per-workspace limit instead (see
+  // webhook-ingress.ts).
+  if (!/^\/webhooks\/yoco\//.test(url.pathname)) {
+    const backstopLimited = await checkRateLimit(env.CENTRAL_DB, `http:${clientIp(request)}`, 300, 60);
+    if (backstopLimited.blocked) {
+      return json(request, env, { ok: false, error: 'Too many requests. Please slow down.' }, 429);
+    }
+  }
+
   // Data-migration tool (superuser only): import central rows + per-workspace tenant rows.
   if (request.method === 'POST' && url.pathname.startsWith('/api/admin/migrate/')) {
     const auth = await requireAuth(request, env);
@@ -1283,18 +1432,20 @@ export default {
       // 403; treating those as 401 caused report and dashboard permission failures to look like an
       // expired login and triggered misleading sign-in errors across the app.
       const raw = cause instanceof Error ? cause.message : 'Internal error.';
-      const status = /permission|denied|no locations are assigned|access to this workspace/i.test(raw)
-        ? 403
-        : /token|sign in|session|expired|missing bearer|authentication/i.test(raw)
-          ? 401
-          : 500;
+      const status = /too many|rate limit/i.test(raw)
+        ? 429
+        : /permission|denied|no locations are assigned|access to this workspace/i.test(raw)
+          ? 403
+          : /token|sign in|session|expired|missing bearer|authentication/i.test(raw)
+            ? 401
+            : 500;
       // Deliberate validation errors thrown by route handlers (e.g. "X cannot be assigned as a
       // recipe ingredient.", "A stock item named X already exists.") are safe and useful to show
       // verbatim. The previous keyword list was too narrow and silently replaced clear, specific
       // validation messages with a useless generic one, hiding the real (and actionable) reason.
       // The denylist guards against ever surfacing a raw runtime/DB exception incidentally.
       const looksLikeInternalException = /sqlite|d1_error|TypeError:|ReferenceError:|SyntaxError:|RangeError:|at Object\.|at async|stack trace|\bundefined is not\b/i.test(raw);
-      const message = !looksLikeInternalException && /token|session|expired|access|permission|denied|invalid|required|not found|sign in|password|email|already exists|duplicate|unique|cannot be|must be|not allowed|not permitted|is not configured|could not|non-stock item|no longer/i.test(raw)
+      const message = !looksLikeInternalException && /too many|rate limit|token|session|expired|access|permission|denied|invalid|required|not found|sign in|password|email|already exists|duplicate|unique|cannot be|must be|not allowed|not permitted|is not configured|could not|non-stock item|no longer/i.test(raw)
         ? raw
         : 'Something went wrong. Please try again.';
       return json(request, env, { ok: false, error: message }, status);
@@ -1316,21 +1467,25 @@ export default {
     const ids = (list.results || []).map((r) => String(r.id)).filter(Boolean);
     console.log(`[low-stock-cron] evaluating ${ids.length} active workspaces`);
     const isCatalogueSyncTick = _event.cron === '*/45 * * * *';
-    await Promise.all(
-      ids.flatMap((id) => [
-        callWorkspaceDO(env, id, 'admin-action/low-stock-due', { uid: 'system', email: '' }, 'POST', {})
-          .catch((cause) => { console.error(`[low-stock-cron] ws=${id} failed: ${cause}`); return null; }),
-        callWorkspaceDO(env, id, 'admin-action/report-schedules-due', { uid: 'system', email: '' }, 'POST', {})
-          .catch((cause) => { console.error(`[report-schedule-cron] ws=${id} failed: ${cause}`); return null; }),
-        callWorkspaceDO(env, id, 'yoco-v2/reconciliation/scheduled', { uid: 'system', email: '', systemRole: 'queue' }, 'POST', {})
-          .catch((cause) => { console.error(`[yoco-v2-reconciliation-cron] ws=${id} failed: ${cause}`); return null; }),
-        // Menu/catalogue sync only needs to run on the 45-minute schedule, not every 15 minutes
-        // alongside the other jobs above — this guard keeps it from firing 3x as often as intended.
-        isCatalogueSyncTick
-          ? callWorkspaceDO(env, id, 'admin-action/catalogue-sync-due', { uid: 'system', email: '' }, 'POST', {})
-              .catch((cause) => { console.error(`[catalogue-sync-cron] ws=${id} failed: ${cause}`); return null; })
-          : Promise.resolve(null)
-      ])
-    );
+    const jobs = ids.flatMap((id) => [
+      () => callWorkspaceDO(env, id, 'admin-action/low-stock-due', { uid: 'system', email: '' }, 'POST', {})
+        .catch((cause) => { console.error(`[low-stock-cron] ws=${id} failed: ${cause}`); return null; }),
+      () => callWorkspaceDO(env, id, 'admin-action/report-schedules-due', { uid: 'system', email: '' }, 'POST', {})
+        .catch((cause) => { console.error(`[report-schedule-cron] ws=${id} failed: ${cause}`); return null; }),
+      () => callWorkspaceDO(env, id, 'yoco-v2/reconciliation/scheduled', { uid: 'system', email: '', systemRole: 'queue' }, 'POST', {})
+        .catch((cause) => { console.error(`[yoco-v2-reconciliation-cron] ws=${id} failed: ${cause}`); return null; }),
+      // Menu/catalogue sync only needs to run on the 45-minute schedule, not every 15 minutes
+      // alongside the other jobs above — this guard keeps it from firing 3x as often as intended.
+      isCatalogueSyncTick
+        ? () => callWorkspaceDO(env, id, 'admin-action/catalogue-sync-due', { uid: 'system', email: '' }, 'POST', {})
+            .catch((cause) => { console.error(`[catalogue-sync-cron] ws=${id} failed: ${cause}`); return null; })
+        : () => Promise.resolve(null)
+    ]);
+    // Unbounded Promise.all across every active workspace (each firing up to 4 jobs, including a
+    // potentially large report-schedule run) is the exact same "many expensive things at once
+    // exhaust a shared account-wide quota" shape as the 2026-08-26 migration incident, just at
+    // account scale instead of a single Durable Object. Bounding concurrency keeps total in-flight
+    // work roughly constant regardless of how many workspaces exist.
+    await runWithConcurrencyLimit(jobs, 5);
   }
 };

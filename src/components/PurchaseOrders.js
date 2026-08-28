@@ -64,7 +64,7 @@ export function renderPurchaseOrders({ state, onPurchaseOrderFilterChange, onPur
     ${purchaseOrders.actionError && !purchaseOrders.draftOrder && !purchaseOrders.confirmDelete ? renderNotice(purchaseOrders.actionError, 'error') : ''}
     ${selectedIds.size ? renderBulkBar([...selectedIds], purchaseOrders.actionStatus) : ''}
     ${renderOrderBody(purchaseOrders, orders, filters.view, selectedIds)}
-    ${renderPurchaseOrderWorkflow(purchaseOrders, filters)}
+    ${renderPurchaseOrderWorkflow(purchaseOrders, filters, state)}
     ${renderDeleteDialog(purchaseOrders)}
     ${renderGmailPromptModal(purchaseOrders)}
     ${renderLocationModal(purchaseOrders.draftOrder?.locationId || '', filters.openDropdown, purchaseOrders.locations || [], purchaseOrders.draftOrder?.siteId || '')}
@@ -477,7 +477,7 @@ function renderTileView(orders, selectedIds) {
   `;
 }
 
-function renderPurchaseOrderWorkflow(purchaseOrders, filters) {
+function renderPurchaseOrderWorkflow(purchaseOrders, filters, state) {
   const draft = purchaseOrders.draftOrder;
   if (!draft) return '';
 

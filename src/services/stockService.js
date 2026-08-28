@@ -356,7 +356,11 @@ export function normalizeIngredients(value) {
 
 async function fetchCloudflareStockItems(workspaceId) {
   const rows = [];
-  const limit = 200;
+  // 500 is the server's maximum page size (limitFromUrl(url, 100, 500) in the worker). Paging at
+  // 200 meant a 500-item catalogue cost three round trips, and SQLite OFFSET re-walks every skipped
+  // index entry on each one — so page 3 still reads past pages 1 and 2. Measured: 1,400 + 1,600 +
+  // 1,100 = 4,100 rows read for one refresh, versus a single page that reads the catalogue once.
+  const limit = 500;
   let offset = 0;
 
   while (true) {

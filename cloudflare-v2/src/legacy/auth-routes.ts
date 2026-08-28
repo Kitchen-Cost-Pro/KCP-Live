@@ -5,6 +5,7 @@ import { verifyTurnstileToken } from './turnstile';
 import { writeAdminAuditEvent, getEmailDeliveryConfig } from './admin-routes';
 import { sendEmail } from './email';
 import { timingSafeEqual } from './crypto';
+import { checkRateLimit, clientIp } from './rate-limit';
 
 const CURRENT_LEGAL_VERSION = '2026-07-14';
 
@@ -212,41 +213,19 @@ function isValidEmail(email: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
-async function checkRateLimit(env: Env, key: string, maxAttempts: number, windowSeconds: number): Promise<{ blocked: boolean }> {
-  try {
-    const now = Math.floor(Date.now() / 1000);
-    const windowStart = now - windowSeconds;
-    await env.DB.prepare(
-      `DELETE FROM auth_rate_limits WHERE key = ?1 AND window_start < ?2`
-    ).bind(key, windowStart).run();
-    const row = await env.DB.prepare(
-      `SELECT attempts FROM auth_rate_limits WHERE key = ?1 LIMIT 1`
-    ).bind(key).first<{ attempts: number }>();
-    if (row && row.attempts >= maxAttempts) return { blocked: true };
-    if (row) {
-      await env.DB.prepare(
-        `UPDATE auth_rate_limits SET attempts = attempts + 1 WHERE key = ?1`
-      ).bind(key).run();
-    } else {
-      await env.DB.prepare(
-        `INSERT INTO auth_rate_limits (key, attempts, window_start) VALUES (?1, 1, ?2)`
-      ).bind(key, now).run();
-    }
-    return { blocked: false };
-  } catch {
-    return { blocked: false };
-  }
-}
-
 async function authLoginFromPayload(request: Request, env: Env, payload: Record<string, unknown>) {
   const email = text(payload.email).toLowerCase();
   const password = String(payload.password || '');
   if (!email || !password) return error(request, env, 400, 'Enter your email and password.');
 
-  const ip = request.headers.get('cf-connecting-ip') || request.headers.get('x-forwarded-for') || 'unknown';
-  const rateLimitKey = `login:${ip}`;
-  const limited = await checkRateLimit(env, rateLimitKey, 10, 300);
-  if (limited.blocked) return error(request, env, 429, 'Too many login attempts. Please wait a few minutes and try again.');
+  const ip = clientIp(request);
+  const ipLimited = await checkRateLimit(env.DB, `login:${ip}`, 10, 300);
+  if (ipLimited.blocked) return error(request, env, 429, 'Too many login attempts. Please wait a few minutes and try again.');
+  // IP-keyed alone lets an attacker spread guesses across many target emails from one IP without
+  // ever tripping it, or spray many IPs at one account. Keying on the account too closes that gap
+  // without weakening the IP limit (both must pass).
+  const accountLimited = await checkRateLimit(env.DB, `login-account:${email}`, 5, 900);
+  if (accountLimited.blocked) return error(request, env, 429, 'Too many login attempts for this account. Please wait 15 minutes and try again.');
 
   const user = await env.DB.prepare(
     `SELECT id, email, display_name, password_hash, password_salt, status, must_change_password
@@ -424,7 +403,7 @@ export async function postAuthRegister(request: Request, env: Env) {
   }
 
   const ip = request.headers.get('cf-connecting-ip') || request.headers.get('x-forwarded-for') || 'unknown';
-  const limited = await checkRateLimit(env, `register:${ip}`, 5, 3600);
+  const limited = await checkRateLimit(env.DB, `register:${ip}`, 5, 3600);
   if (limited.blocked) return error(request, env, 429, 'Too many registration attempts. Please try again later.');
 
   const user = await getOrCreateUser(env, email, fullName);
@@ -577,7 +556,7 @@ export async function postAuthPasswordReset(request: Request, env: Env) {
   }
 
   const ip = request.headers.get('cf-connecting-ip') || request.headers.get('x-forwarded-for') || 'unknown';
-  const limited = await checkRateLimit(env, `reset:${ip}`, 5, 3600);
+  const limited = await checkRateLimit(env.DB, `reset:${ip}`, 5, 3600);
   if (limited.blocked) return error(request, env, 429, 'Too many reset attempts. Please try again later.');
 
   // Always return ok to avoid user enumeration — don't reveal if email exists
@@ -635,7 +614,7 @@ export async function postAuthResetPasswordConfirm(request: Request, env: Env) {
   if (password.length < 8) return error(request, env, 400, 'Password must be at least 8 characters.');
 
   const ip = request.headers.get('cf-connecting-ip') || request.headers.get('x-forwarded-for') || 'unknown';
-  const limited = await checkRateLimit(env, `reset-confirm:${ip}`, 10, 300);
+  const limited = await checkRateLimit(env.DB, `reset-confirm:${ip}`, 10, 300);
   if (limited.blocked) return error(request, env, 429, 'Too many attempts. Please wait a few minutes.');
 
   const row = await env.DB.prepare(

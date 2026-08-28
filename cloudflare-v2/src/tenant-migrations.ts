@@ -597,5 +597,115 @@ CREATE INDEX IF NOT EXISTS idx_low_stock_alert_state_workspace_active
   // rows written before this migration, since there is no way to recover the rate that was
   // actually in effect for those.
   `ALTER TABLE yoco_orders ADD COLUMN vat_rate REAL;
-ALTER TABLE yoco_orders ADD COLUMN vat_registered INTEGER;`
+ALTER TABLE yoco_orders ADD COLUMN vat_registered INTEGER;`,
+  // 37 — indexes for the hot lookup/sort paths that were reading whole tables. Because there is one
+  // Durable Object (one SQLite database) PER WORKSPACE, `WHERE workspace_id = ?1` selects
+  // essentially every row — an index whose only usable term is workspace_id gives no reduction at
+  // all, so several queries that looked indexed were full scans. Each index below was added against
+  // a specific measured `SCAN`:
+  //
+  //  * products(workspace_id, active, lower(trim(name))) — saveProductRecord resolves an existing
+  //    product by `lower(trim(name))`. An expression index is an EXACT match for that predicate, so
+  //    this changes no matching behaviour. Without it, every imported row full-scanned products;
+  //    a bulk recipe import is that scan once PER UPLOADED ROW.
+  //  * products(workspace_id, active, lower(category), lower(name)) — getProducts sorts by exactly
+  //    these expressions, so the whole table was materialised and sorted before LIMIT applied.
+  //  * stock_items(workspace_id, active, name) — getStockItems' `ORDER BY si.name ASC` had no index,
+  //    so every OFFSET page re-scanned and re-sorted the entire table (10 pages = 10 full sorts),
+  //    and its three per-row correlated subqueries ran for every row rather than the page's rows.
+  //  * yoco_order_lines(workspace_id, product_id) — the menu-health aggregate groups by product_id
+  //    over the full line table with no date filter (measured `SCAN yoco_order_lines`).
+  `CREATE INDEX IF NOT EXISTS idx_products_workspace_active_name_key
+  ON products(workspace_id, active, lower(trim(name)));
+CREATE INDEX IF NOT EXISTS idx_products_workspace_active_sort
+  ON products(workspace_id, active, lower(category), lower(name));
+CREATE INDEX IF NOT EXISTS idx_stock_items_workspace_active_name
+  ON stock_items(workspace_id, active, name);
+CREATE INDEX IF NOT EXISTS idx_yoco_order_lines_workspace_product
+  ON yoco_order_lines(workspace_id, product_id);`,
+  // 38 — persisted normalised name key for the stock-item duplicate-name guard. That guard compares
+  // names through normalizeStockItemDuplicateName() in JavaScript (NFKC, zero-width stripping,
+  // whitespace collapsing), which cannot be expressed as a SQL expression index — so the only way
+  // to run it was to SELECT every active stock item and compare in the Worker, once per save. A
+  // bulk stock/recipe import performs one save per uploaded row, making that the whole table read
+  // per row. Storing the key lets the guard become a single indexed point lookup.
+  //
+  // Only the column and index are created here. The actual backfill (approximating the JavaScript
+  // normaliser in SQL) originally ran as a single unconditional UPDATE across the whole table in
+  // THIS migration — 2026-08-28 incident: for any tenant with a non-trivial stock_items table, that
+  // one-request UPDATE (14 nested REPLACE calls per row) could exceed the Durable Object's
+  // per-request CPU limit, get killed mid-flight, and retry-loop through the exact
+  // interrupted-attempt/backoff path a real migration failure uses — reading and re-failing
+  // repeatedly across many tenants for hours with no cron and no user traffic involved. It now runs
+  // as a separate, bounded, resumable backfill in WorkspaceDO.migrate() (see
+  // STOCK_ITEM_NAME_KEY_BACKFILL_ID there) that processes a capped number of rows per request and
+  // simply continues on the tenant's next request instead of ever risking a CPU-limit kill.
+  `ALTER TABLE stock_items ADD COLUMN name_key TEXT;
+CREATE INDEX IF NOT EXISTS idx_stock_items_workspace_active_name_key
+  ON stock_items(workspace_id, active, name_key);`,
+  // 39 — make the reporting filter-options dropdown stop reading the whole ledger.
+  // getReportFilterOptions runs `SELECT DISTINCT movement_type FROM stock_movements WHERE
+  // workspace_id = ?1` on EVERY report route (ten call sites), and movement_type is in practice a
+  // fixed enum of about seven values — so it was reading every movement ever recorded to produce
+  // seven strings. With this index SQLite applies its DISTINCT skip-scan: it seeks to the next
+  // distinct value instead of walking every entry. Measured on a seeded tenant, same seven results:
+  //   20,000 movements  3.30ms -> 0.03ms
+  //  200,000 movements 49.81ms -> 0.03ms   (flat — no longer grows with trading history)
+  // Purely an index, so no query or result changes.
+  `CREATE INDEX IF NOT EXISTS idx_stock_movements_workspace_movement_type
+  ON stock_movements(workspace_id, movement_type);`,
+  // 40 — index the hourly reconciliation sweep's "find unresolved sales" scan. Measured 2026-08-28:
+  // runScheduledYocoV2Reconciliation's unresolvedSales query filters yoco_v2_domain_events on
+  // workspace_id + integration_id + event_type + resolution_status IN (...), but the only existing
+  // index is (workspace_id, source_entity_id, event_type) — resolution_status isn't covered and
+  // event_type alone can't use that index as a real prefix, so every hourly tick full-scanned the
+  // workspace's ENTIRE sale-event history (measured `SCAN yoco_v2_domain_events`), growing without
+  // bound as sales accumulate. A local synthetic benchmark (500k rows, 0.5% unresolved) confirmed
+  // this: adding the obvious covering index alone was NOT enough — SQLite's planner still chose a
+  // full SCAN over a multi-value `resolution_status IN (...)` predicate against a composite index.
+  // Forcing the index (see the `INDEXED BY` added in reconciliation.ts alongside this migration)
+  // flips the plan to SEARCH, touching only the matching rows (~2,500 of 500,000 in the benchmark).
+  `CREATE INDEX IF NOT EXISTS idx_yoco_v2_domain_events_workspace_status
+  ON yoco_v2_domain_events(workspace_id, integration_id, event_type, resolution_status);`,
+  // 41 — replace the Stock Control report's "latest purchase price" lookup with a maintained
+  // summary table instead of recomputing it from full GRV history on every report load. Measured
+  // 2026-08-28: the old `latest_purchase` CTE ran a ROW_NUMBER() window function over the entire
+  // grv_lines/grvs join for the workspace to find the single most recent purchase per
+  // stock_item+location — a window function must read every row of its partition set regardless of
+  // indexing, so this cost grows forever with total purchase history and was measured reading
+  // 17,818 rows on one real workspace's report load alone. Same shape as the reconciliation bug:
+  // an unbounded read that scales with total history instead of with what's actually needed.
+  //
+  // stock_balances and stock_item_location_prices already avoid this — they're maintained as one
+  // row per (workspace_id, stock_item_id, location_id) at write time, so a report just reads that
+  // row directly. This gives grv purchases the same treatment: one current row per key, kept
+  // up to date by the GRV write path (see routes.ts's GRV creation), with a bounded, resumable
+  // backfill (see workspace-do.ts) populating it from existing history without a single unbounded
+  // scan. See reporting-routes.ts for the report query now reading straight from this table.
+  `CREATE TABLE IF NOT EXISTS stock_item_latest_purchase (
+    workspace_id TEXT NOT NULL,
+    stock_item_id TEXT NOT NULL,
+    location_id TEXT NOT NULL,
+    supplier_id TEXT,
+    unit TEXT NOT NULL DEFAULT 'ea',
+    unit_price REAL NOT NULL DEFAULT 0,
+    received_at TEXT NOT NULL,
+    grv_line_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, stock_item_id, location_id)
+  );`,
+  // 42 — index adjustment_lines and adjustments' (workspace_id, adjustment_type) pair. Measured
+  // 2026-08-28 (read-cost-audit.ts + a dedicated one-year simulation): the Dashboard's wastage-
+  // value aggregate joins adjustment_lines to adjustments and had NO index on adjustment_lines at
+  // all (not even on adjustment_id), so it fully scanned every adjustment line ever recorded on
+  // every dashboard load — confirmed `SCAN al` in EXPLAIN QUERY PLAN. At a realistic one-year
+  // volume (365 daily wastage adjustments x 5 lines = 1,825 rows) this flips cleanly to SEARCH on
+  // both sides once indexed, unlike the transfers/stocktake queries also found in that audit —
+  // those filter with `<>` and `lower(status) NOT IN (...)`, which can't become a true index
+  // lookup no matter what's indexed, so they were deliberately left alone rather than added here
+  // as a false "fixed" claim.
+  `CREATE INDEX IF NOT EXISTS idx_adjustment_lines_adjustment
+  ON adjustment_lines(adjustment_id);
+CREATE INDEX IF NOT EXISTS idx_adjustments_workspace_type
+  ON adjustments(workspace_id, adjustment_type, occurred_at);`
 ];

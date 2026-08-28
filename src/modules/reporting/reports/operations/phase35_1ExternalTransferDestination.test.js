@@ -165,5 +165,53 @@ test('Phase 35.1 keeps internal transfer pairing validation unchanged', () => {
   const rows = buildTransferRows([outbound, inbound]);
   const warnings = validateTransferRows({ transferRows: rows, pairRows: rows, ledgerRows: [outbound, inbound] }).flat(Infinity).filter(Boolean);
   assert.equal(warnings.some((warning) => String(warning.code || '').includes('without-')), false);
+});
+
+test('an internal transfer leg orphaned for a while still raises a critical warning', () => {
+  // Internal transfers write both legs atomically in the same database batch, so a genuinely
+  // stale orphaned leg (here dated 2026-07-12, long before "now") reflects real data corruption
+  // and must still escalate loudly, not be swept under the recent-write grace period.
+  const outbound = transferOut({
+    id: 'movement-out-3',
+    sourceId: 'internal-transfer-stale',
+    documentNumber: 'INT-STALE',
+    transferType: 'internal',
+    transferScope: 'internal',
+    fromSiteId: 'workspace-source',
+    fromSiteName: 'Central Kitchen',
+    toSiteId: 'workspace-source',
+    toSiteName: 'Central Kitchen'
+  });
+  const rows = buildTransferRows([outbound]);
+  const warnings = validateTransferRows({ transferRows: rows, pairRows: rows, ledgerRows: [outbound] }).flat(Infinity).filter(Boolean);
+  const orphanWarning = warnings.find((warning) => warning.code === 'stock-transfer-out-without-in');
+  assert.ok(orphanWarning, 'a stale orphaned internal leg must still be flagged');
+  assert.equal(orphanWarning.level, 'critical');
+});
+
+test('an internal transfer leg orphaned moments ago is downgraded to a warning instead of a critical alert', () => {
+  // Regression guard: this used to unconditionally raise a critical alert for ANY orphaned
+  // internal leg. A leg written moments ago with no visible match yet could reflect the report's
+  // read path racing the write (a paginated ledger fetch not yet including the sibling row)
+  // rather than genuine corruption — only this narrow, recent window should be a warning.
+  const now = new Date();
+  const outbound = transferOut({
+    id: 'movement-out-4',
+    sourceId: 'internal-transfer-fresh',
+    documentNumber: 'INT-FRESH',
+    date: now.toISOString().slice(0, 10),
+    timestamp: now.toISOString(),
+    transferType: 'internal',
+    transferScope: 'internal',
+    fromSiteId: 'workspace-source',
+    fromSiteName: 'Central Kitchen',
+    toSiteId: 'workspace-source',
+    toSiteName: 'Central Kitchen'
+  });
+  const rows = buildTransferRows([outbound]);
+  const warnings = validateTransferRows({ transferRows: rows, pairRows: rows, ledgerRows: [outbound] }).flat(Infinity).filter(Boolean);
+  const orphanWarning = warnings.find((warning) => warning.code === 'stock-transfer-out-without-in');
+  assert.ok(orphanWarning, 'a recently orphaned internal leg should still be surfaced');
+  assert.equal(orphanWarning.level, 'warning', 'a moments-old orphan must not be a critical alert');
   assert.equal(warnings.some((warning) => String(warning.code || '').includes('mismatch')), false);
 });

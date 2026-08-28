@@ -72,6 +72,9 @@ import {
   getLinkedTransferProfiles,
   getSelfTransferProfile,
   getAdminWorkspaceSummary,
+  getAdminWorkspaceMigrationHealth,
+  getAdminWorkspaceOpeningBalanceCheck,
+  postAdminWorkspaceMigrationRetry,
   purgeWorkspaceTenant,
   getAdminWorkspaceSettingsDO,
   patchAdminWorkspaceSettingsDO,
@@ -219,6 +222,33 @@ import {
 
 function routePattern(pathname: string, pattern: RegExp) {
   return pathname.match(pattern);
+}
+
+const REPORT_QUERY_TIMEOUT_MS = 20_000;
+
+/**
+ * Bounds a report handler's wall-clock time, not just its row count. MAX_REPORT_ROWS
+ * (reporting-routes.ts) caps how many rows a query can RETURN, but a wide date range can still
+ * make the underlying scan itself expensive well before it reaches that cap — the same shape of
+ * resource exhaustion as the 2026-08-26 migration incident, just via a report instead of a schema
+ * change. On timeout, the underlying query keeps running to completion in the Durable Object (it
+ * cannot be cancelled mid-flight) — this only bounds how long the CALLER waits, so a follow-up
+ * request for the same report shortly after a timeout may still be slow while the DO works through
+ * its backlog; narrowing the requested date range is the actual fix on the client side.
+ */
+async function withReportTimeout(resource: string, work: Promise<Response>): Promise<Response> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<Response>((resolve) => {
+    timer = setTimeout(() => resolve(new Response(JSON.stringify({
+      ok: false,
+      error: `The ${resource} report is taking too long — try narrowing the date range or location filter.`
+    }), { status: 504, headers: { 'content-type': 'application/json; charset=utf-8' } })), REPORT_QUERY_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([work, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 async function handle(request: Request, env: Env): Promise<Response> {
@@ -762,7 +792,7 @@ export async function dispatchWorkspaceRoute(
   }
 
   if (request.method === "GET" && resource === "reports/detailed-activity") {
-    return getDetailedActivityReport(request, env, auth, workspaceId);
+    return withReportTimeout(resource, getDetailedActivityReport(request, env, auth, workspaceId));
   }
 
   if (request.method === "GET" && resource === "reports/operations-excluded") {
@@ -770,23 +800,23 @@ export async function dispatchWorkspaceRoute(
   }
 
   if (request.method === "GET" && resource === "reports/stock-take-audit") {
-    return getStockTakeAuditReport(request, env, auth, workspaceId);
+    return withReportTimeout(resource, getStockTakeAuditReport(request, env, auth, workspaceId));
   }
 
   if (request.method === "GET" && resource === "reports/sales-financial") {
-    return getSalesFinancialReport(request, env, auth, workspaceId);
+    return withReportTimeout(resource, getSalesFinancialReport(request, env, auth, workspaceId));
   }
 
   if (request.method === "GET" && resource === "reports/sale-stock-usage") {
-    return getSaleStockUsageReport(request, env, auth, workspaceId, "all");
+    return withReportTimeout(resource, getSaleStockUsageReport(request, env, auth, workspaceId, "all"));
   }
 
   if (request.method === "GET" && resource === "reports/modifier-usage") {
-    return getSaleStockUsageReport(request, env, auth, workspaceId, "modifier");
+    return withReportTimeout(resource, getSaleStockUsageReport(request, env, auth, workspaceId, "modifier"));
   }
 
   if (request.method === "GET" && resource === "reports/modifier-sales") {
-    return getModifierSalesReport(request, env, auth, workspaceId);
+    return withReportTimeout(resource, getModifierSalesReport(request, env, auth, workspaceId));
   }
 
   if (request.method === "GET" && resource === "reports/menu-recipe-health") {
@@ -794,7 +824,7 @@ export async function dispatchWorkspaceRoute(
   }
 
   if (request.method === "GET" && resource === "reports/stock-control") {
-    return getStockControlReport(request, env, auth, workspaceId);
+    return withReportTimeout(resource, getStockControlReport(request, env, auth, workspaceId));
   }
 
   if (request.method === "GET" && resource === "reports/stock-on-hand") {
@@ -802,33 +832,33 @@ export async function dispatchWorkspaceRoute(
   }
 
   if (request.method === "GET" && resource === "reports/purchase-orders") {
-    return getPurchaseOrdersReport(request, env, auth, workspaceId);
+    return withReportTimeout(resource, getPurchaseOrdersReport(request, env, auth, workspaceId));
   }
 
   if (request.method === "GET" && resource === "reports/grv-log") {
-    return getGrvLogReport(request, env, auth, workspaceId);
+    return withReportTimeout(resource, getGrvLogReport(request, env, auth, workspaceId));
   }
 
   if (request.method === "GET" && resource === "reports/credit-notes") {
-    return getCreditNotesReport(request, env, auth, workspaceId);
+    return withReportTimeout(resource, getCreditNotesReport(request, env, auth, workspaceId));
   }
 
   if (
     request.method === "GET" &&
     resource === "reports/manufacturing-transactions"
   ) {
-    return getManufacturingTransactionsReport(request, env, auth, workspaceId);
+    return withReportTimeout(resource, getManufacturingTransactionsReport(request, env, auth, workspaceId));
   }
 
   if (
     request.method === "GET" &&
     resource === "reports/stock-transfer-transactions"
   ) {
-    return getStockTransferTransactionsReport(request, env, auth, workspaceId);
+    return withReportTimeout(resource, getStockTransferTransactionsReport(request, env, auth, workspaceId));
   }
 
   if (request.method === "GET" && resource === "reports/inventory-audit") {
-    return getInventoryAuditReport(request, env, auth, workspaceId);
+    return withReportTimeout(resource, getInventoryAuditReport(request, env, auth, workspaceId));
   }
 
   if (
@@ -1007,6 +1037,19 @@ export async function dispatchWorkspaceRoute(
   // Purge this workspace's tenant tables — called by the front Worker during admin deletion.
   if (request.method === "POST" && resource === "admin-purge") {
     return purgeWorkspaceTenant(request, env, auth, workspaceId);
+  }
+
+  // This workspace's tenant schema migration status/backoff state — fanned out by the front Worker.
+  if (request.method === "GET" && resource === "admin-migration-health") {
+    return getAdminWorkspaceMigrationHealth(request, env, auth, workspaceId);
+  }
+  // callWorkspaceDO passes the query string as part of the resource (same as the yoco-v2 admin
+  // routes do), so match on the path portion rather than exact equality.
+  if (request.method === "GET" && resource.split("?")[0] === "admin-opening-balance-check") {
+    return getAdminWorkspaceOpeningBalanceCheck(request, env, auth, workspaceId);
+  }
+  if (request.method === "POST" && resource === "admin-migration-retry") {
+    return postAdminWorkspaceMigrationRetry(request, env, auth, workspaceId);
   }
 
   // Admin read/patch of this workspace's settings (billing lock etc.) — fanned in by the front Worker.

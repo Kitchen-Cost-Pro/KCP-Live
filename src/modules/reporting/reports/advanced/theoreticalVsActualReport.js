@@ -1,5 +1,6 @@
 import { roundMoney, safeNumber } from '../../engine/calculations.js';
 import { groupBy, sumBy, text, toArray } from '../../engine/grouping.js';
+import { DEFAULT_REPORT_TIMEZONE, zonedDateTimeStrings } from '../../engine/timezone.js';
 import { calculateVarianceImpactScore, scoreToRiskStatus } from '../../engine/riskScoring.js';
 import { calculateAccuracyPercent, calculateExpectedClosingStock, calculateQuantityVariancePercent, calculateTheoreticalUsage, calculateVarianceQty, calculateVarianceValue, percentileRank } from '../../engine/statistics.js';
 import { buildDailySeries } from '../../engine/trendAnalysis.js';
@@ -127,7 +128,22 @@ function buildComparisonRow(key, { stock = {}, ledger = [], usage = [], stockTak
   const sortedLedger = [...toArray(ledger)].sort((a, b) => `${normalizeDate(a)}:${text(a.time)}`.localeCompare(`${normalizeDate(b)}:${text(b.time)}`));
   const firstLedger = sortedLedger[0];
   const ledgerNet = sumBy(sortedLedger, (row) => safeNumber(row.netQty));
-  const currentStock = stock.currentStock !== undefined ? safeNumber(stock.currentStock) : null;
+  // `stock.currentStock` comes from the live stock-on-hand feed, which has no point-in-time
+  // query — it always reflects the balance AS OF RIGHT NOW. It can only be trusted as this
+  // period's actual opening/closing basis when the filter's end date is today (or
+  // unbounded/future). For any earlier endDate, movements between endDate and today are already
+  // baked into it with no way to back them out, which used to fabricate a variance proportional
+  // to that gap on every historical-period report run — the report's own comment explains it
+  // exists specifically to catch real shrinkage/theft, so a false positive here is as harmful as
+  // a missed real one. A committed stock take is unaffected, since it is itself a point-in-time
+  // count regardless of when the report is run.
+  const endDateFilter = text(filters.endDate).slice(0, 10);
+  // Computed in the report's own business timezone, not UTC — a UTC "today" can be off by up to
+  // the timezone's offset around local midnight (e.g. ~2 hours for Africa/Johannesburg, UTC+2),
+  // occasionally admitting or rejecting the live balance incorrectly right at the day boundary.
+  const todayDate = zonedDateTimeStrings(new Date(), DEFAULT_REPORT_TIMEZONE).date;
+  const currentStockAsOfPeriodEnd = !endDateFilter || endDateFilter >= todayDate;
+  const currentStock = (currentStockAsOfPeriodEnd && stock.currentStock !== undefined) ? safeNumber(stock.currentStock) : null;
   const hasRunningOpening = Boolean(
     firstLedger
     && firstLedger.runningQty !== undefined
@@ -151,8 +167,16 @@ function buildComparisonRow(key, { stock = {}, ledger = [], usage = [], stockTak
   const modifierUsage = sumBy(usage.filter((row) => row.usageType === 'modifier'), 'qtyUsed');
   const theoreticalUsageQty = calculateTheoreticalUsage(recipeUsage, modifierUsage, manufacturingUsage);
   const hasStockTake = Boolean(stockTake && isCommittedStockTake(stockTake));
-  const actualClosingStock = hasStockTake ? safeNumber(stockTake.countedQty ?? stockTake.convertedBaseQty) : (currentStock ?? 0);
   const expectedClosingStock = calculateExpectedClosingStock({ openingStock: derivedOpening, purchases, transfersIn, manufacturingIn, theoreticalUsage: theoreticalUsageQty, wastage: wastageQty, transfersOut });
+  // Without a committed stock take AND without a currentStock figure that's actually usable as of
+  // this period's end date, there is no reliable "actual" number at all — falling back to 0 (or
+  // to today's stale currentStock) would itself fabricate a variance. Falling back to
+  // expectedClosingStock instead makes variance 0-by-construction for this row: an honest "no
+  // verified variance available" rather than a false shrinkage/overage signal either way.
+  const hasReliableActual = hasStockTake || currentStock !== null;
+  const actualClosingStock = hasStockTake
+    ? safeNumber(stockTake.countedQty ?? stockTake.convertedBaseQty)
+    : (currentStock !== null ? currentStock : expectedClosingStock);
   const varianceQty = calculateVarianceQty(actualClosingStock, expectedClosingStock);
   const unitCostExVat = safeNumber(stock.unitCostExVat || stockTake?.unitCostExVat || firstLedger?.unitCostExVat);
   const varianceValue = calculateVarianceValue(varianceQty, unitCostExVat);
@@ -162,6 +186,7 @@ function buildComparisonRow(key, { stock = {}, ledger = [], usage = [], stockTak
   const actualUsageValue = roundMoney(actualUsageQty * unitCostExVat);
   const calculationWarnings = [];
   if (!hasStockTake) calculationWarnings.push('No committed stock take in selected period');
+  if (!hasReliableActual) calculationWarnings.push('Actual closing stock could not be verified for this historical period without a stock take — variance is not computed and defaults to zero');
   if (!sortedLedger.length) calculationWarnings.push('No stock movement history');
   if (!usage.length && !manufacturingUsage) calculationWarnings.push('No theoretical recipe or modifier usage rows');
   if (!unitCostExVat) calculationWarnings.push('Missing unit cost');
@@ -179,7 +204,7 @@ function buildComparisonRow(key, { stock = {}, ledger = [], usage = [], stockTak
     openingStock: derivedOpening, purchases, transfersIn, manufacturingIn, recipeUsageQty: recipeUsage, modifierUsageQty: modifierUsage, manufacturingUsageQty: manufacturingUsage,
     theoreticalUsageQty, actualUsageQty, wastageQty, transfersOut, stockTakeVarianceQty: safeNumber(stockTake?.varianceQty), expectedClosingStock, actualClosingStock, varianceQty,
     baseUom: text(stock.baseUom || stockTake?.baseUom || firstLedger?.baseUom), unitCostExVat, theoreticalUsageValue, actualUsageValue, expectedClosingValue: roundMoney(expectedClosingStock * unitCostExVat), actualClosingValue: roundMoney(actualClosingStock * unitCostExVat), varianceValue, variancePercent,
-    accuracyPercent: calculateAccuracyPercent(actualClosingStock, expectedClosingStock), calculationConfidence: Math.min(1, confidence), calculationWarnings, hasStockTake, lastStockTakeDate: text(stockTake?.stockTakeDate), stockTakeSourceId: text(stockTake?.sourceId),
+    accuracyPercent: calculateAccuracyPercent(actualClosingStock, expectedClosingStock), calculationConfidence: Math.min(1, confidence), calculationWarnings, hasStockTake, hasReliableActual, lastStockTakeDate: text(stockTake?.stockTakeDate), stockTakeSourceId: text(stockTake?.sourceId),
     accuracyTrend: []
   };
 }

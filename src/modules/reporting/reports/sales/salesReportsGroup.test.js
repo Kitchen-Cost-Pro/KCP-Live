@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { getReportDefinition, listReports } from '../index.js';
 import { getExportColumns } from '../../exports/exportMappers.js';
-import { buildPaymentModel, buildSaleStockMovementModel } from './salesReportHelpers.js';
+import { buildPaymentModel, buildSaleStockMovementModel, stockMovementTotals } from './salesReportHelpers.js';
 
 const saleRows = [
   {
@@ -133,6 +133,38 @@ test('Sale Stock Movement builds advanced recipe line detail and separates modif
   assert.equal(detail[0].ingredientQtyPerSale, 1);
 });
 
+
+test('Sale Stock Movement Totals row does not triple-count sale-level figures across per-ingredient detail rows', () => {
+  // Regression guard: recipe_line_detail/transaction_detail carry one row PER INGREDIENT, and
+  // every ingredient row for the same sale line repeats the same grossSaleAmount/vatAmount/
+  // netSaleAmount/qtySold. stockMovementTotals used to sum these naively, so this one sale (2
+  // ingredient rows, R230 gross / R30 VAT / R200 net / qty 2) reported as R460/R60/R400/4 instead
+  // of the real R230/R30/R200/2.
+  const model = buildSaleStockMovementModel(usageRows);
+  const detailTotals = stockMovementTotals(model.views.recipe_line_detail);
+  assert.equal(detailTotals.grossSales, 230);
+  assert.equal(detailTotals.vat, 30);
+  assert.equal(detailTotals.netSales, 200);
+  assert.equal(detailTotals.qtySold, 2);
+  // Stock-value/cost fields ARE genuinely additive per ingredient row and must still sum fully.
+  assert.equal(detailTotals.totalStockValueUsed, 16);
+});
+
+test('Sale Stock Movement Totals still dedupes correctly when rows have no identifying id at all', () => {
+  // Regression guard: sumDistinctSales's dedup guard only skipped a row once its `saleKey` was
+  // both non-empty AND already seen, so a row with none of saleLineId/saleId/receiptNumber/
+  // sourceId/id populated was NEVER treated as "seen" — reproducing the exact triple-counting bug
+  // this function exists to prevent whenever multiple such rows share one underlying sale.
+  const noIdUsageRows = [
+    { locationId: 'loc-1', locationName: 'Main Bar', saleDate: '2026-07-09', saleTime: '12:00', menuItemId: 'burger', menuItemName: 'Burger', menuCategory: 'Food', inventoryItemId: 'bun', inventoryItemName: 'Burger Bun', sourceType: 'Sale Usage', qtySold: 2, qtyUsed: 2, baseUom: 'ea', unitCostExVat: 5, stockValueUsed: 10, grossSaleAmount: 230, vatAmount: 30, netSaleAmount: 200 },
+    { locationId: 'loc-1', locationName: 'Main Bar', saleDate: '2026-07-09', saleTime: '12:00', menuItemId: 'burger', menuItemName: 'Burger', menuCategory: 'Food', modifierId: 'cheese', modifierName: 'Cheese', inventoryItemId: 'cheese-slice', inventoryItemName: 'Cheese Slice', sourceType: 'Modifier Usage', qtySold: 2, qtyUsed: 2, baseUom: 'ea', unitCostExVat: 3, stockValueUsed: 6, grossSaleAmount: 230, vatAmount: 30, netSaleAmount: 200 }
+  ];
+  const model = buildSaleStockMovementModel(noIdUsageRows);
+  const totals = stockMovementTotals(model.views.recipe_line_detail);
+  assert.equal(totals.grossSales, 230, 'two ingredient rows sharing one sale (same date/time/menu item/amounts) must not double the sale total');
+  assert.equal(totals.netSales, 200);
+  assert.equal(totals.totalStockValueUsed, 16, 'stock-value fields remain additive per ingredient row');
+});
 
 test('Sale Stock Movement exports each view with its visible view columns', () => {
   const report = getReportDefinition('sale_stock_movement');

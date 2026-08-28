@@ -433,7 +433,11 @@ export function normalizeRecipeLines(recipe) {
         stockItemId: String(line?.stockItemId || line?.stock_item_id || line?.ingId || ''),
         qty: quantity,
         quantity,
-        unit: String(line?.unit || line?.uom || 'ea').trim() || 'ea'
+        // Do NOT invent 'ea' here. A line with no explicit UOM means "use the stock item's base
+        // unit", and 'ea' is indistinguishable from a real choice once stored — which is what made
+        // the deduction engine reject every kg/L/ml line as an unresolvable custom UOM and deduct
+        // nothing. An empty unit resolves to the base unit on every reader.
+        unit: String(line?.unit || line?.uom || '').trim()
       };
     })
     .filter((line) => line.ingId && line.quantity > 0);

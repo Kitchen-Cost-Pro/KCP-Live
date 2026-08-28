@@ -1164,7 +1164,10 @@ function normalizeRecipeLinesForDisplay(recipe = []) {
       stockItemId: String(line.stockItemId || line.stock_item_id || line.ingId || line.id || '').trim(),
       qty: parseQtyNumber(line.qty ?? line.quantity ?? 0),
       quantity: parseQtyNumber(line.quantity ?? line.qty ?? 0),
-      unit: String(line.unit || line.uom || 'ea').trim() || 'ea'
+      // Preserve "no UOM chosen" as blank rather than coercing to 'ea'. renderRecipeLine already
+      // falls back to the ingredient's base unit for display, and keeping it blank means a
+      // round-trip through the editor can no longer persist a bogus unit.
+      unit: String(line.unit || line.uom || '').trim()
     }))
     .filter((line) => line.ingId && line.qty > 0);
 }

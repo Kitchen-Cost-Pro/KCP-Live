@@ -188,7 +188,7 @@ export function deriveYocoFinancialAmounts({
     && taxResolution.value >= 0
     && taxResolution.value <= taxBaseAmount + CENT_TOLERANCE
     && (taxResolution.value > 0 || !taxBaseAmount || !normalizedVatRate || explicitZeroRated);
-  const calculatedVat = calculateVatFromGross(grossAmount, vatRate);
+  const calculatedVat = resolveMixedBasketVat(raw, grossAmount, vatRate);
   // VAT resolution priority is IDENTICAL for sales and refunds so the same order can never
   // report one VAT figure on its sale row and a different one on its refund row.
   // An explicit zero-rated marker wins over a stored VAT value, matching how the rest of this
@@ -201,7 +201,7 @@ export function deriveYocoFinancialAmounts({
       : explicitTaxPlausible
         ? taxResolution.value
         : calculatedFallback);
-  const refundVatAmount = resolveVatAmount(calculateVatFromGross(refundAmount, vatRate));
+  const refundVatAmount = resolveVatAmount(resolveMixedBasketVat(raw, refundAmount, vatRate));
   const saleVatAmount = resolveVatAmount(calculatedVat);
   const contradictoryZeroRatedVat = explicitZeroRated && hasStoredVat && roundMoney(storedVat) !== 0;
   const vatAmount = isRefund
@@ -414,6 +414,69 @@ function finiteOr(value, fallback) {
   return Number.isFinite(value) ? value : fallback;
 }
 
+// A line's own explicit tax rate, if Yoco recorded one — distinct from `resolveYocoVatRate`,
+// which resolves ONE rate for the whole order. Used so a basket mixing more than one non-zero
+// rate (e.g. a reduced/specialty rate alongside the standard rate) taxes each line at its own
+// rate rather than the order's single resolved rate.
+function lineOwnRate(line = {}) {
+  const directCandidates = [line.vat_rate, line.vatRate, line.tax_rate, line.taxRate];
+  for (const candidate of directCandidates) {
+    if (normalizeVatRate(candidate) > 0) return safeNumber(candidate);
+  }
+  const taxes = arrayValue(line.applied_taxes, line.appliedTaxes, line.taxes);
+  for (const tax of taxes) {
+    const candidate = tax?.percentage ?? tax?.rate ?? tax?.tax_rate ?? tax?.taxRate;
+    if (normalizeVatRate(candidate) > 0) return safeNumber(candidate);
+  }
+  return NaN;
+}
+
+// Order-level `calculateVatFromGross(grossAmount, vatRate)` applies one flat rate to the whole
+// basket. That is wrong whenever the basket mixes a zero-rated/exempt item with a taxable one, or
+// mixes more than one distinct non-zero rate, AND Yoco's own order-level tax figure is
+// missing/implausible (so `explicitTaxPlausible` is false and this fallback actually runs) — e.g.
+// a R100 zero-rated item plus a R115 VAT-inclusive item would otherwise compute VAT on the full
+// R215, wildly overstating it. When there is real per-line evidence of a mixed basket (an explicit
+// zero-rated line, or a line carrying its own rate different from the order's resolved rate),
+// reverse each taxable line's VAT off its own gross at its own rate (falling back to the order's
+// resolved rate for a line with no rate of its own) instead of one flat rate over the whole
+// basket. If there is no such evidence at all, this returns the same flat calculation as before —
+// it only changes behavior when it has real evidence of a mixed basket.
+function resolveMixedBasketVat(raw, grossAmount, vatRate) {
+  const flatVat = calculateVatFromGross(grossAmount, vatRate);
+  const lines = arrayValue(
+    raw?.returned_line_items, raw?.returnedLineItems, raw?.line_items, raw?.lineItems, raw?.items
+  );
+  if (!lines.length) return flatVat;
+  const normalizedOrderRate = normalizeVatRate(vatRate);
+  const flagged = lines.map((line) => {
+    const zeroRated = isExplicitlyZeroRated(line);
+    const ownRate = zeroRated ? NaN : lineOwnRate(line);
+    return { line, zeroRated, ownRate };
+  });
+  const hasZeroRated = flagged.some((entry) => entry.zeroRated);
+  const hasDistinctOwnRate = flagged.some((entry) => Number.isFinite(entry.ownRate) && normalizeVatRate(entry.ownRate) !== normalizedOrderRate);
+  // No per-line evidence of a mixed basket at all: keep the old flat behavior unchanged.
+  if (!hasZeroRated && !hasDistinctOwnRate) return flatVat;
+  const hasTaxableLine = flagged.some((entry) => !entry.zeroRated);
+  // Every line is explicitly zero-rated: no part of this basket is taxable.
+  if (!hasTaxableLine) return 0;
+  let total = 0;
+  let anyTaxableGross = false;
+  for (const { line, zeroRated, ownRate } of flagged) {
+    if (zeroRated) continue;
+    const lineGross = yocoMoneyToMajor(
+      line.total_price ?? line.totalPrice ?? line.total_amount ?? line.totalAmount ?? line.amount
+      ?? line.amounts?.gross_amount ?? line.amounts?.grossAmount ?? line.amounts?.net_amount ?? line.amounts?.netAmount
+    );
+    if (!Number.isFinite(lineGross)) continue;
+    anyTaxableGross = true;
+    total += calculateVatFromGross(lineGross, Number.isFinite(ownRate) ? ownRate : vatRate);
+  }
+  if (!anyTaxableGross) return flatVat;
+  return roundMoney(Math.min(total, grossAmount));
+}
+
 function isExplicitlyZeroRated(raw = {}) {
   const candidates = [
     raw.tax_status,
@@ -430,7 +493,10 @@ function isExplicitlyZeroRated(raw = {}) {
   if (candidates.some((value) => value === true)) return true;
   const text = candidates.map((value) => String(value ?? '').toLowerCase()).join(' ');
   if (/zero[ _-]?rated|tax[ _-]?exempt|vat[ _-]?exempt|non[ _-]?taxable/.test(text)) return true;
-  const taxes = arrayValue(raw.total_taxes, raw.totalTaxes, raw.taxes);
+  // Line items carry their applied taxes under `applied_taxes`/`appliedTaxes` rather than
+  // `total_taxes` — checked here too so this same function can classify an individual line
+  // item (see resolveMixedBasketVat), not just a whole order/refund resource.
+  const taxes = arrayValue(raw.total_taxes, raw.totalTaxes, raw.taxes, raw.applied_taxes, raw.appliedTaxes);
   return taxes.length > 0 && taxes.every((tax) => {
     const rate = safeNumber(tax?.rate ?? tax?.percentage ?? tax?.tax_rate, NaN);
     const label = String(tax?.name ?? tax?.type ?? '').toLowerCase();
