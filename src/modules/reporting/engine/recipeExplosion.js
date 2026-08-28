@@ -153,6 +153,13 @@ export function convertToBaseUom({ qty = 0, fromUom = '', toUom = '', stockItem 
     return { qty: quantity * factor, factor, fromUom: from, toUom: to };
   }
 
+  // 'ea' reaching here is the recipe editor's "no UOM chosen" sentinel, not the unit "each" — it
+  // means "use the stock item's base unit", which is what the editor itself displays for such a
+  // line. Warning about it produced an unactionable "Missing UOM conversion from ea to kg." on
+  // every kg/g/L/ml recipe line. Mirrors convertMenuRecipeQty in the worker's reporting-routes.ts
+  // and the stock-side contract in cloudflare-v2/src/inventory/uom.ts — keep all three in step.
+  if (from === 'ea') return { qty: quantity, factor: 1, fromUom: from, toUom: to };
+
   warnings.push(warning('missing-uom-conversion', `Missing UOM conversion from ${from || 'unknown'} to ${to || 'base UOM'}.`, context));
   return { qty: quantity, factor: 1, fromUom: from, toUom: to, missingConversion: true };
 }

@@ -3319,6 +3319,14 @@ function convertMenuRecipeQty({ qty, fromUom, toUom, stockRawJson }: Row) {
     );
     if (factor) return { qty: quantity * factor, factor };
   }
+  // `ea` here is not the unit "each": it is the sentinel the recipe editor writes into
+  // recipe_lines.unit when no explicit UOM was chosen (normalizeRecipeLines in
+  // services/recipeService.js), and it means "use the stock item's base unit" — which is exactly
+  // what the recipe screen renders for such a line. Reporting it as a missing conversion produced
+  // a permanent, unactionable "Missing UOM conversion from ea to kg." warning on every recipe line
+  // measured in kg/g/L/ml, telling merchants to configure a conversion that should not exist. See
+  // inventory/uom.ts, which holds the same contract for the stock-deduction path.
+  if (from === "ea") return { qty: quantity, factor: 1 };
   return { qty: quantity, factor: 1, missingConversion: true };
 }
 

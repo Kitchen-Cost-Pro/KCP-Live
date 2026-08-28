@@ -1,5 +1,6 @@
 import type { DbStatementLike, Env } from '../legacy/types';
 import { fallbackStockItemUnitCost } from '../legacy/inventory-costing';
+import { UNSPECIFIED_LINE_UOM, standardUomFactor } from './uom';
 
 type Row = Record<string, unknown>;
 
@@ -91,6 +92,13 @@ function resolveUomRatio(stockItem: StockItemRow, lineUnit: string): { ratio: nu
   const requestedUnit = text(lineUnit).toLowerCase();
   if (!requestedUnit || requestedUnit === baseUnit) return { ratio: 1, resolved: true };
 
+  // Same resolution order as resolveCustomUomFactor in the sale-deduction engine (see
+  // inventory/uom.ts): standard same-family conversion, then the item's configured custom UOMs,
+  // then the 'ea' unspecified sentinel. The two resolvers disagreeing is what let a sale deduct
+  // nothing while the wastage path deducted fine.
+  const standard = standardUomFactor(requestedUnit, baseUnit);
+  if (standard !== null) return { ratio: standard, resolved: true };
+
   const rawJson = objectValue(stockItem.raw_json);
   const configs = Array.isArray(rawJson.uomConfigurations) ? (rawJson.uomConfigurations as UomConfiguration[]) : [];
   const match = configs.find((cfg) => {
@@ -102,7 +110,10 @@ function resolveUomRatio(stockItem: StockItemRow, lineUnit: string): { ratio: nu
   // any caller that mutates stock — the 1:1 fallback below exists only so presence-only checks
   // (rules.ts assertRemovalScope) keep working; `resolved: false` is what tells a stock-mutating
   // caller (the wastage endpoint) to skip the deduction instead of trusting this fallback.
-  return ratio > 0 ? { ratio, resolved: true } : { ratio: 1, resolved: false };
+  if (ratio > 0) return { ratio, resolved: true };
+  // Unspecified means "use the item's base unit". Anything else named but unconfigured stays
+  // unresolved so a stock-mutating caller skips it rather than trusting a 1:1 guess.
+  return { ratio: 1, resolved: requestedUnit === UNSPECIFIED_LINE_UOM };
 }
 
 function stockItemType(item: StockItemRow) {
