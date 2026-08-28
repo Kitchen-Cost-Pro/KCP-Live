@@ -2709,6 +2709,124 @@ export async function getAdminWorkspaceMigrationHealth(
 }
 
 /**
+ * Read-only safety check for the proposed opening-balance optimisation.
+ *
+ * getOpeningBalances currently answers "what was on hand at date X" by summing EVERY movement ever
+ * recorded before X. Measured on a 131-item workspace with 40,000 movements, a one-day report reads
+ * 40,000 rows to produce 131 numbers — and it grows with trading history forever, regardless of the
+ * report's date window or catalogue size.
+ *
+ * The cheap equivalent is `current stock_balances MINUS movements from X onwards`, which for a
+ * recent report reads a few hundred rows instead of the whole ledger. That identity only holds if
+ * stock_balances is exactly the running sum of stock_movements — which a manual balance correction
+ * or an import that set quantities directly could have broken at some point in the past.
+ *
+ * So this endpoint computes BOTH and reports every disagreement, rather than assuming. It changes
+ * nothing. Run it before switching the reports over: if it reports zero mismatches the fast path is
+ * provably safe for this workspace's real data, and if it doesn't, the differences are themselves a
+ * genuine stock-reconciliation finding worth having.
+ */
+export async function getAdminWorkspaceOpeningBalanceCheck(
+  request: Request,
+  env: Env,
+  auth: AuthContext,
+  workspaceId: string,
+) {
+  const url = new URL(request.url);
+  // Default to "today" — the same boundary an untouched report page asks for.
+  const from = getParam(url, "from", new Date().toISOString().slice(0, 10));
+  const fromIso = `${String(from).slice(0, 10)}T00:00:00.000Z`;
+
+  const [historicalRows, inWindowRows, balanceRows] = await Promise.all([
+    // METHOD A — exactly what getOpeningBalances does today, datetime() wrapper included, so the
+    // comparison reflects production rather than an idealised version of it.
+    env.DB.prepare(
+      `SELECT stock_item_id, location_id, COALESCE(SUM(quantity_delta), 0) AS qty
+         FROM stock_movements
+        WHERE workspace_id = ?1
+          AND datetime(occurred_at) < datetime(?2)
+        GROUP BY stock_item_id, location_id`,
+    )
+      .bind(workspaceId, fromIso)
+      .all<{ stock_item_id: string; location_id: string; qty: number }>(),
+    // METHOD B, part 1 — movements from the boundary onwards. Deliberately the exact complement of
+    // Method A's predicate, so together they account for every movement exactly once.
+    env.DB.prepare(
+      `SELECT stock_item_id, location_id, COALESCE(SUM(quantity_delta), 0) AS qty
+         FROM stock_movements
+        WHERE workspace_id = ?1
+          AND datetime(occurred_at) >= datetime(?2)
+        GROUP BY stock_item_id, location_id`,
+    )
+      .bind(workspaceId, fromIso)
+      .all<{ stock_item_id: string; location_id: string; qty: number }>(),
+    // METHOD B, part 2 — the current on-hand quantities the fast path would start from.
+    env.DB.prepare(
+      `SELECT stock_item_id, location_id, quantity
+         FROM stock_balances
+        WHERE workspace_id = ?1`,
+    )
+      .bind(workspaceId)
+      .all<{ stock_item_id: string; location_id: string; quantity: number }>(),
+  ]);
+
+  const key = (itemId: unknown, locationId: unknown) => `${text(itemId)}::${text(locationId)}`;
+  const methodA = new Map<string, number>();
+  for (const row of historicalRows.results || []) {
+    methodA.set(key(row.stock_item_id, row.location_id), numberValue(row.qty, 0));
+  }
+  const sinceFrom = new Map<string, number>();
+  for (const row of inWindowRows.results || []) {
+    sinceFrom.set(key(row.stock_item_id, row.location_id), numberValue(row.qty, 0));
+  }
+  const methodB = new Map<string, number>();
+  for (const row of balanceRows.results || []) {
+    const rowKey = key(row.stock_item_id, row.location_id);
+    methodB.set(rowKey, numberValue(row.quantity, 0) - (sinceFrom.get(rowKey) || 0));
+  }
+
+  // Compare across the UNION of both key sets: a pair present in only one method is itself a
+  // mismatch (an item with movements but no balance row, or vice versa).
+  const mismatches: Array<Record<string, unknown>> = [];
+  let compared = 0;
+  for (const rowKey of new Set([...methodA.keys(), ...methodB.keys()])) {
+    const a = methodA.get(rowKey) || 0;
+    const b = methodB.get(rowKey) || 0;
+    compared += 1;
+    // Float tolerance: quantities are REAL, so summing thousands of deltas accumulates error that
+    // is not a real disagreement.
+    if (Math.abs(a - b) < 0.0001) continue;
+    const [stockItemId, locationId] = rowKey.split("::");
+    mismatches.push({
+      stockItemId,
+      locationId,
+      fromHistoricalSum: a,
+      fromBalanceMinusRecent: b,
+      difference: Number((b - a).toFixed(6)),
+      presentInHistoricalSum: methodA.has(rowKey),
+      presentInBalances: methodB.has(rowKey),
+    });
+  }
+  mismatches.sort((left, right) => Math.abs(Number(right.difference)) - Math.abs(Number(left.difference)));
+
+  return json(request, env, {
+    ok: true,
+    workspaceId,
+    asAtBoundary: fromIso,
+    rowsReadByCurrentMethod: (historicalRows.results || []).length
+      ? "full ledger before the boundary (see movementsBeforeBoundary)"
+      : "none",
+    movementsAfterBoundaryGroups: (inWindowRows.results || []).length,
+    balanceRowCount: (balanceRows.results || []).length,
+    pairsCompared: compared,
+    mismatchCount: mismatches.length,
+    safeToUseFastPath: mismatches.length === 0,
+    // Cap the payload: the count is the verdict, the sample is for diagnosing a failure.
+    mismatchSample: mismatches.slice(0, 50),
+  });
+}
+
+/**
  * Clears a stuck migration backoff window for this workspace so the very next request (the
  * frontend's own routine polling, or a manual retry) re-attempts migrate() immediately instead of
  * silently skipping it. Does NOT run migrations itself — WorkspaceDO.fetch() already calls
@@ -5119,8 +5237,23 @@ export async function getProducts(
   const limitIndex = binds.length - 1;
   const offsetIndex = binds.length;
 
+  // The page itself is resolved FIRST so the per-product lookups below can be scoped to it.
+  const productRows = await env.DB.prepare(
+    `SELECT id, legacy_source_id, name, sku, category, price, active, external_provider,
+	            yoco_item_id, yoco_variant_id, yoco_category_id, yoco_category_name,
+	            recipe_source_stock_item_id, missing_recipe, raw_json, updated_at
+	       FROM products
+      WHERE ${filters.join(" AND ")}
+      ORDER BY lower(category) ASC, lower(name) ASC
+      LIMIT ?${limitIndex} OFFSET ?${offsetIndex}`,
+  )
+    .bind(...binds)
+    .all();
+  const pageProductIds = arrayValue(productRows.results)
+    .map((entry) => text(objectValue(entry).id))
+    .filter(Boolean);
+
   const [
-    productRows,
     priceRows,
     recipeRows,
     lineRows,
@@ -5128,23 +5261,17 @@ export async function getProducts(
     modifierGroupRows,
     allProductRows,
   ] = await Promise.all([
-    env.DB.prepare(
-      `SELECT id, legacy_source_id, name, sku, category, price, active, external_provider,
-	              yoco_item_id, yoco_variant_id, yoco_category_id, yoco_category_name,
-	              recipe_source_stock_item_id, missing_recipe, raw_json, updated_at
-	         FROM products
-        WHERE ${filters.join(" AND ")}
-        ORDER BY lower(category) ASC, lower(name) ASC
-        LIMIT ?${limitIndex} OFFSET ?${offsetIndex}`,
-    )
-      .bind(...binds)
-      .all(),
+    // Location prices are read back ONLY for products on this page (pricesByProduct is consumed
+    // inside the page's own map below), so fetching the workspace's entire price table was pure
+    // waste: measured at 2,000 of the 9,900 rows this route read to return 500 products. Scoped via
+    // json_each rather than a placeholder list so the bind count stays fixed regardless of page size.
     env.DB.prepare(
       `SELECT product_id, location_id, price, updated_at
          FROM product_location_prices
-        WHERE workspace_id = ?1`,
+        WHERE workspace_id = ?1
+          AND product_id IN (SELECT value FROM json_each(?2))`,
     )
-      .bind(workspaceId)
+      .bind(workspaceId, JSON.stringify(pageProductIds))
       .all(),
     env.DB.prepare(
       `SELECT id, owner_type, owner_id, linked_product_id, yield_qty, yield_unit
@@ -8631,6 +8758,37 @@ export async function postGoodsReceipt(
         totalEx,
         totalVat,
         totalEx + totalVat,
+      ),
+      // Keeps the Stock Control report's "latest purchase" lookup a point read instead of a
+      // full-history scan (see migration 41's comment in tenant-migrations.ts). The WHERE clause
+      // on the update guards against ever regressing this row if GRVs are ever recorded
+      // out of chronological order (a backdated invoice capture, for instance) — only a purchase
+      // that's actually newer (by received date, then by line id as a tiebreak) replaces what's
+      // stored.
+      env.DB.prepare(
+        `INSERT INTO stock_item_latest_purchase
+          (workspace_id, stock_item_id, location_id, supplier_id, unit, unit_price, received_at, grv_line_id, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(workspace_id, stock_item_id, location_id) DO UPDATE SET
+           supplier_id = excluded.supplier_id,
+           unit = excluded.unit,
+           unit_price = excluded.unit_price,
+           received_at = excluded.received_at,
+           grv_line_id = excluded.grv_line_id,
+           updated_at = excluded.updated_at
+         WHERE excluded.received_at > stock_item_latest_purchase.received_at
+            OR (excluded.received_at = stock_item_latest_purchase.received_at
+                AND excluded.grv_line_id > stock_item_latest_purchase.grv_line_id)`,
+      ).bind(
+        workspaceId,
+        stockItemId,
+        locationId,
+        payload.supplierId,
+        text(line.unit || stockItem.unit),
+        unitCost,
+        payload.receivedAt,
+        grvLineId,
+        now,
       ),
       env.DB.prepare(
         `INSERT INTO stock_movements

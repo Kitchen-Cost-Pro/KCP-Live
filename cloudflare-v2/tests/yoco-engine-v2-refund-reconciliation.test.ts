@@ -1811,9 +1811,12 @@ test("a failing scheduled run records the attempt and backs off instead of re-ru
     "a tick inside the backoff window must not start another run",
   );
 
-  // Past the 15-minute backoff, it is allowed to try again — and a success clears the counters.
+  // Past both the 15-minute backoff AND the (now daily, not hourly) run interval, it is allowed
+  // to try again — and a success clears the counters. 2026-08-28: reconciliation moved to once a
+  // day (see reconciliation.ts's hourlyDue/dailyDue), so this needs a >24h gap from the first
+  // attempt to actually be due, not just past the backoff window.
   const okEnv = envFor(db, fixtureGate(data, { listOrders: [], listRefunds: [] }));
-  await runScheduledYocoV2Reconciliation(okEnv, "ws_1", "integration_1", new Date("2026-07-15T04:00:00.000Z"));
+  await runScheduledYocoV2Reconciliation(okEnv, "ws_1", "integration_1", new Date("2026-07-16T03:00:00.000Z"));
   const afterRecovery = db.database
     .prepare(`SELECT consecutive_failures, next_retry_at FROM yoco_v2_reconciliation_state`)
     .get() as any;

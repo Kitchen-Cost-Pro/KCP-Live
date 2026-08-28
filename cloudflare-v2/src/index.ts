@@ -260,6 +260,47 @@ async function dispatchCentral(request: Request, env: Env, url: URL): Promise<Re
     return json(request, env, { ok: true, configured: true, dailyCap, ...(state?.state || { dateKey: '', used: 0 }) });
   }
 
+  // Diagnostic (2026-08-28): which workspace(s) actually account for the account's total SQL
+  // storage. Queries EVERY workspace regardless of status — a workspace marked inactive/deleted
+  // in CENTRAL_DB doesn't necessarily mean its Durable Object storage was ever purged (that's a
+  // separate explicit 'admin-purge' action), so a stale never-purged workspace is a real
+  // candidate for unaccounted-for storage.
+  if (request.method === 'GET' && url.pathname === '/api/admin/workspace-storage') {
+    await requireAdmin(request, lenv);
+    const workspaceRows = await env.CENTRAL_DB.prepare(
+      `SELECT id, name, status FROM workspaces ORDER BY name COLLATE NOCASE ASC`
+    ).all<{ id: string; name: string; status: string }>();
+    const workspaces = workspaceRows.results || [];
+    const results = await fanOutWorkspaceDOs(
+      env,
+      workspaces.map((row) => String(row.id)),
+      'admin-database-size',
+      { uid: 'admin', email: '', systemRole: 'admin' }
+    );
+    const sizeByWorkspace = new Map(results.map((r) => [r.workspaceId, r.data as any]));
+    const rows = workspaces
+      .map((row) => {
+        const workspaceId = String(row.id);
+        const data = sizeByWorkspace.get(workspaceId);
+        const databaseSizeBytes = Number(data?.databaseSizeBytes || 0);
+        return {
+          workspaceId,
+          name: String(row.name || workspaceId),
+          status: String(row.status || ''),
+          databaseSizeBytes,
+          databaseSizeMb: Math.round((databaseSizeBytes / (1024 * 1024)) * 100) / 100
+        };
+      })
+      .sort((a, b) => b.databaseSizeBytes - a.databaseSizeBytes);
+    const totalBytes = rows.reduce((sum, row) => sum + row.databaseSizeBytes, 0);
+    return json(request, env, {
+      ok: true,
+      totalBytes,
+      totalMb: Math.round((totalBytes / (1024 * 1024)) * 100) / 100,
+      workspaces: rows
+    });
+  }
+
   if (request.method === 'GET' && url.pathname === '/api/admin/org-sites') {
     return getAdminOrgSites(request, lenv, async (workspaceIds) => getAdminWorkspaceSettingsMap(env, workspaceIds));
   }
@@ -322,6 +363,19 @@ async function dispatchCentral(request: Request, env: Env, url: URL): Promise<Re
     if (!adminSession.admin?.isSuper) return json(request, env, { ok: false, error: 'Superuser only.' }, 403);
     const wsId = decodeURIComponent(migrationHealthM[1]);
     const r = await callWorkspaceDO(env, wsId, 'admin-migration-health', { uid: 'admin', email: '' }, 'GET');
+    return json(request, env, r as Record<string, unknown>);
+  }
+  // Read-only comparison of the two ways of computing opening stock balances — see
+  // getAdminWorkspaceOpeningBalanceCheck for why. Superuser-only: it reports per-item stock
+  // discrepancies, and it reads the full ledger once, so it is a deliberate diagnostic rather than
+  // something routine traffic should be able to trigger.
+  const openingBalanceCheckM = url.pathname.match(/^\/api\/admin\/workspaces\/([^/]+)\/opening-balance-check$/);
+  if (openingBalanceCheckM && request.method === 'GET') {
+    const adminSession = await requireAdmin(request, lenv);
+    if (!adminSession.admin?.isSuper) return json(request, env, { ok: false, error: 'Superuser only.' }, 403);
+    const wsId = decodeURIComponent(openingBalanceCheckM[1]);
+    const resource = `admin-opening-balance-check${url.search}`;
+    const r = await callWorkspaceDO(env, wsId, resource, { uid: 'admin', email: '' }, 'GET');
     return json(request, env, r as Record<string, unknown>);
   }
   const migrationRetryM = url.pathname.match(/^\/api\/admin\/workspaces\/([^/]+)\/migration-retry$/);

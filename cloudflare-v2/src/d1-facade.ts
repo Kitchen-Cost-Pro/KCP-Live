@@ -37,10 +37,28 @@ function metaFrom(cursor: SqlStorageCursor<Record<string, SqlStorageValue>>): Fa
   };
 }
 
+// Temporary diagnostic (2026-08-28): find every unbounded/unindexed query burning through the
+// free-tier rows-read quota, not just the one already found in reconciliation.ts. This is the one
+// choke point every tenant DO query passes through (FacadeStatement.first/all/run/batch below), so
+// logging here catches ANY query anywhere in the app, not just a specific suspected code path.
+// Remove once the account's rows-read usage is understood and back to a stable baseline.
+//
+// Lowered from 10,000: a 10k-per-query threshold missed requests that were expensive in
+// aggregate — e.g. a Reporting page load firing several individual queries in the low thousands
+// each, none crossing the old bar alone, but summing to 30k+ across one request. 2,000 trades
+// more log noise for catching that pattern too.
+const HEAVY_READ_LOG_THRESHOLD = 2_000;
+
+function logIfHeavyRead(query: string, cursor: SqlStorageCursor<Record<string, SqlStorageValue>>): void {
+  const rowsRead = Number(cursor.rowsRead || 0);
+  if (rowsRead < HEAVY_READ_LOG_THRESHOLD) return;
+  console.warn(`[heavy-read] rows_read=${rowsRead} sql=${query.replace(/\s+/g, ' ').trim().slice(0, 300)}`);
+}
+
 export class FacadeStatement {
   constructor(
     private readonly sql: SqlStorage,
-    private readonly query: string,
+    readonly query: string,
     private readonly params: unknown[] = []
   ) {}
 
@@ -63,7 +81,9 @@ export class FacadeStatement {
   }
 
   async first<T = Record<string, unknown>>(column?: string): Promise<T | null> {
-    const rows = this.execCursor().toArray();
+    const cursor = this.execCursor();
+    const rows = cursor.toArray();
+    logIfHeavyRead(this.query, cursor);
     if (!rows.length) return null;
     const row = rows[0] as Record<string, unknown>;
     return (column === undefined ? row : (row[column] ?? null)) as T;
@@ -72,17 +92,22 @@ export class FacadeStatement {
   async all<T = Record<string, unknown>>(): Promise<FacadeResult<T>> {
     const cursor = this.execCursor();
     const results = cursor.toArray() as T[];
+    logIfHeavyRead(this.query, cursor);
     return { results, success: true, meta: metaFrom(cursor) };
   }
 
   async run<T = Record<string, unknown>>(): Promise<FacadeResult<T>> {
     const cursor = this.execCursor();
     cursor.toArray(); // drain to force execution + populate rowsWritten
+    logIfHeavyRead(this.query, cursor);
     return { results: [] as T[], success: true, meta: metaFrom(cursor) };
   }
 
   async raw<T = unknown[]>(): Promise<T[]> {
-    return [...this.execCursor().raw()] as T[];
+    const cursor = this.execCursor();
+    const rows = [...cursor.raw()] as T[];
+    logIfHeavyRead(this.query, cursor);
+    return rows;
   }
 }
 
@@ -103,6 +128,7 @@ export class FacadeDatabase {
       for (const st of statements) {
         const cursor = st.execCursor();
         cursor.toArray();
+        logIfHeavyRead(st.query, cursor);
         out.push({ results: [] as T[], success: true, meta: metaFrom(cursor) });
       }
       return out;

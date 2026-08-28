@@ -22,6 +22,7 @@ import {
 } from "./exports/exportExcel.js";
 import { downloadReportPdf } from "./exports/exportPdf.js";
 import { getReportDefinition, resolveReportRoute } from "./reports/index.js";
+import { clearReportCache } from "./api/reportCache.js";
 import { isOrderableStockControlRow } from "./reports/operations/stockControlOrderability.js";
 import { bindReportTooltips } from "./tooltips/tooltipBuilder.js";
 import { renderSavedViewsControl } from "./savedViews/SavedViewsControl.js";
@@ -356,6 +357,9 @@ export function renderReportViewer({
       root
         .querySelector("[data-report-refresh]")
         ?.addEventListener("click", () => {
+          // Manual refresh always bypasses the report cache, regardless of whether the app has
+          // itself noticed a data change yet — see api/reportCache.js.
+          clearReportCache();
           onRefresh?.();
           void draw();
         });

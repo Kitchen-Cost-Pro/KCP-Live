@@ -183,3 +183,54 @@ CREATE INDEX IF NOT EXISTS idx_stock_movements_workspace_movement_type
 `;
 
 export const HOT_PATH_INDEX_SCHEMA_REPAIR_ID = 'hot-path-indexes-and-name-key-v1';
+
+/**
+ * Same drift problem as HOT_PATH_INDEX_SCHEMA_REPAIR above, for two fixes added 2026-08-28 as plain
+ * TENANT_MIGRATIONS entries (40 and 41): the reconciliation-scan index and the
+ * stock_item_latest_purchase table. A NEW repair rather than appending to
+ * HOT_PATH_INDEX_SCHEMA_REPAIR's existing content, per that repair's own comment — its id is already
+ * recorded as applied for tenants that ran it, so new statements added to old content would never
+ * reach them.
+ *
+ * Without this, WS-lellos-trattoria-bee300 (and any other tenant whose _kcp_schema.version drifted
+ * ahead of TENANT_MIGRATIONS.length) would never get either fix: the reconciliation query's
+ * `INDEXED BY` would keep hitting its "no such index" fallback to the slow scan forever (not just
+ * during a brief catch-up window), and the Stock Control report would keep reading its
+ * `stock_item_latest_purchase` JOIN against a table that doesn't exist — silently returning no
+ * purchase data rather than erroring, since that JOIN is a LEFT JOIN.
+ *
+ * Deliberately DDL-only, same as HOT_PATH_INDEX_SCHEMA_REPAIR: the stock_item_latest_purchase
+ * backfill is a separate bounded, resumable batch loop in workspace-do.ts.
+ */
+export const RECONCILIATION_AND_PURCHASE_SUMMARY_SCHEMA_REPAIR = `
+CREATE INDEX IF NOT EXISTS idx_yoco_v2_domain_events_workspace_status
+  ON yoco_v2_domain_events(workspace_id, integration_id, event_type, resolution_status);
+CREATE TABLE IF NOT EXISTS stock_item_latest_purchase (
+  workspace_id TEXT NOT NULL,
+  stock_item_id TEXT NOT NULL,
+  location_id TEXT NOT NULL,
+  supplier_id TEXT,
+  unit TEXT NOT NULL DEFAULT 'ea',
+  unit_price REAL NOT NULL DEFAULT 0,
+  received_at TEXT NOT NULL,
+  grv_line_id TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, stock_item_id, location_id)
+);
+`;
+
+export const RECONCILIATION_AND_PURCHASE_SUMMARY_SCHEMA_REPAIR_ID = 'reconciliation-index-and-purchase-summary-v1';
+
+/**
+ * Same drift problem again, for migration 42 (adjustment_lines/adjustments indexes, 2026-08-28).
+ * A new repair rather than appending to RECONCILIATION_AND_PURCHASE_SUMMARY_SCHEMA_REPAIR, so each
+ * repair's name stays an honest description of what it contains.
+ */
+export const ADJUSTMENT_LINES_INDEX_SCHEMA_REPAIR = `
+CREATE INDEX IF NOT EXISTS idx_adjustment_lines_adjustment
+  ON adjustment_lines(adjustment_id);
+CREATE INDEX IF NOT EXISTS idx_adjustments_workspace_type
+  ON adjustments(workspace_id, adjustment_type, occurred_at);
+`;
+
+export const ADJUSTMENT_LINES_INDEX_SCHEMA_REPAIR_ID = 'adjustment-lines-index-v1';

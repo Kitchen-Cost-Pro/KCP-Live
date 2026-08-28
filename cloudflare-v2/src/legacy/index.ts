@@ -73,6 +73,7 @@ import {
   getSelfTransferProfile,
   getAdminWorkspaceSummary,
   getAdminWorkspaceMigrationHealth,
+  getAdminWorkspaceOpeningBalanceCheck,
   postAdminWorkspaceMigrationRetry,
   purgeWorkspaceTenant,
   getAdminWorkspaceSettingsDO,
@@ -1041,6 +1042,11 @@ export async function dispatchWorkspaceRoute(
   // This workspace's tenant schema migration status/backoff state — fanned out by the front Worker.
   if (request.method === "GET" && resource === "admin-migration-health") {
     return getAdminWorkspaceMigrationHealth(request, env, auth, workspaceId);
+  }
+  // callWorkspaceDO passes the query string as part of the resource (same as the yoco-v2 admin
+  // routes do), so match on the path portion rather than exact equality.
+  if (request.method === "GET" && resource.split("?")[0] === "admin-opening-balance-check") {
+    return getAdminWorkspaceOpeningBalanceCheck(request, env, auth, workspaceId);
   }
   if (request.method === "POST" && resource === "admin-migration-retry") {
     return postAdminWorkspaceMigrationRetry(request, env, auth, workspaceId);

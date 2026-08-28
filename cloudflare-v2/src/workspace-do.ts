@@ -13,8 +13,12 @@ import type { Env } from './types';
 import { dispatchWorkspaceRoute } from './legacy/index';
 import { dispatchYocoV2WorkspaceRoute } from './modules/yoco-engine-v2/route-dispatch';
 import {
+  ADJUSTMENT_LINES_INDEX_SCHEMA_REPAIR,
+  ADJUSTMENT_LINES_INDEX_SCHEMA_REPAIR_ID,
   HOT_PATH_INDEX_SCHEMA_REPAIR,
   HOT_PATH_INDEX_SCHEMA_REPAIR_ID,
+  RECONCILIATION_AND_PURCHASE_SUMMARY_SCHEMA_REPAIR,
+  RECONCILIATION_AND_PURCHASE_SUMMARY_SCHEMA_REPAIR_ID,
   YOCO_V2_RUNTIME_SCHEMA_REPAIR,
   YOCO_V2_RUNTIME_SCHEMA_REPAIR_ID,
   YOCO_V2_VAT_SNAPSHOT_SCHEMA_REPAIR,
@@ -40,6 +44,39 @@ const STOCK_ITEM_NAME_KEY_BACKFILL_SQL = `
              char(8203), ''), char(65279), ''),
              '  ', ' '), '  ', ' '), '  ', ' '), '  ', ' ')))
    WHERE rowid IN (SELECT rowid FROM stock_items WHERE name_key IS NULL LIMIT ?1)
+`;
+
+// Backfill for stock_item_latest_purchase (see migration 41's comment in tenant-migrations.ts).
+// Unlike the name_key backfill, there's no natural "still needs it" column to filter on — every
+// grv_lines row must be visited once to correctly converge on the true latest purchase per
+// (stock_item, location). So progress is tracked with an explicit cursor (the last grv_lines.id
+// processed) in a small dedicated table, paged through in id order. Because the upsert only
+// replaces a stored row when the newly-seen purchase is actually more recent (see its WHERE
+// clause), processing order doesn't need to be chronological for correctness — visiting every
+// row exactly once, in ANY stable order, converges to the right answer. Smaller batch size than
+// the name_key backfill (500 vs 2000) because each row here costs a join to grvs, not a single-
+// table update.
+const STOCK_ITEM_LATEST_PURCHASE_BACKFILL_ID = 'stock_item_latest_purchase_backfill_v1';
+const STOCK_ITEM_LATEST_PURCHASE_BACKFILL_BATCH_ROWS = 500;
+const STOCK_ITEM_LATEST_PURCHASE_BACKFILL_MAX_BATCHES_PER_REQUEST = 3;
+const STOCK_ITEM_LATEST_PURCHASE_BACKFILL_UPSERT_SQL = `
+  INSERT INTO stock_item_latest_purchase
+    (workspace_id, stock_item_id, location_id, supplier_id, unit, unit_price, received_at, grv_line_id, updated_at)
+  SELECT gl.workspace_id, gl.stock_item_id, gl.location_id, g.supplier_id, gl.unit, gl.unit_price, g.received_at,
+         gl.id, datetime('now')
+    FROM grv_lines gl
+    JOIN grvs g ON g.id = gl.grv_id AND g.workspace_id = gl.workspace_id
+   WHERE gl.id > ?1 AND gl.id <= ?2
+  ON CONFLICT(workspace_id, stock_item_id, location_id) DO UPDATE SET
+    supplier_id = excluded.supplier_id,
+    unit = excluded.unit,
+    unit_price = excluded.unit_price,
+    received_at = excluded.received_at,
+    grv_line_id = excluded.grv_line_id,
+    updated_at = excluded.updated_at
+  WHERE excluded.received_at > stock_item_latest_purchase.received_at
+     OR (excluded.received_at = stock_item_latest_purchase.received_at
+         AND excluded.grv_line_id > stock_item_latest_purchase.grv_line_id)
 `;
 
 /**
@@ -359,6 +396,40 @@ export class WorkspaceDO extends DurableObject<Env> {
         });
       }
 
+      // Same drift problem, for the reconciliation index (migration 40) and the
+      // stock_item_latest_purchase table (migration 41), both added 2026-08-28. Must run BEFORE
+      // the stock_item_latest_purchase backfill below, which no-ops while the table is absent.
+      const reconciliationAndPurchaseSummaryRepairApplied = sql.exec(
+        `SELECT repair_id FROM _kcp_runtime_repairs WHERE repair_id = ?1`,
+        RECONCILIATION_AND_PURCHASE_SUMMARY_SCHEMA_REPAIR_ID,
+      ).toArray()[0];
+      if (!reconciliationAndPurchaseSummaryRepairApplied) {
+        markInProgress();
+        storage.transactionSync(() => {
+          this.db.execScript(RECONCILIATION_AND_PURCHASE_SUMMARY_SCHEMA_REPAIR);
+          sql.exec(
+            `INSERT OR REPLACE INTO _kcp_runtime_repairs (repair_id, applied_at) VALUES (?1, datetime('now'))`,
+            RECONCILIATION_AND_PURCHASE_SUMMARY_SCHEMA_REPAIR_ID,
+          );
+        });
+      }
+
+      // Same drift problem, for the adjustment_lines/adjustments indexes (migration 42, 2026-08-28).
+      const adjustmentLinesIndexRepairApplied = sql.exec(
+        `SELECT repair_id FROM _kcp_runtime_repairs WHERE repair_id = ?1`,
+        ADJUSTMENT_LINES_INDEX_SCHEMA_REPAIR_ID,
+      ).toArray()[0];
+      if (!adjustmentLinesIndexRepairApplied) {
+        markInProgress();
+        storage.transactionSync(() => {
+          this.db.execScript(ADJUSTMENT_LINES_INDEX_SCHEMA_REPAIR);
+          sql.exec(
+            `INSERT OR REPLACE INTO _kcp_runtime_repairs (repair_id, applied_at) VALUES (?1, datetime('now'))`,
+            ADJUSTMENT_LINES_INDEX_SCHEMA_REPAIR_ID,
+          );
+        });
+      }
+
       // Bounded, resumable backfill for stock_items.name_key — see its own constants' comment
       // above for the 2026-08-28 incident this replaced. Guarded by a persisted repair marker
       // (cheap primary-key lookup) so a tenant that has already finished never pays even the
@@ -392,6 +463,64 @@ export class WorkspaceDO extends DurableObject<Env> {
           // Not exhausted: leave the repair marker unset so the next request picks up where this
           // one left off. markInProgress() above still clears normally below via
           // shouldClearMigrationHealth, since a partial backfill is forward progress, not a failure.
+        }
+      }
+
+      // Bounded, resumable backfill for stock_item_latest_purchase — see its own constants'
+      // comment above.
+      const purchaseSummaryBackfillDone = sql.exec(
+        `SELECT repair_id FROM _kcp_runtime_repairs WHERE repair_id = ?1`,
+        STOCK_ITEM_LATEST_PURCHASE_BACKFILL_ID,
+      ).toArray()[0];
+      if (!purchaseSummaryBackfillDone) {
+        const hasSummaryTable = (
+          sql.exec(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'stock_item_latest_purchase'`).toArray()
+        ).length > 0;
+        if (hasSummaryTable) {
+          markInProgress();
+          sql.exec(
+            `CREATE TABLE IF NOT EXISTS _kcp_runtime_backfill_cursors (
+               backfill_id TEXT PRIMARY KEY,
+               cursor TEXT NOT NULL
+             )`
+          );
+          let exhausted = false;
+          for (let batch = 0; batch < STOCK_ITEM_LATEST_PURCHASE_BACKFILL_MAX_BATCHES_PER_REQUEST; batch++) {
+            const cursorRow = sql.exec(
+              `SELECT cursor FROM _kcp_runtime_backfill_cursors WHERE backfill_id = ?1`,
+              STOCK_ITEM_LATEST_PURCHASE_BACKFILL_ID,
+            ).toArray()[0] as { cursor?: unknown } | undefined;
+            const cursor = String(cursorRow?.cursor ?? '');
+            const idRows = sql.exec(
+              `SELECT id FROM grv_lines WHERE id > ?1 ORDER BY id ASC LIMIT ?2`,
+              cursor,
+              STOCK_ITEM_LATEST_PURCHASE_BACKFILL_BATCH_ROWS,
+            ).toArray() as Array<{ id?: unknown }>;
+            if (idRows.length === 0) {
+              exhausted = true;
+              break;
+            }
+            const lastId = String(idRows[idRows.length - 1].id);
+            sql.exec(STOCK_ITEM_LATEST_PURCHASE_BACKFILL_UPSERT_SQL, cursor, lastId);
+            sql.exec(
+              `INSERT INTO _kcp_runtime_backfill_cursors (backfill_id, cursor) VALUES (?1, ?2)
+               ON CONFLICT(backfill_id) DO UPDATE SET cursor = excluded.cursor`,
+              STOCK_ITEM_LATEST_PURCHASE_BACKFILL_ID,
+              lastId,
+            );
+            if (idRows.length < STOCK_ITEM_LATEST_PURCHASE_BACKFILL_BATCH_ROWS) {
+              exhausted = true;
+              break;
+            }
+          }
+          if (exhausted) {
+            sql.exec(
+              `INSERT OR REPLACE INTO _kcp_runtime_repairs (repair_id, applied_at) VALUES (?1, datetime('now'))`,
+              STOCK_ITEM_LATEST_PURCHASE_BACKFILL_ID,
+            );
+          }
+          // Not exhausted: cursor is already persisted above, so the next request resumes from
+          // exactly where this one left off.
         }
       }
 
@@ -437,6 +566,16 @@ export class WorkspaceDO extends DurableObject<Env> {
     this.ensureMigrated();
     const workspaceId = request.headers.get('x-kcp-workspace') || '';
     const resource = request.headers.get('x-kcp-resource') || new URL(request.url).pathname;
+
+    // Diagnostic (2026-08-28): which workspace(s) actually account for the account's total SQL
+    // storage. `databaseSize` is a real, cheap, synchronous property of this DO's own SQLite
+    // storage — no query, no rows read — so this is safe to fan out to every workspace on demand.
+    // See /api/admin/workspace-storage in index.ts for the fan-out caller.
+    if (resource === 'admin-database-size') {
+      return new Response(JSON.stringify({ ok: true, databaseSizeBytes: this.state.storage.sql.databaseSize }), {
+        headers: { 'content-type': 'application/json' }
+      });
+    }
 
     let fwd: { uid?: string; email?: string; name?: string; systemRole?: 'admin' | 'queue'; adminRole?: string; permissions?: string[] } = {};
     try {

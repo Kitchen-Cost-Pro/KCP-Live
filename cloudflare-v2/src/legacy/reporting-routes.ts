@@ -1627,6 +1627,7 @@ export async function getStockControlReport(
     "grvs",
     "grv_lines",
     "stock_item_location_prices",
+    "stock_item_latest_purchase",
   ];
   const tableStatus: Record<string, boolean> = {};
   for (const table of requiredTables)
@@ -1661,8 +1662,29 @@ export async function getStockControlReport(
     filters,
     tableStatus,
   );
+  // Reads the maintained stock_item_latest_purchase summary (one row per stock_item+location,
+  // kept current at write time — see migration 41's comment in tenant-migrations.ts) instead of
+  // recomputing "most recent purchase" from full GRV history on every report load. Falls back to
+  // the old full-history window-function scan only for a tenant that hasn't been repaired/
+  // backfilled yet (see workspace-do.ts) — this keeps the report correct throughout that rollout
+  // window rather than showing blank purchase data, at the old (known, bounded-in-time) cost.
   const latestPurchaseCte =
-    tableStatus.grv_lines && tableStatus.grvs
+    tableStatus.stock_item_latest_purchase
+      ? `latest_purchase AS (
+        SELECT
+            lp.workspace_id,
+            lp.stock_item_id,
+            lp.location_id,
+            lp.supplier_id,
+            ${tableStatus.suppliers ? "s.name" : "''"} AS supplier_name,
+            lp.unit AS last_purchase_uom,
+            lp.unit_price AS last_purchase_cost,
+            lp.received_at AS last_purchased_date
+          FROM stock_item_latest_purchase lp
+          ${tableStatus.suppliers ? "LEFT JOIN suppliers s ON s.id = lp.supplier_id AND s.workspace_id = lp.workspace_id" : ""}
+         WHERE lp.workspace_id = ?1
+      )`
+      : tableStatus.grv_lines && tableStatus.grvs
       ? `latest_purchase AS (
         SELECT * FROM (
           SELECT
