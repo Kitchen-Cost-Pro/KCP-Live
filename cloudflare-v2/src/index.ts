@@ -301,6 +301,60 @@ async function dispatchCentral(request: Request, env: Env, url: URL): Promise<Re
     });
   }
 
+  // Follow-up to /api/admin/workspace-storage: which table(s) inside ONE workspace actually
+  // account for its storage. ?workspaceId=WS-... required.
+  if (request.method === 'GET' && url.pathname === '/api/admin/workspace-table-sizes') {
+    await requireAdmin(request, lenv);
+    const workspaceId = String(url.searchParams.get('workspaceId') || '').trim();
+    if (!workspaceId) return json(request, env, { ok: false, error: 'workspaceId is required' }, 400);
+    const result = await callWorkspaceDO(env, workspaceId, 'admin-table-sizes', { uid: 'admin', email: '', systemRole: 'admin' });
+    return json(request, env, result || { ok: false, error: 'Could not reach workspace' });
+  }
+
+  // Confirms whether a workspace's yoco_v2_reconciliation_findings dedup migration actually took
+  // effect, or whether it's a drifted tenant still on the pre-fix one-row-per-run-forever
+  // behavior. ?workspaceId=WS-... required.
+  if (request.method === 'GET' && url.pathname === '/api/admin/workspace-findings-dedup-check') {
+    await requireAdmin(request, lenv);
+    const workspaceId = String(url.searchParams.get('workspaceId') || '').trim();
+    if (!workspaceId) return json(request, env, { ok: false, error: 'workspaceId is required' }, 400);
+    const result = await callWorkspaceDO(env, workspaceId, 'admin-findings-dedup-check', { uid: 'admin', email: '', systemRole: 'admin' });
+    return json(request, env, result || { ok: false, error: 'Could not reach workspace' });
+  }
+
+  // Wipes yoco_v2_reconciliation_findings for one workspace — see admin-findings-purge's comment
+  // in workspace-do.ts for why this is safe. ?workspaceId=WS-... required.
+  if (request.method === 'POST' && url.pathname === '/api/admin/workspace-findings-purge') {
+    await requireAdmin(request, lenv);
+    const workspaceId = String(url.searchParams.get('workspaceId') || '').trim();
+    if (!workspaceId) return json(request, env, { ok: false, error: 'workspaceId is required' }, 400);
+    const result = await callWorkspaceDO(env, workspaceId, 'admin-findings-purge', { uid: 'admin', email: '', systemRole: 'admin' }, 'POST', {});
+    return json(request, env, result || { ok: false, error: 'Could not reach workspace' });
+  }
+
+  // Which specific gate is blocking SALE_STOCK from deducting when SALE_REPORTING works fine —
+  // calls the real getEffectRuntime() logic the live-sale path itself uses.
+  // ?workspaceId=WS-... required.
+  if (request.method === 'GET' && url.pathname === '/api/admin/workspace-effect-runtime-check') {
+    await requireAdmin(request, lenv);
+    const workspaceId = String(url.searchParams.get('workspaceId') || '').trim();
+    if (!workspaceId) return json(request, env, { ok: false, error: 'workspaceId is required' }, 400);
+    const result = await callWorkspaceDO(env, workspaceId, 'admin-effect-runtime-check', { uid: 'admin', email: '', systemRole: 'admin' });
+    return json(request, env, result || { ok: false, error: 'Could not reach workspace' });
+  }
+
+  // Follow-up to workspace-effect-runtime-check: shows recent proposed stock movements and their
+  // resolution_status/warning_code, to see whether items are legitimately unresolved (unmapped
+  // modifier/item, missing recipe, invalid UOM) rather than the gate being closed.
+  // ?workspaceId=WS-... required.
+  if (request.method === 'GET' && url.pathname === '/api/admin/workspace-recent-stock-proposals') {
+    await requireAdmin(request, lenv);
+    const workspaceId = String(url.searchParams.get('workspaceId') || '').trim();
+    if (!workspaceId) return json(request, env, { ok: false, error: 'workspaceId is required' }, 400);
+    const result = await callWorkspaceDO(env, workspaceId, 'admin-recent-stock-proposals', { uid: 'admin', email: '', systemRole: 'admin' });
+    return json(request, env, result || { ok: false, error: 'Could not reach workspace' });
+  }
+
   if (request.method === 'GET' && url.pathname === '/api/admin/org-sites') {
     return getAdminOrgSites(request, lenv, async (workspaceIds) => getAdminWorkspaceSettingsMap(env, workspaceIds));
   }

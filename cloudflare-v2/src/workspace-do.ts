@@ -12,6 +12,7 @@ import {
 import type { Env } from './types';
 import { dispatchWorkspaceRoute } from './legacy/index';
 import { dispatchYocoV2WorkspaceRoute } from './modules/yoco-engine-v2/route-dispatch';
+import { getEffectRuntime } from './modules/yoco-engine-v2/effect-gate';
 import {
   ADJUSTMENT_LINES_INDEX_SCHEMA_REPAIR,
   ADJUSTMENT_LINES_INDEX_SCHEMA_REPAIR_ID,
@@ -573,6 +574,129 @@ export class WorkspaceDO extends DurableObject<Env> {
     // See /api/admin/workspace-storage in index.ts for the fan-out caller.
     if (resource === 'admin-database-size') {
       return new Response(JSON.stringify({ ok: true, databaseSizeBytes: this.state.storage.sql.databaseSize }), {
+        headers: { 'content-type': 'application/json' }
+      });
+    }
+
+    // Diagnostic (2026-08-28): why isn't stock deducting for a workspace that IS live, when
+    // reporting works fine? Calls the EXACT SAME function live-sale.ts's applyStock() calls to
+    // decide whether to deduct — getEffectRuntime() — for both SALE_REPORTING and SALE_STOCK, so
+    // the answer reflects the real gate logic rather than a guess. Each result's `reason` field is
+    // a plain code (EFFECT_OWNERSHIP_NOT_V2, WORKSPACE_EFFECT_DISABLED, V2_CONSUMPTION_PAUSED,
+    // WORKSPACE_NOT_LIVE, ACTIVE) already built into that function for exactly this purpose.
+    if (resource === 'admin-effect-runtime-check') {
+      const integrationId = `yoco:${workspaceId}`;
+      const [saleReporting, saleStock] = await Promise.all([
+        getEffectRuntime(this.legacyEnv(), workspaceId, integrationId, 'SALE_REPORTING'),
+        getEffectRuntime(this.legacyEnv(), workspaceId, integrationId, 'SALE_STOCK'),
+      ]);
+      return new Response(JSON.stringify({ ok: true, saleReporting, saleStock }), {
+        headers: { 'content-type': 'application/json' }
+      });
+    }
+
+    // Diagnostic (2026-08-28): the effect gate is confirmed ACTIVE for SALE_STOCK on some
+    // workspaces (see admin-effect-runtime-check), yet stock still isn't deducting. The other
+    // known way applyStock() (live-sale.ts) legitimately deducts nothing: every proposed line for
+    // the sale was unresolved (unmapped modifier/item, missing recipe, invalid UOM) and skipped —
+    // the order still completes and posts to reporting, but there's nothing resolvable to deduct.
+    // Returns the most recent proposed stock movements with their resolution_status/warning_code
+    // so we can see directly whether that's what's happening, and for which items.
+    if (resource === 'admin-recent-stock-proposals') {
+      const sql = this.state.storage.sql;
+      const rows = sql.exec(
+        `SELECT source_order_id, source_line_id, menu_item_id, modifier_id, ingredient_item_id,
+                quantity, resolution_status, warning_code, created_at
+           FROM yoco_v2_proposed_stock_movements
+          ORDER BY created_at DESC LIMIT 25`
+      ).toArray();
+      const byStatus = sql.exec(
+        `SELECT resolution_status, warning_code, COUNT(*) AS n
+           FROM yoco_v2_proposed_stock_movements
+          GROUP BY resolution_status, warning_code
+          ORDER BY n DESC`
+      ).toArray();
+      return new Response(JSON.stringify({ ok: true, recentProposals: rows, statusBreakdown: byStatus }), {
+        headers: { 'content-type': 'application/json' }
+      });
+    }
+
+    // Diagnostic (2026-08-28): is yoco_v2_reconciliation_findings' dedup migration actually in
+    // effect for this workspace, or is it a drifted tenant (like WS-lellos-trattoria-bee300)
+    // silently still on the pre-fix behavior — one new row per finding per run, forever?
+    if (resource === 'admin-findings-dedup-check') {
+      const sql = this.state.storage.sql;
+      const schemaRow = sql.exec(`SELECT version FROM _kcp_schema WHERE id = 1`).toArray()[0] as { version?: unknown } | undefined;
+      const uniqueIndexExists = (sql.exec(
+        `SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'ux_yoco_v2_reconciliation_findings_entity'`
+      ).toArray() as unknown[]).length > 0;
+      const totalRow = sql.exec(`SELECT COUNT(*) AS n FROM yoco_v2_reconciliation_findings`).toArray()[0] as { n?: unknown };
+      const distinctRow = sql.exec(
+        `SELECT COUNT(*) AS n FROM (SELECT 1 FROM yoco_v2_reconciliation_findings GROUP BY workspace_id, integration_id, finding_type, source_entity_type, source_entity_id)`
+      ).toArray()[0] as { n?: unknown };
+      const maxOccurrenceRow = sql.exec(`SELECT MAX(occurrence_count) AS n FROM yoco_v2_reconciliation_findings`).toArray()[0] as { n?: unknown };
+      const topDuplicates = sql.exec(
+        `SELECT source_entity_id, finding_type, COUNT(*) AS n
+           FROM yoco_v2_reconciliation_findings
+          GROUP BY workspace_id, integration_id, finding_type, source_entity_type, source_entity_id
+         HAVING COUNT(*) > 1
+          ORDER BY n DESC LIMIT 5`
+      ).toArray();
+      return new Response(JSON.stringify({
+        ok: true,
+        schemaVersion: Number(schemaRow?.version || 0),
+        totalMigrationsLength: TENANT_MIGRATIONS.length,
+        uniqueIndexExists,
+        totalRows: Number(totalRow?.n || 0),
+        distinctEntityKeys: Number(distinctRow?.n || 0),
+        maxOccurrenceCount: Number(maxOccurrenceRow?.n || 0),
+        topDuplicateGroups: topDuplicates
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+
+    // Cleanup action (2026-08-28): wipe yoco_v2_reconciliation_findings for this workspace. Safe
+    // to run — this table only holds "reconciliation noticed a problem" records, not real
+    // transaction/order/stock data; a genuine still-open issue is simply rediscovered fresh on
+    // the next reconciliation run. Intended for a workspace confirmed (via
+    // admin-findings-dedup-check) to have accumulated a large backlog, e.g. from a drifted
+    // migration counter that missed the dedup fix. No WHERE clause needed: each Durable Object
+    // only holds this one workspace's own tables, so this can't reach any other workspace's data.
+    if (request.method === 'POST' && resource === 'admin-findings-purge') {
+      const sql = this.state.storage.sql;
+      const cursor = sql.exec(`DELETE FROM yoco_v2_reconciliation_findings`);
+      cursor.toArray(); // drain to populate rowsWritten
+      const deletedRows = Number((cursor as unknown as { rowsWritten?: number }).rowsWritten || 0);
+      return new Response(JSON.stringify({ ok: true, deletedRows }), {
+        headers: { 'content-type': 'application/json' }
+      });
+    }
+
+    // Diagnostic (2026-08-28): follow-up to admin-database-size — which TABLE(S) inside one
+    // workspace actually account for its storage. Row counts always work; per-table byte sizes
+    // use SQLite's `dbstat` virtual table where the runtime supports it, falling back to
+    // rows-only if it doesn't rather than failing the whole diagnostic.
+    if (resource === 'admin-table-sizes') {
+      const sql = this.state.storage.sql;
+      const tables = (sql.exec(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`).toArray() as Array<{ name?: unknown }>)
+        .map((row) => String(row.name || ''))
+        .filter(Boolean);
+      let byteSizes: Map<string, number> | null = null;
+      try {
+        const rows = sql.exec(`SELECT name, SUM(pgsize) AS bytes FROM dbstat GROUP BY name`).toArray() as Array<{ name?: unknown; bytes?: unknown }>;
+        byteSizes = new Map(rows.map((row) => [String(row.name || ''), Number(row.bytes || 0)]));
+      } catch {
+        byteSizes = null; // dbstat not available in this runtime — row counts only below.
+      }
+      const results = tables.map((table) => {
+        let rowCount = 0;
+        try {
+          rowCount = Number((sql.exec(`SELECT COUNT(*) AS n FROM "${table}"`).toArray()[0] as { n?: unknown })?.n || 0);
+        } catch {
+          rowCount = -1; // couldn't count this one — surfaced as -1 rather than silently omitted.
+        }
+        return { table, rowCount, bytes: byteSizes ? (byteSizes.get(table) ?? 0) : null };
+      }).sort((a, b) => (b.bytes ?? b.rowCount) - (a.bytes ?? a.rowCount));
+      return new Response(JSON.stringify({ ok: true, dbstatAvailable: byteSizes !== null, tables: results }), {
         headers: { 'content-type': 'application/json' }
       });
     }
