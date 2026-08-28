@@ -1,14 +1,46 @@
 import { DurableObject } from 'cloudflare:workers';
-import { FacadeDatabase } from './d1-facade';
+import { FacadeDatabase, isRetryableAddColumnError } from './d1-facade';
 import { TENANT_MIGRATIONS } from './tenant-migrations';
+import {
+  computeMigrationBackoffMs,
+  evaluateMigrationHealth,
+  hasExhaustedMigrationAttempts,
+  isResourceExhaustionReason,
+  shouldClearMigrationHealth,
+  type MigrationHealthState,
+} from './modules/migration-backoff';
 import type { Env } from './types';
 import { dispatchWorkspaceRoute } from './legacy/index';
 import { dispatchYocoV2WorkspaceRoute } from './modules/yoco-engine-v2/route-dispatch';
 import {
+  HOT_PATH_INDEX_SCHEMA_REPAIR,
+  HOT_PATH_INDEX_SCHEMA_REPAIR_ID,
   YOCO_V2_RUNTIME_SCHEMA_REPAIR,
   YOCO_V2_RUNTIME_SCHEMA_REPAIR_ID,
+  YOCO_V2_VAT_SNAPSHOT_SCHEMA_REPAIR,
+  YOCO_V2_VAT_SNAPSHOT_SCHEMA_REPAIR_ID,
 } from './modules/yoco-engine-v2/schema-repair';
 import type { Env as LegacyEnv, AuthContext as LegacyAuth } from './legacy/types';
+
+// Backfill for stock_items.name_key (see migration 38's own comment in tenant-migrations.ts for
+// the 2026-08-28 incident this replaced: one unconditional UPDATE across the whole table, run
+// unconditionally in the migration itself, could exceed a Durable Object's per-request CPU limit
+// on any tenant with a non-trivial stock_items table and retry-loop for hours. Bounded batches
+// below cap the work any single request can do; a tenant with more pending rows than one
+// request's budget simply keeps making progress on its next request instead of failing.
+const STOCK_ITEM_NAME_KEY_BACKFILL_ID = 'stock_items_name_key_backfill_v1';
+const STOCK_ITEM_NAME_KEY_BACKFILL_BATCH_ROWS = 2000;
+const STOCK_ITEM_NAME_KEY_BACKFILL_MAX_BATCHES_PER_REQUEST = 3;
+const STOCK_ITEM_NAME_KEY_BACKFILL_SQL = `
+  UPDATE stock_items
+     SET name_key = trim(lower(replace(replace(replace(replace(
+           replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(name,
+             char(9), ' '), char(10), ' '), char(13), ' '),
+             char(160), ' '), char(8194), ' '), char(8195), ' '), char(8201), ' '), char(8239), ' '),
+             char(8203), ''), char(65279), ''),
+             '  ', ' '), '  ', ' '), '  ', ' '), '  ', ' ')))
+   WHERE rowid IN (SELECT rowid FROM stock_items WHERE name_key IS NULL LIMIT ?1)
+`;
 
 /**
  * One WorkspaceDO instance per workspace (addressed by `idFromName(workspaceId)`), each owning its
@@ -22,6 +54,30 @@ import type { Env as LegacyEnv, AuthContext as LegacyAuth } from './legacy/types
 export class WorkspaceDO extends DurableObject<Env> {
   private readonly db: FacadeDatabase;
   private readonly state: DurableObjectState;
+
+  /**
+   * In-memory migration circuit breaker. These live on the Durable Object INSTANCE, which stays
+   * resident across requests, so they work without touching storage at all.
+   *
+   * This exists because the persisted breaker (_kcp_migration_health) has a fatal dependency: it
+   * can only stop a retry loop by WRITING the backoff row. When an account is out of storage quota
+   * that write fails too — and recordFailure() deliberately swallows that failure — so nothing is
+   * recorded, the next request sees a clean health row, and it attempts the whole migration again.
+   * Every request then re-runs a migration that reads a large part of the tenant's data before
+   * dying. That is a self-sustaining read amplifier: the busier the workspace, the faster it burns
+   * the very quota it is failing on, and it cannot recover on its own.
+   *
+   * Live incident 2026-08-27: ~15,000,000 rows read in under 40 minutes on ONE workspace, while a
+   * second account running the identical code stayed under 100,000 — the difference was not the
+   * code but that this tenant had a migration failing. Routine traffic cannot produce that rate;
+   * only a retry loop can.
+   *
+   * `migrationSettledInMemory` additionally means a fully-migrated tenant runs NO migration SQL at
+   * all on subsequent requests in the same isolate, instead of the ~10 statements it used to pay on
+   * every single request.
+   */
+  private migrationSettledInMemory = false;
+  private migrationSuspendedUntilMs = 0;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -64,6 +120,15 @@ export class WorkspaceDO extends DurableObject<Env> {
   }
 
   private migrate(storage: DurableObjectStorage): void {
+    // Emergency kill switch (see WORKSPACE_MIGRATIONS_DISABLED's own comment in types.ts) — checked
+    // before any SQL runs, including the bootstrap CREATE TABLE calls, so a flagged deploy costs
+    // zero additional storage reads/writes no matter how large a tenant's pending backlog is.
+    if (String(this.env.WORKSPACE_MIGRATIONS_DISABLED || '').toLowerCase() === 'true') return;
+    // In-memory breaker, checked BEFORE any SQL. See the field declarations for why this cannot be
+    // left to the persisted _kcp_migration_health row alone: that row can only apply the brakes by
+    // being written, and the exact situation it needs to stop is the one where writes fail.
+    if (this.migrationSettledInMemory) return;
+    if (Date.now() < this.migrationSuspendedUntilMs) return;
     // Everything in here — including the two bootstrap CREATE TABLE IF NOT EXISTS calls and the
     // health-check SELECT that used to sit outside this boundary — is now inside one outer
     // try/catch. On the Durable Objects free tier, a write-quota rejection can be thrown by ANY
@@ -72,9 +137,44 @@ export class WorkspaceDO extends DurableObject<Env> {
     // calls and the health SELECT were unprotected, so a quota-exhausted workspace couldn't even
     // finish constructing its Durable Object: every request to it failed outright, not just
     // writes. Nothing here may ever propagate out of this function.
-    let health: { consecutive_failures: number; next_retry_at: string | null } | undefined;
+    let health: MigrationHealthState | undefined;
+    const sql = storage.sql;
+    const recordFailure = (reason: string, forceLongBackoff: boolean): void => {
+      console.error('[WorkspaceDO] migration attempt failed; will back off and keep serving on the existing schema', reason);
+      const failures = Number(health?.consecutive_failures || 0) + 1;
+      // Apply the brake IN MEMORY first, before attempting to persist anything. The persisted write
+      // below is best-effort and is exactly what fails when storage quota is exhausted; if the brake
+      // depended on it, every subsequent request would re-attempt this same migration and re-read
+      // whatever it reads before dying. Setting it here means the loop stops even when nothing at
+      // all can be written.
+      this.migrationSuspendedUntilMs = Date.now() + computeMigrationBackoffMs(
+        failures,
+        forceLongBackoff || isResourceExhaustionReason(reason),
+      );
+      // A quota/resource-exhaustion error means "wait for the quota to reset," not "try again in a
+      // few seconds" — treating it like an ordinary transient error is exactly what turned one
+      // failing migration into a runaway retry storm. Back off much longer for these specifically.
+      // A CPU-limit kill (forceLongBackoff, detected via the in-progress marker below rather than a
+      // catchable error — see its own comment for why) gets the same long treatment: an attempt
+      // that got killed mid-flight is by definition too expensive to just retry immediately.
+      const isResourceExhaustion = forceLongBackoff || isResourceExhaustionReason(reason);
+      const backoffMs = computeMigrationBackoffMs(failures, isResourceExhaustion);
+      try {
+        sql.exec(
+          `INSERT INTO _kcp_migration_health (id, consecutive_failures, next_retry_at, in_progress_since) VALUES (1, ?1, ?2, NULL)
+           ON CONFLICT(id) DO UPDATE SET consecutive_failures = excluded.consecutive_failures, next_retry_at = excluded.next_retry_at, in_progress_since = NULL`,
+          failures,
+          new Date(Date.now() + backoffMs).toISOString(),
+        );
+      } catch {
+        // Even the bookkeeping write failed (storage is completely out of quota right now) — there
+        // is nothing further we can safely persist. The next request will simply attempt the
+        // migration again and hit this same failure path, which is the best available fallback
+        // when writes are fully exhausted; it will start succeeding again as soon as any write
+        // capacity returns.
+      }
+    };
     try {
-      const sql = storage.sql;
       sql.exec(
         `CREATE TABLE IF NOT EXISTS _kcp_schema (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL)`
       );
@@ -87,24 +187,95 @@ export class WorkspaceDO extends DurableObject<Env> {
         `CREATE TABLE IF NOT EXISTS _kcp_migration_health (
            id INTEGER PRIMARY KEY CHECK (id = 1),
            consecutive_failures INTEGER NOT NULL DEFAULT 0,
-           next_retry_at TEXT
+           next_retry_at TEXT,
+           in_progress_since TEXT
          )`
       );
+      // in_progress_since didn't exist before 2026-08-26 — add it for tenants whose
+      // _kcp_migration_health table predates this fix. Checked via table_info rather than "just run
+      // the ALTER and swallow the duplicate-column error", because migrate() runs on EVERY request:
+      // the swallow-it form threw an exception on every request for the entire life of every
+      // already-migrated tenant, which is pure waste on the hot path.
+      const healthColumns = new Set(
+        (sql.exec(`PRAGMA table_info(_kcp_migration_health)`).toArray() as Array<{ name?: unknown }>)
+          .map((column) => String(column?.name ?? '')),
+      );
+      if (!healthColumns.has('in_progress_since')) {
+        try {
+          sql.exec(`ALTER TABLE _kcp_migration_health ADD COLUMN in_progress_since TEXT`);
+        } catch (cause) {
+          if (!isRetryableAddColumnError('ALTER TABLE _kcp_migration_health ADD COLUMN in_progress_since TEXT', cause)) throw cause;
+        }
+      }
+      // Guarantee the id=1 row exists before markInProgress() (below) ever runs — it only UPDATEs,
+      // so on a brand-new tenant with no row yet it would silently no-op and the crash-loop guard
+      // this whole mechanism exists for would never actually engage on that tenant's first attempt.
+      sql.exec(`INSERT OR IGNORE INTO _kcp_migration_health (id, consecutive_failures, next_retry_at, in_progress_since) VALUES (1, 0, NULL, NULL)`);
       health = sql.exec(
-        `SELECT consecutive_failures, next_retry_at FROM _kcp_migration_health WHERE id = 1`
-      ).toArray()[0] as { consecutive_failures: number; next_retry_at: string | null } | undefined;
-      const nextRetryAtMs = health?.next_retry_at ? Date.parse(health.next_retry_at) : 0;
-      if (nextRetryAtMs && Date.now() < nextRetryAtMs) {
+        `SELECT consecutive_failures, next_retry_at, in_progress_since FROM _kcp_migration_health WHERE id = 1`
+      ).toArray()[0] as unknown as MigrationHealthState | undefined;
+
+      // See evaluateMigrationHealth's own doc comment for the full reasoning — in short:
+      // in_progress_since is written right before each expensive block below starts and cleared
+      // right after it finishes, so finding it still set on a LATER invocation is proof the
+      // previous attempt was killed mid-flight (a Durable Object CPU-limit kill isn't a catchable
+      // JS exception, so the catch block never ran to record a normal failure). That's exactly the
+      // 2026-08-26 crash-loop shape; treating it as a failure here makes it structurally impossible
+      // to repeat, since at most one attempt can ever run before backoff kicks in.
+      // Hard stop before anything else is considered. Backoff only slows a doomed migration down;
+      // this ends it. Deliberately checked against the PERSISTED failure count, because the failure
+      // mode that caused the 2026-08-27 outage — a CPU-limit kill — destroys the isolate and every
+      // in-memory guard with it, so only something on disk can survive to stop the next isolate.
+      if (hasExhaustedMigrationAttempts(health)) {
+        this.migrationSettledInMemory = true; // stop re-reading this row on every request too
+        console.error(
+          `[WorkspaceDO] migration halted after ${health?.consecutive_failures} consecutive failures — ` +
+            'automatic retrying is DISABLED for this workspace. It keeps serving on its existing ' +
+            'schema. Investigate via GET /api/admin/workspaces/<id>/migration-health, then resume ' +
+            'deliberately via POST /api/admin/workspaces/<id>/migration-retry.',
+        );
+        return;
+      }
+
+      const decision = evaluateMigrationHealth(health, Date.now());
+      if (decision.action === 'skip_backoff_active') {
         // Still inside the backoff window from a prior failure — skip this attempt entirely and
         // serve the request on the existing schema rather than re-failing the same write again.
         return;
       }
+      if (decision.action === 'skip_interrupted_attempt') {
+        recordFailure(
+          `Previous migration attempt (started ${decision.startedAt}) was interrupted and never completed — likely a Durable Object CPU/resource limit kill.`,
+          true,
+        );
+        return;
+      }
+      let markedInProgress = false;
+      const markInProgress = () => {
+        markedInProgress = true;
+        return sql.exec(
+          `UPDATE _kcp_migration_health SET in_progress_since = ?1 WHERE id = 1`,
+          new Date().toISOString(),
+        );
+      };
 
       const row = sql.exec(`SELECT version FROM _kcp_schema WHERE id = 1`).toArray()[0] as
         | { version: number }
         | undefined;
       let applied = row ? Number(row.version) : 0;
-      for (let i = applied; i < TENANT_MIGRATIONS.length; i += 1) {
+      // Apply AT MOST ONE pending migration per invocation — never the whole backlog in one shot.
+      // A dormant tenant whose DO hasn't been reinstantiated in a while can accumulate a long run
+      // of pending migrations; applying all of them in a single request/transaction means the cost
+      // (rows read, CPU time) of an entire backlog lands on whichever request happens to wake that
+      // DO. Capping to one per invocation bounds the worst case to a single migration's cost — the
+      // remaining backlog is picked up on the tenant's next request instead, each one protected by
+      // the same backoff/failure tracking as any other attempt. Production incident, 2026-08-27: a
+      // tenant catching up on 20+ pending migrations at once, several scanning a large accumulated
+      // yoco_orders/yoco_order_lines history, read millions of rows in one call and exhausted the
+      // account's entire daily Durable Objects free-tier row-read quota within hours.
+      if (applied < TENANT_MIGRATIONS.length) {
+        markInProgress();
+        const i = applied;
         storage.transactionSync(() => {
           this.db.execScript(TENANT_MIGRATIONS[i]);
           applied = i + 1;
@@ -134,6 +305,7 @@ export class WorkspaceDO extends DurableObject<Env> {
         YOCO_V2_RUNTIME_SCHEMA_REPAIR_ID,
       ).toArray()[0];
       if (!repairApplied) {
+        markInProgress();
         storage.transactionSync(() => {
           this.db.execScript(YOCO_V2_RUNTIME_SCHEMA_REPAIR);
           sql.exec(
@@ -144,37 +316,109 @@ export class WorkspaceDO extends DurableObject<Env> {
         });
       }
 
-      // Success — clear any prior backoff state so a future genuine failure starts counting fresh.
-      if (health && (health.consecutive_failures || health.next_retry_at)) {
+      // Kept as a SEPARATE, small, independently-tracked repair from the block above rather than
+      // appended to it — applying it must not require re-running that entire historical blob
+      // (foundation through effect-gate) again. That combination previously exceeded a Durable
+      // Object's CPU time limit in production for a tenant with several days of accumulated data,
+      // putting it into a repeating crash loop. See YOCO_V2_VAT_SNAPSHOT_SCHEMA_REPAIR's own
+      // comment for the incident this fixes.
+      const vatSnapshotRepairApplied = sql.exec(
+        `SELECT repair_id FROM _kcp_runtime_repairs WHERE repair_id = ?1`,
+        YOCO_V2_VAT_SNAPSHOT_SCHEMA_REPAIR_ID,
+      ).toArray()[0];
+      if (!vatSnapshotRepairApplied) {
+        markInProgress();
+        storage.transactionSync(() => {
+          this.db.execScript(YOCO_V2_VAT_SNAPSHOT_SCHEMA_REPAIR);
+          sql.exec(
+            `INSERT OR REPLACE INTO _kcp_runtime_repairs (repair_id, applied_at)
+             VALUES (?1, datetime('now'))`,
+            YOCO_V2_VAT_SNAPSHOT_SCHEMA_REPAIR_ID,
+          );
+        });
+      }
+
+      // Hot-path indexes + stock_items.name_key. Applied as a repair, NOT left to migrations 37-39,
+      // because a tenant whose _kcp_schema.version drifted ahead of TENANT_MIGRATIONS.length skips
+      // the indexed loop entirely and can never receive a newly appended migration — the live
+      // WS-lellos-trattoria-bee300 workspace is on version 44 against 40 migrations. Without this,
+      // saveStockItem's `WHERE name_key = ?` would fail with "no such column" on every save there.
+      // Must run BEFORE the name_key backfill below, which no-ops while the column is absent.
+      const hotPathRepairApplied = sql.exec(
+        `SELECT repair_id FROM _kcp_runtime_repairs WHERE repair_id = ?1`,
+        HOT_PATH_INDEX_SCHEMA_REPAIR_ID,
+      ).toArray()[0];
+      if (!hotPathRepairApplied) {
+        markInProgress();
+        storage.transactionSync(() => {
+          this.db.execScript(HOT_PATH_INDEX_SCHEMA_REPAIR);
+          sql.exec(
+            `INSERT OR REPLACE INTO _kcp_runtime_repairs (repair_id, applied_at) VALUES (?1, datetime('now'))`,
+            HOT_PATH_INDEX_SCHEMA_REPAIR_ID,
+          );
+        });
+      }
+
+      // Bounded, resumable backfill for stock_items.name_key — see its own constants' comment
+      // above for the 2026-08-28 incident this replaced. Guarded by a persisted repair marker
+      // (cheap primary-key lookup) so a tenant that has already finished never pays even the
+      // "any rows left?" check again.
+      const nameKeyBackfillDone = sql.exec(
+        `SELECT repair_id FROM _kcp_runtime_repairs WHERE repair_id = ?1`,
+        STOCK_ITEM_NAME_KEY_BACKFILL_ID,
+      ).toArray()[0];
+      if (!nameKeyBackfillDone) {
+        const hasNameKeyColumn = (
+          sql.exec(`PRAGMA table_info(stock_items)`).toArray() as Array<{ name?: unknown }>
+        ).some((column) => String(column?.name ?? '') === 'name_key');
+        if (hasNameKeyColumn) {
+          markInProgress();
+          let exhausted = false;
+          for (let batch = 0; batch < STOCK_ITEM_NAME_KEY_BACKFILL_MAX_BATCHES_PER_REQUEST; batch++) {
+            const cursor = sql.exec(STOCK_ITEM_NAME_KEY_BACKFILL_SQL, STOCK_ITEM_NAME_KEY_BACKFILL_BATCH_ROWS);
+            cursor.toArray(); // drain to populate rowsWritten, same requirement as d1-facade.ts
+            const updated = Number((cursor as unknown as { rowsWritten?: number }).rowsWritten || 0);
+            if (updated < STOCK_ITEM_NAME_KEY_BACKFILL_BATCH_ROWS) {
+              exhausted = true;
+              break;
+            }
+          }
+          if (exhausted) {
+            sql.exec(
+              `INSERT OR REPLACE INTO _kcp_runtime_repairs (repair_id, applied_at) VALUES (?1, datetime('now'))`,
+              STOCK_ITEM_NAME_KEY_BACKFILL_ID,
+            );
+          }
+          // Not exhausted: leave the repair marker unset so the next request picks up where this
+          // one left off. markInProgress() above still clears normally below via
+          // shouldClearMigrationHealth, since a partial backfill is forward progress, not a failure.
+        }
+      }
+
+      // Success — clear any prior backoff state (and the in-progress marker) so a future genuine
+      // failure starts counting fresh. Conditional, because migrate() runs on EVERY request: issued
+      // unconditionally this wrote one row per request forever, on a tenant with nothing left to
+      // migrate. Measured at 20 requests per page load that is 20 wasted writes per page — 2% of
+      // the entire 100,000/day Durable Objects write allowance per 100 page loads, spent on
+      // rewriting a row to the values it already held. Only write when something actually changed:
+      // either this pass marked an attempt in progress, or the persisted row is genuinely dirty.
+      if (shouldClearMigrationHealth(health, markedInProgress)) {
         sql.exec(
-          `UPDATE _kcp_migration_health SET consecutive_failures = 0, next_retry_at = NULL WHERE id = 1`
+          `UPDATE _kcp_migration_health SET consecutive_failures = 0, next_retry_at = NULL, in_progress_since = NULL WHERE id = 1`
         );
+      }
+
+      // Reaching here means this pass completed without throwing. If there is also nothing left
+      // pending, this isolate never needs to touch migration storage again: later requests return
+      // at the in-memory check above instead of re-running the ~10 bookkeeping statements. Only set
+      // it when the backlog is genuinely exhausted — migrate() applies at most ONE migration per
+      // invocation, so a tenant catching up is still mid-chain here and must come back next request.
+      if (applied >= TENANT_MIGRATIONS.length) {
+        this.migrationSettledInMemory = true;
       }
     } catch (cause) {
-      console.error('[WorkspaceDO] migration attempt failed; will back off and keep serving on the existing schema', cause);
-      const failures = Number(health?.consecutive_failures || 0) + 1;
       const message = String((cause as Error)?.message || cause || '');
-      // A quota/resource-exhaustion error means "wait for the quota to reset," not "try again in a
-      // few seconds" — treating it like an ordinary transient error is exactly what turned one
-      // failing migration into a runaway retry storm. Back off much longer for these specifically.
-      const isResourceExhaustion = /exceeded allowed|quota|free tier|rate limit/i.test(message);
-      const backoffMs = isResourceExhaustion
-        ? Math.min(60 * 60 * 1000, 5 * 60 * 1000 * failures) // 5, 10, 15... min, capped at 1 hour
-        : Math.min(5 * 60 * 1000, 15 * 1000 * failures); // 15, 30, 45... sec, capped at 5 min
-      try {
-        storage.sql.exec(
-          `INSERT INTO _kcp_migration_health (id, consecutive_failures, next_retry_at) VALUES (1, ?1, ?2)
-           ON CONFLICT(id) DO UPDATE SET consecutive_failures = excluded.consecutive_failures, next_retry_at = excluded.next_retry_at`,
-          failures,
-          new Date(Date.now() + backoffMs).toISOString(),
-        );
-      } catch {
-        // Even the bookkeeping write failed (storage is completely out of quota right now) — there
-        // is nothing further we can safely persist. The next request will simply attempt the
-        // migration again and hit this same catch block, which is the best available fallback
-        // when writes are fully exhausted; it will start succeeding again as soon as any write
-        // capacity returns.
-      }
+      recordFailure(message, false);
       // Deliberately do not re-throw: a pending/failed migration must never prevent the workspace
       // from serving requests that don't depend on the new schema.
     }

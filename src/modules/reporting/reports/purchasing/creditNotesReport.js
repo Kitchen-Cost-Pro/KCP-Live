@@ -3,6 +3,7 @@ import { groupBy, sumBy, text, toArray } from "../../engine/grouping.js";
 import { fetchCreditNoteReportRows } from "../../api/reportingApi.js";
 import {
   firstText,
+  hasValue,
   latestText,
   mapColumns,
   rememberPayload,
@@ -276,6 +277,14 @@ export const creditNotesReport = {
     addCountWarning(
       rows,
       warnings,
+      "credit-note-missing-vat",
+      "warning",
+      "credit note line(s) have a credit value but no VAT figure — VAT was reported as R0 rather than calculated.",
+      (row) => !row.hasVat,
+    );
+    addCountWarning(
+      rows,
+      warnings,
       "credit-note-missing-item",
       "critical",
       "credit note line(s) have no item.",
@@ -348,6 +357,7 @@ function normalizeLine(row = {}, index = 0) {
     row.lineCreditExVat !== undefined
       ? safeNumber(row.lineCreditExVat)
       : roundMoney(qtyCredited * unitCostExVat);
+  const vatSupplied = hasValue(row.vat) || hasValue(row.lineVat) || hasValue(row.line_vat);
   const vat = safeNumber(row.vat ?? row.lineVat ?? row.line_vat);
   const lineCreditInclVat =
     row.lineCreditInclVat !== undefined
@@ -355,6 +365,10 @@ function normalizeLine(row = {}, index = 0) {
       : roundMoney(lineCreditExVat + vat);
   return {
     ...row,
+    // A credit-note line with a real ex-VAT value but no VAT field at all is a data gap, not a
+    // genuine zero — flagged by the `credit-note-missing-vat` validator below instead of silently
+    // understating `lineCreditInclVat`/workspace totals with no indication anything is wrong.
+    hasVat: vatSupplied || lineCreditExVat <= 0,
     id:
       text(row.id) ||
       `credit-note-line:${text(row.sourceId || row.creditNoteId)}:${index}`,

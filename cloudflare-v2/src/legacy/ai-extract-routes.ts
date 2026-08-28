@@ -1,6 +1,7 @@
 import { Env } from './types';
 import { AuthContext } from './types';
 import { error, json } from './http';
+import { checkRateLimit } from './rate-limit';
 
 const text = (v: unknown): string => String(v ?? '').trim();
 
@@ -188,6 +189,10 @@ export async function postWorkspaceAiExtract(
   if (!env.GEMINI_API_KEY) {
     return error(request, env, 503, 'AI onboarding is not configured. Please add a GEMINI_API_KEY to the worker secrets.');
   }
+  // Third-party API cost/quota risk, same class of problem as the Cloudflare quota issue this
+  // whole rate-limit pass is about, different vendor. No limit existed before this.
+  const aiLimited = await checkRateLimit(env.CENTRAL_DB, `ai-extract:${workspaceId}`, 20, 3600);
+  if (aiLimited.blocked) return error(request, env, 429, 'AI onboarding has reached its hourly usage limit for this workspace. Please try again later.');
 
   const settingsRow = await env.DB.prepare(
     `SELECT raw_json FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`

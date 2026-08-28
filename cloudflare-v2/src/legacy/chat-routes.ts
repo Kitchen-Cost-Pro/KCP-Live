@@ -1,6 +1,7 @@
 import { Env } from './types';
 import { AuthContext } from './types';
 import { error, json } from './http';
+import { checkRateLimit } from './rate-limit';
 const text = (v: unknown): string => String(v ?? '').trim();
 const numberValue = (v: unknown, fallback: number): number => { const n = Number(v); return Number.isFinite(n) ? n : fallback; };
 
@@ -677,6 +678,10 @@ export async function postWorkspaceChat(
   if (!env.GROQ_API_KEY) {
     return error(request, env, 503, 'AI assistant is not configured. Please add a GROQ_API_KEY to the worker secrets.');
   }
+  // Third-party API cost/quota risk, same class of problem as the Cloudflare quota issue this
+  // whole rate-limit pass is about, different vendor. No limit existed before this.
+  const aiLimited = await checkRateLimit(env.CENTRAL_DB, `ai-chat:${workspaceId}`, 20, 3600);
+  if (aiLimited.blocked) return error(request, env, 429, 'The KCP Assistant has reached its hourly usage limit for this workspace. Please try again later.');
 
   const settingsRow = await env.DB.prepare(
     `SELECT raw_json FROM workspace_settings WHERE workspace_id = ?1 LIMIT 1`

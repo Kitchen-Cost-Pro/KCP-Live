@@ -15,7 +15,10 @@ mkdirSync(adminDirectory, { recursive: true });
 copyFileSync(adminSource, adminTarget);
 
 // The admin HTML uses a relative favicon URL, so retain it under /admin/ too.
-const faviconSource = join(root, 'dist', 'admin-favicon.svg');
+// Dev builds (--mode dev) get a distinct icon so /admin is visually distinguishable from
+// production while testing both side by side.
+const isDevBuild = process.argv.includes('--mode') && process.argv[process.argv.indexOf('--mode') + 1] === 'dev';
+const faviconSource = join(root, 'dist', isDevBuild ? 'admin-favicon-dev.svg' : 'admin-favicon.svg');
 if (existsSync(faviconSource)) {
   copyFileSync(faviconSource, join(adminDirectory, 'admin-favicon.svg'));
 }

@@ -111,6 +111,19 @@ function stockItemUomFactor(item: Row, requestedUnit: string): number | null {
   const requested = normalize(requestedUnit || item.unit);
   if (!requested || requested === baseUnit) return 1;
   const raw = parseJson(item.raw_json);
+  // `uomConfigurations` (customUom/custom_uom + ratio) is the schema the stock-item editor
+  // frontend actually writes (see inventory/recipe-expansion.ts resolveUomRatio and
+  // effect-proposals.ts resolveCustomUomFactor) — check it first, or a legitimate custom UOM
+  // rule fails this validation and cannot be saved even though it deducts correctly at sale
+  // time. The other collections below were never populated by any writer we found; kept only
+  // as a defensive fallback for legacy/manually imported data.
+  const uomConfigurations = Array.isArray(raw.uomConfigurations) ? raw.uomConfigurations : [];
+  for (const entryValue of uomConfigurations) {
+    const entry = objectValue(entryValue);
+    if (normalize(entry.customUom || entry.custom_uom) !== requested) continue;
+    const factor = numberValue(entry.ratio, 0);
+    return factor > 0 ? factor : null;
+  }
   for (const collection of [raw.uoms, raw.customUoms, raw.custom_uoms, raw.units, raw.alternateUoms, raw.alternate_uoms]) {
     if (!Array.isArray(collection)) continue;
     for (const entryValue of collection) {

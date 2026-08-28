@@ -294,17 +294,22 @@ export function paymentTotals(rows = [], includeAverage = false) {
 }
 
 export function stockMovementTotals(rows = []) {
+  // Sale-level fields (gross/vat/net sales, qty sold) must be summed ONCE PER SALE LINE, not once
+  // per row: recipe_line_detail/transaction_detail carry one row per ingredient, and every
+  // ingredient row for the same sale line repeats the SAME sale-level gross/vat/net/qty. Using a
+  // plain per-row sum here (as this function used to) triple-counted a 3-ingredient sale's totals.
+  // Stock-value/cost fields are genuinely additive per ingredient row, so they still use sumBy.
   const recipeStockValueUsed = roundMoney(sumBy(rows, (row) => row.recipeStockValueUsed ?? row.recipeStockCost ?? (row.sourceType === 'Modifier Usage' ? 0 : row.stockValueUsed)));
   const modifierStockValueUsed = roundMoney(sumBy(rows, (row) => row.modifierStockValueUsed ?? row.modifierStockCost ?? (row.sourceType === 'Modifier Usage' ? row.stockValueUsed : 0)));
   const totalStockValueUsed = roundMoney(sumBy(rows, (row) => row.totalStockValueUsed ?? row.totalStockCost ?? row.stockValueUsed)) || addMoney(recipeStockValueUsed, modifierStockValueUsed);
-  const netSales = roundMoney(sumBy(rows, (row) => row.netSales ?? row.netSaleAmount));
+  const netSales = sumDistinctSales(rows, (row) => row.netSales ?? row.netSaleAmount);
   const grossProfit = calculateGrossProfit(netSales, totalStockValueUsed);
   return {
     label: 'Totals',
     salesCount: sumBy(rows, (row) => row.salesCount ?? row.saleCount ?? 1),
-    qtySold: roundMoney(sumBy(rows, (row) => row.qtySold)),
-    grossSales: roundMoney(sumBy(rows, (row) => row.grossSales ?? row.grossSaleAmount)),
-    vat: roundMoney(sumBy(rows, (row) => row.vat ?? row.vatAmount)),
+    qtySold: sumDistinctSales(rows, (row) => row.qtySold),
+    grossSales: sumDistinctSales(rows, (row) => row.grossSales ?? row.grossSaleAmount),
+    vat: sumDistinctSales(rows, (row) => row.vat ?? row.vatAmount),
     netSales,
     qtyUsed: roundMoney(sumBy(rows, (row) => row.qtyUsed)),
     recipeStockValueUsed,
@@ -518,15 +523,23 @@ function toUsageTransactionDetailRow(row = {}) {
   };
 }
 
-function sumDistinctSales(rows = [], key = '') {
+function sumDistinctSales(rows = [], getValue = '') {
   const seen = new Set();
   let total = 0;
+  const scopeSuffix = typeof getValue === 'function' ? getValue.name || 'fn' : getValue;
   for (const row of rows) {
-    const saleKey = text(row.saleLineId || row.saleId || row.receiptNumber || row.sourceId || row.id);
-    const scoped = `${saleKey}:${key}`;
+    const primaryKey = text(row.saleLineId || row.saleId || row.receiptNumber || row.sourceId || row.id);
+    // A row with none of the usual identifying fields is a genuine data gap, but treating it as
+    // "always unique" (the old behavior) reproduces the exact triple-counting bug this function
+    // exists to prevent whenever several such rows share one underlying sale. Fall back to a
+    // composite of fields a single real sale line would consistently repeat across its ingredient
+    // rows — two genuinely different sales matching on all of these to the cent is vanishingly
+    // unlikely, so this is a meaningfully better default than never deduping at all.
+    const saleKey = primaryKey || [row.saleDate, row.saleTime, row.menuItemId || row.menuItemName, row.grossSaleAmount, row.vatAmount, row.netSaleAmount].map(text).join('|');
+    const scoped = `${saleKey}:${scopeSuffix}`;
     if (saleKey && seen.has(scoped)) continue;
     seen.add(scoped);
-    total += safeNumber(row[key]);
+    total += safeNumber(typeof getValue === 'function' ? getValue(row) : row[getValue]);
   }
   return roundMoney(total);
 }

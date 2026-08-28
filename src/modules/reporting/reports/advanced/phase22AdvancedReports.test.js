@@ -62,6 +62,10 @@ test('Stock-Out Forecast uses location stock and real ledger usage to produce fo
     getDetailedActivityLedger: async () => response(usageRows)
   } };
 
+  // `endDate` scopes the USAGE window (which historical usage rate feeds the forecast) but must
+  // NOT be used to anchor the stock-out projection itself — `currentStock` is always today's live
+  // balance (there is no point-in-time stock query), so the forecast date is always computed
+  // forward from today, not from `endDate`.
   const model = await buildStockOutForecastModel({ workspaceId: 'WS-1', filters: { endDate: '2026-07-10', lookbackPeriod: 30 }, services });
   assert.equal(model.filteredRows.length, 1);
   const row = model.filteredRows[0];
@@ -70,7 +74,8 @@ test('Stock-Out Forecast uses location stock and real ledger usage to produce fo
   assert.equal(row.usageLast30Days, 60);
   assert.equal(row.weightedDailyUsage, 2);
   assert.equal(row.daysUntilStockOut, 5);
-  assert.equal(row.forecastStockOutDate, '2026-07-15');
+  assert.equal(row.forecastStockOutDate, calculateForecastStockOutDate(model.asOfDate, 5));
+  assert.notEqual(model.asOfDate, '2026-07-10', 'asOfDate must be anchored to today, not the historical usage-window endDate');
   assert.equal(row.recommendedReorderQty, 20);
   assert.equal(row.estimatedReorderValue, 40);
   assert.equal(row.riskStatus, 'High Risk');
@@ -136,6 +141,56 @@ test('Theoretical vs Actual reconciles opening, inbound, theoretical usage, wast
   assert.equal(row.accuracyPercent, 1);
   assert.equal(row.hasStockTake, true);
   assert.match(model.views.formula_breakdown[0].formulaResult, /^82 = 100 \+ 20 \+ 5 \+ 0 - 35 - 3 - 5$/);
+});
+
+test('Theoretical vs Actual does not fabricate a variance for a historical period when only today\'s live stock balance is available', async () => {
+  // Regression guard: without a committed stock take, actualClosingStock used to fall back to
+  // `stock.currentStock` unconditionally — but that figure is always "as of right now," not as
+  // of the report's endDate. For a historical period (endDate in the past), any stock movement
+  // between endDate and today would silently leak into the reported variance, fabricating a false
+  // shrinkage/overage signal. It must instead fall back to expectedClosingStock (variance = 0,
+  // honestly "unverified") rather than trust a live balance that doesn't answer the question asked.
+  const ledger = [
+    { id: 'grv', date: '2020-01-01', locationId: 'main', locationName: 'Main Kitchen', itemId: 'flour', itemName: 'Flour', category: 'Dry Goods', movementType: 'GRV', source: 'GRV', qtyIn: 20, qtyOut: 0, netQty: 20, baseUom: 'kg', unitCostExVat: 5, movementValue: 100, sourceId: 'grv' },
+    { id: 'sale', date: '2020-01-02', locationId: 'main', locationName: 'Main Kitchen', itemId: 'flour', itemName: 'Flour', category: 'Dry Goods', movementType: 'Sale Usage', source: 'Sale Usage', qtyIn: 0, qtyOut: 5, netQty: -5, baseUom: 'kg', unitCostExVat: 5, movementValue: -25, sourceId: 'sale' }
+  ];
+  const services = { reporting: {
+    // A wildly different "live" balance than this 2020 period could plausibly have closed at —
+    // if this leaked into actualClosingStock, it would fabricate a huge false variance.
+    getStockOnHandRows: async () => response([{ itemId: 'flour', itemName: 'Flour', category: 'Dry Goods', locationId: 'main', locationName: 'Main Kitchen', currentStock: 999, baseUom: 'kg', unitCostExVat: 5, hasLocationBalance: true }]),
+    getDetailedActivityLedger: async () => response(ledger),
+    getStockTakeAuditRows: async () => response([]),
+    getSaleStockUsageRows: async () => response([{ id: 'usage-1', sourceId: 'usage-1', saleDate: '2020-01-02', locationId: 'main', locationName: 'Main Kitchen', inventoryItemId: 'flour', inventoryItemName: 'Flour', inventoryCategoryName: 'Dry Goods', sourceType: 'Sale Usage', qtyUsed: 5, totalQtyUsed: 5, baseUom: 'kg', unitCostExVat: 5, menuItemId: 'menu-1', menuItemName: 'Bread', receiptNumber: 'R-1' }])
+  } };
+
+  const model = await buildTheoreticalVsActualModel({ workspaceId: 'WS-1', filters: { startDate: '2020-01-01', endDate: '2020-01-02' }, services });
+  const row = model.rows[0];
+  assert.equal(row.hasStockTake, false);
+  assert.equal(row.hasReliableActual, false);
+  assert.equal(row.actualClosingStock, row.expectedClosingStock, 'actual must fall back to expected, not the live (today) balance, for a historical period with no stock take');
+  assert.equal(row.varianceQty, 0);
+  assert.equal(row.varianceValue, 0);
+  assert.ok(row.calculationWarnings.some((warning) => /could not be verified/i.test(warning)));
+});
+
+test('Theoretical vs Actual still uses the live stock balance normally when the report is not scoped to a past end date', async () => {
+  const ledger = [
+    { id: 'grv', date: '2020-01-01', locationId: 'main', locationName: 'Main Kitchen', itemId: 'flour', itemName: 'Flour', category: 'Dry Goods', movementType: 'GRV', source: 'GRV', qtyIn: 20, qtyOut: 0, netQty: 20, baseUom: 'kg', unitCostExVat: 5, movementValue: 100, sourceId: 'grv' },
+    { id: 'sale', date: '2020-01-02', locationId: 'main', locationName: 'Main Kitchen', itemId: 'flour', itemName: 'Flour', category: 'Dry Goods', movementType: 'Sale Usage', source: 'Sale Usage', qtyIn: 0, qtyOut: 5, netQty: -5, baseUom: 'kg', unitCostExVat: 5, movementValue: -25, sourceId: 'sale' }
+  ];
+  const services = { reporting: {
+    getStockOnHandRows: async () => response([{ itemId: 'flour', itemName: 'Flour', category: 'Dry Goods', locationId: 'main', locationName: 'Main Kitchen', currentStock: 15, baseUom: 'kg', unitCostExVat: 5, hasLocationBalance: true }]),
+    getDetailedActivityLedger: async () => response(ledger),
+    getStockTakeAuditRows: async () => response([]),
+    getSaleStockUsageRows: async () => response([{ id: 'usage-1', sourceId: 'usage-1', saleDate: '2020-01-02', locationId: 'main', locationName: 'Main Kitchen', inventoryItemId: 'flour', inventoryItemName: 'Flour', inventoryCategoryName: 'Dry Goods', sourceType: 'Sale Usage', qtyUsed: 5, totalQtyUsed: 5, baseUom: 'kg', unitCostExVat: 5, menuItemId: 'menu-1', menuItemName: 'Bread', receiptNumber: 'R-1' }])
+  } };
+
+  // No endDate filter at all: the report is an "as of right now" query, so the live balance IS
+  // the correct actual closing figure and must still be used.
+  const model = await buildTheoreticalVsActualModel({ workspaceId: 'WS-1', filters: { startDate: '2020-01-01' }, services });
+  const row = model.rows[0];
+  assert.equal(row.hasReliableActual, true);
+  assert.equal(row.actualClosingStock, 15);
 });
 
 test('Advanced registry exposes only the three Phase 22 reports', () => {

@@ -597,5 +597,61 @@ CREATE INDEX IF NOT EXISTS idx_low_stock_alert_state_workspace_active
   // rows written before this migration, since there is no way to recover the rate that was
   // actually in effect for those.
   `ALTER TABLE yoco_orders ADD COLUMN vat_rate REAL;
-ALTER TABLE yoco_orders ADD COLUMN vat_registered INTEGER;`
+ALTER TABLE yoco_orders ADD COLUMN vat_registered INTEGER;`,
+  // 37 — indexes for the hot lookup/sort paths that were reading whole tables. Because there is one
+  // Durable Object (one SQLite database) PER WORKSPACE, `WHERE workspace_id = ?1` selects
+  // essentially every row — an index whose only usable term is workspace_id gives no reduction at
+  // all, so several queries that looked indexed were full scans. Each index below was added against
+  // a specific measured `SCAN`:
+  //
+  //  * products(workspace_id, active, lower(trim(name))) — saveProductRecord resolves an existing
+  //    product by `lower(trim(name))`. An expression index is an EXACT match for that predicate, so
+  //    this changes no matching behaviour. Without it, every imported row full-scanned products;
+  //    a bulk recipe import is that scan once PER UPLOADED ROW.
+  //  * products(workspace_id, active, lower(category), lower(name)) — getProducts sorts by exactly
+  //    these expressions, so the whole table was materialised and sorted before LIMIT applied.
+  //  * stock_items(workspace_id, active, name) — getStockItems' `ORDER BY si.name ASC` had no index,
+  //    so every OFFSET page re-scanned and re-sorted the entire table (10 pages = 10 full sorts),
+  //    and its three per-row correlated subqueries ran for every row rather than the page's rows.
+  //  * yoco_order_lines(workspace_id, product_id) — the menu-health aggregate groups by product_id
+  //    over the full line table with no date filter (measured `SCAN yoco_order_lines`).
+  `CREATE INDEX IF NOT EXISTS idx_products_workspace_active_name_key
+  ON products(workspace_id, active, lower(trim(name)));
+CREATE INDEX IF NOT EXISTS idx_products_workspace_active_sort
+  ON products(workspace_id, active, lower(category), lower(name));
+CREATE INDEX IF NOT EXISTS idx_stock_items_workspace_active_name
+  ON stock_items(workspace_id, active, name);
+CREATE INDEX IF NOT EXISTS idx_yoco_order_lines_workspace_product
+  ON yoco_order_lines(workspace_id, product_id);`,
+  // 38 — persisted normalised name key for the stock-item duplicate-name guard. That guard compares
+  // names through normalizeStockItemDuplicateName() in JavaScript (NFKC, zero-width stripping,
+  // whitespace collapsing), which cannot be expressed as a SQL expression index — so the only way
+  // to run it was to SELECT every active stock item and compare in the Worker, once per save. A
+  // bulk stock/recipe import performs one save per uploaded row, making that the whole table read
+  // per row. Storing the key lets the guard become a single indexed point lookup.
+  //
+  // Only the column and index are created here. The actual backfill (approximating the JavaScript
+  // normaliser in SQL) originally ran as a single unconditional UPDATE across the whole table in
+  // THIS migration — 2026-08-28 incident: for any tenant with a non-trivial stock_items table, that
+  // one-request UPDATE (14 nested REPLACE calls per row) could exceed the Durable Object's
+  // per-request CPU limit, get killed mid-flight, and retry-loop through the exact
+  // interrupted-attempt/backoff path a real migration failure uses — reading and re-failing
+  // repeatedly across many tenants for hours with no cron and no user traffic involved. It now runs
+  // as a separate, bounded, resumable backfill in WorkspaceDO.migrate() (see
+  // STOCK_ITEM_NAME_KEY_BACKFILL_ID there) that processes a capped number of rows per request and
+  // simply continues on the tenant's next request instead of ever risking a CPU-limit kill.
+  `ALTER TABLE stock_items ADD COLUMN name_key TEXT;
+CREATE INDEX IF NOT EXISTS idx_stock_items_workspace_active_name_key
+  ON stock_items(workspace_id, active, name_key);`,
+  // 39 — make the reporting filter-options dropdown stop reading the whole ledger.
+  // getReportFilterOptions runs `SELECT DISTINCT movement_type FROM stock_movements WHERE
+  // workspace_id = ?1` on EVERY report route (ten call sites), and movement_type is in practice a
+  // fixed enum of about seven values — so it was reading every movement ever recorded to produce
+  // seven strings. With this index SQLite applies its DISTINCT skip-scan: it seeks to the next
+  // distinct value instead of walking every entry. Measured on a seeded tenant, same seven results:
+  //   20,000 movements  3.30ms -> 0.03ms
+  //  200,000 movements 49.81ms -> 0.03ms   (flat — no longer grows with trading history)
+  // Purely an index, so no query or result changes.
+  `CREATE INDEX IF NOT EXISTS idx_stock_movements_workspace_movement_type
+  ON stock_movements(workspace_id, movement_type);`
 ];

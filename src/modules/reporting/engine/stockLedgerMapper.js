@@ -635,9 +635,18 @@ export function mapPurchaseOrderReceiveLedgerRows(dataSet = {}) {
       .map((grv) => text(grv.sourcePoId || grv.poId))
       .filter(Boolean),
   );
+  // A PO already covered by an explicit `purchaseOrderReceives` row (built into `rows` above)
+  // must not ALSO be re-derived from the order's own `receivedQty` below — that double-counted
+  // the same physical receipt for any order received via the PO-receive flow rather than a GRV,
+  // inflating stock-in and closing value in every report that consumes this ledger.
+  const receivedPoIds = new Set(
+    toArray(dataSet.purchaseOrderReceives)
+      .map((receipt) => text(receipt.poId || receipt.sourcePoId || receipt.purchaseOrderId || receipt.id))
+      .filter(Boolean),
+  );
   const derivedFromOrders = toArray(dataSet.purchaseOrders).flatMap((order) => {
     const orderId = text(order.id);
-    if (orderId && grvPoIds.has(orderId)) return [];
+    if (orderId && (grvPoIds.has(orderId) || receivedPoIds.has(orderId))) return [];
     const receivedAt = text(
       order.receivedAt ||
         order.partiallyReceivedAt ||

@@ -8297,13 +8297,40 @@ function addZonedDateRange(
     timeZone,
     tradingDayStartMinutes: numberValue((filters as Row).tradingDayStartMinutes, 0),
   });
+  // The datetime(...) predicates below are the EXACT, authoritative bounds and are kept as-is:
+  // datetime() normalises both sides, so they stay correct even if stored timestamps mix ISO
+  // 'T' and SQLite ' ' separators. But wrapping the column in a function makes it non-sargable —
+  // SQLite cannot use idx_stock_movements_workspace_date and full-scans the ledger, which is why
+  // reports/detailed-activity (13 LEFT JOINs, called on every dashboard load) was one of the
+  // heaviest reads in the system.
+  //
+  // So each exact predicate is paired with a deliberately WIDER, index-usable prefilter on the
+  // bare column. It only has to be a guaranteed superset — the exact predicate still removes
+  // anything extra it lets through, so results are unchanged while the planner gets a range it
+  // can seek on. Comparing against a date-only bound is safe for any separator because the first
+  // ten characters are the date, and a longer string sharing that prefix always sorts after it:
+  // both '2026-08-27T09:00Z' and '2026-08-27 09:00' sort >= '2026-08-27' and < '2026-08-28'.
+  // The upper bound uses the day AFTER toExclusiveUtc's date, since rows earlier on that final
+  // day are still legitimately in range.
+  const utcDay = (value: unknown): string => String(value ?? "").slice(0, 10);
+  const dayAfter = (day: string): string => {
+    const parsed = new Date(`${day}T00:00:00Z`);
+    if (Number.isNaN(parsed.getTime())) return "9999-12-31";
+    parsed.setUTCDate(parsed.getUTCDate() + 1);
+    return parsed.toISOString().slice(0, 10);
+  };
+
   if (fromUtc) {
     binds.push(fromUtc);
     clauses.push(`datetime(${column}) >= datetime(?${binds.length})`);
+    binds.push(utcDay(fromUtc));
+    clauses.push(`${column} >= ?${binds.length}`);
   }
   if (toExclusiveUtc) {
     binds.push(toExclusiveUtc);
     clauses.push(`datetime(${column}) < datetime(?${binds.length})`);
+    binds.push(dayAfter(utcDay(toExclusiveUtc)));
+    clauses.push(`${column} < ?${binds.length}`);
   }
 }
 

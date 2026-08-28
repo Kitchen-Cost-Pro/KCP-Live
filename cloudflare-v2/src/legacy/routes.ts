@@ -43,6 +43,8 @@ import {
 } from "./low-stock-email";
 import { lowStockLocationRelevantSql } from "./low-stock-policy";
 import { sendEmail } from "./email";
+import { TENANT_MIGRATIONS } from "../tenant-migrations";
+import { checkRateLimit } from "./rate-limit";
 import {
   calculateIncomingLocationCost,
   getWorkspaceEffectiveVatRate,
@@ -713,20 +715,26 @@ async function saveStockItem(
   const nameIsChanging =
     !existing || normalizeStockItemDuplicateName(existing.name) !== normalizeStockItemDuplicateName(item.name);
 
+  const nextNameKey = normalizeStockItemDuplicateName(item.name);
+
   if (nameIsChanging) {
+    // Indexed point lookup on the persisted name_key (migration 38) rather than reading every
+    // active stock item and normalising in JS. That scan ran once per save, so a bulk import paid
+    // the whole table per uploaded row. Rows written before migration 38 carry a SQL-approximated
+    // key (see that migration for the exact residual gap); every write below stores the precise
+    // JavaScript-computed value, so the set of approximate rows only ever shrinks.
     const duplicateRows = await env.DB.prepare(
       `SELECT id, name
          FROM stock_items
         WHERE workspace_id = ?1
-          AND active = 1`,
+          AND active = 1
+          AND name_key = ?2
+        LIMIT 2`,
     )
-      .bind(workspaceId)
+      .bind(workspaceId, nextNameKey)
       .all<{ id: string; name: string }>();
-    const nextNameKey = normalizeStockItemDuplicateName(item.name);
     const duplicateName = (duplicateRows.results || []).find(
-      (row) =>
-        normalizeStockItemDuplicateName(row.name) === nextNameKey &&
-        text(row.id) !== item.id,
+      (row) => text(row.id) !== item.id,
     );
 
     if (duplicateName?.id) {
@@ -742,10 +750,11 @@ async function saveStockItem(
     env.DB.prepare(
       `INSERT INTO stock_items
 	        (id, workspace_id, legacy_source_id, name, category, item_type, unit, unit_cost, vat_enabled, is_stocked,
-	         threshold_qty, par_level_qty, yield_pct, batch_yield, barcode_csv, active, raw_json, created_at, updated_at)
-	       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 1, ?16, ?17, ?17)
+	         threshold_qty, par_level_qty, yield_pct, batch_yield, barcode_csv, active, raw_json, created_at, updated_at, name_key)
+	       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 1, ?16, ?17, ?17, ?18)
 	       ON CONFLICT(id) DO UPDATE SET
 	        name = excluded.name,
+	        name_key = excluded.name_key,
 	        category = excluded.category,
 	        item_type = excluded.item_type,
 	        unit = excluded.unit,
@@ -783,6 +792,7 @@ async function saveStockItem(
       item.barcodeCsv,
       item.rawJson,
       now,
+      nextNameKey,
     ),
   ];
 
@@ -1227,25 +1237,46 @@ async function updateProductRecipeCompleteness(
     .run();
 }
 
+/**
+ * Recompute `missing_recipe` for every product that sources its recipe from this stock item.
+ *
+ * Runs on EVERY saveStockItem. It previously fanned out to updateProductRecipeCompleteness once per
+ * linked product — 3 statements and 1 unconditional UPDATE each — so saving a single stock item that
+ * 120 menu items reference cost 372 SQL statements and 122 rows written (measured). One statement
+ * does the same work now, and the trailing `missing_recipe <> <computed>` guard means rows are only
+ * written when the value genuinely changes; re-saving a stock item whose recipe links are unchanged
+ * (by far the common case, and what a bulk import does on every row) now writes nothing at all.
+ */
 async function updateProductsUsingRecipeSource(
   env: Env,
   workspaceId: string,
   stockItemId: string,
 ) {
-  const rows = await env.DB.prepare(
-    `SELECT id
-       FROM products
+  const hasLinesSql = (ownerType: string, ownerIdColumn: string) => `EXISTS (
+    SELECT 1
+      FROM recipes r
+      JOIN recipe_lines rl ON rl.workspace_id = r.workspace_id AND rl.recipe_id = r.id
+     WHERE r.workspace_id = products.workspace_id
+       AND r.owner_type = '${ownerType}'
+       AND r.owner_id = products.${ownerIdColumn}
+       AND r.active = 1
+  )`;
+  const computedMissingRecipe = `CASE
+      WHEN ${hasLinesSql("product", "id")}
+        OR ${hasLinesSql("stock_item", "recipe_source_stock_item_id")}
+      THEN 0 ELSE 1 END`;
+
+  await env.DB.prepare(
+    `UPDATE products
+        SET missing_recipe = ${computedMissingRecipe},
+            updated_at = ?3
       WHERE workspace_id = ?1
         AND recipe_source_stock_item_id = ?2
-        AND active = 1`,
+        AND active = 1
+        AND missing_recipe <> (${computedMissingRecipe})`,
   )
-    .bind(workspaceId, stockItemId)
-    .all<{ id: string }>();
-  await Promise.all(
-    ((rows.results || []) as { id: string }[]).map((row) =>
-      updateProductRecipeCompleteness(env, workspaceId, text(row.id)),
-    ),
-  );
+    .bind(workspaceId, stockItemId, nowIso())
+    .run();
 }
 
 async function saveYocoModifierRecipe(
@@ -1483,30 +1514,46 @@ async function saveProductRecord(
   const product = normalizeProductPayload(raw);
   if (!product.name) throw new Error("Menu item name is required.");
 
-  const existing = await env.DB.prepare(
-    `SELECT id, raw_json
-       FROM products
-      WHERE workspace_id = ?1
-        AND active = 1
-        AND (
-          id = ?2
-          OR legacy_source_id = ?3
-          OR (?4 != '' AND external_provider = ?4 AND yoco_item_id = ?5 AND yoco_variant_id = ?6)
-          OR lower(trim(name)) = lower(trim(?7))
-        )
-      ORDER BY CASE WHEN id = ?2 THEN 0 ELSE 1 END
-      LIMIT 1`,
-  )
-    .bind(
-      workspaceId,
-      product.id,
-      product.legacySourceId,
-      product.externalProvider,
-      product.yocoItemId,
-      product.yocoVariantId,
-      product.name,
+  // Resolve an existing product by trying each identity key as its OWN indexed point lookup,
+  // most specific first, instead of one query OR-ing them together. SQLite can only use indexes
+  // across an OR when EVERY branch is indexable; the `lower(trim(name))` branch was not, so the
+  // whole condition degraded to a full scan of products — once per save, and a bulk recipe import
+  // performs one save per uploaded row (measured: this was the dominant cost of an import).
+  // Priority is preserved: `id` still wins, exactly as the previous `ORDER BY CASE WHEN id = ?2`
+  // guaranteed. The remaining keys had no defined precedence before (one row, arbitrary plan
+  // order), so resolving them most-specific-first is at least as well-defined as what it replaces.
+  const findExistingProduct = async (
+    where: string,
+    binds: unknown[],
+  ): Promise<{ id: string; raw_json?: string } | null> =>
+    env.DB.prepare(
+      `SELECT id, raw_json
+         FROM products
+        WHERE workspace_id = ?1
+          AND active = 1
+          AND ${where}
+        LIMIT 1`,
     )
-    .first<{ id: string; raw_json?: string }>();
+      .bind(workspaceId, ...binds)
+      .first<{ id: string; raw_json?: string }>();
+
+  let existing: { id: string; raw_json?: string } | null = null;
+  if (product.id) {
+    existing = await findExistingProduct(`id = ?2`, [product.id]);
+  }
+  if (!existing && product.legacySourceId) {
+    existing = await findExistingProduct(`legacy_source_id = ?2`, [product.legacySourceId]);
+  }
+  if (!existing && product.externalProvider) {
+    existing = await findExistingProduct(
+      `external_provider = ?2 AND yoco_item_id = ?3 AND yoco_variant_id = ?4`,
+      [product.externalProvider, product.yocoItemId, product.yocoVariantId],
+    );
+  }
+  if (!existing) {
+    // Matches idx_products_workspace_active_name_key (migration 37) expression-for-expression.
+    existing = await findExistingProduct(`lower(trim(name)) = lower(trim(?2))`, [product.name]);
+  }
 
   const productId = existing?.id || product.id;
   const now = nowIso();
@@ -2620,6 +2667,76 @@ export async function getAdminWorkspaceSummary(
     },
     yoco,
   });
+}
+
+/**
+ * Reports this workspace's tenant schema migration state, straight from its own DO. Diagnoses the
+ * class of incident where WorkspaceDO.migrate() (workspace-do.ts) is silently skipping every
+ * migration attempt because it is still inside a prior failure's backoff window — which produces no
+ * error log at all, so it is otherwise invisible from the outside. Read-only; safe to call anytime.
+ */
+export async function getAdminWorkspaceMigrationHealth(
+  request: Request,
+  env: Env,
+  _auth: AuthContext,
+  workspaceId: string,
+) {
+  const [schemaRow, healthRow, orderColumns] = await Promise.all([
+    env.DB.prepare(`SELECT version FROM _kcp_schema WHERE id = 1`).first<{ version: number }>(),
+    env.DB.prepare(
+      `SELECT consecutive_failures, next_retry_at FROM _kcp_migration_health WHERE id = 1`,
+    ).first<{ consecutive_failures: number; next_retry_at: string | null }>(),
+    env.DB.prepare(`PRAGMA table_info(yoco_orders)`).all<{ name: string }>(),
+  ]);
+  const appliedVersion = Number(schemaRow?.version || 0);
+  const totalMigrations = TENANT_MIGRATIONS.length;
+  const columnNames = new Set((orderColumns.results || []).map((c) => c.name));
+  const nextRetryAtMs = healthRow?.next_retry_at ? Date.parse(healthRow.next_retry_at) : 0;
+  return json(request, env, {
+    ok: true,
+    workspaceId,
+    appliedVersion,
+    totalMigrations,
+    isUpToDate: appliedVersion >= totalMigrations,
+    migrationHealth: {
+      consecutiveFailures: Number(healthRow?.consecutive_failures || 0),
+      nextRetryAt: healthRow?.next_retry_at || null,
+      backoffActive: Boolean(nextRetryAtMs && nextRetryAtMs > Date.now()),
+      backoffRemainingMs: nextRetryAtMs ? Math.max(0, nextRetryAtMs - Date.now()) : 0,
+    },
+    yocoOrdersVatColumnsPresent: columnNames.has('vat_rate') && columnNames.has('vat_registered'),
+  });
+}
+
+/**
+ * Clears a stuck migration backoff window for this workspace so the very next request (the
+ * frontend's own routine polling, or a manual retry) re-attempts migrate() immediately instead of
+ * silently skipping it. Does NOT run migrations itself — WorkspaceDO.fetch() already calls
+ * ensureMigrated() as the first thing it does on every request, using the already-deployed,
+ * already-tested migration chain (see tenant-migrations.ts and its full-chain test coverage), so
+ * duplicating that execution logic here would only add a second, untested code path for the exact
+ * same job. This just removes the one thing standing in its way.
+ */
+export async function postAdminWorkspaceMigrationRetry(
+  request: Request,
+  env: Env,
+  _auth: AuthContext,
+  workspaceId: string,
+) {
+  // This endpoint's whole job is to force-clear a stuck backoff, so it can't itself respect
+  // next_retry_at the way an ordinary caller would — but that means nothing else stops a leaked
+  // token or a buggy monitoring script from calling it in a tight loop, repeatedly forcing
+  // migrate() to re-attempt on every single call regardless of how expensive the last attempt was.
+  // Rate-limit the endpoint itself instead: generous enough for a human clicking it a few times
+  // during an incident, tight enough to block an automated retry loop.
+  const limited = await checkRateLimit(env.CENTRAL_DB, `migration-retry:${workspaceId}`, 3, 60);
+  if (limited.blocked) {
+    return json(request, env, { ok: false, error: 'Too many migration-retry requests for this workspace. Wait a minute and try again.' }, { status: 429 });
+  }
+  await env.DB.prepare(
+    `UPDATE _kcp_migration_health SET consecutive_failures = 0, next_retry_at = NULL WHERE id = 1`,
+  ).run();
+  return json(request, env, { ok: true, workspaceId, backoffCleared: true });
 }
 
 /**
@@ -4395,6 +4512,8 @@ export async function resendWorkspaceMemberInvite(
   memberId: string,
 ) {
   await scoped(request, env, auth, workspaceId);
+  const emailLimited = await checkRateLimit(env.CENTRAL_DB, `admin-email:${auth.uid || workspaceId}`, 20, 3600);
+  if (emailLimited.blocked) return error(request, env, 429, 'Too many emails sent recently. Please wait and try again.');
   const now = nowIso();
 
   const member = await env.CENTRAL_DB.prepare(
@@ -6425,6 +6544,18 @@ export async function postStockResetDashboardHistory(
   workspaceId: string,
 ) {
   await scoped(request, env, auth, workspaceId);
+  // This route DELETES every movement, order, order line, GRV, adjustment, transfer, stock-take and
+  // audit row in the workspace — ~25 unbounded workspace-wide DELETEs. Measured on a 20,000-movement
+  // tenant: 33,789 rows, roughly 293,000 once index amplification is counted (stock_movements alone
+  // carries 9 indexes), which is about 3x the entire 100,000/day Durable Objects write allowance for
+  // the whole account — from ONE click, and it grows with every day the workspace trades.
+  //
+  // It was previously gated by scoped() alone, i.e. nothing more than "is a member of this
+  // workspace". That made a total, irreversible history wipe LESS protected than posting a routine
+  // stock adjustment, which requires assertWorkspacePermission(..., 'nav-adjustments'). No ordinary
+  // role is granted 'workspace-reset-history', so in practice this now requires the '*' permission
+  // held by owners/admins.
+  await assertWorkspacePermission(env, auth, workspaceId, "workspace-reset-history");
   const payload = await readJson<{ includeStockOnHand?: boolean }>(request);
   const includeStockOnHand = payload.includeStockOnHand === true;
   const now = nowIso();
@@ -7129,6 +7260,20 @@ export async function postWastageAdjustment(
     }
 
     for (const ingredient of ingredients) {
+      // A custom UOM (e.g. "1 box") that couldn't be matched to a configured ratio has no
+      // reliable base-unit quantity — deducting it anyway would silently waste the wrong amount
+      // of stock. Skip the deduction and surface it instead of guessing.
+      if (!ingredient.uomResolved) {
+        summary.push({
+          productId,
+          productName,
+          quantity,
+          stockItemId: ingredient.stockItemId,
+          stockItemName: ingredient.stockItemName,
+          skipped: "uom_invalid",
+        });
+        continue;
+      }
       const balance = await env.DB.prepare(
         `SELECT quantity FROM stock_balances WHERE workspace_id = ?1 AND stock_item_id = ?2 AND location_id = ?3 LIMIT 1`,
       )
@@ -13317,7 +13462,34 @@ export async function getDashboard(
     .bind(...balanceBinds)
     .first();
 
-  const movementBinds = [workspaceId, ...dashboardLocationIds, from, to];
+  // Half-open [start, end) bounds for the SAME window `from`/`to` describe, precomputed here so
+  // the stock_movements filters below can compare the BARE occurred_at column instead of wrapping
+  // it in date(). Wrapping a column in a function makes it non-sargable: SQLite cannot use
+  // idx_stock_movements_workspace_date and falls back to reading the entire ledger. Measured on a
+  // seeded tenant: `date(sm.occurred_at) BETWEEN ...` planned as `SCAN sm` (25.3ms at 200k rows and
+  // climbing linearly), the bare-column form as
+  // `SEARCH sm USING INDEX idx_stock_movements_workspace_date` (0.5ms, flat as the table grows).
+  // occurred_at is stored ISO-8601, which sorts lexicographically in chronological order, so a
+  // plain string comparison against a 'YYYY-MM-DD' bound is exact — '2026-08-27T13:04:00Z' both
+  // sorts >= '2026-08-27' and < '2026-08-28'. `to` is inclusive, hence the exclusive next-day end.
+  const dayOnly = (value: unknown): string => String(value ?? "").slice(0, 10);
+  const nextDay = (day: string): string => {
+    const parsed = new Date(`${day}T00:00:00Z`);
+    if (Number.isNaN(parsed.getTime())) return "9999-12-31";
+    parsed.setUTCDate(parsed.getUTCDate() + 1);
+    return parsed.toISOString().slice(0, 10);
+  };
+  const movementRangeStart = dayOnly(from);
+  const movementRangeEnd = nextDay(dayOnly(to));
+
+  const movementBinds = [
+    workspaceId,
+    ...dashboardLocationIds,
+    from,
+    to,
+    movementRangeStart,
+    movementRangeEnd,
+  ];
   const movementLocationClause = dashboardLocationIds.length
     ? `AND sm.location_id IN (${locationPlaceholders})`
     : "";
@@ -13326,6 +13498,10 @@ export async function getDashboard(
     : "";
   const fromIndex = dashboardLocationIds.length + 2;
   const toIndex = dashboardLocationIds.length + 3;
+  const rangeStartIndex = dashboardLocationIds.length + 4;
+  const rangeEndIndex = dashboardLocationIds.length + 5;
+  // Sargable replacement for `date(sm.occurred_at) BETWEEN date(?from) AND date(?to)`.
+  const movementDateClause = `AND sm.occurred_at >= ?${rangeStartIndex} AND sm.occurred_at < ?${rangeEndIndex}`;
 
   // --- Shared movement classification + valuation: ONE source of truth so the Wastage
   // TILE (summary total) and the Wastage GRAPH (daily series) can never disagree, and so
@@ -13402,7 +13578,7 @@ export async function getDashboard(
         AND silp.stock_item_id = sm.stock_item_id
         AND silp.location_id = sm.location_id
       WHERE sm.workspace_id = ?1 ${movementLocationClause}
-        AND date(sm.occurred_at) BETWEEN date(?${fromIndex}) AND date(?${toIndex})
+        ${movementDateClause}
       GROUP BY sm.movement_type, sm.metadata_json`,
   )
     .bind(...movementBinds)
@@ -13428,7 +13604,7 @@ export async function getDashboard(
         AND silp.stock_item_id = sm.stock_item_id
         AND silp.location_id = sm.location_id
       WHERE sm.workspace_id = ?1 ${movementLocationClause}
-        AND date(sm.occurred_at) BETWEEN date(?${fromIndex}) AND date(?${toIndex})`,
+        ${movementDateClause}`,
     )
       .bind(...movementBinds)
       .first(),
@@ -13492,7 +13668,7 @@ export async function getDashboard(
         AND silp.stock_item_id = sm.stock_item_id
         AND silp.location_id = sm.location_id
       WHERE sm.workspace_id = ?1 ${movementLocationClause}
-        AND date(sm.occurred_at) BETWEEN date(?${fromIndex}) AND date(?${toIndex})
+        ${movementDateClause}
       GROUP BY day
       ORDER BY day ASC`,
   )
@@ -13720,63 +13896,88 @@ export async function getDashboard(
       .bind(workspaceId)
       .first<{ count: number }>(),
     env.DB.prepare(
+      // Each UNION branch is individually ordered and capped at the same 8 rows the outer query
+      // returns. The outer LIMIT alone is NOT enough: it applies to the assembled compound, so
+      // SQLite must materialise and sort EVERY branch in full before it can take 8 — which meant
+      // this query full-scanned the entire stock_movements ledger (measured: `SCAN sm` +
+      // `USE TEMP B-TREE FOR ORDER BY`, ~200k rows read and sorted to display 8) on every single
+      // dashboard load, growing forever with trading history. Bounding each branch lets the
+      // movements branch stream 8 rows straight off idx_stock_movements_workspace_date in reverse
+      // instead. Taking each branch's newest 8 cannot change the result: the overall newest 8 can
+      // only ever come from the per-branch newest 8.
       `SELECT * FROM (
-        SELECT
-          t.id,
-          'transfer' AS type,
-          CASE WHEN lower(t.status) = 'pending_receipt' THEN 'External Transfer Awaiting Receipt' ELSE 'Transfer Posted' END AS title,
-          COALESCE(tl.display_name, tl.name, fl.display_name, fl.name, 'Workspace activity') AS location,
-          t.requested_at AS timestamp
-         FROM transfers t
-         LEFT JOIN locations fl ON fl.id = t.from_location_id
-         LEFT JOIN locations tl ON tl.id = t.to_location_id
-        WHERE t.workspace_id = ?1
-           OR (t.transfer_type <> 'internal' AND t.to_workspace_id = ?1)
+        SELECT * FROM (
+          SELECT
+            t.id,
+            'transfer' AS type,
+            CASE WHEN lower(t.status) = 'pending_receipt' THEN 'External Transfer Awaiting Receipt' ELSE 'Transfer Posted' END AS title,
+            COALESCE(tl.display_name, tl.name, fl.display_name, fl.name, 'Workspace activity') AS location,
+            t.requested_at AS timestamp
+           FROM transfers t
+           LEFT JOIN locations fl ON fl.id = t.from_location_id
+           LEFT JOIN locations tl ON tl.id = t.to_location_id
+          WHERE t.workspace_id = ?1
+             OR (t.transfer_type <> 'internal' AND t.to_workspace_id = ?1)
+          ORDER BY t.requested_at DESC
+          LIMIT 8
+        )
         UNION ALL
-        SELECT
-          sts.id,
-          'stocktake' AS type,
-          'Stock Count Completed' AS title,
-          COALESCE(l.display_name, l.name, 'Workspace activity') AS location,
-          COALESCE(sts.counted_at, sts.updated_at, sts.created_at) AS timestamp
-         FROM stocktake_sessions sts
-         LEFT JOIN locations l ON l.id = sts.location_id
-        WHERE sts.workspace_id = ?1
+        SELECT * FROM (
+          SELECT
+            sts.id,
+            'stocktake' AS type,
+            'Stock Count Completed' AS title,
+            COALESCE(l.display_name, l.name, 'Workspace activity') AS location,
+            COALESCE(sts.counted_at, sts.updated_at, sts.created_at) AS timestamp
+           FROM stocktake_sessions sts
+           LEFT JOIN locations l ON l.id = sts.location_id
+          WHERE sts.workspace_id = ?1
+          ORDER BY COALESCE(sts.counted_at, sts.updated_at, sts.created_at) DESC
+          LIMIT 8
+        )
       UNION ALL
-        SELECT
-          sm.id,
-          CASE
-            WHEN sm.movement_type LIKE '%sale%' THEN 'sale'
-            WHEN sm.movement_type LIKE '%grv%' THEN 'grv'
-            WHEN sm.movement_type LIKE '%manufact%' THEN 'manufacturing'
-            WHEN sm.movement_type LIKE '%adjust%' THEN 'adjustment'
-            WHEN sm.movement_type LIKE '%transfer%' THEN 'transfer'
-            ELSE 'movement'
-          END AS type,
-          CASE
-            WHEN sm.movement_type LIKE '%sale%' THEN 'Sale Synced'
-            WHEN sm.movement_type LIKE '%grv%' THEN 'GRV Received'
-            WHEN sm.movement_type LIKE '%manufact%' THEN 'Manufacturing Posted'
-            WHEN sm.movement_type LIKE '%adjust%' THEN 'Manual Adjustment Added'
-            WHEN sm.movement_type LIKE '%transfer%' THEN 'Transfer Posted'
-            ELSE 'Stock Movement'
-          END AS title,
-          COALESCE(si.name, l.display_name, l.name, 'Workspace activity') AS location,
-          sm.occurred_at AS timestamp
-         FROM stock_movements sm
-         LEFT JOIN stock_items si ON si.id = sm.stock_item_id AND si.workspace_id = sm.workspace_id
-         LEFT JOIN locations l ON l.id = sm.location_id AND l.workspace_id = sm.workspace_id
-        WHERE sm.workspace_id = ?1
+        SELECT * FROM (
+          SELECT
+            sm.id,
+            CASE
+              WHEN sm.movement_type LIKE '%sale%' THEN 'sale'
+              WHEN sm.movement_type LIKE '%grv%' THEN 'grv'
+              WHEN sm.movement_type LIKE '%manufact%' THEN 'manufacturing'
+              WHEN sm.movement_type LIKE '%adjust%' THEN 'adjustment'
+              WHEN sm.movement_type LIKE '%transfer%' THEN 'transfer'
+              ELSE 'movement'
+            END AS type,
+            CASE
+              WHEN sm.movement_type LIKE '%sale%' THEN 'Sale Synced'
+              WHEN sm.movement_type LIKE '%grv%' THEN 'GRV Received'
+              WHEN sm.movement_type LIKE '%manufact%' THEN 'Manufacturing Posted'
+              WHEN sm.movement_type LIKE '%adjust%' THEN 'Manual Adjustment Added'
+              WHEN sm.movement_type LIKE '%transfer%' THEN 'Transfer Posted'
+              ELSE 'Stock Movement'
+            END AS title,
+            COALESCE(si.name, l.display_name, l.name, 'Workspace activity') AS location,
+            sm.occurred_at AS timestamp
+           FROM stock_movements sm
+           LEFT JOIN stock_items si ON si.id = sm.stock_item_id AND si.workspace_id = sm.workspace_id
+           LEFT JOIN locations l ON l.id = sm.location_id AND l.workspace_id = sm.workspace_id
+          WHERE sm.workspace_id = ?1
+          ORDER BY sm.occurred_at DESC
+          LIMIT 8
+        )
       UNION ALL
-        SELECT
-          po.id,
-          'purchase-order' AS type,
-          'Purchase Order Updated' AS title,
-          COALESCE(s.name, 'Workspace activity') AS location,
-          COALESCE(po.updated_at, po.ordered_at, po.created_at) AS timestamp
-         FROM purchase_orders po
-         LEFT JOIN suppliers s ON s.id = po.supplier_id AND s.workspace_id = po.workspace_id
-        WHERE po.workspace_id = ?1
+        SELECT * FROM (
+          SELECT
+            po.id,
+            'purchase-order' AS type,
+            'Purchase Order Updated' AS title,
+            COALESCE(s.name, 'Workspace activity') AS location,
+            COALESCE(po.updated_at, po.ordered_at, po.created_at) AS timestamp
+           FROM purchase_orders po
+           LEFT JOIN suppliers s ON s.id = po.supplier_id AND s.workspace_id = po.workspace_id
+          WHERE po.workspace_id = ?1
+          ORDER BY COALESCE(po.updated_at, po.ordered_at, po.created_at) DESC
+          LIMIT 8
+        )
       )
       ORDER BY timestamp DESC
       LIMIT 8`,

@@ -231,3 +231,30 @@ test('Modifier report does not fabricate VAT when the backend explicitly reports
   assert.equal(row.vat, 0);
   assert.equal(row.netSales, 100);
 });
+
+test('a modifier sold then fully refunded nets Net Sales to zero instead of inflating Gross/Net Sales', () => {
+  // Regression guard: a refund row's own grossAmount/vatAmount/netAmount used to never be
+  // zeroed/negated, so summing the sale row and the refund row added the refund's amount on top
+  // of the sale instead of netting it — a fully refunded R46 modifier reported Gross Sales R92 /
+  // Net Sales R80 instead of Gross Sales R46 / Refunds R46 / Net Sales R0.
+  const model = buildModifierReportModel([
+    {
+      id: 'sale-1',
+      modifierName: 'Extra Cheese',
+      grossAmount: 46,
+      vatAmount: 6,
+      netAmount: 40
+    },
+    {
+      id: 'refund-1',
+      modifierName: 'Extra Cheese',
+      isRefund: true,
+      refundAmount: 46
+    }
+  ]);
+  const row = model.views.summary[0];
+  assert.equal(row.grossSales, 46, 'Gross Sales reflects only the sale row, not sale + unreversed refund');
+  assert.equal(row.refundAmount, 46);
+  assert.equal(row.vat, 0, 'VAT is fully reversed by the refund');
+  assert.equal(row.netSales, 0, 'Net Sales nets to zero for a fully refunded modifier');
+});

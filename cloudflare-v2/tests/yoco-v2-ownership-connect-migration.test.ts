@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import type { DbLike, DbResult, DbStatementLike } from '../src/legacy/types';
 import {
   YOCO_V2_CONTROLLED_CUTOVER_MIGRATION,
+  YOCO_V2_EFFECT_GATE_MIGRATION,
   YOCO_V2_FOUNDATION_MIGRATION,
   YOCO_V2_REFUND_CONTROLLED_CUTOVER_MIGRATION,
 } from '../src/modules/yoco-engine-v2/migrations';
@@ -88,6 +89,12 @@ function createDb(): SqliteDb {
   db.database.exec(YOCO_V2_FOUNDATION_MIGRATION);
   db.database.exec(YOCO_V2_CONTROLLED_CUTOVER_MIGRATION);
   db.database.exec(YOCO_V2_REFUND_CONTROLLED_CUTOVER_MIGRATION);
+  // Phase V2 14 unified the separate sale/refund cutover tables into yoco_v2_effect_gate, and
+  // effectControlStatement() in ownership.ts writes to it. Production always has it — it is
+  // TENANT_MIGRATIONS index 35 AND part of YOCO_V2_RUNTIME_SCHEMA_REPAIR — but this harness was
+  // never updated, so these tests failed on "no such table: yoco_v2_effect_gate" against code
+  // that is correct in production.
+  db.database.exec(YOCO_V2_EFFECT_GATE_MIGRATION);
   return db;
 }
 

@@ -1,0 +1,125 @@
+# KCP dedicated DEVELOPMENT Cloudflare account — fully separate account from production (kcp-api-v2).
+# Copy to wrangler.dev.toml, fill in the placeholders below, then deploy with:
+#   node ./node_modules/wrangler/bin/wrangler.js deploy --config wrangler.dev.toml
+#
+# Setup order (run these under the DEV account — confirm with `wrangler whoami` first):
+#   1. wrangler login                                   (log in as the dev account)
+#   2. wrangler d1 create kcp_central_dev                -> copy the returned database_id below
+#   3. wrangler queues create kcp-yoco-v2-events-dev
+#      wrangler queues create kcp-yoco-v2-events-dlq-dev
+#   4. wrangler deploy --config wrangler.dev.toml         (first deploy also creates the Durable Objects)
+#   5. wrangler secret put <NAME> --config wrangler.dev.toml   (repeat for every secret listed below)
+
+account_id = "16a3463edf756942935b0637f2dc6fa3"
+name = "kcp-api-v2-dev"
+main = "src/index.ts"
+compatibility_date = "2026-05-23"
+
+[alias]
+xlsx = "./node_modules/xlsx/xlsx.mjs"
+jspdf = "./node_modules/jspdf/dist/jspdf.es.min.js"
+jspdf-autotable = "./node_modules/jspdf-autotable/dist/jspdf.plugin.autotable.mjs"
+
+# --- Durable Objects: one WorkspaceDO (SQLite) per workspace -------------------------------------
+[[durable_objects.bindings]]
+name = "WORKSPACE"
+class_name = "WorkspaceDO"
+
+[[durable_objects.bindings]]
+name = "YOCO_V2_RATE_GATE"
+class_name = "YocoV2RateGateDO"
+
+[[durable_objects.bindings]]
+name = "YOCO_V2_WRITE_BUDGET"
+class_name = "YocoV2WriteBudgetDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["WorkspaceDO"]
+
+[[migrations]]
+tag = "v2-yoco-rate-gate"
+new_sqlite_classes = ["YocoV2RateGateDO"]
+
+[[migrations]]
+tag = "v3-yoco-write-budget"
+new_sqlite_classes = ["YocoV2WriteBudgetDO"]
+
+# Cron triggers stay disabled here too, matching production's current disabled state.
+# See CRON_BACKUP_RESTORE.md if/when production re-enables them — mirror that change here.
+[triggers]
+crons = []
+
+# --- Central plane: shared D1 for identity / registry / members / cross-tenant coordination ------
+[[d1_databases]]
+binding = "CENTRAL_DB"
+database_name = "kcp_central_dev"
+database_id = "91145eb1-90b5-4065-bf7e-ebe3523ca195"
+
+[vars]
+ENVIRONMENT = "development"
+# Update once you know the dev Pages URL (Cloudflare will assign one on first Pages deploy,
+# e.g. https://kcp-live-dev.pages.dev) and the dev Worker's workers.dev URL (assigned after step 4
+# above, e.g. https://kcp-api-v2-dev.<your-dev-subdomain>.workers.dev).
+ALLOWED_ORIGINS = "http://localhost:*,http://127.0.0.1:*,https://development-kcp-kitchencostpro.pages.dev,https://*.development-kcp-kitchencostpro.pages.dev"
+ADMIN_BOOTSTRAP_EMAILS = "superuser@yoco.com"
+APP_BASE_URL = "https://development-kcp-kitchencostpro.pages.dev"
+YOCO_WEBHOOK_BASE_URL = "https://kcp-api-v2-dev.kcp-kitchencostpro.workers.dev"
+GMAIL_OAUTH_REDIRECT_URI = "https://kcp-api-v2-dev.kcp-kitchencostpro.workers.dev/api/gmail/oauth/callback"
+GDRIVE_OAUTH_REDIRECT_URI = "https://kcp-api-v2-dev.kcp-kitchencostpro.workers.dev/api/gdrive/oauth/callback"
+# Use a SEPARATE Turnstile site (dash.cloudflare.com -> Turnstile) so dev traffic never shares a
+# challenge widget/config with production. Same for the paired secret key set with `secret put`.
+# Real Turnstile widget "KCP Development" (site: 0x4AAAAAAEcyfVxDgU0hnr9V), created via
+# `wrangler turnstile widget create` under the dev account, scoped to development-kcp-
+# kitchencostpro.pages.dev / kcp-api-v2-dev.kcp-kitchencostpro.workers.dev / localhost.
+TURNSTILE_SITE_KEY = "0x4AAAAAAEcyfVxDgU0hnr9V"
+ADMIN_TURNSTILE_MODE = "enforce"
+APP_TURNSTILE_MODE = "enforce"
+YOCO_V2_CAPTURE_ENABLED = "all"
+YOCO_V2_QUEUE_ENABLED = "all"
+YOCO_V2_ADMIN_ENABLED = "all"
+YOCO_V2_LIVE_SALE_REPORTING = "all"
+YOCO_V2_LIVE_SALE_STOCK = "all"
+YOCO_V2_LIVE_REFUND_REPORTING = "all"
+YOCO_V2_LIVE_REFUND_STOCK = "all"
+YOCO_V2_MAX_ATTEMPTS = "8"
+YOCO_V2_BASE_RETRY_MS = "5000"
+YOCO_V2_MAX_RETRY_MS = "900000"
+YOCO_V2_API_TIMEOUT_MS = "15000"
+YOCO_V2_REQUEST_SPACING_MS = "250"
+YOCO_V2_ORDER_CACHE_TTL_MS = "30000"
+YOCO_V2_REFUND_CACHE_TTL_MS = "20000"
+YOCO_V2_METADATA_CACHE_TTL_MS = "60000"
+YOCO_V2_AUTH_FAILURE_THRESHOLD = "2"
+YOCO_V2_RATE_LIMIT_PAUSE_FALLBACK_MS = "30000"
+YOCO_V2_RECONCILIATION_OVERLAP_MINUTES = "120"
+YOCO_V2_RECONCILIATION_LOOKBACK_HOURS = "24"
+# Same conservative headroom convention as production (real free-tier cap is 100,000/day).
+YOCO_V2_WRITE_BUDGET_DAILY_CAP = "90000"
+YOCO_V2_WRITE_BUDGET_SOFT_WARN_RATIO = "0.8"
+# Production secrets are configured with `wrangler secret put --config wrangler.dev.toml`; never
+# store them here.
+
+# Secrets to configure (each: wrangler secret put <NAME> --config wrangler.dev.toml):
+#   TURNSTILE_SECRET_KEY, ADMIN_TURNSTILE_SECRET_KEY, YOCO_KEY_ENCRYPTION_SECRET,
+#   YOCO_WEBHOOK_SECRET, GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, GMAIL_TOKEN_ENCRYPTION_SECRET,
+#   GMAIL_OAUTH_STATE_SECRET, GDRIVE_CLIENT_ID, GDRIVE_CLIENT_SECRET,
+#   GDRIVE_TOKEN_ENCRYPTION_SECRET, GDRIVE_OAUTH_STATE_SECRET
+# Use FRESH values for dev, not copies of production secrets — a leaked dev environment should
+# never expose a production encryption key or OAuth client.
+
+# --- Yoco V2 isolated capture and processing queues ----------------------------------------------
+[[queues.producers]]
+binding = "YOCO_V2_EVENTS"
+queue = "kcp-yoco-v2-events-dev"
+
+[[queues.producers]]
+binding = "YOCO_V2_EVENTS_DLQ"
+queue = "kcp-yoco-v2-events-dlq-dev"
+
+[[queues.consumers]]
+queue = "kcp-yoco-v2-events-dev"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 8
+dead_letter_queue = "kcp-yoco-v2-events-dlq-dev"

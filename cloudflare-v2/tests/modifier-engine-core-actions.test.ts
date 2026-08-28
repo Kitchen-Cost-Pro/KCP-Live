@@ -143,6 +143,17 @@ function createEnv() {
       ('coffee_dairy', 'ws_1', 'recipe_coffee', 'dairy', 200, 'ml', 1),
       ('patty_beef', 'ws_1', 'recipe_patty', 'beef', 0.2, 'kg', 1);
 
+    INSERT INTO stock_items (id, workspace_id, name, item_type, unit, unit_cost, active, is_stocked) VALUES
+      ('flour', 'ws_1', 'Flour', 'raw', 'kg', 2, 1, 1);
+    UPDATE stock_items SET raw_json = '{"uomConfigurations":[{"customUom":"box","ratio":12}]}' WHERE id = 'flour';
+
+    INSERT INTO products (id, workspace_id, name, active, external_provider, yoco_item_id, yoco_variant_id) VALUES
+      ('pizza', 'ws_1', 'Pizza', 1, 'yoco', 'prod_pizza', 'var_pizza');
+    INSERT INTO recipes (id, workspace_id, owner_type, owner_id, yield_qty, active) VALUES
+      ('recipe_pizza', 'ws_1', 'product', 'pizza', 1, 1);
+    INSERT INTO recipe_lines (id, workspace_id, recipe_id, stock_item_id, quantity, unit, sort_order) VALUES
+      ('pizza_flour', 'ws_1', 'recipe_pizza', 'flour', 1, 'box', 1);
+
     INSERT INTO yoco_modifier_groups
       (id, workspace_id, yoco_modifier_group_id, name, raw_json, created_at, updated_at)
       VALUES (
@@ -346,6 +357,38 @@ test('ADD_RECIPE follows a linked product recipe and deducts it once per sale qu
   assert.equal(extra?.warning_code, null);
 });
 
+test('a base recipe line recorded in a custom UOM (uomConfigurations schema) converts to base units instead of silently deducting 1x', async () => {
+  // Regression guard: effect-proposals.ts's recipe-expansion path once read a UOM-ratio schema
+  // that the stock-item editor never wrote (see resolveCustomUomFactor), so a "1 box" line
+  // recipe silently deducted 1 base unit instead of the configured 12 with no warning. `pizza`'s
+  // recipe uses the schema the frontend actually writes (uomConfigurations/customUom/ratio).
+  const env = createEnv();
+  const rows = await proposals(env, canonical({ orderId: 'custom_uom_recipe', productId: 'pizza', modifier: modifier('unused_modifier_for_pizza') }));
+  const flourRow = rows.find((row: any) => row.ingredient_item_id === 'flour');
+  assert.ok(flourRow, 'a flour movement should be proposed');
+  assert.equal(flourRow.quantity, -12, '1 box should deduct the configured 12kg ratio, not 1kg');
+  assert.equal(flourRow.warning_code, null);
+});
+
+test('a base recipe line whose custom UOM cannot be resolved is skipped with a warning instead of silently deducting 1x', async () => {
+  const env = createEnv();
+  env.DB.database.exec(`
+    INSERT INTO stock_items (id, workspace_id, name, item_type, unit, unit_cost, active, is_stocked)
+      VALUES ('sugar', 'ws_1', 'Sugar', 'raw', 'kg', 3, 1, 1);
+    INSERT INTO products (id, workspace_id, name, active, external_provider, yoco_item_id, yoco_variant_id)
+      VALUES ('cake', 'ws_1', 'Cake', 1, 'yoco', 'prod_cake', 'var_cake');
+    INSERT INTO recipes (id, workspace_id, owner_type, owner_id, yield_qty, active)
+      VALUES ('recipe_cake', 'ws_1', 'product', 'cake', 1, 1);
+    INSERT INTO recipe_lines (id, workspace_id, recipe_id, stock_item_id, quantity, unit, sort_order)
+      VALUES ('cake_sugar', 'ws_1', 'recipe_cake', 'sugar', 1, 'bag', 1);
+  `);
+  const rows = await proposals(env, canonical({ orderId: 'unresolvable_uom_recipe', productId: 'cake', modifier: modifier('unused_modifier_for_cake') }));
+  const sugarRow = rows.find((row: any) => row.ingredient_item_id === 'sugar');
+  assert.ok(sugarRow, 'a warning row should still be surfaced for the unresolved sugar line');
+  assert.equal(sugarRow.warning_code, 'MODIFIER_STOCK_UOM_INVALID');
+  assert.equal(sugarRow.quantity, 0, 'an unresolved custom UOM must not deduct any stock');
+});
+
 test('ADD_STOCK_ITEM deducts the configured stock item with rule quantity', async () => {
   const env = createEnv();
   await upsertModifierRule(env, {
@@ -413,6 +456,20 @@ test('ADD_STOCK_ITEM validates custom UOMs and converts them to base quantity', 
     workspaceId: 'ws_1', ownerId: 'bad_sauce_unit',
     rule: { actionType: 'ADD_STOCK_ITEM', targetOwnerType: 'stock_item', targetOwnerId: 'sauce', quantity: 1, unit: 'invalid-carton', applyAllMatchingProducts: true }
   }), /not a valid base or custom UOM/i);
+});
+
+test('ADD_STOCK_ITEM accepts a custom UOM recorded under the uomConfigurations schema (the one the stock-item editor actually writes)', async () => {
+  // Regression guard: stockItemUomFactor once only checked the legacy uoms/customUoms
+  // collections (never populated by any writer), so a legitimate uomConfigurations-based custom
+  // UOM (e.g. `flour`'s "box") failed this validation and could never be saved as a modifier
+  // rule, even though it deducts correctly at sale time via effect-proposals.ts.
+  const env = createEnv();
+  await upsertModifierRule(env, {
+    workspaceId: 'ws_1', ownerId: 'extra_flour',
+    rule: { actionType: 'ADD_STOCK_ITEM', targetOwnerType: 'stock_item', targetOwnerId: 'flour', quantity: 1, unit: 'box', applyAllMatchingProducts: true }
+  });
+  const rows = await proposals(env, canonical({ orderId: 'add_flour_box', productId: 'burger', modifier: modifier('extra_flour') }));
+  assert.equal(rows.find((row: any) => row.modifier_id === 'extra_flour' && row.ingredient_item_id === 'flour')?.quantity, -12);
 });
 
 test('global remove and replace rules skip matching menu items that do not contain the source ingredient', async () => {

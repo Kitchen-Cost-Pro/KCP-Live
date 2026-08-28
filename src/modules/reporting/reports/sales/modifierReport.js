@@ -10,6 +10,7 @@ import { groupBy, sumBy, text, toArray } from '../../engine/grouping.js';
 import { formatMoney } from '../../engine/formatters.js';
 import { DEFAULT_REPORT_TIMEZONE, formatReportTime } from '../../engine/timezone.js';
 import { buildRowFormulaTooltip } from '../../tooltips/tooltipBuilder.js';
+import { CENT_TOLERANCE } from '../../engine/yocoFinancials.js';
 
 const money = (value) => formatMoney(value || 0);
 const percent = (value) => `${((safeNumber(value) || 0) * 100).toFixed(1)}%`;
@@ -380,25 +381,41 @@ function normalizeModifierRow(row = {}) {
     || text(row.transactionType || row.transaction_type).toLowerCase() === 'refund'
     || text(row.status).toLowerCase().includes('refund')
     || Boolean(text(row.refundId || row.refund_id));
-  const grossAmount = safeNumber(row.grossAmount ?? row.grossSales);
-  const refundAmount = safeNumber(row.refundAmount ?? row.refunds ?? row.refund_amount);
+  const sourceGrossAmount = safeNumber(row.grossAmount ?? row.grossSales);
+  const refundAmount = safeNumber(row.refundAmount ?? row.refunds ?? row.refund_amount ?? (isRefund ? sourceGrossAmount : 0));
   // A non-VAT-registered workspace legitimately supplies vatRate: 0 — that must not collapse
   // into "not supplied" and fall back to the 15% default below, or every sale on that workspace
   // would show fabricated VAT instead of the R0 the backend already correctly calculated.
   const vatRateSupplied = row.vatRate !== undefined || row.vat_rate !== undefined;
   const suppliedRate = vatRateSupplied ? normalizeModifierVatRate(row.vatRate ?? row.vat_rate) : NaN;
   const vatRate = vatRateSupplied ? suppliedRate : 0.15;
+  const isExplicitZeroRate = vatRateSupplied && suppliedRate === 0;
   const isVatExempt = modifierBoolean(row.isVatExempt ?? row.is_vat_exempt ?? row.vatExempt ?? row.vat_exempt ?? row.zeroRated ?? row.zero_rated)
     || /zero[ _-]?rated|tax[ _-]?exempt|vat[ _-]?exempt|non[ _-]?taxable/.test(text(row.vatSource || row.vat_source || row.taxStatus || row.tax_status).toLowerCase());
+  // "Gross Sales" is a sale-only column — this report shows refunds in their own dedicated
+  // "Refunds" column (see the columns above and netSalesTooltip's "Net Refund" formula), so a
+  // refund row must not add its original gross back into Gross Sales, VAT or Net Sales, or a
+  // fully-refunded modifier inflates those totals instead of netting toward zero.
+  const grossAmount = isRefund ? 0 : sourceGrossAmount;
   const explicitVat = row.vatAmount ?? row.vat;
   const explicitVatAmount = safeNumber(explicitVat);
-  const explicitVatUsable = hasModifierValue(explicitVat) && (isRefund || explicitVatAmount > 0 || !grossAmount || isVatExempt);
-  const vatAmount = explicitVatUsable ? explicitVatAmount : calculateVatFromGross(grossAmount, vatRate);
+  const explicitVatUsable = hasModifierValue(explicitVat)
+    && (explicitVatAmount !== 0 || (!sourceGrossAmount && !refundAmount) || isVatExempt || isExplicitZeroRate);
+  // For a refund row, VAT is the (negative) reversal of what was charged on the refunded amount —
+  // computed off `refundAmount`, not the now-zeroed `grossAmount` — matching the tooltip's
+  // "Net Refund = -(Refunds - Reversed VAT)" formula.
+  const vatAmount = isRefund
+    ? (explicitVatUsable
+      ? (explicitVatAmount > 0 ? -explicitVatAmount : explicitVatAmount)
+      : roundMoney(-(isVatExempt ? 0 : calculateVatFromGross(refundAmount, vatRate))))
+    : (explicitVatUsable ? explicitVatAmount : calculateVatFromGross(grossAmount, vatRate));
   const explicitNet = row.netAmount ?? row.netSales;
   const explicitNetAmount = safeNumber(explicitNet);
   const explicitNetReconciles = hasModifierValue(explicitNet)
-    && (isRefund || Math.abs(roundMoney(grossAmount - vatAmount) - roundMoney(explicitNetAmount)) <= 0.011);
-  const netAmount = explicitNetReconciles ? explicitNetAmount : roundMoney(grossAmount - vatAmount);
+    && (isRefund || Math.abs(roundMoney(grossAmount - vatAmount) - roundMoney(explicitNetAmount)) <= CENT_TOLERANCE);
+  const netAmount = isRefund
+    ? roundMoney(-(refundAmount - Math.abs(vatAmount)))
+    : (explicitNetReconciles ? explicitNetAmount : roundMoney(grossAmount - vatAmount));
   const stockCost = safeNumber(row.stockCost);
   const grossProfit = row.grossProfit !== undefined ? safeNumber(row.grossProfit) : calculateGrossProfit(netAmount, stockCost);
   const transactionQty = safeNumber(row.qty ?? row.netSelections ?? row.timesSelected, isRefund ? -1 : 1);

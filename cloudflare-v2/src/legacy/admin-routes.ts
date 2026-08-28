@@ -5,6 +5,7 @@ import { connectYoco, disconnectYoco, getYocoConnection, syncYocoCatalogue } fro
 import { sendEmail, type EmailDeliveryConfig } from './email';
 import { encryptTextWithSecret, decryptTextWithSecret } from './crypto';
 import { KCP_WORKER_RELEASE, KCP_WORKER_RELEASE_DATE, KCP_REFUND_PIPELINE_VERSION } from '../release';
+import { checkRateLimit } from './rate-limit';
 
 function text(value: unknown, fallback = '') {
   return String(value ?? fallback).trim();
@@ -591,6 +592,10 @@ export async function requireAdmin(request: Request, env: Env) {
   const configured = text(env.ADMIN_API_TOKEN);
   const suppliedToken = text(request.headers.get('x-kcp-admin-token'));
   if (configured && suppliedToken && suppliedToken === configured) {
+    // Rate-limit the shared token path too — a leaked ADMIN_API_TOKEN otherwise has no throttle at
+    // all on how fast it can be used to hammer expensive admin routes.
+    const tokenLimited = await checkRateLimit(env.DB, 'admin-action:env-token', 60, 60);
+    if (tokenLimited.blocked) throw new Error('Too many admin actions. Please wait a moment and try again.');
     return {
       via: 'token' as const,
       auth: null,
@@ -615,6 +620,16 @@ export async function requireAdmin(request: Request, env: Env) {
   let admin = await findAdminUserByAuth(env, auth);
   if (!admin) admin = await maybeBootstrapAdminUser(env, auth);
   if (!admin) throw new Error('Admin access denied.');
+  // No rate limiting previously existed on ANY admin action once authenticated — nothing stopped a
+  // compromised admin session (or a buggy retry loop in the frontend) from hammering expensive
+  // routes (catalogue sync, bulk delete, migration-retry) at unlimited speed. This one bucket
+  // covers every admin route though, including routine read-only dashboard telemetry (summaries,
+  // invitations, registration-requests, webhook health/write-budget/timeseries) — a single normal
+  // dashboard load plus opening one tab is easily 8-10 calls on its own, so 10/min (tried first)
+  // false-positived on real usage within seconds. 60/min still bounds a runaway loop or abused
+  // token while giving normal admin console usage headroom.
+  const sessionLimited = await checkRateLimit(env.DB, `admin-action:${admin.id}`, 60, 60);
+  if (sessionLimited.blocked) throw new Error('Too many admin actions. Please wait a moment and try again.');
   return { via: 'session' as const, auth, admin };
 }
 
@@ -703,7 +718,12 @@ export async function postAdminAuditLog(request: Request, env: Env) {
 }
 
 export async function postAdminTestEmail(request: Request, env: Env) {
-  await requireAdmin(request, env);
+  const adminSession = await requireAdmin(request, env);
+  // Separate from requireAdmin's general action-pace limit — unlimited email sends by any
+  // admin/member session is a provider-cost and deliverability-reputation risk in its own right,
+  // not just a Cloudflare-quota one, so it gets its own, tighter, email-specific budget.
+  const emailLimited = await checkRateLimit(env.DB, `admin-email:${adminSession.admin?.id || 'unknown'}`, 20, 3600);
+  if (emailLimited.blocked) return error(request, env, 429, 'Too many emails sent recently. Please wait and try again.');
   const payload = await readJson<Record<string, unknown>>(request);
   const to = text(payload.to);
   if (!to) return error(request, env, 400, 'Recipient email required.');
@@ -993,6 +1013,8 @@ export async function deleteAdminUser(request: Request, env: Env, adminId: strin
 export async function postAdminUserPasswordReset(request: Request, env: Env, adminId: string) {
   const adminSession = await requireAdmin(request, env);
   if (!adminSession.admin?.isSuper) return error(request, env, 403, 'Only superusers can reset admin passwords.');
+  const emailLimited = await checkRateLimit(env.DB, `admin-email:${adminSession.admin.id}`, 20, 3600);
+  if (emailLimited.blocked) return error(request, env, 429, 'Too many emails sent recently. Please wait and try again.');
 
   const row = await env.DB.prepare(
     `SELECT id, email, display_name FROM admin_users WHERE id = ?1 LIMIT 1`
@@ -1583,6 +1605,8 @@ export async function deleteAdminInvitation(request: Request, env: Env, invitati
 
 export async function postAdminInvite(request: Request, env: Env) {
   const adminSession = await requireAdmin(request, env);
+  const emailLimited = await checkRateLimit(env.DB, `admin-email:${adminSession.admin?.id || 'unknown'}`, 20, 3600);
+  if (emailLimited.blocked) return error(request, env, 429, 'Too many emails sent recently. Please wait and try again.');
   const payload = await readJson<Record<string, unknown>>(request);
   const workspaceId = text(payload.workspaceId);
   const email = text(payload.email).toLowerCase();

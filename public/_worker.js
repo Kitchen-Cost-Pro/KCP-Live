@@ -1,14 +1,17 @@
-const API_ORIGIN = 'https://kcp-api-v2.adminkitchencostpro.workers.dev';
-const API_URL = new URL(API_ORIGIN);
+const DEFAULT_API_ORIGIN = 'https://kcp-api-v2.adminkitchencostpro.workers.dev';
 const STOCK_TAKE_SERVICE_CHUNK = '__STOCK_TAKE_SERVICE_CHUNK__';
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname.startsWith('/api/')) {
+      // env.API_ORIGIN is a Pages project variable/secret — unset means this is the production
+      // Pages project, which keeps proxying to production. Only a dev/preview Pages project
+      // needs it set, to point at its own Worker instead of hardcoded production.
+      const apiUrl = new URL(String(env.API_ORIGIN || DEFAULT_API_ORIGIN));
       const target = new URL(request.url);
-      target.protocol = API_URL.protocol;
-      target.host = API_URL.host;
+      target.protocol = apiUrl.protocol;
+      target.host = apiUrl.host;
       return fetch(new Request(target.toString(), request));
     }
 

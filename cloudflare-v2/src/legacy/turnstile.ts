@@ -21,6 +21,22 @@ export async function verifyTurnstileToken(request: Request, env: Env, token: un
   const mode = text(options.mode || env.ADMIN_TURNSTILE_MODE, 'enforce').toLowerCase();
   const label = text(options.label || 'Security');
   if (!secret || !siteKey) {
+    // A missing secret/site key while mode is 'enforce' silently disabling the captcha check
+    // entirely (previously: return ok:true here unconditionally) is a real security regression
+    // that would produce zero errors, zero failed logins, nothing — the login flow just quietly
+    // stops being protected. If enforcement was explicitly requested, treat a missing secret as
+    // the misconfiguration it is: log loudly and fail closed, rather than silently degrading.
+    if (mode === 'enforce') {
+      console.error(
+        `[turnstile] ${label} check is set to 'enforce' but ${!secret ? 'TURNSTILE_SECRET_KEY/secretKey' : 'TURNSTILE_SITE_KEY'} is not configured — failing closed instead of silently disabling the check. Set the missing secret via 'wrangler secret put'.`
+      );
+      return {
+        ok: false,
+        required: true,
+        mode,
+        message: `${label} check is temporarily unavailable. Please try again shortly.`
+      };
+    }
     return { ok: true, required: false, mode };
   }
 

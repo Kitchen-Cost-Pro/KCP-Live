@@ -6,23 +6,34 @@ export function buildReportIntegritySummary(rows = []) {
   const issues = [];
   for (const row of safeRows) {
     const rowId = row?.id || row?.sourceId || row?.receiptNumber || '';
+    // A refund row deliberately zeroes `grossAmount` and reports its reversal as negative
+    // `netAmount`/`vatAmount` (see yocoFinancials.js / modifierReport.js) — gross = net + vat
+    // does not hold for it by design, it must instead reconcile against the refunded amount, and
+    // its payout impact is the full refund, not its own (zeroed) netAmount. Checking every row
+    // against the sale-only formula regardless of `isRefund` would flag every single refund as a
+    // false "critical" integrity issue.
+    const isRefund = row?.isRefund === true || row?.is_refund === true;
     if (hasAny(row, ['grossAmount', 'netAmount', 'vatAmount'])) {
       const gross = safeNumber(row.grossAmount);
       const net = safeNumber(row.netAmount);
       const vat = safeNumber(row.vatAmount);
-      if (!moneyReconciles(gross, net + vat)) {
+      const grossReconciles = isRefund
+        ? moneyReconciles(safeNumber(row.refundAmount ?? row.refundGrossAmount), Math.abs(net) + Math.abs(vat))
+        : moneyReconciles(gross, net + vat);
+      if (!grossReconciles) {
         issues.push({ code: 'sales-gross-net-vat-reconciliation', level: 'critical', rowId, difference: roundMoney(gross - net - vat) });
       }
       const isVatExempt = row?.isVatExempt === true || row?.is_vat_exempt === true || /zero[ _-]?rated|exempt|non[ _-]?taxable/.test(String(row?.vatSource || row?.vat_source || '').toLowerCase());
       const taxableSalesContext = safeNumber(row?.vatRate ?? row?.vat_rate) > 0
         || String(row?.createdBy || row?.created_by || '').toLowerCase() === 'yoco'
         || ['yoco', 'calculated', 'source'].includes(String(row?.vatSource || row?.vat_source || '').toLowerCase());
-      if (gross > 0 && moneyReconciles(gross, net) && moneyReconciles(vat, 0) && taxableSalesContext && !isVatExempt) {
+      if (!isRefund && gross > 0 && moneyReconciles(gross, net) && moneyReconciles(vat, 0) && taxableSalesContext && !isVatExempt) {
         issues.push({ code: 'sales-taxable-zero-vat', level: 'critical', rowId, difference: roundMoney(gross - net) });
       }
     }
     if (row?.payoutAmount !== undefined) {
-      const expected = roundMoney(safeNumber(row.netAmount) + safeNumber(row.tipAmount) - safeNumber(row.refundAmount) - safeNumber(row.feeAmount));
+      const payoutNetSales = isRefund ? 0 : safeNumber(row.netAmount);
+      const expected = roundMoney(payoutNetSales + safeNumber(row.tipAmount) - safeNumber(row.refundAmount) - safeNumber(row.feeAmount));
       if (!moneyReconciles(row.payoutAmount, expected, 0.05)) {
         issues.push({ code: 'sales-payout-reconciliation', level: 'warning', rowId, difference: roundMoney(safeNumber(row.payoutAmount) - expected) });
       }

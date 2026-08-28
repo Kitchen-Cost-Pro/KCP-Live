@@ -171,7 +171,12 @@ function normalizeLine(row = {}, index = 0) {
     vat,
     lineValueInclVat,
     receivedValue,
-    grvReceivedValue: safeNumber(row.grvReceivedValue ?? row.grv_received_value ?? receivedValue),
+    // Deliberately does NOT fall back to `receivedValue` when the API omits this field — that
+    // would make grvReceivedValue always equal receivedValue, so the value-mismatch check below
+    // (purchase-order-grv-value-mismatch) could never fire even when the PO and its linked GRV
+    // genuinely disagree. A missing value defaults to 0 like any other numeric field instead,
+    // so a real discrepancy (or a data gap) still surfaces instead of being silently masked.
+    grvReceivedValue: safeNumber(row.grvReceivedValue ?? row.grv_received_value),
     grvCount: safeNumber(row.grvCount ?? row.grv_count),
     status: titleStatus(row.status),
     expectedDeliveryDate: text(row.expectedDeliveryDate || row.expected_delivery_date || row.expectedAt || row.expected_at).slice(0, 10),

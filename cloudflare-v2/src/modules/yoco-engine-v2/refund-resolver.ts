@@ -1,5 +1,6 @@
 import type { Env } from '../../legacy/types';
 import { deriveYocoFinancialAmounts, yocoMoneyToMajor } from '../../../../src/modules/reporting/engine/yocoFinancials.js';
+import { roundMoney } from '../../../../src/modules/reporting/engine/calculations.js';
 import type {
   CanonicalRefundLine,
   CanonicalSaleModifier,
@@ -555,6 +556,30 @@ async function workspaceVatRate(env: Env, workspaceId: string): Promise<number> 
   return vat > 0 ? vat : 15;
 }
 
+async function originalSaleVatRate(env: Env, workspaceId: string, sourceOrderId: string): Promise<number> {
+  // A refund must reverse the VAT rate that was actually in force when the ORIGINAL sale was
+  // processed, not whatever workspace_settings says right now — otherwise a later vat_registered
+  // toggle or rate change silently corrupts the reversal for any refund whose own Yoco resource
+  // omits an explicit tax figure (e.g. amount-only/custom-amount refunds). `yoco_orders` persists
+  // this as a point-in-time snapshot at sale time (see live-sale.ts applyReporting), so prefer it
+  // over the live workspace_settings lookup used by workspaceVatRate().
+  if (!sourceOrderId) return workspaceVatRate(env, workspaceId);
+  let row: Row | null = null;
+  try {
+    row = await env.DB.prepare(
+      `SELECT vat_rate, vat_registered FROM yoco_orders WHERE workspace_id = ?1 AND yoco_order_id = ?2 AND order_type = 'sale' LIMIT 1`
+    ).bind(workspaceId, sourceOrderId).first<Row>();
+  } catch {
+    // Tolerate a yoco_orders table whose vat_rate/vat_registered columns haven't been migrated
+    // yet on this workspace's DO, same as workspaceVatRate() does for workspace_settings.
+    row = null;
+  }
+  if (!row) return workspaceVatRate(env, workspaceId);
+  if (numberValue(row.vat_registered, 1) === 0) return 0;
+  const rate = numberValue(row.vat_rate, NaN);
+  return rate > 0 ? rate : workspaceVatRate(env, workspaceId);
+}
+
 async function previousRefundedQuantities(env: Env, workspaceId: string, sourceOrderId: string, currentRefundId: string): Promise<Map<string, number>> {
   const rows = await env.DB.prepare(
     `SELECT payload_json FROM yoco_v2_domain_events
@@ -1020,7 +1045,7 @@ export async function resolveCanonicalYocoRefund(env: YocoV2ApiClientEnv, input:
     inventoryStatus = 'WAITING_FOR_YOCO'; reportingStatus = financialStatus;
     await markStep('WAITING_FOR_YOCO', 'Original order is not available yet; no line allocation or stock proposal was attempted.', { source_order_id: refs.sourceOrderId || null });
     const rawFinancial = { ...refundOrder, ...refund };
-    const derived = deriveYocoFinancialAmounts({ raw: rawFinancial, configuredVatRate: await workspaceVatRate(env, workspaceId), orderType: 'refund', status: text(refund.status || refundOrder.status) });
+    const derived = deriveYocoFinancialAmounts({ raw: rawFinancial, configuredVatRate: await originalSaleVatRate(env, workspaceId, refs.sourceOrderId), orderType: 'refund', status: text(refund.status || refundOrder.status) });
     const waiting: CanonicalSaleRefundedEvent = {
       event_id: eventId, event_type: 'sale.refunded', schema_version: REFUND_SCHEMA_VERSION, source: 'yoco', workspace_id: workspaceId,
       integration_id: integrationId, refund_id: refundIdentity, refund_order_id: refs.refundOrderId || undefined,
@@ -1091,7 +1116,7 @@ export async function resolveCanonicalYocoRefund(env: YocoV2ApiClientEnv, input:
   }
 
   const refundRaw: Row = { ...refundOrder, ...refund, payments: arrayValue(originalOrder.payments).length ? originalOrder.payments : arrayValue(payment).length ? payment : undefined };
-  const financials = deriveYocoFinancialAmounts({ raw: refundRaw, configuredVatRate: await workspaceVatRate(env, workspaceId), orderType: 'refund', status: text(refund.status || refundOrder.status || 'refunded') });
+  const financials = deriveYocoFinancialAmounts({ raw: refundRaw, configuredVatRate: await originalSaleVatRate(env, workspaceId, refs.sourceOrderId), orderType: 'refund', status: text(refund.status || refundOrder.status || 'refunded') });
   const grossAmount = Math.abs(numberValue(financials.refundGrossAmount));
   const originalRemainingGross = originalLines.reduce((sum, line, index) => {
     const remainingQty = Math.max(0, lineQuantity(line) - (previous.get(sourceLineId(line, index)) || 0));
@@ -1101,11 +1126,41 @@ export async function resolveCanonicalYocoRefund(env: YocoV2ApiClientEnv, input:
 
   if (!canonicalLines.length && !manualAllocation.length && explicitFull && originalLines.length && moneyEqual(grossAmount, originalRemainingGross)) {
     for (const [index, originalLine] of originalLines.entries()) {
-      const remaining = Math.max(0, lineQuantity(originalLine) - (previous.get(sourceLineId(originalLine, index)) || 0));
+      const originalQty = lineQuantity(originalLine);
+      const remaining = Math.max(0, originalQty - (previous.get(sourceLineId(originalLine, index)) || 0));
       if (remaining <= 0) continue;
-      canonicalLines.push(await canonicalRefundLine(env, workspaceId, originalLine, index, { ...originalLine, id: `${refundIdentity}:${sourceLineId(originalLine, index)}` }, index, remaining, 'FULL_ORDER_REMAINDER', 1));
+      // When a prior partial refund already reduced what's left on this line, `remaining` is
+      // less than the line's original quantity. The synthetic "returned line" must carry
+      // amounts scaled to `remaining`, not the full original line's gross/tax/net — canonicalRefundLine
+      // otherwise reads a spread-in `{...originalLine}`'s own (unscaled) amounts directly rather
+      // than applying the quantity ratio, overstating gross/tax/net for the remainder.
+      const ratio = remaining / Math.max(0.000001, originalQty);
+      const originalAmounts = lineAmounts(originalLine);
+      const scaledReturnedLine: Row = {
+        ...originalLine,
+        id: `${refundIdentity}:${sourceLineId(originalLine, index)}`,
+        quantity: remaining,
+        total_price: roundMoney(originalAmounts.gross * ratio),
+        tax_amount: roundMoney(originalAmounts.tax * ratio),
+        net_amount: roundMoney(originalAmounts.net * ratio),
+        discount_amount: roundMoney(originalAmounts.discount * ratio)
+      };
+      canonicalLines.push(await canonicalRefundLine(env, workspaceId, originalLine, index, scaledReturnedLine, index, remaining, 'FULL_ORDER_REMAINDER', 1));
     }
   }
+
+  // When source lines were reliably allocated, reverse each original line's own recorded VAT
+  // (prorated by the refunded quantity in canonicalRefundLine above) instead of the coarser
+  // order-level recompute in `financials`. This is immune to a workspace VAT-rate/registration
+  // change between sale and refund, and correctly handles a mixed-VAT-rate basket (each line
+  // reverses its own rate), unlike a single order-level rate applied to the whole refund gross.
+  const lineDerivedVat = canonicalLines.length
+    ? roundMoney(canonicalLines.reduce((sum, line) => sum + Math.abs(numberValue(line.tax_amount)), 0))
+    : null;
+  const refundVatAmount = lineDerivedVat !== null ? lineDerivedVat : Math.abs(numberValue(financials.refundVatAmount));
+  const refundNetAmount = lineDerivedVat !== null
+    ? roundMoney(Math.max(0, grossAmount - refundVatAmount))
+    : Math.abs(numberValue(financials.refundNetAmount));
 
   let refundType: YocoV2RefundType = 'UNKNOWN';
   if (canonicalLines.length) {
@@ -1137,7 +1192,7 @@ export async function resolveCanonicalYocoRefund(env: YocoV2ApiClientEnv, input:
   const reasonCode = allocationIssue || (refundType === 'AMOUNT_ONLY' ? 'AMOUNT_ONLY_WITHOUT_RETURN_LINES' : !canonicalLines.length ? 'REFUND_LINES_UNRESOLVED' : '');
 
   await markStep('RETURN_LINES_RESOLVED', canonicalLines.length ? 'Refunded source lines and quantities were resolved exactly.' : 'No reliable automatic line allocation was available.', { line_count: canonicalLines.length, reason_code: reasonCode || null });
-  await markStep('FINANCIALS_RESOLVED', 'Refund gross, net and VAT financial dimensions were resolved independently.', { gross_amount: grossAmount, net_amount: Math.abs(numberValue(financials.refundNetAmount)), tax_amount: Math.abs(numberValue(financials.refundVatAmount)) });
+  await markStep('FINANCIALS_RESOLVED', 'Refund gross, net and VAT financial dimensions were resolved independently.', { gross_amount: grossAmount, net_amount: refundNetAmount, tax_amount: refundVatAmount });
   await markStep('MAPPINGS_RESOLVED', 'Refund item and location mappings were evaluated.', { location_id: kcpLocationId || null, item_mapping_missing: canonicalLines.some((line) => line.mapping_status === 'MISSING') });
 
   const overallStatus: YocoV2RefundWorkflowStep = 'CANONICAL_EVENT_CREATED';
@@ -1161,8 +1216,8 @@ export async function resolveCanonicalYocoRefund(env: YocoV2ApiClientEnv, input:
     refund_type: refundType,
     gross_amount: grossAmount,
     discount_amount: money(refund.discount_amount || refund.discountAmount || objectValue(refund.amounts).discount_amount),
-    net_amount: Math.abs(numberValue(financials.refundNetAmount)),
-    tax_amount: Math.abs(numberValue(financials.refundVatAmount)),
+    net_amount: refundNetAmount,
+    tax_amount: refundVatAmount,
     tip_amount: money(refund.tip_amount || refund.tipAmount),
     financial_resolution_status: financialStatus,
     inventory_resolution_status: inventoryStatus,

@@ -213,9 +213,17 @@ function buildCategorySummaryRows(rows = []) {
 
 function normalizeStockControlItem(row = {}) {
   const currentStock = safeNumber(row.currentStock);
+  // A deliberately-set `parLevel: 0` (e.g. a discontinued item that should never be reordered) is
+  // falsy in JS — `parLevel || lowStockThreshold` would silently replace it with the low-stock
+  // threshold instead of respecting the explicit zero, fabricating a nonzero reorder recommendation
+  // for an item the business explicitly wants at zero. Check presence on the raw field before it's
+  // coerced to a number, since `safeNumber` itself already collapses "missing" and "zero" to 0.
+  const parLevelSupplied = row.parLevel !== undefined && row.parLevel !== null && text(row.parLevel) !== '';
   const parLevel = safeNumber(row.parLevel);
   const lowStockThreshold = safeNumber(row.lowStockThreshold);
-  const requiredQty = row.requiredQty !== undefined ? safeNumber(row.requiredQty) : Math.max((parLevel || lowStockThreshold) - currentStock, 0);
+  const requiredQty = row.requiredQty !== undefined
+    ? safeNumber(row.requiredQty)
+    : Math.max((parLevelSupplied ? parLevel : lowStockThreshold) - currentStock, 0);
   const unitCostExVat = safeNumber(row.unitCostExVat);
   return {
     ...row,

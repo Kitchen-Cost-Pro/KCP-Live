@@ -30,6 +30,10 @@ export function groupRows(rows = [], selector) {
   return groupBy(rows, selector);
 }
 
+export function hasValue(value) {
+  return value !== undefined && value !== null && text(value) !== '';
+}
+
 export function money(value) {
   return roundMoney(safeNumber(value));
 }

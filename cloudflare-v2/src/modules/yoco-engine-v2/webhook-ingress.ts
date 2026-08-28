@@ -9,6 +9,7 @@ import { migrateYocoV2EffectOwnershipForConnection } from './ownership';
 import { processYocoV2QueueMessage } from './processor';
 import { scheduleImmediateYocoV2Processing } from './queue-consumer';
 import { yocoV2WriteBudgetConfig } from './config';
+import { checkRateLimit } from '../../legacy/rate-limit';
 
 function text(value: unknown, fallback = ''): string {
   return String(value ?? fallback).trim();
@@ -129,6 +130,18 @@ export async function handleYocoV2WebhookIngress(
 ): Promise<Response> {
   if (request.method !== 'POST' || auth.uid !== 'yoco-webhook') {
     return response({ ok: false, error: 'Invalid Yoco webhook ingress route.' }, 403);
+  }
+
+  // Cheapest possible check, before parsing the body or touching yoco_connections: even a rejected
+  // request (bad signature, unknown workspace) previously cost at least one D1 read + one D1 write
+  // (recordRejectedReceipt below) with no limit on how often that could happen. A flood against one
+  // workspace — real or guessed — could burn the SHARED write-budget every workspace depends on,
+  // reproducing today's cross-tenant-outage shape via a different trigger. 60/min is generous for
+  // genuine Yoco traffic (a single device firing several events per sale) while still bounding worst
+  // case abuse to a fixed, small cost.
+  const throttled = await checkRateLimit(env.CENTRAL_DB, `webhook:${workspaceId}`, 60, 60);
+  if (throttled.blocked) {
+    return response({ ok: false, error: 'Too many webhook requests for this workspace.' }, 429);
   }
 
   const rawBody = await request.text();
