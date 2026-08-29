@@ -47,11 +47,18 @@ export function renderReportingDashboard({
   const reports = listReports();
   const sourceState = state || sourceData || {};
   const dataSet = createReportingDataSet(sourceState);
+  // appState.settings is a state WRAPPER ({ status, values, draft, ... }), not the settings fields
+  // themselves — those live one level deeper, at .values/.draft (see createSettingsState in
+  // main.js). Reading sourceState.settings directly here meant every date-range preset ("Today",
+  // "This Week", ...) was silently resolved with tradingDayStartMinutes always 0 and the default
+  // timezone, regardless of the workspace's real configured values — the SAME settings object the
+  // backend correctly reads, just one property too shallow.
+  const settingsValues = sourceState?.settings?.values || sourceState?.settings?.draft || {};
   const datePresetContext = {
     timeZone: normalizeReportTimeZone(
-      sourceState?.workspace?.timezone || sourceState?.settings?.timezone || 'Africa/Johannesburg'
+      sourceState?.workspace?.timezone || settingsValues.timezone || 'Africa/Johannesburg'
     ),
-    tradingDayStartMinutes: normalizeTradingDayStartMinutes(sourceState?.settings || {}),
+    tradingDayStartMinutes: normalizeTradingDayStartMinutes(settingsValues),
   };
   const initialRoute = resolveReportRoute(initialReportId);
   let activeReportState = initialRoute
