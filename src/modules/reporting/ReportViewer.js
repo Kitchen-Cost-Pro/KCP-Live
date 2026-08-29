@@ -158,6 +158,12 @@ export function renderReportViewer({
     // Re-resolve it from a fresh `now` on every real reload so "Today" always means today.
     if (reload && activeFilters?.dateRangeType && activeFilters.dateRangeType !== "custom") {
       activeFilters = applyDateRangePreset(activeFilters, datePresetContext);
+      // A relative preset resolves to the SAME startDate/endDate all day, which is exactly the
+      // report cache's key — so re-resolving above does nothing to bypass a stale cache entry from
+      // earlier in the day (a prior mount, or a stale result cached before newer data existed).
+      // Clear it here too, not just on the explicit Apply/Refresh actions, so a plain page
+      // (re)load of a relative-date report is never silently served yesterday's cached rows.
+      clearReportCache();
     }
     const runId = ++latestRunId;
     root.__reportActionMenuCleanup?.();
@@ -406,6 +412,13 @@ export function renderReportViewer({
         );
         activePage = 1;
         onFiltersChange?.(activeFilters);
+        // A relative preset like "Today" resolves to the SAME query (same startDate/endDate) every
+        // time it's applied within the same calendar day — which is exactly the report cache's key.
+        // Without clearing it here, clicking Apply on an already-cached preset silently replays
+        // whatever was cached from the very first time it was tried, no matter how much new data
+        // has since appeared, and the only way out was the separate Refresh button. An explicit
+        // Apply is just as much a deliberate "show me current data" action as Refresh is.
+        clearReportCache();
         void draw();
       });
       root
