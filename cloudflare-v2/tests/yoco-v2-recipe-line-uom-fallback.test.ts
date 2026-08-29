@@ -97,7 +97,11 @@ function createEnv() {
       ('cheese',     'ws_1', 'Cheese Slice', 'raw', 'ea', 5, 1, 1),
       ('flour',      'ws_1', 'Flour', 'raw', 'kg', 20, 1, 1),
       ('cream',      'ws_1', 'Cream', 'raw', 'l', 40, 1, 1),
-      ('portion',    'ws_1', 'Portioned Fish', 'raw', 'kg', 300, 1, 1);
+      ('portion',    'ws_1', 'Portioned Fish', 'raw', 'kg', 300, 1, 1),
+      -- Deliberately non-standard, free-text base UOMs: the base UOM field is a label, not a
+      -- unit the engine has to recognise.
+      ('punnet',     'ws_1', 'Strawberries', 'raw', 'punnet', 35, 1, 1),
+      ('bunch',      'ws_1', 'Coriander', 'raw', 'Bunch', 12, 1, 1);
     -- An item that genuinely configures 'ea' as a custom UOM must keep using that ratio, NOT the
     -- unspecified-sentinel fallback: 1 portion = 0.25 kg.
     UPDATE stock_items SET raw_json = '{"uomConfigurations":[{"customUom":"ea","ratio":0.25}]}'
@@ -112,14 +116,16 @@ function createEnv() {
       ('cheese_side',  'ws_1', 'Cheese Side',    1, 'yoco', 'prod_cs', 'var_cs'),
       ('bread',        'ws_1', 'Bread',          1, 'yoco', 'prod_br', 'var_br'),
       ('curry',        'ws_1', 'Curry',          1, 'yoco', 'prod_cu', 'var_cu'),
-      ('fish_dish',    'ws_1', 'Fish Dish',      1, 'yoco', 'prod_fd', 'var_fd');
+      ('fish_dish',    'ws_1', 'Fish Dish',      1, 'yoco', 'prod_fd', 'var_fd'),
+      ('salad',        'ws_1', 'Salad',          1, 'yoco', 'prod_sa', 'var_sa');
 
     INSERT INTO recipes (id, workspace_id, owner_type, owner_id, yield_qty, active) VALUES
       ('recipe_qp', 'ws_1', 'product', 'queen_prawns', 1, 1),
       ('recipe_cs', 'ws_1', 'product', 'cheese_side',  1, 1),
       ('recipe_br', 'ws_1', 'product', 'bread',        1, 1),
       ('recipe_cu', 'ws_1', 'product', 'curry',        1, 1),
-      ('recipe_fd', 'ws_1', 'product', 'fish_dish',    1, 1);
+      ('recipe_fd', 'ws_1', 'product', 'fish_dish',    1, 1),
+      ('recipe_sa', 'ws_1', 'product', 'salad',        1, 1);
 
     -- The exact production shape: a kg-based ingredient whose line unit is the 'ea' sentinel.
     INSERT INTO recipe_lines (id, workspace_id, recipe_id, stock_item_id, quantity, unit, sort_order) VALUES
@@ -129,7 +135,10 @@ function createEnv() {
       -- How a kitchen actually writes a recipe: grams and millilitres against kg/L stock.
       ('cu_beef',   'ws_1', 'recipe_cu', 'beef_mince', 250, 'g',  1),
       ('cu_cream',  'ws_1', 'recipe_cu', 'cream',      150, 'ml', 2),
-      ('fd_portion','ws_1', 'recipe_fd', 'portion',      2, 'ea', 1);
+      ('fd_portion','ws_1', 'recipe_fd', 'portion',      2, 'ea', 1),
+      -- One line left unspecified ('ea'), one naming the base UOM explicitly with different casing.
+      ('sa_punnet', 'ws_1', 'recipe_sa', 'punnet',       3, 'ea', 1),
+      ('sa_bunch',  'ws_1', 'recipe_sa', 'bunch',        2, 'bunch', 2);
   `);
   return { DB } as any;
 }
@@ -264,4 +273,20 @@ test('recipe-expansion.ts converts grams and millilitres identically', async () 
   assert.ok(Math.abs(beef!.totalQty - 0.25) < 1e-9, `expected 0.25 kg, got ${beef!.totalQty}`);
   assert.equal(cream!.uomResolved, true);
   assert.ok(Math.abs(cream!.totalQty - 0.15) < 1e-9, `expected 0.15 l, got ${cream!.totalQty}`);
+});
+
+test('a free-text base UOM deducts in its own units — the base UOM field is a label, not a unit the engine must recognise', async () => {
+  const env = createEnv();
+  const rows = await proposalsFor(env, sale('order_salad', 'salad'));
+
+  // Line unit is the unspecified 'ea' sentinel; the item is stocked in "punnet".
+  const punnet = rows.find((row: any) => row.ingredient_item_id === 'punnet') as any;
+  assert.equal(punnet.warning_code, null, 'a non-standard base UOM must not be treated as a missing conversion');
+  assert.equal(punnet.quantity, -3, '3 must deduct as 3 punnets');
+  assert.equal(punnet.base_uom, 'punnet');
+
+  // Line unit names the base UOM explicitly, in different casing ("bunch" vs stored "Bunch").
+  const bunch = rows.find((row: any) => row.ingredient_item_id === 'bunch') as any;
+  assert.equal(bunch.warning_code, null, 'unit matching is case-insensitive');
+  assert.equal(bunch.quantity, -2);
 });

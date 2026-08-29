@@ -4,7 +4,13 @@ import {
   calculateVarianceValue,
   safeNumber,
 } from "../../engine/calculations.js";
-import { groupBy, sumBy, text, toArray } from "../../engine/grouping.js";
+import {
+  applyReportFilters,
+  groupBy,
+  sumBy,
+  text,
+  toArray,
+} from "../../engine/grouping.js";
 import { buildRowWarnings } from "../../validators/rowWarningUtils.js";
 import { formatMoney, formatNumber } from "../../engine/formatters.js";
 import { buildRowFormulaTooltip } from "../../tooltips/tooltipBuilder.js";
@@ -603,7 +609,10 @@ async function loadStockTakeAuditModel({
     filters,
     services,
   });
-  const sourceRows = normalizeStockTakeRows(sourceResponse.rows);
+  const sourceRows = applyReportFilters(
+    normalizeStockTakeRows(sourceResponse.rows),
+    filters,
+  );
   const varianceLedgerRows = await loadStockTakeVarianceLedgerRows({
     workspaceId,
     filters,
@@ -690,7 +699,15 @@ function buildStockTakeAuditModel({
 }
 
 function normalizeStockTakeRows(rows = []) {
-  return toArray(rows).map((row, index) => ({
+  return toArray(rows).map((row, index) => {
+    const stockTakeDate = text(
+      row.stockTakeDate ||
+        row.stock_take_date ||
+        row.date ||
+        row.countedAt ||
+        row.counted_at,
+    ).slice(0, 10);
+    return {
     ...row,
     id: text(row.id) || `stock-take-line:${index}`,
     stockTakeSessionId: text(
@@ -711,13 +728,10 @@ function normalizeStockTakeRows(rows = []) {
         row.documentNumber ||
         row.document_number,
     ),
-    stockTakeDate: text(
-      row.stockTakeDate ||
-        row.stock_take_date ||
-        row.date ||
-        row.countedAt ||
-        row.counted_at,
-    ).slice(0, 10),
+    // Aliased for applyReportFilters, which resolves a row's comparable date from
+    // `date`/`timestamp`/`createdAt` and otherwise has no notion of stockTakeDate.
+    date: stockTakeDate,
+    stockTakeDate,
     locationId: text(row.locationId || row.location_id),
     locationName: text(row.locationName || row.location_name),
     status: text(
@@ -823,7 +837,8 @@ function normalizeStockTakeRows(rows = []) {
       row.varianceMovementRowCount ?? row.variance_movement_row_count,
     ),
     raw: row.raw || row,
-  }));
+    };
+  });
 }
 
 function enrichStockTakeLine(row = {}) {

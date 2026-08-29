@@ -1,5 +1,11 @@
 import { roundMoney, safeNumber } from "../../engine/calculations.js";
-import { groupBy, sumBy, text, toArray } from "../../engine/grouping.js";
+import {
+  applyReportFilters,
+  groupBy,
+  sumBy,
+  text,
+  toArray,
+} from "../../engine/grouping.js";
 import { fetchGrvLogRows } from "../../api/reportingApi.js";
 import {
   firstText,
@@ -216,7 +222,10 @@ export const grvLogReport = {
       ? await services.reporting.getGrvLogRows({ workspaceId, filters })
       : await fetchGrvLogRows({ workspaceId, filters });
     rememberPayload(services, "__lastGrvLogPayload", payload);
-    const lineRows = toArray(payload.rows).map(normalizeLine);
+    const lineRows = applyReportFilters(
+      toArray(payload.rows).map(normalizeLine),
+      filters,
+    );
     const views = buildGrvViews(lineRows);
     return (views[view] || views.summary).map((row) => ({
       ...row,
@@ -372,6 +381,11 @@ function normalizeLine(row = {}, index = 0) {
         row.grvNumber ||
         row.grv_number ||
         row.sourceId,
+    ),
+    // Aliased for applyReportFilters, which resolves a row's comparable date from
+    // `date`/`timestamp`/`createdAt` and otherwise has no notion of grvDate.
+    date: text(
+      row.grvDate || row.grv_date || row.receivedAt || row.received_at,
     ),
     grvDate: text(
       row.grvDate || row.grv_date || row.receivedAt || row.received_at,

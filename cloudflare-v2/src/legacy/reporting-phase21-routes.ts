@@ -13,6 +13,7 @@ import {
   historicalTransactionReference,
   resolveTransactionReferences,
 } from "./transaction-references";
+import { getWorkspaceEffectiveVatRate } from "./inventory-costing";
 
 type Row = Record<string, any>;
 type Warning = { code: string; level: string; message: string };
@@ -750,14 +751,15 @@ export async function getCreditNotesReport(
       "credit-notes-missing-source-tables",
       "Credit Notes cannot load because credit_notes or credit_note_lines are missing.",
     );
-  const settings = tables.workspace_settings
-    ? await env.DB.prepare(
-        "SELECT vat_rate FROM workspace_settings WHERE workspace_id=?1 LIMIT 1",
-      )
-        .bind(workspaceId)
-        .first<Row>()
-    : null;
-  const vatRate = number(settings?.vat_rate, 15) / 100;
+  // Must use the same registration-aware rate everywhere else in the app derives VAT from a
+  // stored cost (getWorkspaceEffectiveVatRate) — a hand-rolled `vat_rate`-only lookup ignored
+  // `vat_registered`, so for a non-VAT-registered workspace it kept applying the full rate on
+  // top of `unit_cost`, which is already VAT-inclusive for that workspace (see
+  // finalizeReceivedCost in GRVEntry.js). That double-applied VAT, inflating `vat` and
+  // `lineCreditInclVat` by another ~15% instead of correctly reporting 0 additional VAT.
+  const vatRate = tables.workspace_settings
+    ? await getWorkspaceEffectiveVatRate(env, workspaceId)
+    : 0.15;
   const clauses = ["cn.workspace_id = ?1"];
   const binds: any[] = [workspaceId];
   addDateRange(clauses, binds, "cn.credited_at", filters, timeZone);

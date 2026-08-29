@@ -189,6 +189,8 @@ export function renderGRVEntry({ state, onGrvFilterChange, onGrvAction = {} } = 
 }
 
 function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, onGrvAction) {
+  const vatRegistered = isWorkspaceVatRegistered(state);
+  const supplierVatRate = getSupplierVatRate(state);
   const blurActiveDraftField = () => {
     const active = document.activeElement;
     if (!active || !view.contains(active)) return;
@@ -434,16 +436,20 @@ function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, 
           currentLine.packSize,
           field.dataset.grvVatEnabled !== 'false',
           draft.pricesIncludeVat,
-          vatRate
+          vatRegistered,
+          supplierVatRate
         );
       }
       if (field.dataset.grvLine === 'packPriceDisplay') {
         const displayValue = field.value;
         const packSize = getPositivePackSize(currentLine.packSize);
         const vatEnabled = currentLine.vatEnabled !== false;
-        const packPriceEx = (draft.pricesIncludeVat && vatEnabled)
-          ? parseLooseDecimal(displayValue) / (1 + vatRate)
-          : parseLooseDecimal(displayValue);
+        const packPriceEx = finalizeReceivedCost(parseLooseDecimal(displayValue), {
+          isVatable: vatEnabled,
+          pricesIncludeVat: draft.pricesIncludeVat,
+          vatRegistered,
+          supplierVatRate
+        });
         payload.packPriceDisplay = displayValue;
         payload.packPriceEx = String(packPriceEx);
         payload.unitCost = packSize > 0 ? String(packPriceEx / packSize) : '0';
@@ -454,9 +460,12 @@ function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, 
         const displayValue = hasExplicitPackPrice
           ? formatEditableInput(currentLine.packPriceDisplay ?? calculateDisplayedPackPrice(currentLine, draft.pricesIncludeVat, vatRate))
           : formatEditableInput(calculateDisplayedPackPrice(currentLine, draft.pricesIncludeVat, vatRate));
-        const packPriceEx = draft.pricesIncludeVat && currentLine.vatEnabled !== false
-          ? parseLooseDecimal(displayValue) / (1 + vatRate)
-          : parseLooseDecimal(displayValue);
+        const packPriceEx = finalizeReceivedCost(parseLooseDecimal(displayValue), {
+          isVatable: currentLine.vatEnabled !== false,
+          pricesIncludeVat: draft.pricesIncludeVat,
+          vatRegistered,
+          supplierVatRate
+        });
         payload.packPriceDisplay = displayValue;
         payload.packPriceEx = String(packPriceEx);
         payload.unitCost = nextPackSize > 0 ? String(packPriceEx / nextPackSize) : '0';
@@ -485,18 +494,28 @@ function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, 
         const packQty = Math.max(parseLooseDecimal(view.querySelector(`[data-grv-line-detail-field="receivedQty"][data-grv-line-detail-entry-index="${entryIndex}"]`)?.value), 0);
         const totalDisplay = parseLooseDecimal(value);
         const vatEnabled = view.querySelector(`[data-grv-line-detail-field="vatEnabled"][data-grv-line-detail-entry-index="${entryIndex}"]`)?.checked !== false;
-        const displayFactor = draft.pricesIncludeVat && vatEnabled ? (1 + vatRate) : 1;
-        const packPriceEx = packQty > 0 ? (totalDisplay / displayFactor) / packQty : 0;
+        const totalCost = finalizeReceivedCost(totalDisplay, {
+          isVatable: vatEnabled,
+          pricesIncludeVat: draft.pricesIncludeVat,
+          vatRegistered,
+          supplierVatRate
+        });
+        const packPriceEx = packQty > 0 ? totalCost / packQty : 0;
         onGrvAction.onUpdateLineDetailDraft?.(entryIndex, { packPriceEx: String(packPriceEx) });
         return;
       }
       if (key === 'packPriceEx') {
         const packPriceDisplay = parseLooseDecimal(value);
         const vatEnabled = view.querySelector(`[data-grv-line-detail-field="vatEnabled"][data-grv-line-detail-entry-index="${entryIndex}"]`)?.checked !== false;
-        const displayFactor = draft.pricesIncludeVat && vatEnabled ? (1 + vatRate) : 1;
+        const packPriceEx = finalizeReceivedCost(packPriceDisplay, {
+          isVatable: vatEnabled,
+          pricesIncludeVat: draft.pricesIncludeVat,
+          vatRegistered,
+          supplierVatRate
+        });
         onGrvAction.onUpdateLineDetailDraft?.(entryIndex, {
           packPriceDisplay: value,
-          packPriceEx: String(packPriceDisplay / displayFactor)
+          packPriceEx: String(packPriceEx)
         });
         return;
       }
@@ -1673,13 +1692,16 @@ function calculateDisplayedPackPrice(line = {}, pricesIncludeVat, vatRate) {
   return packPriceEx * (1 + vatRate);
 }
 
-function normalizeDisplayCost(value, receivedQty, packSize, vatEnabled, pricesIncludeVat, vatRate) {
+function normalizeDisplayCost(value, receivedQty, packSize, vatEnabled, pricesIncludeVat, vatRegistered, supplierVatRate) {
   const amount = parseLooseDecimal(value);
-  const totalEx = pricesIncludeVat && vatEnabled !== false
-    ? amount / (1 + vatRate)
-    : amount;
+  const totalCost = finalizeReceivedCost(amount, {
+    isVatable: vatEnabled !== false,
+    pricesIncludeVat,
+    vatRegistered,
+    supplierVatRate
+  });
   const baseQuantity = getBaseQuantity(receivedQty, packSize);
-  return baseQuantity > 0 ? totalEx / baseQuantity : 0;
+  return baseQuantity > 0 ? totalCost / baseQuantity : 0;
 }
 
 function getBaseQuantity(receivedQty, packSize) {
@@ -1705,6 +1727,31 @@ function getVatRate(state) {
   const settings = state.settings?.draft || state.settings?.values || {};
   if (settings.vatRegistered === false) return 0;
   return (Number(settings.vatRate ?? settings.vatPercentage ?? 15) || 15) / 100;
+}
+
+function isWorkspaceVatRegistered(state) {
+  const settings = state.settings?.draft || state.settings?.values || {};
+  return settings.vatRegistered !== false;
+}
+
+// Unlike getVatRate (zeroed above so no VAT ever shows on a non-registered workspace's live
+// previews/totals), this is the real rate a VATable supplier actually charges on their invoice —
+// it must stay non-zero regardless of OUR OWN registration status. A non-registered business still
+// pays that VAT; it just can't reclaim it, so the input VAT becomes a genuine, unrecoverable part
+// of the item's cost (see finalizeReceivedCost below) rather than a separate line it can net off.
+function getSupplierVatRate(state) {
+  const settings = state.settings?.draft || state.settings?.values || {};
+  return (Number(settings.vatRate ?? settings.vatPercentage ?? 15) || 15) / 100;
+}
+
+// Turns a raw entered amount into the cost that actually gets saved as this line's unit cost.
+// `pricesIncludeVat` tells us how to interpret what was typed (gross vs net); `vatRegistered`
+// then decides what the SAVED figure should be: a VAT-registered business reclaims input VAT, so
+// its stock cost stays net/ex-VAT (unchanged from before); a non-registered business cannot
+// reclaim it, so the VAT a VATable supplier charged is a real cost and must be folded back in.
+function finalizeReceivedCost(amount, { isVatable, pricesIncludeVat, vatRegistered, supplierVatRate }) {
+  const netExVat = pricesIncludeVat && isVatable ? amount / (1 + supplierVatRate) : amount;
+  return (!vatRegistered && isVatable) ? netExVat * (1 + supplierVatRate) : netExVat;
 }
 
 function roundValue(value) {
