@@ -40,6 +40,27 @@ type ReportWarning = {
 // truncation condition so an incomplete report can never be exported silently.
 const MAX_REPORT_ROWS = 1000000;
 
+// stock_movements document types entered via a date-only picker (no time-of-day input), which
+// therefore always store `occurred_at` as literal UTC midnight for any backdated entry. Reporting
+// shows these as their real processing time (created_at) instead -- see standardizeMovementRow.
+// Every other document type (sale, transfer, stock take, purchase order) carries a genuine
+// externally- or system-captured occurred_at that must never be overridden this way.
+const BACKDATABLE_LEDGER_DOCUMENT_TYPES = new Set([
+  "grv",
+  "credit_note",
+  "adjustment",
+  "wastage_adjustment",
+  "manufacturing_batch",
+]);
+
+// The SQL-level twin of BACKDATABLE_LEDGER_DOCUMENT_TYPES above, used to filter/sort
+// stock_movements by the same "effective date" the JS-side standardizeMovementRow computes. Must
+// match idx_stock_movements_workspace_effective_date (tenant-migrations.ts, migration 43) BOTH in
+// the IN-list contents and in overall shape, or SQLite won't recognize it can use that index and
+// will fall back to a full scan for date-range filtering.
+const EFFECTIVE_MOVEMENT_DATE_SQL =
+  "(CASE WHEN sm.document_type IN ('grv', 'credit_note', 'adjustment', 'wastage_adjustment', 'manufacturing_batch') THEN sm.created_at ELSE sm.occurred_at END)";
+
 export async function getDetailedActivityReport(
   request: Request,
   env: Env,
@@ -180,7 +201,7 @@ export async function getDetailedActivityReport(
        LEFT JOIN manufacturing_batches mb ON mb.id = sm.document_id AND mb.workspace_id = sm.workspace_id AND sm.document_type = 'manufacturing_batch'
        LEFT JOIN yoco_orders yo ON yo.workspace_id = sm.workspace_id AND sm.document_type = 'yoco_order' AND yo.yoco_order_id = COALESCE(NULLIF(json_extract(sm.metadata_json, '$.reportOrderKey'), ''), sm.document_id)
       WHERE ${whereSql}
-      ORDER BY datetime(sm.occurred_at) ASC, datetime(sm.created_at) ASC, sm.movement_type ASC, sm.id ASC
+      ORDER BY datetime(${EFFECTIVE_MOVEMENT_DATE_SQL}) ASC, datetime(sm.created_at) ASC, sm.movement_type ASC, sm.id ASC
       LIMIT ?${binds.length + 1}`,
   )
     .bind(...binds, MAX_REPORT_ROWS)
@@ -6676,11 +6697,10 @@ function standardizeInventorySourceActionRow(
   timeZone: string,
   tradingDayStartMinutes = 0,
 ) {
-  const occurredAt = resolveReportTimestamp(
-    row.occurred_at,
-    row.created_at,
-    timeZone,
-  );
+  // See the matching comment in standardizeMovementRow -- same backdatable-date-picker issue.
+  const occurredAt = BACKDATABLE_LEDGER_DOCUMENT_TYPES.has(clean(row.document_type).toLowerCase())
+    ? clean(row.created_at) || row.occurred_at
+    : resolveReportTimestamp(row.occurred_at, row.created_at, timeZone);
   const local = zonedTradingDateTimeStrings(occurredAt, timeZone, tradingDayStartMinutes);
   const actor = actorMap.get(clean(row.created_by));
   const documentType = clean(row.document_type);
@@ -7128,7 +7148,7 @@ function buildMovementWhere(
     binds.push(value);
     clauses.push(sql.replace("?", `?${binds.length}`));
   };
-  addZonedDateRange(clauses, binds, "sm.occurred_at", filters, timeZone);
+  addZonedDateRange(clauses, binds, EFFECTIVE_MOVEMENT_DATE_SQL, filters, timeZone);
   addLocationSqlScope(clauses, binds, "sm.location_id", filters);
   if (filters.itemId) add("sm.stock_item_id = ?", filters.itemId);
   if (filters.categoryId) add("si.category = ?", filters.categoryId);
@@ -7445,11 +7465,18 @@ function standardizeMovementRow(
   const categoryName =
     clean(row.category_name || metadata.stockCategory || metadata.category) ||
     "General";
-  const occurredAt = resolveReportTimestamp(
-    row.occurred_at,
-    row.created_at,
-    timeZone,
-  );
+  // GRV/Credit Note/Adjustment/Wastage/Manufacturing all have a date-only entry field that can be
+  // deliberately backdated (see grvDate/creditNoteDate/postedAt in reporting-phase21-routes.ts) --
+  // occurred_at for those document types is therefore always literal UTC midnight, never a real
+  // clock time. Reporting shows when the movement was actually PROCESSED (created_at), matching
+  // those reports' own date columns, rather than resolveReportTimestamp's same-day fallback (which
+  // would still show midnight for a backdated entry). Every other document type (sale/transfer/
+  // stock take/purchase order) carries a genuine, externally- or system-captured occurred_at that
+  // must NOT be overridden by processing time -- resolveReportTimestamp is the safe, conservative
+  // choice there since it only ever substitutes a value that already looks like midnight.
+  const occurredAt = BACKDATABLE_LEDGER_DOCUMENT_TYPES.has(clean(row.document_type).toLowerCase())
+    ? clean(row.created_at) || row.occurred_at
+    : resolveReportTimestamp(row.occurred_at, row.created_at, timeZone);
   const local = zonedTradingDateTimeStrings(occurredAt, timeZone, tradingDayStartMinutes);
   const baseUom =
     clean(row.base_uom || metadata.unit || metadata.baseUom) || "ea";

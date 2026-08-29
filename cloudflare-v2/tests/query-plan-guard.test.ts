@@ -69,13 +69,23 @@ function seededTenantDb(): DatabaseSync {
   }
   const movement = database.prepare(
     `INSERT INTO stock_movements
-       (id, workspace_id, stock_item_id, location_id, movement_type, quantity_delta, unit_cost,
-        value_delta, occurred_at, created_at)
-     VALUES (?, ?, ?, 'loc1', 'sale', -1, 10, -10, ?, ?)`,
+       (id, workspace_id, stock_item_id, location_id, movement_type, document_type, quantity_delta,
+        unit_cost, value_delta, occurred_at, created_at)
+     VALUES (?, ?, ?, 'loc1', 'sale', ?, -1, 10, -10, ?, ?)`,
   );
+  // Mixes backdatable document types (GRV/credit note/adjustment/wastage/manufacturing -- always
+  // literal UTC midnight for occurred_at, see idx_stock_movements_workspace_effective_date) with
+  // genuine real-timestamp types (plain sale movements), so the effective-date CASE expression
+  // below is actually exercised both ways, not just falling through its ELSE branch uniformly.
+  const backdatableTypes = ['grv', 'credit_note', 'adjustment', 'wastage_adjustment', 'manufacturing_batch'];
   for (let i = 0; i < 20000; i += 1) {
     const stamp = new Date(Date.UTC(2026, 7, 27) - i * 60000).toISOString();
-    movement.run(`sm_${i}`, WS, `si_${i % 2000}`, stamp, stamp);
+    if (i % 5 === 0) {
+      const day = stamp.slice(0, 10);
+      movement.run(`sm_${i}`, WS, `si_${i % 2000}`, backdatableTypes[i % backdatableTypes.length], `${day}T00:00:00.000Z`, stamp);
+    } else {
+      movement.run(`sm_${i}`, WS, `si_${i % 2000}`, null, stamp, stamp);
+    }
   }
   const order = database.prepare(
     `INSERT INTO yoco_orders (id, workspace_id, yoco_order_id, location_id, order_type, total, occurred_at)
@@ -170,6 +180,7 @@ test('the migration chain creates every index the hot read paths depend on', () 
     'idx_stock_items_workspace_active_name_key',
     'idx_yoco_order_lines_workspace_product',
     'idx_stock_movements_workspace_movement_type',
+    'idx_stock_movements_workspace_effective_date',
   ]) {
     assert.ok(present.has(indexName), `missing index ${indexName}`);
   }
@@ -211,11 +222,20 @@ const HOT_QUERIES: Array<{
   },
   {
     guarded: ['sm'],
-    name: 'reporting detailed-activity — exact datetime() bounds plus sargable prefilter',
+    // GRV/credit note/adjustment/wastage/manufacturing are entered via a date-only picker (no
+    // time-of-day input), so occurred_at for those is always literal UTC midnight for a backdated
+    // entry -- reporting filters/sorts by the effective date (created_at for those document types,
+    // occurred_at for everything else, see EFFECTIVE_MOVEMENT_DATE_SQL in reporting-routes.ts) so a
+    // backdated GRV processed today still shows up under "Today". Must match
+    // idx_stock_movements_workspace_effective_date (tenant-migrations.ts migration 43) exactly, or
+    // this degrades to workspace_id-only and reads the whole ledger.
+    name: 'reporting detailed-activity — effective-date CASE expression plus sargable prefilter',
     sql: `SELECT sm.id FROM stock_movements sm
            WHERE sm.workspace_id = ?1
-             AND datetime(sm.occurred_at) >= datetime(?2) AND sm.occurred_at >= ?3
-             AND datetime(sm.occurred_at) < datetime(?4) AND sm.occurred_at < ?5`,
+             AND datetime((CASE WHEN sm.document_type IN ('grv', 'credit_note', 'adjustment', 'wastage_adjustment', 'manufacturing_batch') THEN sm.created_at ELSE sm.occurred_at END)) >= datetime(?2)
+             AND (CASE WHEN sm.document_type IN ('grv', 'credit_note', 'adjustment', 'wastage_adjustment', 'manufacturing_batch') THEN sm.created_at ELSE sm.occurred_at END) >= ?3
+             AND datetime((CASE WHEN sm.document_type IN ('grv', 'credit_note', 'adjustment', 'wastage_adjustment', 'manufacturing_batch') THEN sm.created_at ELSE sm.occurred_at END)) < datetime(?4)
+             AND (CASE WHEN sm.document_type IN ('grv', 'credit_note', 'adjustment', 'wastage_adjustment', 'manufacturing_batch') THEN sm.created_at ELSE sm.occurred_at END) < ?5`,
     binds: [WS, '2026-08-26T22:00:00.000Z', '2026-08-26', '2026-08-27T22:00:00.000Z', '2026-08-28'],
   },
   {

@@ -151,6 +151,14 @@ export function renderReportViewer({
   };
 
   const draw = async ({ reload = true } = {}) => {
+    // activeFilters is resolved once at mount (and whenever the filter form is submitted) and
+    // otherwise never touched — so a relative preset like "Today" silently goes stale the moment
+    // the calendar day rolls over while this viewer instance stays open, even across a manual
+    // Refresh: the network call is genuinely fresh, but it queries with yesterday's date range.
+    // Re-resolve it from a fresh `now` on every real reload so "Today" always means today.
+    if (reload && activeFilters?.dateRangeType && activeFilters.dateRangeType !== "custom") {
+      activeFilters = applyDateRangePreset(activeFilters, datePresetContext);
+    }
     const runId = ++latestRunId;
     root.__reportActionMenuCleanup?.();
     if (reload || !latestResult) {

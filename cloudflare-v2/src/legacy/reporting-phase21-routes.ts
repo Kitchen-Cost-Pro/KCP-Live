@@ -527,7 +527,10 @@ export async function getGrvLogReport(
     );
   const clauses = ["g.workspace_id = ?1"];
   const binds: any[] = [workspaceId];
-  addDateRange(clauses, binds, "g.received_at", filters, timeZone);
+  // Filter by when the GRV was actually processed (created_at), not the backdatable received_at
+  // date -- matches grvDate below, which reports the same submission instant. A GRV backdated 2
+  // days but processed today must show up under "Today", not silently fall outside the window.
+  addDateRange(clauses, binds, "g.created_at", filters, timeZone);
   addSqlLocationScope(clauses, binds, filters, "gl.location_id");
   addSqlFilter(clauses, binds, filters.supplierId, "g.supplier_id");
   addSqlFilter(clauses, binds, filters.itemId, "gl.stock_item_id");
@@ -586,7 +589,13 @@ export async function getGrvLogReport(
           row.grv_id,
           row.received_at || row.created_at,
         ),
-      grvDate: zonedTradingDisplayTimestamp(row.received_at, timeZone, tradingDayStartMinutes),
+      // `received_at` is the (deliberately backdatable) date goods were physically received —
+      // captured from a date-only picker with no time-of-day input, so it's always literal UTC
+      // midnight. Reporting intentionally shows when the GRV was actually PROCESSED into the
+      // system (created_at), not the backdated received date: a GRV backdated 2 days still
+      // reports as processed today, since that's when it actually happened from the system's
+      // point of view. Falls back to received_at only if created_at is ever missing.
+      grvDate: zonedTradingDisplayTimestamp(row.created_at || row.received_at, timeZone, tradingDayStartMinutes),
       grvNumber: clean(
         raw.grvNumber || raw.grv_number || raw.reference || row.grv_id,
       ),
@@ -762,7 +771,9 @@ export async function getCreditNotesReport(
     : 0.15;
   const clauses = ["cn.workspace_id = ?1"];
   const binds: any[] = [workspaceId];
-  addDateRange(clauses, binds, "cn.credited_at", filters, timeZone);
+  // Filter by when the credit note was actually processed (created_at), not the backdatable
+  // credited_at date -- see the GRV Log filter above for the full reasoning.
+  addDateRange(clauses, binds, "cn.created_at", filters, timeZone);
   addSqlLocationScope(clauses, binds, filters, "cnl.location_id");
   addSqlFilter(clauses, binds, filters.supplierId, "cn.supplier_id");
   addSqlFilter(clauses, binds, filters.itemId, "cnl.stock_item_id");
@@ -836,7 +847,9 @@ export async function getCreditNotesReport(
           row.credit_note_id,
           row.credited_at || row.created_at,
         ),
-      creditNoteDate: zonedTradingDisplayTimestamp(row.credited_at, timeZone, tradingDayStartMinutes),
+      // Reporting shows when the credit note was actually processed (created_at), not the
+      // backdatable credited_at date -- see grvDate above for the full reasoning.
+      creditNoteDate: zonedTradingDisplayTimestamp(row.created_at || row.credited_at, timeZone, tradingDayStartMinutes),
       creditNoteNumber: clean(row.credit_note_number),
       supplierId: clean(row.supplier_id),
       supplierName: clean(row.supplier_name),
@@ -1017,7 +1030,9 @@ export async function getManufacturingTransactionsReport(
 
   const clauses = ["mb.workspace_id = ?1"];
   const binds: any[] = [workspaceId];
-  addDateRange(clauses, binds, "mb.posted_at", filters, timeZone);
+  // Filter by when the batch was actually processed (created_at), not the backdatable posted_at
+  // date -- see the GRV Log filter above for the full reasoning.
+  addDateRange(clauses, binds, "mb.created_at", filters, timeZone);
   addSqlLocationScope(clauses, binds, filters, "mb.location_id");
   addSqlFilter(clauses, binds, filters.itemId, "mb.stock_item_id");
   if (filters.category || filters.categoryId) {
@@ -1184,7 +1199,10 @@ export async function getManufacturingTransactionsReport(
             row.posted_at || row.created_at,
           ),
       ),
-      postedAt: zonedTradingDisplayTimestamp(row.posted_at, timeZone, tradingDayStartMinutes),
+      // Reporting shows when the batch was actually processed (created_at), not the backdatable
+      // posted_at date -- see grvDate above for the full reasoning. The client (manufacturingTransactionsReport.js)
+      // re-derives batchDate/batchTime from this same postedAt value, so both stay consistent.
+      postedAt: zonedTradingDisplayTimestamp(row.created_at || row.posted_at, timeZone, tradingDayStartMinutes),
       batchDate: zonedTradingDateTimeStrings(row.posted_at, timeZone, tradingDayStartMinutes).date,
       committedAt: zonedTradingDisplayTimestamp(row.created_at || row.posted_at, timeZone, tradingDayStartMinutes),
       status,
