@@ -20,12 +20,14 @@ export function renderGRVEntry({ state, onGrvFilterChange, onGrvAction = {} } = 
   };
   const draft = getDraft(grv);
   const vatRate = getVatRate(state);
+  const vatRegistered = isWorkspaceVatRegistered(state);
+  const supplierVatRate = getSupplierVatRate(state);
   const supplierMatches = getSupplierMatches(state, grv, draft.supplierName || '');
   const convertibleOrders = filterConvertibleOrders(grv.orders || [], filters.poQuery || filters.query || '');
   const stockMatches = getStockMatches(grv.stockItems || [], filters.lineQuery || '', draft.items || []);
   const selectedStockIds = new Set((filters.selectedStockIds || []).map(String));
   const selectedLineIndexes = new Set((filters.selectedLineIndexes || []).map(String));
-  const totals = calculateDraftTotals(draft, vatRate);
+  const totals = calculateDraftTotals(draft, vatRate, vatRegistered, supplierVatRate);
   const isPoLinkedDraft = Boolean(String(draft.sourcePoId || '').trim());
   const headerReady = Boolean(
     String(draft.supplierName || '').trim() &&
@@ -164,7 +166,7 @@ export function renderGRVEntry({ state, onGrvFilterChange, onGrvAction = {} } = 
       </div>
     </div>
 
-    ${filters.overlay === 'draft' ? renderDraftDrawer(statusLabel, totals, draft, vatRate, selectedLineIndexes, headerReady, grv.actionStatus, grv.actionError || '', grv.locations || [], filters.openDropdown || '') : ''}
+    ${filters.overlay === 'draft' ? renderDraftDrawer(statusLabel, totals, draft, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes, headerReady, grv.actionStatus, grv.actionError || '', grv.locations || [], filters.openDropdown || '') : ''}
     ${filters.overlay === 'po' ? renderPurchaseOrderOverlay(convertibleOrders, filters.poQuery || '') : ''}
     ${filters.overlay === 'stock' ? renderStockOverlay(stockMatches, filters.lineQuery || '', headerReady, selectedStockIds) : ''}
     ${filters.overlay === 'calendar' ? renderCustomCalendarOverlay({
@@ -592,7 +594,7 @@ function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, 
   });
 }
 
-function renderDraftTable(draft, vatRate, selectedLineIndexes = new Set(), locations = [], openDropdown = '') {
+function renderDraftTable(draft, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes = new Set(), locations = [], openDropdown = '') {
   const splitByLocation = draft.splitByLocation === true;
   return `
     <table class="grv-table">
@@ -623,7 +625,7 @@ function renderDraftTable(draft, vatRate, selectedLineIndexes = new Set(), locat
         </tr>
       </thead>
       <tbody>
-        ${(draft.items || []).map((line, index) => renderDraftRow(line, index, draft.pricesIncludeVat, vatRate, selectedLineIndexes, splitByLocation, locations, openDropdown)).join('')}
+        ${(draft.items || []).map((line, index) => renderDraftRow(line, index, draft.pricesIncludeVat, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes, splitByLocation, locations, openDropdown)).join('')}
       </tbody>
     </table>
   `;
@@ -659,20 +661,20 @@ function renderDraftLauncher(statusLabel, totals, draft, headerReady) {
   `;
 }
 
-function renderDraftDrawer(statusLabel, totals, draft, vatRate, selectedLineIndexes, headerReady, actionStatus, actionError = '', locations = [], openDropdown = '') {
+function renderDraftDrawer(statusLabel, totals, draft, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes, headerReady, actionStatus, actionError = '', locations = [], openDropdown = '') {
   return `
     <div class="grv-overlay grv-overlay--drawer" data-grv-overlay>
       <section class="grv-overlayCard grv-overlayCard--draft grv-draft-panel" role="dialog" aria-modal="true">
         <button type="button" class="grv-removeBtn grv-draftDrawerClose" data-grv-overlay-close aria-label="Close draft table">
           ${icon('x')}
         </button>
-        ${renderDraftPanelContent(statusLabel, totals, draft, vatRate, selectedLineIndexes, headerReady, actionStatus, actionError, locations, openDropdown)}
+        ${renderDraftPanelContent(statusLabel, totals, draft, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes, headerReady, actionStatus, actionError, locations, openDropdown)}
       </section>
     </div>
   `;
 }
 
-function renderDraftPanelContent(statusLabel, totals, draft, vatRate, selectedLineIndexes, headerReady, actionStatus, actionError = '', locations = [], openDropdown = '') {
+function renderDraftPanelContent(statusLabel, totals, draft, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes, headerReady, actionStatus, actionError = '', locations = [], openDropdown = '') {
   return `
     <div class="grv-topbar">
       <div class="grv-topbarTitle">
@@ -698,7 +700,7 @@ function renderDraftPanelContent(statusLabel, totals, draft, vatRate, selectedLi
     ${actionError ? `<div class="grv-drawerNotice">${renderNotice(actionError, 'error')}</div>` : ''}
 
     <div class="grv-draft-scroll">
-      ${(draft.items || []).length ? renderDraftTable(draft, vatRate, selectedLineIndexes, locations, openDropdown) : `
+      ${(draft.items || []).length ? renderDraftTable(draft, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes, locations, openDropdown) : `
         <div class="grv-empty">
           <span>INVOICE EMPTY.</span>
         </div>
@@ -734,17 +736,35 @@ function renderDraftPanelContent(statusLabel, totals, draft, vatRate, selectedLi
   `;
 }
 
-function renderDraftRow(line, index, pricesIncludeVat, vatRate, selectedLineIndexes = new Set(), splitByLocation = false, locations = [], openDropdown = '') {
+function renderDraftRow(line, index, pricesIncludeVat, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes = new Set(), splitByLocation = false, locations = [], openDropdown = '') {
   const variance = Number(line.receivedQty || 0) - Number(line.orderedQty || 0);
   const unitCostEx = Number(line.unitCost || 0);
   const packSize = getPositivePackSize(line.packSize);
   const packPriceEx = Number(line.packPriceEx ?? (unitCostEx * packSize)) || 0;
   const lineTotalEx = calculateLineTotalEx(line);
-  const lineVat = line.vatEnabled === false ? 0 : lineTotalEx * vatRate;
+  const lineIsVatable = line.vatEnabled !== false;
+  // `unitCost`/`lineTotalEx` are already VAT-inclusive for a non-VAT-registered workspace's
+  // VATable line (see finalizeReceivedCost) — deriving VAT as lineTotalEx * vatRate would either
+  // show R0 (vatRate is zeroed for display when non-registered) or double the VAT if the real
+  // rate were used against an already-gross figure. Recover the true net total first, then the
+  // real VAT is simply the difference, so the embedded VAT is always shown, never hidden or doubled.
+  // Non-VAT-registered VATable lines already carry VAT baked into unitCost/packPriceEx
+  // (finalizeReceivedCost) — every derived display value below has to know that, or it will
+  // either apply the rate again on top of an already-gross figure, or (since vatRate is zeroed
+  // for display when non-registered) silently show ex-VAT/incl-VAT figures as identical.
+  const costAlreadyIncludesVat = lineIsVatable && !vatRegistered;
+  const lineNetTotalEx = costAlreadyIncludesVat
+    ? lineTotalEx / (1 + supplierVatRate)
+    : lineTotalEx;
+  const lineVat = lineIsVatable ? lineNetTotalEx * supplierVatRate : 0;
+  const showUnitInclVat = pricesIncludeVat && lineIsVatable;
+  const displayedUnitCost = showUnitInclVat
+    ? (costAlreadyIncludesVat ? unitCostEx : unitCostEx * (1 + supplierVatRate))
+    : (costAlreadyIncludesVat ? unitCostEx / (1 + supplierVatRate) : unitCostEx);
   const destination = line.locationName || line.targetLocationName || line.locationId || line.targetLocation || 'No destination';
-  const displayedPackPrice = pricesIncludeVat && line.vatEnabled !== false
-    ? packPriceEx * (1 + vatRate)
-    : packPriceEx;
+  const displayedPackPrice = showUnitInclVat
+    ? (costAlreadyIncludesVat ? packPriceEx : packPriceEx * (1 + supplierVatRate))
+    : (costAlreadyIncludesVat ? packPriceEx / (1 + supplierVatRate) : packPriceEx);
   const rawDisplayedPackPrice = String(line.packPriceDisplay ?? '').trim();
   const varianceLabel = variance === 0 ? 'matched' : `${formatSignedNumber(variance)} var`;
   const splitMeta = line.splitGroupId && Number(line.splitExpectedQty || 0) > 0
@@ -806,8 +826,8 @@ function renderDraftRow(line, index, pricesIncludeVat, vatRate, selectedLineInde
       </td>
       <td>
         <div class="grv-tableStat grv-tableStat--price">
-          <strong>${formatCurrency(pricesIncludeVat && line.vatEnabled !== false ? unitCostEx * (1 + vatRate) : unitCostEx)}</strong>
-          <span>${pricesIncludeVat && line.vatEnabled !== false ? 'unit incl VAT' : 'unit ex VAT'}</span>
+          <strong>${formatCurrency(displayedUnitCost)}</strong>
+          <span>${showUnitInclVat ? 'unit incl VAT' : 'unit ex VAT'}</span>
         </div>
       </td>
       <td>
@@ -1645,10 +1665,19 @@ function isPhysicalStockItem(item = {}) {
     !category.includes('manufactured');
 }
 
-function calculateDraftTotals(draft, vatRate) {
-  const lineSubtotal = (draft.items || []).reduce((sum, line) => sum + calculateLineTotalEx(line), 0);
+function calculateDraftTotals(draft, vatRate, vatRegistered = true, supplierVatRate = vatRate) {
+  // A non-VAT-registered workspace's VATable lines already carry VAT baked into unitCost
+  // (finalizeReceivedCost), so their calculateLineTotalEx is gross, not net. Un-gross it here
+  // first so Subtotal/VAT/Total stay internally consistent (Subtotal + VAT = Total) instead of
+  // Subtotal silently equalling the gross Total while VAT is understated or shown as zero.
+  const netLineTotalEx = (line) => {
+    const total = calculateLineTotalEx(line);
+    const isVatable = line.vatEnabled !== false;
+    return isVatable && !vatRegistered ? total / (1 + supplierVatRate) : total;
+  };
+  const lineSubtotal = (draft.items || []).reduce((sum, line) => sum + netLineTotalEx(line), 0);
   const taxableLineSubtotal = (draft.items || []).reduce((sum, line) => (
-    line.vatEnabled === false ? sum : sum + calculateLineTotalEx(line)
+    line.vatEnabled === false ? sum : sum + netLineTotalEx(line)
   ), 0);
   const transportEx = Number(draft.transportEx || 0) || 0;
   const discount = Number(draft.invoiceDiscountEx || 0) || 0;
@@ -1660,7 +1689,7 @@ function calculateDraftTotals(draft, vatRate) {
     ? appliedDiscount * (taxableBaseBeforeDiscount / subtotal)
     : 0;
   const taxableAfterDiscount = Math.max(0, taxableBaseBeforeDiscount - discountTaxableShare);
-  const vat = Math.max(0, taxableAfterDiscount * vatRate);
+  const vat = Math.max(0, taxableAfterDiscount * supplierVatRate);
   const invoiceOverrideEx = Number(draft.invoiceTotalEx || 0) || 0;
   const totalEx = invoiceOverrideEx > 0 ? invoiceOverrideEx : subtotalAfterDiscount;
   const totalIncl = totalEx + vat;
