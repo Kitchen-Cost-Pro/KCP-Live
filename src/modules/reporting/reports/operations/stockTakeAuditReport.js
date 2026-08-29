@@ -17,6 +17,7 @@ import { buildRowFormulaTooltip } from "../../tooltips/tooltipBuilder.js";
 import { reconcileStockTakeAuditToDetailedActivity } from "../../validators/reconciliationChecks.js";
 import { fetchStockTakeAuditRows } from "../../api/reportingApi.js";
 import { detailedActivityReport } from "./detailedActivityReport.js";
+import { zonedDateTimeStrings } from "../../engine/timezone.js";
 
 const VALUE_TOLERANCE = 0.01;
 
@@ -609,8 +610,12 @@ async function loadStockTakeAuditModel({
     filters,
     services,
   });
+  const sourceTimeZone =
+    sourceResponse.meta?.timeZone ||
+    sourceResponse.meta?.timezone ||
+    "Africa/Johannesburg";
   const sourceRows = applyReportFilters(
-    normalizeStockTakeRows(sourceResponse.rows),
+    normalizeStockTakeRows(sourceResponse.rows, sourceTimeZone),
     filters,
   );
   const varianceLedgerRows = await loadStockTakeVarianceLedgerRows({
@@ -698,15 +703,22 @@ function buildStockTakeAuditModel({
   };
 }
 
-function normalizeStockTakeRows(rows = []) {
+function normalizeStockTakeRows(rows = [], timeZone = "Africa/Johannesburg") {
   return toArray(rows).map((row, index) => {
-    const stockTakeDate = text(
+    const rawStockTakeDate = text(
       row.stockTakeDate ||
         row.stock_take_date ||
         row.date ||
         row.countedAt ||
         row.counted_at,
-    ).slice(0, 10);
+    );
+    // A plain "YYYY-MM-DD" slices safely either way, but countedAt can be a full UTC instant (e.g.
+    // "2026-08-29T22:51:00.000Z") -- slicing that verbatim reads as the UTC calendar day, which is
+    // "yesterday" relative to the workspace's SAST day whenever the count happens near local
+    // midnight. Convert through the workspace timezone first so this always matches the day the
+    // backend itself used when it originally filtered these rows (see the GRV Log fix for the same
+    // class of bug).
+    const stockTakeDate = zonedDateTimeStrings(rawStockTakeDate, timeZone).date || rawStockTakeDate.slice(0, 10);
     return {
     ...row,
     id: text(row.id) || `stock-take-line:${index}`,
