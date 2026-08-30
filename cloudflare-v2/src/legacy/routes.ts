@@ -6511,6 +6511,191 @@ export async function patchStockLevel(
   });
 }
 
+export async function getStockItemLocationCosts(
+  request: Request,
+  env: Env,
+  auth: AuthContext,
+  workspaceId: string,
+  stockItemId: string,
+) {
+  await scoped(request, env, auth, workspaceId);
+  await assertWorkspacePermission(env, auth, workspaceId, "nav-ingredients");
+  const stockItem = await env.DB.prepare(
+    `SELECT id, name, unit_cost
+       FROM stock_items
+      WHERE workspace_id = ?1
+        AND id = ?2
+      LIMIT 1`,
+  )
+    .bind(workspaceId, stockItemId)
+    .first<Record<string, unknown>>();
+  if (!stockItem) return error(request, env, 404, "Stock item was not found.");
+
+  const allowedIds = await getUserAllowedLocationIds(env, auth, workspaceId);
+  const locationScopeSql =
+    allowedIds === null
+      ? ""
+      : ` AND l.id IN (${allowedIds.map((_, i) => `?${i + 3}`).join(", ") || "''"})`;
+  const rows = await env.DB.prepare(
+    `SELECT
+        l.id AS location_id,
+        l.name,
+        l.display_name,
+        l.external_name,
+        l.is_default,
+        silp.price AS location_price,
+        silp.updated_at AS location_price_updated_at,
+        lp.unit_price AS last_purchase_cost,
+        lp.received_at AS last_purchased_at
+       FROM locations l
+       LEFT JOIN stock_item_location_prices silp
+         ON silp.workspace_id = l.workspace_id
+        AND silp.location_id = l.id
+        AND silp.stock_item_id = ?2
+       LEFT JOIN stock_item_latest_purchase lp
+         ON lp.workspace_id = l.workspace_id
+        AND lp.location_id = l.id
+        AND lp.stock_item_id = ?2
+      WHERE l.workspace_id = ?1
+        AND l.active = 1
+        ${locationScopeSql}
+      ORDER BY l.is_default DESC, l.name ASC`,
+  )
+    .bind(workspaceId, stockItemId, ...(allowedIds || []))
+    .all<Record<string, unknown>>();
+
+  const unitCost = numberValue(stockItem.unit_cost, 0);
+  const locations = (rows.results || []).map((row) => {
+    const hasOverride =
+      row.location_price !== undefined && row.location_price !== null;
+    return {
+      locationId: text(row.location_id),
+      locationName: resolveLocationDisplayName(row),
+      isDefault: Number(row.is_default || 0) === 1,
+      cost: hasOverride ? numberValue(row.location_price, 0) : unitCost,
+      hasOverride,
+      updatedAt: text(row.location_price_updated_at),
+      lastPurchaseCost:
+        row.last_purchase_cost !== undefined && row.last_purchase_cost !== null
+          ? numberValue(row.last_purchase_cost, 0)
+          : null,
+      lastPurchasedAt: text(row.last_purchased_at),
+    };
+  });
+
+  return json(request, env, {
+    ok: true,
+    stockItemId,
+    itemName: text(stockItem.name),
+    unitCost,
+    locations,
+  });
+}
+
+export async function postStockItemLocationCosts(
+  request: Request,
+  env: Env,
+  auth: AuthContext,
+  workspaceId: string,
+  stockItemId: string,
+) {
+  await scoped(request, env, auth, workspaceId);
+  await assertWorkspacePermission(env, auth, workspaceId, "nav-ingredients");
+  const payload = await readJson<{ updates?: unknown[] }>(request);
+  const updates = arrayValue(payload.updates)
+    .map(objectValue)
+    .filter((entry) => text(entry.locationId));
+  if (!updates.length)
+    return error(
+      request,
+      env,
+      400,
+      "No location cost updates were supplied.",
+    );
+
+  const stockItem = await env.DB.prepare(
+    `SELECT id, name, unit_cost
+       FROM stock_items
+      WHERE workspace_id = ?1
+        AND id = ?2
+      LIMIT 1`,
+  )
+    .bind(workspaceId, stockItemId)
+    .first<Record<string, unknown>>();
+  if (!stockItem) return error(request, env, 404, "Stock item was not found.");
+
+  const now = nowIso();
+  const statements: DbStatementLike[] = [];
+  let updatedCount = 0;
+
+  for (const update of updates) {
+    const locationId = text(update.locationId);
+    const newCost = numberValue(
+      update.cost ?? update.price ?? update.unitCost,
+      NaN,
+    );
+    if (!locationId || !Number.isFinite(newCost) || newCost < 0) continue;
+    await assertLocationAccess(
+      env,
+      auth,
+      workspaceId,
+      locationId,
+      "location_cost_edit",
+    );
+
+    const existing = await env.DB.prepare(
+      `SELECT price
+         FROM stock_item_location_prices
+        WHERE workspace_id = ?1
+          AND stock_item_id = ?2
+          AND location_id = ?3
+        LIMIT 1`,
+    )
+      .bind(workspaceId, stockItemId, locationId)
+      .first<Record<string, unknown>>();
+    const oldCost = numberValue(
+      existing?.price ?? stockItem.unit_cost,
+      0,
+    );
+    if (Math.round(oldCost * 10000) === Math.round(newCost * 10000)) continue;
+
+    statements.push(
+      upsertLocationCostStatement(
+        env,
+        workspaceId,
+        stockItemId,
+        locationId,
+        newCost,
+        now,
+      ),
+    );
+    statements.push(
+      env.DB.prepare(
+        `INSERT INTO audit_events (id, workspace_id, actor_uid, event_type, entity_type, entity_id, before_json, after_json, created_at)
+         VALUES (?1, ?2, ?3, 'location_cost_updated', 'stock_item_location_price', ?4, ?5, ?6, ?7)`,
+      ).bind(
+        id("audit"),
+        workspaceId,
+        auth.uid,
+        stockItemId,
+        JSON.stringify({ locationId, oldCostExVat: oldCost }),
+        JSON.stringify({
+          locationId,
+          newCostExVat: newCost,
+          itemName: stockItem.name || "",
+        }),
+        now,
+      ),
+    );
+    updatedCount += 1;
+  }
+
+  if (!updatedCount)
+    return json(request, env, { ok: true, updatedCount: 0 });
+  await env.DB.batch(statements);
+  return json(request, env, { ok: true, updatedCount });
+}
+
 export async function postStockImport(
   request: Request,
   env: Env,

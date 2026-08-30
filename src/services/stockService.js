@@ -107,6 +107,45 @@ export async function updateStockLevel(workspaceId, itemId, nextLevel, options =
   });
 }
 
+/** Every active location's resolved cost for one stock item, plus its last purchase cost. */
+export async function fetchStockItemLocationCosts(workspaceId, itemId) {
+  const workspaceKey = String(workspaceId || '').trim();
+  const id = String(itemId || '').trim();
+  if (!workspaceKey) throw new Error('Workspace id is required to load location costs.');
+  if (!id) throw new Error('Stock item id is required.');
+
+  const result = await callCloudflareWorkspaceRoute(workspaceKey, `stock-items/${encodeURIComponent(id)}/location-costs`, {
+    method: 'GET'
+  });
+  return {
+    stockItemId: String(result?.stockItemId || id),
+    itemName: String(result?.itemName || ''),
+    unitCost: Number(result?.unitCost || 0) || 0,
+    locations: Array.isArray(result?.locations) ? result.locations : []
+  };
+}
+
+/** Saves an item's cost at one or more locations in a single batched request. */
+export async function saveStockItemLocationCosts(workspaceId, itemId, updates = []) {
+  const workspaceKey = String(workspaceId || '').trim();
+  const id = String(itemId || '').trim();
+  if (!workspaceKey) throw new Error('Workspace id is required to save location costs.');
+  if (!id) throw new Error('Stock item id is required.');
+
+  const payloadUpdates = (updates || [])
+    .map((update) => ({
+      locationId: String(update?.locationId || '').trim(),
+      cost: Number(update?.cost ?? update?.price ?? update?.unitCost ?? NaN)
+    }))
+    .filter((update) => update.locationId && Number.isFinite(update.cost) && update.cost >= 0);
+  if (!payloadUpdates.length) return { ok: true, updatedCount: 0 };
+
+  return callCloudflareWorkspaceRoute(workspaceKey, `stock-items/${encodeURIComponent(id)}/location-costs`, {
+    method: 'POST',
+    payload: { updates: payloadUpdates }
+  });
+}
+
 export async function upsertStockItem(workspaceId, item = {}) {
   const workspaceKey = String(workspaceId || '').trim();
   if (!workspaceKey) throw new Error('Workspace id is required to save stock items.');

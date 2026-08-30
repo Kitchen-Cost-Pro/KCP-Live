@@ -1636,6 +1636,35 @@ async function refreshStockFromDataVersion(workspaceId) {
   } catch { /* silent — a failed live refresh must never disrupt the app */ }
 }
 
+// Unlike refreshStockFromDataVersion (a background poll reacting to someone else's change), this
+// runs right after the current session's own write — e.g. a GRV that just posted a location price
+// override to stock_item_location_prices. It must not wait on the poll throttle or on the Stock
+// Items tab being the active route, since the whole point is showing that session its own result.
+async function refreshStockAfterOwnMutation(workspaceId) {
+  if (!workspaceId || appState.workspace?.id !== workspaceId) return;
+  stockLiveRefreshLastAt = Date.now();
+  const requestToken = stockMutationToken;
+  try {
+    clearApiCache();
+    const { fetchStock } = await import('./services/stockService.js');
+    const stock = await fetchStock(workspaceId);
+    if (appState.workspace?.id !== workspaceId) return;
+    if (requestToken !== stockMutationToken) return;
+    applyRealtimeSnapshot('stock', () => {
+      appState.stock = {
+        ...appState.stock,
+        status: 'ready',
+        items: stock.items || appState.stock.items || [],
+        locations: stock.locations || appState.stock.locations || [],
+        categories: stock.categories || appState.stock.categories || [],
+        uoms: stock.uoms || appState.stock.uoms || [],
+        updatedAt: stock.updatedAt || new Date().toISOString(),
+        error: ''
+      };
+    });
+  } catch { /* silent — a failed post-GRV refresh must not disrupt the GRV success flow */ }
+}
+
 function installStockLiveRefresh() {
   if (stockLiveRefreshInstalled) return;
   stockLiveRefreshInstalled = true;
@@ -6546,9 +6575,102 @@ function openStockEditor(itemId) {
   appState.stock = {
     ...appState.stock,
     editingItem: editableItem,
+    locationCostEditor: null,
     actionError: ''
   };
   renderApp();
+  if (itemId) loadStockLocationCostEditor(itemId);
+}
+
+async function loadStockLocationCostEditor(itemId) {
+  const id = String(itemId || '').trim();
+  const workspaceId = appState.workspace?.id;
+  if (!id || !workspaceId) return;
+
+  appState.stock = {
+    ...appState.stock,
+    locationCostEditor: { itemId: id, status: 'loading', unitCost: 0, locations: [], draft: {}, error: '' }
+  };
+  renderApp();
+
+  try {
+    const { fetchStockItemLocationCosts } = await import('./services/stockService.js');
+    const result = await fetchStockItemLocationCosts(workspaceId, id);
+    // The user may have closed the drawer or opened a different item while this was in flight.
+    if (String(appState.stock.editingItem?.id || '') !== id) return;
+    appState.stock = {
+      ...appState.stock,
+      locationCostEditor: {
+        itemId: id,
+        status: 'ready',
+        unitCost: result.unitCost,
+        locations: result.locations,
+        draft: {},
+        error: ''
+      }
+    };
+    renderApp();
+  } catch (error) {
+    if (String(appState.stock.editingItem?.id || '') !== id) return;
+    appState.stock = {
+      ...appState.stock,
+      locationCostEditor: { itemId: id, status: 'error', unitCost: 0, locations: [], draft: {}, error: error.message || 'Could not load location costs.' }
+    };
+    renderApp();
+  }
+}
+
+function updateStockLocationCostDraft(locationId, value) {
+  const editor = appState.stock.locationCostEditor;
+  if (!editor) return;
+  appState.stock = {
+    ...appState.stock,
+    locationCostEditor: {
+      ...editor,
+      draft: { ...editor.draft, [String(locationId || '')]: value }
+    }
+  };
+}
+
+async function saveStockLocationCosts(itemId) {
+  const id = String(itemId || '').trim();
+  const editor = appState.stock.locationCostEditor;
+  const workspaceId = appState.workspace?.id;
+  if (!id || !workspaceId || !editor || editor.itemId !== id) return;
+
+  const updates = editor.locations
+    .map((location) => {
+      const locationId = String(location.locationId || '');
+      const draftValue = editor.draft[locationId];
+      if (draftValue === undefined) return null;
+      const cost = Number(String(draftValue).replace(',', '.'));
+      if (!Number.isFinite(cost) || cost < 0) return null;
+      return { locationId, cost };
+    })
+    .filter(Boolean);
+
+  if (!updates.length) {
+    showStockToast('No location cost changes to save.', 'info');
+    return;
+  }
+
+  appState.stock = { ...appState.stock, locationCostEditor: { ...editor, status: 'saving', error: '' } };
+  renderApp();
+
+  try {
+    const { saveStockItemLocationCosts } = await import('./services/stockService.js');
+    await saveStockItemLocationCosts(workspaceId, id, updates);
+    showStockToast('Location costs updated.', 'success');
+    await loadStockLocationCostEditor(id);
+    refreshStockAfterOwnMutation(workspaceId);
+  } catch (error) {
+    if (appState.stock.locationCostEditor?.itemId !== id) return;
+    appState.stock = {
+      ...appState.stock,
+      locationCostEditor: { ...editor, status: 'ready', error: error.message || 'Could not save location costs.' }
+    };
+    renderApp();
+  }
 }
 
 function normalizeStockDraftRecipe(recipe = []) {
@@ -6693,6 +6815,7 @@ function closeStockEditor() {
   appState.stock = {
     ...appState.stock,
     editingItem: null,
+    locationCostEditor: null,
     lookupPicker: createStockLookupPickerState(),
     actionStatus: '',
     actionError: ''
@@ -10882,6 +11005,12 @@ async function saveGrvReceipt(options = {}) {
     };
     clearPersistedDraft('grv');
     showGrvToast('GRV saved and stock incremented.', 'success');
+    // The data-version poll would eventually pick up this GRV's stock_movements row and refresh
+    // the Stock Items tab (see refreshStockFromDataVersion), but only after its own throttle/poll
+    // cadence (up to ~75s) and only while that tab is the active route. That left the submitting
+    // user's own session showing pre-GRV location costs immediately after a save that "processed
+    // correctly" server-side — refresh now, in this session, regardless of throttle or active tab.
+    refreshStockAfterOwnMutation(appState.workspace?.id);
   } catch (error) {
     appState.grv = {
       ...appState.grv,
@@ -19504,6 +19633,8 @@ function renderApp() {
       onPreserveFocus: preserveFieldFocus,
       onDraftFieldChange: updateStockDraftField,
       onToggleEditorSection: toggleStockEditorSection,
+      onLocationCostDraftChange: updateStockLocationCostDraft,
+      onSaveLocationCosts: saveStockLocationCosts,
       onOpenRecipeScreen: openStockRecipeScreen,
       onCloseRecipeScreen: closeStockRecipeScreen,
       onRecipeSearchChange: updateStockRecipeSearch,

@@ -1575,6 +1575,19 @@ export async function getMenuRecipeHealthReport(
       )
     : [];
 
+  // Per-location ingredient cost overrides, so the per-location pricing breakdown (which already
+  // resolves selling price per location via product_location_prices) can resolve recipe cost the
+  // same way instead of mixing a location-scoped selling price against a workspace-global cost.
+  const locationCostRows = tableStatus.stock_item_location_prices
+    ? await safeAllRows(
+        env.DB.prepare(
+          `SELECT stock_item_id, location_id, price
+       FROM stock_item_location_prices
+      WHERE workspace_id = ?1`,
+        ).bind(workspaceId),
+      )
+    : [];
+
   const context = buildMenuHealthContext({
     workspaceId,
     vatRate,
@@ -1582,6 +1595,7 @@ export async function getMenuRecipeHealthReport(
     recipes,
     recipeLines: recipeLineRows,
     priceRows,
+    locationCostRows,
     modifierGroups,
     modifierUsageCounts,
     salesStats,
@@ -2477,6 +2491,7 @@ function buildMenuHealthContext({
   recipes,
   recipeLines,
   priceRows,
+  locationCostRows,
   modifierGroups,
   modifierUsageCounts,
   salesStats,
@@ -2485,6 +2500,7 @@ function buildMenuHealthContext({
   const recipesByOwner = new Map<string, Row>();
   const linesByRecipe = new Map<string, Row[]>();
   const priceRowsByProduct = new Map<string, Row[]>();
+  const locationCostsByStockItem = new Map<string, Map<string, number>>();
   const modifierUsageByProduct = new Map<string, number>();
   const salesByProduct = new Map<string, Row>();
   for (const recipe of recipes || []) {
@@ -2509,6 +2525,14 @@ function buildMenuHealthContext({
       priceRowsByProduct.set(productId, []);
     priceRowsByProduct.get(productId)?.push(price);
   }
+  for (const row of locationCostRows || []) {
+    const stockItemId = clean(row.stock_item_id);
+    const locationId = clean(row.location_id);
+    if (!stockItemId || !locationId) continue;
+    if (!locationCostsByStockItem.has(stockItemId))
+      locationCostsByStockItem.set(stockItemId, new Map());
+    locationCostsByStockItem.get(stockItemId)?.set(locationId, numberValue(row.price, 0));
+  }
   for (const usage of modifierUsageCounts || []) {
     modifierUsageByProduct.set(
       clean(usage.product_id),
@@ -2525,6 +2549,7 @@ function buildMenuHealthContext({
     recipesByOwner,
     linesByRecipe,
     priceRowsByProduct,
+    locationCostsByStockItem,
     modifierGroups: modifierGroups || [],
     modifierUsageByProduct,
     salesByProduct,
@@ -2760,6 +2785,7 @@ function buildMenuRecipeHealthRows(
       basePriceInclVat,
       recipeCostExVat,
       itemWarnings,
+      recipe,
     );
     pricingRows.push(...productPricingRows);
   }
@@ -2955,12 +2981,80 @@ function explodeMenuRecipe(
   return { rows, cost: totalCost };
 }
 
+/**
+ * Pure (no warnings, no side effects) recipe-cost walk used only to re-cost a recipe at one
+ * specific location for the per-location pricing breakdown. explodeMenuRecipe already computes
+ * the workspace-level cost once per product and pushes warnings as a side effect; calling it again
+ * per location would duplicate every ingredient warning onto the shared itemWarnings/warnings
+ * arrays, so this mirrors its cost-only logic instead of reusing it directly.
+ */
+function calculateLocationRecipeCost(
+  recipe: Row | undefined,
+  context: Row,
+  locationId: string,
+  path: string[] = [],
+): number {
+  if (!recipe) return 0;
+  const recipeId = clean(recipe.id);
+  if (path.includes(recipeId)) return 0;
+  const lines = context.linesByRecipe.get(recipeId) || [];
+  if (!lines.length) return 0;
+  const yieldQty = Math.max(numberValue(recipe.yield_qty, 1), 1);
+  const nextPath = [...path, recipeId];
+  let totalCost = 0;
+  for (const line of lines) {
+    const stockItemId = clean(line.stock_item_id);
+    if (!stockItemId) continue;
+    const converted = convertMenuRecipeQty({
+      qty: numberValue(line.quantity, 0),
+      fromUom: clean(line.unit || line.base_uom),
+      toUom: clean(line.base_uom || line.unit),
+      stockRawJson: line.stock_raw_json,
+    });
+    const qtyRequired = converted.qty / yieldQty;
+    const stockItem = {
+      id: stockItemId,
+      item_type: line.item_type,
+      is_stocked: line.is_stocked,
+      raw_json: line.stock_raw_json,
+    };
+    const nestedRecipe = context.recipesByOwner.get(`stock_item:${stockItemId}`);
+    if (
+      isSubRecipeStockItem(stockItem) &&
+      !isStockHoldingPrepItem(stockItem) &&
+      nestedRecipe
+    ) {
+      totalCost +=
+        qtyRequired *
+        calculateLocationRecipeCost(nestedRecipe, context, locationId, nextPath);
+      continue;
+    }
+    totalCost += qtyRequired * resolveMenuRecipeIngredientCost(stockItemId, line, context, locationId);
+  }
+  return totalCost;
+}
+
+/** Location cost override if one exists for this ingredient at this location, else the workspace-global unit cost. */
+function resolveMenuRecipeIngredientCost(
+  stockItemId: string,
+  line: Row,
+  context: Row,
+  locationId: string,
+): number {
+  if (locationId) {
+    const override = context.locationCostsByStockItem?.get(stockItemId)?.get(locationId);
+    if (override !== undefined) return override;
+  }
+  return numberValue(line.unit_cost, 0);
+}
+
 function buildPricingRowsForProduct(
   product: Row,
   context: Row,
   fallbackPriceInclVat: number,
   recipeCostExVat: number,
   itemWarnings: Row[],
+  recipe?: Row,
 ) {
   const priceRows = context.priceRowsByProduct.get(clean(product.id)) || [];
   const targetPrices = priceRows.length
@@ -2974,21 +3068,27 @@ function buildPricingRowsForProduct(
         },
       ];
   return targetPrices.map((price: Row, index: number) => {
+    const locationId = clean(price.location_id);
+    // Resolved the same way the selling price already is: per-location cost when this row has a
+    // real location, else the workspace-level cost already computed for the summary row.
+    const locationRecipeCostExVat = recipe && locationId
+      ? roundMoneyNumber(calculateLocationRecipeCost(recipe, context, locationId))
+      : recipeCostExVat;
     const sellingPriceInclVat = roundMoneyNumber(
       numberValue(price.price, fallbackPriceInclVat),
     );
     const vat = calculateVatAmount(sellingPriceInclVat, context.vatRate);
     const sellingPriceExVat = roundMoneyNumber(sellingPriceInclVat - vat);
-    const grossProfit = roundMoneyNumber(sellingPriceExVat - recipeCostExVat);
+    const grossProfit = roundMoneyNumber(sellingPriceExVat - locationRecipeCostExVat);
     const gpPercent = sellingPriceExVat ? grossProfit / sellingPriceExVat : 0;
     const foodCostPercent = sellingPriceExVat
-      ? recipeCostExVat / sellingPriceExVat
+      ? locationRecipeCostExVat / sellingPriceExVat
       : 0;
     const priceStatus = resolveLocationPriceStatus(
       product,
       priceRows,
       context.locations,
-      clean(price.location_id),
+      locationId,
     );
     const rowWarnings = itemWarnings.filter((warning) =>
       [
@@ -3000,7 +3100,7 @@ function buildPricingRowsForProduct(
       ].includes(warning.issueType),
     );
     return {
-      id: `menu-recipe-pricing:${clean(product.id)}:${clean(price.location_id) || index}`,
+      id: `menu-recipe-pricing:${clean(product.id)}:${locationId || index}`,
       workspaceId: clean(product.workspace_id),
       menuItemId: clean(product.id),
       menuItemName: clean(product.name),
@@ -3015,13 +3115,13 @@ function buildPricingRowsForProduct(
           product.yoco_category_name_resolved ||
           product.yoco_category_id,
       ),
-      locationId: clean(price.location_id),
+      locationId,
       locationName: clean(price.location_name || "Default"),
       sellingPriceInclVat,
       vatRate: normalizeReportVatRate(context.vatRate),
       vat,
       sellingPriceExVat,
-      recipeCostExVat,
+      recipeCostExVat: locationRecipeCostExVat,
       grossProfit,
       gpPercent,
       foodCostPercent,
@@ -6251,6 +6351,14 @@ export const __modifierReportingInternals = {
   movementModifierId,
   movementModifierName,
   standardizeModifierSalesRow,
+};
+
+export const __menuHealthInternals = {
+  buildMenuHealthContext,
+  buildMenuRecipeHealthRows,
+  buildPricingRowsForProduct,
+  calculateLocationRecipeCost,
+  resolveMenuRecipeIngredientCost,
 };
 
 export async function getInventoryAuditReport(

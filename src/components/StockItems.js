@@ -396,6 +396,10 @@ function bindStockEvents(view, stock, onStockFilterChange, onStockAction) {
   view.querySelector('[data-stock-form]')?.addEventListener('keydown', (event) => {
     if (event.key !== 'Enter') return;
     if (event.target.closest('button')) return;
+    // Location cost rows live inside the same <form> as the item's master fields but save
+    // through their own action (onSaveLocationCosts) — Enter here must not also submit the
+    // master item form.
+    if (event.target.closest('[data-stock-location-cost-row]')) return;
     event.preventDefault();
     event.currentTarget.requestSubmit();
   });
@@ -430,6 +434,16 @@ function bindStockEvents(view, stock, onStockFilterChange, onStockAction) {
 	      recipe,
 	      uomConfigurations
 	    });
+  });
+
+  view.querySelectorAll('[data-stock-location-cost-field]').forEach((input) => {
+    input.addEventListener('change', () => {
+      onStockAction.onLocationCostDraftChange?.(input.dataset.stockLocationCostId, input.value);
+    });
+  });
+
+  view.querySelector('[data-stock-save-location-costs]')?.addEventListener('click', () => {
+    onStockAction.onSaveLocationCosts?.(view.querySelector('[data-stock-form]')?.dataset.stockItemId || '');
   });
 
   view.querySelectorAll('[data-stock-scan-barcode-input]').forEach((button) => {
@@ -949,6 +963,7 @@ function renderStockModal(stock, categories = [], uoms = [], locations = [], sto
   const openSections = getStockEditorOpenSections(item);
   const isDetailsOpen = openSections.has('details');
   const isUomConfigOpen = openSections.has('uom');
+  const isLocationCostsOpen = openSections.has('locationCosts');
   return `
     <div class="stockModule__modalBackdrop" role="presentation">
       <section class="stockModule__modal stockModule__modal--sheet" role="dialog" aria-modal="true" aria-labelledby="stock-modal-title">
@@ -1118,6 +1133,20 @@ function renderStockModal(stock, categories = [], uoms = [], locations = [], sto
               </div>
             </div>
           </section>
+          ${item.id ? `
+          <section class="stockModule__sheetPanel stockModule__sheetPanel--collapsible ${isLocationCostsOpen ? 'is-open' : 'is-closed'}" data-stock-editor-section="locationCosts">
+            <button type="button" class="stockModule__sectionToggle" data-stock-section-toggle="locationCosts" aria-expanded="${isLocationCostsOpen}">
+              <span>
+                <strong>3. Cost by Location</strong>
+                <em>Set this item's cost at every location without a bulk import.</em>
+              </span>
+              ${icon('chevron')}
+            </button>
+            <div class="stockModule__sectionBody">
+              ${renderStockLocationCostEditor(stock.locationCostEditor, item)}
+            </div>
+          </section>
+          ` : ''}
           `}
           ${stock.actionError ? `<div class="stockModule__inlineError stockModule__span2" role="alert">${escapeHtml(stock.actionError)}</div>` : ''}
           <div class="stockModule__modalActions stockModule__span2">
@@ -1135,6 +1164,64 @@ function renderStockModal(stock, categories = [], uoms = [], locations = [], sto
           </div>
         </form>
       </section>
+    </div>
+  `;
+}
+
+function renderStockLocationCostEditor(editor, item = {}) {
+  const belongsToItem = Boolean(editor) && String(editor.itemId || '') === String(item.id || '');
+  if (!belongsToItem || editor.status === 'loading') {
+    return `<p class="stockModule__sectionHint">Loading location costs…</p>`;
+  }
+  if (editor.status === 'error') {
+    return `<p class="stockModule__inlineError" role="alert">${escapeHtml(editor.error || 'Could not load location costs.')}</p>`;
+  }
+  const locations = Array.isArray(editor.locations) ? editor.locations : [];
+  if (!locations.length) {
+    return `<p class="stockModule__sectionHint">No active locations found for this workspace.</p>`;
+  }
+  const draft = editor.draft || {};
+  const isSaving = editor.status === 'saving';
+  return `
+    <div class="stockModule__locationCostGrid">
+      ${locations.map((location) => {
+        const locationId = String(location.locationId || '');
+        const draftValue = draft[locationId] ?? String(location.cost ?? 0);
+        const hasLastPurchase = location.lastPurchaseCost !== null && location.lastPurchaseCost !== undefined;
+        return `
+          <div class="stockModule__locationCostRow" data-stock-location-cost-row="${escapeAttribute(locationId)}">
+            <div class="stockModule__locationCostName">
+              <strong>${escapeHtml(location.locationName || 'Location')}</strong>
+              ${location.hasOverride
+                ? '<span class="stockModule__badge">Override</span>'
+                : '<span class="stockModule__badge stockModule__badge--muted">Using item cost</span>'}
+            </div>
+            <label>
+              <span>Cost Ex VAT</span>
+              <input
+                type="text"
+                inputmode="decimal"
+                value="${escapeAttribute(draftValue)}"
+                data-stock-location-cost-field
+                data-stock-location-cost-id="${escapeAttribute(locationId)}"
+                ${isSaving ? 'disabled' : ''}
+              />
+            </label>
+            ${hasLastPurchase ? `
+              <span class="stockModule__locationCostHint">
+                Last purchase: ${formatCurrency(location.lastPurchaseCost)}${location.lastPurchasedAt ? ` on ${escapeHtml(String(location.lastPurchasedAt).slice(0, 10))}` : ''}
+              </span>
+            ` : ''}
+          </div>
+        `;
+      }).join('')}
+    </div>
+    ${editor.error ? `<div class="stockModule__inlineError" role="alert">${escapeHtml(editor.error)}</div>` : ''}
+    <div class="stockModule__locationCostActions">
+      <button type="button" class="stockModule__primary" data-stock-save-location-costs ${isSaving ? 'disabled' : ''}>
+        ${icon('check')}
+        <span>${isSaving ? 'Saving' : 'Save Location Costs'}</span>
+      </button>
     </div>
   `;
 }

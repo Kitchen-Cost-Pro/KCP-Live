@@ -4,6 +4,7 @@ import { calculatePriceRiskScore, priceVolatilityStatus } from '../../engine/ris
 import { average, calculateCoefficientOfVariation, calculateCostChange, calculateCostChangePercent, calculatePriceRange, calculateVolatilityPercent, calculateWeightedAverageCost, percentileRank } from '../../engine/statistics.js';
 import { runningAverage } from '../../engine/trendAnalysis.js';
 import { applyAdvancedFilters, attachModelMeta, countWarning, itemSupplierKey, loadAdvancedSources, normalizeDate, sourceWarnings } from './advancedReportHelpers.js';
+import { zonedDateTimeStrings } from '../../engine/timezone.js';
 
 const money = (key, label, tooltipKey = '') => ({ key, label, type: 'money', align: 'right', sortable: true, ...(tooltipKey ? { tooltipKey } : {}) });
 const qty = (key, label) => ({ key, label, type: 'number', align: 'right', sortable: true });
@@ -138,7 +139,12 @@ function normalizeCreditHistoryRow(row, index) {
   const lineCreditExVat = Math.abs(safeNumber(row.lineCreditExVat ?? row.creditValueExVat ?? qtyCredited * unitCostExVat));
   return {
     id: `price-credit-history:${row.id || row.sourceId || index}`,
-    purchaseDate: text(row.creditNoteDate).slice(0, 10) || normalizeDate(row),
+    // creditNoteDate is a full reconstructed UTC instant (zonedTradingDisplayTimestamp in
+    // creditNotesReport.js), not a date-only string -- naively slicing it reads as the UTC
+    // calendar day, one day early whenever the credit note's real local time is before UTC
+    // midnight (e.g. logged at 00:51 SAST = 22:51 UTC the previous day). Convert through the
+    // reporting timezone first, same fix as the GRV Log "Today" bug.
+    purchaseDate: zonedDateTimeStrings(row.creditNoteDate, 'Africa/Johannesburg').date || normalizeDate(row),
     supplierId: text(row.supplierId),
     supplierName: text(row.supplierName) || 'Missing Supplier',
     itemId: text(row.itemId || row.stockItemId),

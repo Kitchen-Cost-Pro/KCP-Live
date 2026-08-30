@@ -96,6 +96,7 @@ import {
   getSiteConfiguration,
   getSuppliers,
   getStockItems,
+  getStockItemLocationCosts,
   getStockTakeDrafts,
   getStockTakeTemplates,
   getStockTakes,
@@ -171,6 +172,7 @@ import {
   postStockCategoryAction,
   postStockImport,
   postStockLocationCostsImport,
+  postStockItemLocationCosts,
   postStockItem,
   postStockResetDashboardHistory,
   postStockTake,
@@ -1190,6 +1192,28 @@ export async function dispatchWorkspaceRoute(
   const stockLevelMatch = resource.match(/^stock-items\/([^/]+)\/stock-level$/);
   if (request.method === "PATCH" && stockLevelMatch) {
     return patchStockLevel(request, env, auth, workspaceId, stockLevelMatch[1]);
+  }
+
+  const stockItemLocationCostsMatch = resource.match(
+    /^stock-items\/([^/]+)\/location-costs$/,
+  );
+  if (request.method === "GET" && stockItemLocationCostsMatch) {
+    return getStockItemLocationCosts(
+      request,
+      env,
+      auth,
+      workspaceId,
+      stockItemLocationCostsMatch[1],
+    );
+  }
+  if (request.method === "POST" && stockItemLocationCostsMatch) {
+    return postStockItemLocationCosts(
+      request,
+      env,
+      auth,
+      workspaceId,
+      stockItemLocationCostsMatch[1],
+    );
   }
 
   const stockItemMatch = resource.match(/^stock-items\/([^/]+)$/);

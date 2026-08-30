@@ -1,5 +1,6 @@
 import { roundMoney, safeNumber } from '../../engine/calculations.js';
 import { groupBy, sumBy, text, toArray } from '../../engine/grouping.js';
+import { zonedDateTimeStrings } from '../../engine/timezone.js';
 import { fetchStockOnHandRows } from '../../api/reportingApi.js';
 import { mapColumns, rememberPayload, topText, uniqueCount } from '../purchasing/purchasingReportHelpers.js';
 import { buildDefaultStockSku } from '../../../../utils/stockSku.js';
@@ -157,7 +158,11 @@ function normalizeStockRow(row = {}, index = 0) {
     status: resolveStatus(currentStock, lowStockThreshold, parLevel, hasLocationBalance !== false),
     supplierId: text(row.supplierId || row.supplier_id),
     supplierName: text(row.supplierName || row.supplier_name),
-    lastMovementDate: text(row.lastMovementDate || row.last_movement_date).slice(0, 10),
+    // Backend passes this through as a raw occurred_at instant with no timezone conversion --
+    // naive slicing reads as the UTC calendar day, one day early whenever the real local time is
+    // before UTC midnight. Same fix as the GRV Log "Today" bug (this column is display-only, no
+    // date-range filter reads it, so this only ever mislabeled the date, never dropped rows).
+    lastMovementDate: zonedDateTimeStrings(row.lastMovementDate || row.last_movement_date, 'Africa/Johannesburg').date,
     lastMovementType: text(row.lastMovementType || row.last_movement_type),
     lastUpdated: text(row.lastUpdated || row.last_updated || row.balanceUpdatedAt || row.balance_updated_at),
     openingStock: safeNumber(row.openingStock ?? row.opening_stock),
