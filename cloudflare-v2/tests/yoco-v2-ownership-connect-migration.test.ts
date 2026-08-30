@@ -131,21 +131,20 @@ test('authorised connect performs a one-way migration from historic ownership ro
   assert.ok(ownership.every((row) => row.engine_version === 'V2' && Number(row.enabled) === 1));
   assert.ok(ownership.every((row) => row.enabled_by === 'manager_1'));
 
-  const saleControls = db.database.prepare(`
+  // Phase V2 14 unified the separate sale/refund cutover tables into one yoco_v2_effect_gate table
+  // covering all four effect types (see migrations.ts) — effectControlStatement() in ownership.ts
+  // writes there, not to the old per-domain tables, which are left in place read-only.
+  const effectGate = db.database.prepare(`
     SELECT effect_type, feature_enabled, consumption_paused, cutover_at, activated_by
-      FROM yoco_v2_effect_controls
+      FROM yoco_v2_effect_gate
      WHERE workspace_id = 'ws_legacy'
      ORDER BY effect_type
   `).all() as Array<Record<string, unknown>>;
-  const refundControls = db.database.prepare(`
-    SELECT effect_type, feature_enabled, consumption_paused, cutover_at, activated_by
-      FROM yoco_v2_refund_effect_controls
-     WHERE workspace_id = 'ws_legacy'
-     ORDER BY effect_type
-  `).all() as Array<Record<string, unknown>>;
+  const saleControls = effectGate.filter((row) => String(row.effect_type).startsWith('SALE_'));
+  const refundControls = effectGate.filter((row) => String(row.effect_type).startsWith('REFUND_'));
   assert.equal(saleControls.length, 2);
   assert.equal(refundControls.length, 2);
-  assert.ok([...saleControls, ...refundControls].every((row) => (
+  assert.ok(effectGate.every((row) => (
     Number(row.feature_enabled) === 1
     && Number(row.consumption_paused) === 0
     && Boolean(row.cutover_at)

@@ -36,16 +36,15 @@ test('Phase 58 normalizes Go Live state and activation timestamp', () => {
 test('Phase 58 Go Live saves an activation instant while V2 effects fail closed on ownership', () => {
   const main = read('src/main.js');
   const ownership = read('cloudflare-v2/src/modules/yoco-engine-v2/ownership.ts');
-  const saleRuntime = read('cloudflare-v2/src/modules/yoco-engine-v2/cutover.ts');
-  const refundRuntime = read('cloudflare-v2/src/modules/yoco-engine-v2/refund-cutover.ts');
+  // cutover.ts/refund-cutover.ts were later consolidated: the ownership fail-closed gate check
+  // (engine_version / ownerIsV2) now lives in the shared effect-gate.ts used by both sale and refund.
+  const effectGate = read('cloudflare-v2/src/modules/yoco-engine-v2/effect-gate.ts');
   const settings = read('src/components/Settings.js');
   assert.match(main, /stockDepletionEnabledAt: new Date\(\)\.toISOString\(\)/);
   assert.match(ownership, /assertAllYocoEffectsOwnedByV2/);
   assert.match(ownership, /YOCO_V2_OWNERSHIP_NOT_READY/);
-  assert.match(saleRuntime, /engine_version/);
-  assert.match(saleRuntime, /ownerIsV2/);
-  assert.match(refundRuntime, /engine_version/);
-  assert.match(refundRuntime, /ownerIsV2/);
+  assert.match(effectGate, /engine_version/);
+  assert.match(effectGate, /ownerIsV2/);
   assert.match(settings, /Complete the checklist before enabling stock depletion/);
   assert.match(settings, /Going Live\.\.\./);
 });

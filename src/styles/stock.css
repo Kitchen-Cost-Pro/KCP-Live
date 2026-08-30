@@ -1097,6 +1097,48 @@
   font-weight: 850;
 }
 
+.stockModule__costFieldShell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.stockModule__costFieldShell input {
+  flex: 1;
+  min-width: 0;
+}
+
+.stockModule__costByLocationButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 0 12px;
+  height: 40px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: var(--surface-secondary);
+  color: var(--text-main);
+  font-size: 0.72rem;
+  font-weight: 900;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.stockModule__costByLocationButton:hover {
+  border-color: var(--accent-blue);
+  color: var(--accent-blue);
+}
+
+.stockModule__costByLocationButton svg {
+  width: 14px;
+  height: 14px;
+}
+
+.stockModule__locationCostingModal--costByLocation {
+  max-width: 640px;
+}
+
 .stockModule__locationCostGrid {
   display: grid;
   gap: 10px;

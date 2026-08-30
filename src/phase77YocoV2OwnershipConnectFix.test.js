@@ -22,8 +22,10 @@ test('V2 ownership migration claims and activates all four effects without resto
   const ownership = read('cloudflare-v2/src/modules/yoco-engine-v2/ownership.ts');
   assert.match(ownership, /migrateYocoV2EffectOwnershipForConnection/);
   assert.match(ownership, /engine_version = 'V2'/);
-  assert.match(ownership, /yoco_v2_effect_controls/);
-  assert.match(ownership, /yoco_v2_refund_effect_controls/);
+  // Phase V2 14 unified the separate yoco_v2_effect_controls (sale) and
+  // yoco_v2_refund_effect_controls (refund) tables into one yoco_v2_effect_gate table
+  // (see migrations.ts) — the per-effect cutover history tables stayed separate.
+  assert.match(ownership, /yoco_v2_effect_gate/);
   assert.match(ownership, /yoco_v2_cutover_history/);
   assert.match(ownership, /yoco_v2_refund_cutover_history/);
   assert.match(ownership, /legacy_runtime_restored: false/);

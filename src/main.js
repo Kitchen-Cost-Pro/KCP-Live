@@ -6576,10 +6576,23 @@ function openStockEditor(itemId) {
     ...appState.stock,
     editingItem: editableItem,
     locationCostEditor: null,
+    locationCostModalOpen: false,
     actionError: ''
   };
   renderApp();
-  if (itemId) loadStockLocationCostEditor(itemId);
+}
+
+function openStockLocationCostModal(itemId) {
+  const id = String(itemId || '').trim();
+  if (!id) return;
+  appState.stock = { ...appState.stock, locationCostModalOpen: true };
+  renderApp();
+  loadStockLocationCostEditor(id);
+}
+
+function closeStockLocationCostModal() {
+  appState.stock = { ...appState.stock, locationCostModalOpen: false };
+  renderApp();
 }
 
 async function loadStockLocationCostEditor(itemId) {
@@ -6816,6 +6829,7 @@ function closeStockEditor() {
     ...appState.stock,
     editingItem: null,
     locationCostEditor: null,
+    locationCostModalOpen: false,
     lookupPicker: createStockLookupPickerState(),
     actionStatus: '',
     actionError: ''
@@ -19633,6 +19647,8 @@ function renderApp() {
       onPreserveFocus: preserveFieldFocus,
       onDraftFieldChange: updateStockDraftField,
       onToggleEditorSection: toggleStockEditorSection,
+      onOpenLocationCostModal: openStockLocationCostModal,
+      onCloseLocationCostModal: closeStockLocationCostModal,
       onLocationCostDraftChange: updateStockLocationCostDraft,
       onSaveLocationCosts: saveStockLocationCosts,
       onOpenRecipeScreen: openStockRecipeScreen,

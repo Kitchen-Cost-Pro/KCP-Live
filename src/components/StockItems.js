@@ -123,6 +123,7 @@ export function renderStockItems({ state, onStockFilterChange, onStockAction = {
     ${stock.actionError && !stock.editingItem && !stock.confirmDelete ? renderNotice(stock.actionError, 'error') : ''}
     ${renderStockBody(stock, items, pagedItems, paging, activeFilters, selectedIds, state.settings?.values?.vatRegistered !== false)}
     ${renderStockModal(stock, categories, uoms, stock.locations || [], renderItems, state.settings?.values?.vatRegistered !== false)}
+    ${renderStockLocationCostModal(stock, stock.editingItem)}
     ${renderStockLookupPickerModal(stock, categories, uoms)}
     ${renderStockManagerModal(stock, managerData)}
     ${renderLocationCostingPickerModal(filters, locationOptions, stock.actionStatus || '')}
@@ -396,10 +397,6 @@ function bindStockEvents(view, stock, onStockFilterChange, onStockAction) {
   view.querySelector('[data-stock-form]')?.addEventListener('keydown', (event) => {
     if (event.key !== 'Enter') return;
     if (event.target.closest('button')) return;
-    // Location cost rows live inside the same <form> as the item's master fields but save
-    // through their own action (onSaveLocationCosts) — Enter here must not also submit the
-    // master item form.
-    if (event.target.closest('[data-stock-location-cost-row]')) return;
     event.preventDefault();
     event.currentTarget.requestSubmit();
   });
@@ -436,6 +433,14 @@ function bindStockEvents(view, stock, onStockFilterChange, onStockAction) {
 	    });
   });
 
+  view.querySelector('[data-stock-open-location-cost]')?.addEventListener('click', (event) => {
+    onStockAction.onOpenLocationCostModal?.(event.currentTarget.dataset.stockOpenLocationCost);
+  });
+
+  view.querySelector('[data-stock-close-location-cost]')?.addEventListener('click', () => {
+    onStockAction.onCloseLocationCostModal?.();
+  });
+
   view.querySelectorAll('[data-stock-location-cost-field]').forEach((input) => {
     input.addEventListener('change', () => {
       onStockAction.onLocationCostDraftChange?.(input.dataset.stockLocationCostId, input.value);
@@ -443,7 +448,7 @@ function bindStockEvents(view, stock, onStockFilterChange, onStockAction) {
   });
 
   view.querySelector('[data-stock-save-location-costs]')?.addEventListener('click', () => {
-    onStockAction.onSaveLocationCosts?.(view.querySelector('[data-stock-form]')?.dataset.stockItemId || '');
+    onStockAction.onSaveLocationCosts?.(stock.editingItem?.id || '');
   });
 
   view.querySelectorAll('[data-stock-scan-barcode-input]').forEach((button) => {
@@ -963,7 +968,6 @@ function renderStockModal(stock, categories = [], uoms = [], locations = [], sto
   const openSections = getStockEditorOpenSections(item);
   const isDetailsOpen = openSections.has('details');
   const isUomConfigOpen = openSections.has('uom');
-  const isLocationCostsOpen = openSections.has('locationCosts');
   return `
     <div class="stockModule__modalBackdrop" role="presentation">
       <section class="stockModule__modal stockModule__modal--sheet" role="dialog" aria-modal="true" aria-labelledby="stock-modal-title">
@@ -1019,7 +1023,14 @@ function renderStockModal(stock, categories = [], uoms = [], locations = [], sto
               </label>
               <label>
                 <span>${withInfo('Unit Cost', 'Latest ex-VAT unit cost used for stock valuation and recipe costing.')}</span>
-                <input name="cost" type="text" inputmode="decimal" value="${escapeAttribute(String(item.cost || 0))}" data-stock-draft-field="cost" />
+                <div class="stockModule__costFieldShell">
+                  <input name="cost" type="text" inputmode="decimal" value="${escapeAttribute(String(item.cost || 0))}" data-stock-draft-field="cost" />
+                  ${item.id ? `
+                    <button type="button" class="stockModule__costByLocationButton" data-stock-open-location-cost="${escapeAttribute(item.id)}">
+                      ${icon('mapPin')}<span>Cost by Location</span>
+                    </button>
+                  ` : ''}
+                </div>
               </label>
               <label>
                 <span>${withInfo('Threshold', 'Low-stock alert quantity. Items below this level show a LOW badge.')}</span>
@@ -1133,20 +1144,6 @@ function renderStockModal(stock, categories = [], uoms = [], locations = [], sto
               </div>
             </div>
           </section>
-          ${item.id ? `
-          <section class="stockModule__sheetPanel stockModule__sheetPanel--collapsible ${isLocationCostsOpen ? 'is-open' : 'is-closed'}" data-stock-editor-section="locationCosts">
-            <button type="button" class="stockModule__sectionToggle" data-stock-section-toggle="locationCosts" aria-expanded="${isLocationCostsOpen}">
-              <span>
-                <strong>3. Cost by Location</strong>
-                <em>Set this item's cost at every location without a bulk import.</em>
-              </span>
-              ${icon('chevron')}
-            </button>
-            <div class="stockModule__sectionBody">
-              ${renderStockLocationCostEditor(stock.locationCostEditor, item)}
-            </div>
-          </section>
-          ` : ''}
           `}
           ${stock.actionError ? `<div class="stockModule__inlineError stockModule__span2" role="alert">${escapeHtml(stock.actionError)}</div>` : ''}
           <div class="stockModule__modalActions stockModule__span2">
@@ -1163,6 +1160,28 @@ function renderStockModal(stock, categories = [], uoms = [], locations = [], sto
             </button>
           </div>
         </form>
+      </section>
+    </div>
+  `;
+}
+
+function renderStockLocationCostModal(stock, item) {
+  if (!stock.locationCostModalOpen) return '';
+  const targetItem = item && item.id && item.id !== '__new__' ? item : null;
+  if (!targetItem) return '';
+  return `
+    <div class="stockModule__modalBackdrop stockModule__locationCostingBackdrop" role="presentation">
+      <section class="stockModule__modal stockModule__locationCostingModal stockModule__locationCostingModal--costByLocation" role="dialog" aria-modal="true" aria-labelledby="stock-location-cost-title">
+        <header>
+          <div>
+            <p>Cost by Location</p>
+            <h2 id="stock-location-cost-title">${escapeHtml(getStockItemDisplayName(targetItem) || targetItem.name || 'Stock item')}</h2>
+          </div>
+          <button type="button" class="stockModule__iconButton" data-stock-close-location-cost aria-label="Close">${icon('x')}</button>
+        </header>
+        <div class="stockModule__locationCostingModalBody">
+          ${renderStockLocationCostEditor(stock.locationCostEditor, targetItem)}
+        </div>
       </section>
     </div>
   `;
@@ -2263,6 +2282,7 @@ function icon(name) {
     download: '<path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/>',
     edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
     folder: '<path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8.5A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"/>',
+    mapPin: '<path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/>',
     plus: '<path d="M12 5v14"/><path d="M5 12h14"/>',
     search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
     trash: '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m19 6-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>',
