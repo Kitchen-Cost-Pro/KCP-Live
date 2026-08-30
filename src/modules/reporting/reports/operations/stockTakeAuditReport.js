@@ -4,13 +4,20 @@ import {
   calculateVarianceValue,
   safeNumber,
 } from "../../engine/calculations.js";
-import { groupBy, sumBy, text, toArray } from "../../engine/grouping.js";
+import {
+  applyReportFilters,
+  groupBy,
+  sumBy,
+  text,
+  toArray,
+} from "../../engine/grouping.js";
 import { buildRowWarnings } from "../../validators/rowWarningUtils.js";
 import { formatMoney, formatNumber } from "../../engine/formatters.js";
 import { buildRowFormulaTooltip } from "../../tooltips/tooltipBuilder.js";
 import { reconcileStockTakeAuditToDetailedActivity } from "../../validators/reconciliationChecks.js";
 import { fetchStockTakeAuditRows } from "../../api/reportingApi.js";
 import { detailedActivityReport } from "./detailedActivityReport.js";
+import { zonedDateTimeStrings } from "../../engine/timezone.js";
 
 const VALUE_TOLERANCE = 0.01;
 
@@ -603,7 +610,14 @@ async function loadStockTakeAuditModel({
     filters,
     services,
   });
-  const sourceRows = normalizeStockTakeRows(sourceResponse.rows);
+  const sourceTimeZone =
+    sourceResponse.meta?.timeZone ||
+    sourceResponse.meta?.timezone ||
+    "Africa/Johannesburg";
+  const sourceRows = applyReportFilters(
+    normalizeStockTakeRows(sourceResponse.rows, sourceTimeZone),
+    filters,
+  );
   const varianceLedgerRows = await loadStockTakeVarianceLedgerRows({
     workspaceId,
     filters,
@@ -689,8 +703,23 @@ function buildStockTakeAuditModel({
   };
 }
 
-function normalizeStockTakeRows(rows = []) {
-  return toArray(rows).map((row, index) => ({
+function normalizeStockTakeRows(rows = [], timeZone = "Africa/Johannesburg") {
+  return toArray(rows).map((row, index) => {
+    const rawStockTakeDate = text(
+      row.stockTakeDate ||
+        row.stock_take_date ||
+        row.date ||
+        row.countedAt ||
+        row.counted_at,
+    );
+    // A plain "YYYY-MM-DD" slices safely either way, but countedAt can be a full UTC instant (e.g.
+    // "2026-08-29T22:51:00.000Z") -- slicing that verbatim reads as the UTC calendar day, which is
+    // "yesterday" relative to the workspace's SAST day whenever the count happens near local
+    // midnight. Convert through the workspace timezone first so this always matches the day the
+    // backend itself used when it originally filtered these rows (see the GRV Log fix for the same
+    // class of bug).
+    const stockTakeDate = zonedDateTimeStrings(rawStockTakeDate, timeZone).date || rawStockTakeDate.slice(0, 10);
+    return {
     ...row,
     id: text(row.id) || `stock-take-line:${index}`,
     stockTakeSessionId: text(
@@ -711,13 +740,10 @@ function normalizeStockTakeRows(rows = []) {
         row.documentNumber ||
         row.document_number,
     ),
-    stockTakeDate: text(
-      row.stockTakeDate ||
-        row.stock_take_date ||
-        row.date ||
-        row.countedAt ||
-        row.counted_at,
-    ).slice(0, 10),
+    // Aliased for applyReportFilters, which resolves a row's comparable date from
+    // `date`/`timestamp`/`createdAt` and otherwise has no notion of stockTakeDate.
+    date: stockTakeDate,
+    stockTakeDate,
     locationId: text(row.locationId || row.location_id),
     locationName: text(row.locationName || row.location_name),
     status: text(
@@ -823,7 +849,8 @@ function normalizeStockTakeRows(rows = []) {
       row.varianceMovementRowCount ?? row.variance_movement_row_count,
     ),
     raw: row.raw || row,
-  }));
+    };
+  });
 }
 
 function enrichStockTakeLine(row = {}) {

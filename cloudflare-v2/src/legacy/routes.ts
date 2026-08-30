@@ -683,7 +683,10 @@ async function saveStockItem(
   auth: AuthContext,
   workspaceId: string,
   raw: Record<string, unknown>,
-  options: { allowStockBalanceUpdate?: boolean } = {},
+  options: {
+    allowStockBalanceUpdate?: boolean;
+    clearLocationPriceOverrideOnCostChange?: boolean;
+  } = {},
 ) {
   const item = normalizeStockItemPayload(raw);
   if (!item.name) throw new Error("Stock item name is required.");
@@ -696,14 +699,14 @@ async function saveStockItem(
   // itself still considers active rows only, so a deleted item's name never blocks a genuinely new
   // one.
   const existing = await env.DB.prepare(
-    `SELECT id, name
+    `SELECT id, name, unit_cost
        FROM stock_items
       WHERE workspace_id = ?1
         AND id = ?2
       LIMIT 1`,
   )
     .bind(workspaceId, item.id)
-    .first<{ id: string; name: string }>();
+    .first<{ id: string; name: string; unit_cost: number }>();
 
   // Only enforce name-uniqueness when the name is actually changing. Some workspaces
   // already carry pre-existing stock items that share a name but differ by unit (e.g.
@@ -746,6 +749,21 @@ async function saveStockItem(
 
   const stockItemId = existing?.id || item.id;
   const now = nowIso();
+  // A GRV/transfer/manufacturing run can leave a per-location price override in
+  // stock_item_location_prices that permanently outranks the item's master unit_cost
+  // (see resolveLocationUnitCost client-side) — so editing the master cost here looked like
+  // it "didn't update" on the main Stock Items list even though it saved correctly. A cost
+  // edit is the user's explicit correction, so it must clear those stale overrides rather
+  // than be silently masked by them.
+  //
+  // Restricted to the single-item edit path (default true): a bulk import row that simply
+  // leaves its cost cell blank still normalizes to unitCost = 0 client-side (see
+  // normalizeStockPayload in stockService.js), which would otherwise look identical to a
+  // deliberate "set cost to 0" edit and wipe every location's price override on a routine
+  // re-import. Bulk import/workspace-import callers explicitly opt out of the clear below.
+  const costIsChanging =
+    options.clearLocationPriceOverrideOnCostChange !== false &&
+    existing && Math.abs(numberValue(existing.unit_cost, 0) - item.unitCost) > 0.0001;
   const statements = [
     env.DB.prepare(
       `INSERT INTO stock_items
@@ -795,6 +813,16 @@ async function saveStockItem(
       nextNameKey,
     ),
   ];
+
+  if (costIsChanging) {
+    statements.push(
+      env.DB.prepare(
+        `DELETE FROM stock_item_location_prices
+        WHERE workspace_id = ?1
+          AND stock_item_id = ?2`,
+      ).bind(workspaceId, stockItemId),
+    );
+  }
 
   const balances = Object.entries(item.balances)
     .map(
@@ -6520,7 +6548,7 @@ export async function postStockImport(
           text(row.locationId || row.targetLocation || row.defaultLocationId) ||
           fallbackLocation,
       },
-      { allowStockBalanceUpdate },
+      { allowStockBalanceUpdate, clearLocationPriceOverrideOnCostChange: false },
     );
     importedCount += 1;
   }
@@ -8671,7 +8699,7 @@ export async function postGoodsReceipt(
         `${text(line.stockItemName || stockItemId)} needs a receiving location.`,
       );
     const stockItem = await env.DB.prepare(
-      `SELECT id, name, unit, unit_cost, raw_json
+      `SELECT id, name, unit, unit_cost, vat_enabled, raw_json
 	         FROM stock_items
 	        WHERE workspace_id = ?1
 	          AND id = ?2
@@ -8722,7 +8750,11 @@ export async function postGoodsReceipt(
       incomingUnitCost: unitCost,
     });
     const totalEx = numberValue(line.lineTotalEx, quantity * unitCost);
-    const totalVat = totalEx * workspaceVatRate;
+    // A zero-rated/VAT-exempt item must never carry VAT, regardless of the workspace rate —
+    // this previously applied workspaceVatRate to every line unconditionally, adding 15% to a
+    // non-VATable item's GRV total.
+    const lineIsVatable = numberValue(stockItem.vat_enabled, 1) !== 0;
+    const totalVat = lineIsVatable ? totalEx * workspaceVatRate : 0;
     const metadata = JSON.stringify({
       before,
       after: before + quantity,
@@ -14272,7 +14304,7 @@ export async function postImportPreview(
                 stockItem.defaultLocationId,
             ) || fallbackLocation,
         },
-        { allowStockBalanceUpdate: false },
+        { allowStockBalanceUpdate: false, clearLocationPriceOverrideOnCostChange: false },
       ),
     );
   }

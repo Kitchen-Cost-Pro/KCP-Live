@@ -707,5 +707,23 @@ CREATE INDEX IF NOT EXISTS idx_stock_items_workspace_active_name_key
   `CREATE INDEX IF NOT EXISTS idx_adjustment_lines_adjustment
   ON adjustment_lines(adjustment_id);
 CREATE INDEX IF NOT EXISTS idx_adjustments_workspace_type
-  ON adjustments(workspace_id, adjustment_type, occurred_at);`
+  ON adjustments(workspace_id, adjustment_type, occurred_at);`,
+  // 43 — Detailed Activity/Operations Dashboard filter and sort stock_movements by occurred_at,
+  // but GRV/Credit Note/Adjustment/Wastage/Manufacturing rows are entered via a date-only picker
+  // with no time-of-day input, so occurred_at for those document types is always literal UTC
+  // midnight for a backdated entry — the report ends up filtering by the backdated business date
+  // instead of when it was actually processed (created_at), unlike every other document type
+  // (sale/transfer/stock take), which carries a genuine event timestamp in occurred_at.
+  //
+  // reporting-routes.ts needs to filter/sort by created_at for those five document types and by
+  // occurred_at for everything else — expressed as a single CASE, so it must match textually
+  // against an expression index for SQLite to use it (confirmed empirically: without this index,
+  // the query falls back to SEARCH ... USING INDEX idx_stock_movements_workspace_created but only
+  // on workspace_id, then filters every row for that workspace by the CASE expression — with it,
+  // SQLite seeks directly on both workspace_id and the effective-date bounds).
+  `CREATE INDEX IF NOT EXISTS idx_stock_movements_workspace_effective_date
+  ON stock_movements(
+    workspace_id,
+    (CASE WHEN document_type IN ('grv', 'credit_note', 'adjustment', 'wastage_adjustment', 'manufacturing_batch') THEN created_at ELSE occurred_at END)
+  );`
 ];

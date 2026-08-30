@@ -808,12 +808,17 @@ function renderStockRow(item, locationId, locations = [], selected = false, vatR
   const isLow = isPhysicalStock && onHand < Number(item.lowStockThreshold || 5);
   const barcodeLabel = parseBarcodeValues(item.barcodes ?? item.barcode ?? item.Barcodes ?? item.Barcode).join(', ') || 'No barcode';
   const locationCost = resolveLocationUnitCost(item, locationId);
-  // When the business is not VAT registered, no item ever actually carries VAT regardless of its
-  // own per-item flag — showing "VAT" on an item would misleadingly imply VAT is being charged.
-  const itemCarriesVat = vatRegistered && item.vatEnabled !== false;
+  // The pill reflects the item's own VATable-vs-Zero-Rated classification (item.vatEnabled),
+  // never the workspace's VAT-registration status — those are independent facts. A VATable item
+  // stays labelled "With VAT" even when the workspace isn't VAT registered (no VAT is charged in
+  // that case, which the tooltip explains), rather than being relabelled "Without VAT" as if it
+  // were the same thing as a genuinely Zero-Rated item.
+  const itemIsVatable = item.vatEnabled !== false;
   const vatPillTitle = !vatRegistered
-    ? 'Workspace is not VAT registered — no VAT is applied to any item, and this cost is treated as VAT-inclusive.'
-    : itemCarriesVat
+    ? (itemIsVatable
+        ? 'This item is VATable, but no VAT is charged because the workspace is not VAT registered.'
+        : 'This item is VAT-exempt (Zero-Rated).')
+    : itemIsVatable
       ? 'This item carries VAT. Its stored cost is treated as ex-VAT.'
       : 'This item is VAT-exempt.';
 
@@ -826,7 +831,7 @@ function renderStockRow(item, locationId, locations = [], selected = false, vatR
 	          ${itemType === 'sub_recipe' ? '<em class="stockModule__pill stockModule__pill--purple" title="Sub-Recipe: used inside recipes, has no stock-on-hand balance, and cannot be ordered.">Sub-Recipe</em>' : ''}
 	          ${itemType === 'manufactured' ? '<em class="stockModule__pill stockModule__pill--amber" title="Prep / Manufactured: produced in batches and tracked as its own stock item.">Prep</em>' : ''}
 	          ${itemType === 'recipe_source' ? '<em class="stockModule__pill stockModule__pill--purple" title="Non Stock: separate from Sub-Recipe. It can carry stock on hand and be counted, but it cannot be used as a recipe ingredient.">Non Stock</em>' : ''}
-          <em class="stockModule__pill ${itemCarriesVat ? 'stockModule__pill--green' : 'stockModule__pill--amber'}" title="${escapeAttribute(vatPillTitle)}">${itemCarriesVat ? 'With VAT' : 'Without VAT'}</em>
+          <em class="stockModule__pill ${itemIsVatable ? 'stockModule__pill--green' : 'stockModule__pill--amber'}" title="${escapeAttribute(vatPillTitle)}">${itemIsVatable ? 'With VAT' : 'Without VAT'}</em>
           ${isLow ? '<em class="stockModule__pill stockModule__pill--red">LOW</em>' : ''}
         </h2>
         <p>${escapeHtml(barcodeLabel)}</p>

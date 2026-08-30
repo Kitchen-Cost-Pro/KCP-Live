@@ -1,5 +1,12 @@
 import { roundMoney, safeNumber } from "../../engine/calculations.js";
-import { groupBy, sumBy, text, toArray } from "../../engine/grouping.js";
+import {
+  applyReportFilters,
+  groupBy,
+  sumBy,
+  text,
+  toArray,
+} from "../../engine/grouping.js";
+import { zonedDateTimeStrings } from "../../engine/timezone.js";
 import { fetchGrvLogRows } from "../../api/reportingApi.js";
 import {
   firstText,
@@ -216,7 +223,12 @@ export const grvLogReport = {
       ? await services.reporting.getGrvLogRows({ workspaceId, filters })
       : await fetchGrvLogRows({ workspaceId, filters });
     rememberPayload(services, "__lastGrvLogPayload", payload);
-    const lineRows = toArray(payload.rows).map(normalizeLine);
+    const timeZone =
+      payload.meta?.timeZone || payload.meta?.timezone || "Africa/Johannesburg";
+    const lineRows = applyReportFilters(
+      toArray(payload.rows).map((row, index) => normalizeLine(row, index, timeZone)),
+      filters,
+    );
     const views = buildGrvViews(lineRows);
     return (views[view] || views.summary).map((row) => ({
       ...row,
@@ -337,7 +349,7 @@ export function buildGrvViews(rows = []) {
   };
 }
 
-function normalizeLine(row = {}, index = 0) {
+function normalizeLine(row = {}, index = 0, timeZone = "Africa/Johannesburg") {
   const receivedQty = safeNumber(
     row.receivedQty ?? row.received_qty ?? row.quantity,
   );
@@ -373,6 +385,20 @@ function normalizeLine(row = {}, index = 0) {
         row.grv_number ||
         row.sourceId,
     ),
+    // Aliased for applyReportFilters, which resolves a row's comparable date from
+    // `date`/`timestamp`/`createdAt` and otherwise has no notion of grvDate. grvDate is a full UTC
+    // instant (e.g. "2026-08-29T22:51:40.000Z"), not a pre-localized date -- normalizeComparableDate
+    // takes an ISO date verbatim from its first 10 characters with NO timezone conversion, which is
+    // correct for an already-local date string but silently takes the UTC calendar day for a raw
+    // instant. For a GRV logged at 00:51 SAST (=22:51 UTC the PREVIOUS day), that naive slice reads
+    // as "yesterday" and got the row wrongly excluded from "Today" even though the backend's own
+    // (correctly timezone-aware) filtering had already included it. Convert to the workspace's
+    // reporting timezone first so the comparable date always matches the backend's own idea of
+    // which calendar day this row belongs to.
+    date: zonedDateTimeStrings(
+      row.grvDate || row.grv_date || row.receivedAt || row.received_at,
+      timeZone,
+    ).date,
     grvDate: text(
       row.grvDate || row.grv_date || row.receivedAt || row.received_at,
     ),
