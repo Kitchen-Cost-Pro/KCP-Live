@@ -10656,6 +10656,12 @@ function updateGrvLine(index, updates = {}) {
     const selection = getLineUomSelection(items[index], normalizedUpdates.selectedUom);
     normalizedUpdates.selectedUom = selection.selectedUom;
     normalizedUpdates.packSize = String(selection.ratio);
+    // Pack Price is total cost for one pack (unitCost is per base unit) — switching UOM changes
+    // the pack size (e.g. 1 Bottle = 30 TOT), so the pack price must be re-derived from the
+    // unchanged base unit cost, not left stale from the previous UOM's pack size.
+    const unitCostEx = Number(items[index].unitCost || 0);
+    normalizedUpdates.packPriceEx = String(unitCostEx * selection.ratio);
+    normalizedUpdates.packPriceDisplay = '';
   }
 
   items[index] = {

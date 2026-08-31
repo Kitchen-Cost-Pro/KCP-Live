@@ -486,11 +486,11 @@
 }
 
 #view-grv .grv-tableCol--vat {
-  width: 108px;
+  width: 148px;
 }
 
 #view-grv .grv-tableCol--total {
-  width: 124px;
+  width: 164px;
 }
 
 #view-grv .grv-tableCol--actions {
@@ -907,14 +907,11 @@
   color: rgba(255, 255, 255, 0.94);
   font-size: 0.92rem;
   font-weight: 950;
-  line-height: 1.25;
-  /* A large amount (e.g. R150 000,00) with table-layout: fixed columns must wrap onto a second
-     line inside its own cell instead of visually bleeding into the next column — nowrap here was
-     the direct cause of that overlap. word-break/overflow-wrap cover locale currency formatting
-     that uses a non-breaking space as its thousands separator, which "normal" alone can't break at. */
-  white-space: normal;
-  overflow-wrap: break-word;
-  word-break: break-word;
+  line-height: 1.1;
+  /* Kept on one line — the VAT/Total columns were widened instead of wrapping large amounts,
+     which read as broken/ugly. The table's scroll container (.grv-draft-scroll) is the fallback
+     for a value wide enough to still exceed the widened column. */
+  white-space: nowrap;
 }
 
 #view-grv .grv-tableStat span {
@@ -1060,10 +1057,7 @@
   color: rgba(255, 255, 255, 0.94);
   font-size: 0.92rem;
   font-weight: 950;
-  line-height: 1.25;
-  white-space: normal;
-  overflow-wrap: break-word;
-  word-break: break-word;
+  white-space: nowrap;
 }
 
 #view-grv .grv-actionsCell {
