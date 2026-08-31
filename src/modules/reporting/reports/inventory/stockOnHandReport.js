@@ -57,13 +57,15 @@ const byItemColumns = [
   { key: 'lastMovementDate', label: 'Last Movement Date', type: 'date', sortable: true }
 ];
 
+const qtyUnitColumn = (key, label) => ({ key, label, type: 'qty_unit_text', align: 'right', sortable: true });
+
 const byUomColumns = [
   { key: 'itemName', label: 'Item', sortable: true },
   { key: 'locationName', label: 'Location', sortable: true },
-  { key: 'baseUomDisplay', label: 'Base UOM Qty', sortable: true },
-  { key: 'customUom1Display', label: 'Custom UOM 1', sortable: true },
-  { key: 'customUom2Display', label: 'Custom UOM 2', sortable: true },
-  { key: 'customUom3Display', label: 'Custom UOM 3', sortable: true }
+  qtyUnitColumn('baseUomDisplay', 'Base UOM Qty'),
+  qtyUnitColumn('customUom1Display', 'Custom UOM 1'),
+  qtyUnitColumn('customUom2Display', 'Custom UOM 2'),
+  qtyUnitColumn('customUom3Display', 'Custom UOM 3')
 ];
 
 const lineDetailColumns = [

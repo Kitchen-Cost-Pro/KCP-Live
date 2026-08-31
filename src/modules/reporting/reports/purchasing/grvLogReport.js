@@ -40,6 +40,13 @@ const numberColumn = (key, label) => ({
   align: "right",
   sortable: true,
 });
+const qtyUnitColumn = (key, label) => ({
+  key,
+  label,
+  type: "qty_unit_text",
+  align: "right",
+  sortable: true,
+});
 
 const summaryColumns = [
   { key: "grvDate", label: "GRV Date & Time", type: "datetime", sortable: true },
@@ -121,17 +128,17 @@ const lineDetailColumns = [
   { key: "locationName", label: "Location", sortable: true },
   { key: "itemName", label: "Item", sortable: true },
   { key: "category", label: "Category", sortable: true },
-  qtyColumn("receivedQty", "Received Qty"),
-  { key: "baseUom", label: "Base UOM", sortable: true },
-  // As-processed Draft detail (see getGrvLogReport in reporting-phase21-routes.ts): the custom
-  // ordering/receiving UOM the user picked, the pack quantity and pack size they actually entered,
-  // and the resulting pack price — matching what the Draft table showed at the time of capture,
-  // not just the already-converted base-unit total above.
-  { key: "receivingUom", label: "UOM", sortable: true },
-  qtyColumn("packQty", "Pack Qty"),
+  // As-processed Draft detail (see getGrvLogReport in reporting-phase21-routes.ts): how the user
+  // actually bought it — e.g. "1 Bottle" — not just the already-converted base-unit stock total.
+  // Leads the quantity columns since this is the answer to "how did they buy it", the thing a
+  // pack-size/UOM mistake at capture time would actually show up as.
+  qtyUnitColumn("purchasedAsDisplay", "Purchased As"),
   qtyColumn("packSize", "Pack Size"),
   moneyColumn("packPriceExVat", "Pack Price Ex VAT"),
-  moneyColumn("unitCostExVat", "Unit Cost Ex VAT", "unitCostExVat"),
+  // The same line converted to the item's base stock unit — this is what actually posted to the
+  // stock ledger (stock_movements), always in the base unit regardless of how it was purchased.
+  qtyUnitColumn("convertedQtyDisplay", "Converted Qty"),
+  moneyColumn("unitCostExVat", "Unit Cost Ex VAT (per base unit)", "unitCostExVat"),
   moneyColumn("lineValueExVat", "Line Value Ex VAT", "grvLineValueExVat"),
   moneyColumn("vat", "VAT"),
   moneyColumn("lineValueInclVat", "Line Value Incl VAT"),
@@ -209,13 +216,11 @@ export const grvLogReport = {
       locationName: "Location",
       itemName: "Item",
       category: "Category",
-      receivedQty: "Received Qty",
-      baseUom: "Base UOM",
-      receivingUom: "UOM",
-      packQty: "Pack Qty",
+      purchasedAsDisplay: "Purchased As",
       packSize: "Pack Size",
       packPriceExVat: "Pack Price Ex VAT",
-      unitCostExVat: "Unit Cost Ex VAT",
+      convertedQtyDisplay: "Converted Qty",
+      unitCostExVat: "Unit Cost Ex VAT (per base unit)",
       lineValueExVat: "Line Value Ex VAT",
       vat: "VAT",
       lineValueInclVat: "Line Value Incl VAT",
@@ -361,10 +366,23 @@ export function buildGrvViews(rows = []) {
   };
 }
 
+// A plain "<qty> <unit>" string, matching Stock on Hand's "by UOM" cell format — the ReportTable
+// qty_unit_text column type visually splits this into a bold number + muted unit trail, without
+// needing a structured value (keeps this a plain string for sorting/export).
+function formatQtyUnit(qty, unit) {
+  const rounded = roundMoney(safeNumber(qty), 3);
+  const label = text(unit);
+  return label ? `${rounded} ${label}` : String(rounded);
+}
+
 function normalizeLine(row = {}, index = 0, timeZone = "Africa/Johannesburg") {
   const receivedQty = safeNumber(
     row.receivedQty ?? row.received_qty ?? row.quantity,
   );
+  const baseUom = text(row.baseUom || row.base_uom || row.unit);
+  const packSize = safeNumber(row.packSize ?? row.pack_size, 1) || 1;
+  const packQty = safeNumber(row.packQty ?? row.pack_qty, packSize ? receivedQty / packSize : receivedQty);
+  const receivingUom = text(row.receivingUom || row.receiving_uom) || baseUom;
   const unitCostExVat = safeNumber(
     row.unitCostExVat ??
       row.unit_cost_ex_vat ??
@@ -438,7 +456,16 @@ function normalizeLine(row = {}, index = 0, timeZone = "Africa/Johannesburg") {
     category:
       text(row.category || row.categoryName || row.category_name) || "General",
     receivedQty,
-    baseUom: text(row.baseUom || row.base_uom || row.unit),
+    baseUom,
+    packSize,
+    packQty,
+    receivingUom,
+    packPriceExVat: safeNumber(row.packPriceExVat ?? row.pack_price_ex_vat),
+    // "How they bought it" (e.g. "1 Bottle") vs. the same line converted to the base stock unit
+    // that actually posted to the ledger (e.g. "30 Tot") — kept as two distinct, clearly labeled
+    // values rather than mixed into one ambiguous quantity.
+    purchasedAsDisplay: formatQtyUnit(packQty, receivingUom),
+    convertedQtyDisplay: formatQtyUnit(receivedQty, baseUom),
     unitCostExVat,
     lineValueExVat,
     vat,

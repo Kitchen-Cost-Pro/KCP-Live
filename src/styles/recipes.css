@@ -1833,6 +1833,26 @@
   flex-wrap: wrap;
 }
 
+.recipesModule__toggleField {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  padding: 4px 0;
+}
+
+.recipesModule__toggleField input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.recipesModule__toggleField span {
+  color: var(--text-main);
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
 .recipesModule__linkedRecipeNote {
   flex: 1 1 auto;
   min-height: 44px;

@@ -3515,6 +3515,10 @@ body.dark .reportModalCard .reportScheduleReportCard { background: #0f1116; }
 .excludedSummaryBanner__why { grid-column: 2; color: var(--report-muted); font-size: .62rem; }
 .advancedFormulaPanel__body aside p { margin: .12rem 0; color: var(--report-muted); font-size: .61rem; }
 
+.reportTable__qtyUnitCell { display: inline-flex; align-items: baseline; gap: .3rem; white-space: nowrap; }
+.reportTable__qtyUnitCell strong { color: var(--report-text); font-weight: 800; }
+.reportTable__qtyUnitCell em { color: var(--report-muted); font-size: .72em; font-style: normal; font-weight: 700; text-transform: uppercase; letter-spacing: .02em; opacity: .75; }
+
 .reportRiskBadge { display: inline-flex; align-items: center; min-height: 1.45rem; border: 1px solid var(--report-border); border-radius: 999px; padding: .18rem .46rem; background: rgba(148,163,184,.08); color: var(--report-text); font-size: .59rem; font-weight: 800; white-space: nowrap; }
 .reportRiskBadge--out,
 .reportRiskBadge--critical,

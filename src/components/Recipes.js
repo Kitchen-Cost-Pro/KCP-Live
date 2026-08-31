@@ -615,6 +615,10 @@ function bindRecipeEvents(view, visibleItems, filters, onRecipeFilterChange, onR
     onRecipeAction.onSave?.();
   });
 
+  view.querySelector('[data-recipe-toggle-no-recipe-required]')?.addEventListener('change', (event) => {
+    onRecipeAction.onToggleNoRecipeRequired?.(event.currentTarget.checked);
+  });
+
   view.querySelector('[data-recipe-confirm-delete]')?.addEventListener('click', () => {
     onRecipeAction.onConfirmDelete?.();
   });
@@ -897,6 +901,13 @@ function renderRecipeModal(item, draftRecipe, recipes, filters) {
         ${modifierRuleValidation ? `<div class="recipesModule__inlineError" role="alert">${escapeHtml(modifierRuleValidation)}</div>` : ''}
         ${recipes.actionError ? `<div class="recipesModule__inlineError" role="alert">${escapeHtml(recipes.actionError)}</div>` : ''}
         ${renderLineRemovalConfirm(recipes.confirmLineRemoval)}
+
+        ${!isModifier ? `
+          <label class="recipesModule__toggleField" title="Turn on for items that legitimately never have a recipe — a resold bottled drink, a gift card, a service charge. Stops this item from showing up as a Missing Recipe problem on Menu &amp; Recipe Health, onboarding, and stock deduction.">
+            <input type="checkbox" data-recipe-toggle-no-recipe-required ${item.noRecipeRequired === true ? 'checked' : ''} />
+            <span>No Recipe Required</span>
+          </label>
+        ` : ''}
 
         <footer class="recipesModule__modalFooter">
 	          ${linkedProductMode ? `

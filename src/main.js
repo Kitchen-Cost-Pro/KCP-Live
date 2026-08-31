@@ -5905,6 +5905,19 @@ function selectRecipeModifierStockPicker(value = '') {
   renderApp();
 }
 
+function toggleRecipeNoRecipeRequired(checked = false) {
+  const item = appState.recipes.editingItem;
+  if (!item || item.recipeOwnerType === 'yoco_modifier') return;
+  appState.recipes = {
+    ...appState.recipes,
+    editingItem: {
+      ...item,
+      noRecipeRequired: checked === true
+    }
+  };
+  renderApp();
+}
+
 function updateRecipeSourceStockItem(stockItemId = '') {
   const item = appState.recipes.editingItem;
   if (!item || item.recipeOwnerType === 'yoco_modifier') return;
@@ -19619,6 +19632,7 @@ function renderApp() {
 	      onRestoreNoteSuggestion: (noteText) => setRecipeNoteSuggestionDisposition(noteText, 'SUGGESTED'),
 	      onToggleIgnoredNoteSuggestions: toggleRecipeIgnoredNoteSuggestions,
 		      onRecipeSourceStockItemChange: updateRecipeSourceStockItem,
+	      onToggleNoRecipeRequired: toggleRecipeNoRecipeRequired,
 		      onScanBarcode: scanRecipeIngredientBarcode,
 	      onSave: saveCurrentRecipe,
 	      onRequestDelete: withPermission('recipes', ACTION_PERMISSION_MAP.deleteRecords, requestRecipeDelete, 'You do not have permission to delete recipes.'),

@@ -226,6 +226,15 @@ function renderCellContent(value, column = {}, row = {}, result = {}) {
       label: column.label || "Trend",
     });
   }
+  if (type === "qty_unit_text") {
+    // Value is a plain "<qty> <unit>" string (e.g. "52 Tot") built at report-row time — split
+    // purely for display so the unit reads as a muted trailing label instead of run-on plain
+    // text, without changing the underlying value used for sorting/export.
+    const raw = text(formatCell(value, column));
+    const match = raw.match(/^(-?[\d.,]+)\s+(.+)$/);
+    if (!match) return escapeHtml(raw);
+    return `<span class="reportTable__qtyUnitCell"><strong>${escapeHtml(match[1])}</strong><em>${escapeHtml(match[2])}</em></span>`;
+  }
   if (type === "transaction_id") {
     const reference = formatCell(value, column);
     if (!reference) return "";
