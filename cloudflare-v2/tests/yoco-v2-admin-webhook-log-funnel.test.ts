@@ -175,6 +175,36 @@ function openOrderRateGate() {
   } as any;
 }
 
+// Same as openOrderRateGate, but records the forceRefresh flag of every request it answers, so a
+// test can assert live webhook resolution never trusts the order-detail cache for finality.
+function recordingOrderRateGate(status: 'open' | 'completed') {
+  const seenForceRefresh: boolean[] = [];
+  const gate = {
+    idFromName(name: string) { return name; },
+    get() {
+      return {
+        async fetch(requestInput: RequestInfo | URL, requestInit?: RequestInit) {
+          const request = requestInput instanceof Request ? requestInput : new Request(requestInput, requestInit);
+          const input = await request.json<{ forceRefresh?: boolean }>();
+          seenForceRefresh.push(Boolean(input.forceRefresh));
+          return new Response(JSON.stringify({
+            ok: true,
+            classification: 'SUCCESS',
+            responseStatus: 200,
+            bodyText: JSON.stringify({ id: 'ord_multi', status }),
+            responseHeaders: { 'content-type': 'application/json' },
+            retryAfterSeconds: 0,
+            cacheStatus: 'MISS',
+            durationMs: 1,
+            circuit: { pausedUntil: null, pauseReason: null, interventionRequired: false, consecutiveAuthFailures: 0, consecutiveRateLimits: 0, updatedAt: new Date().toISOString() }
+          }), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+      };
+    }
+  };
+  return { gate: gate as any, seenForceRefresh };
+}
+
 async function ingest(env: any, body: string, eventType: string, yocoEventId: string) {
   const capture = await captureVerifiedYocoV2Event(env, {
     workspaceId: 'ws_1',
@@ -291,4 +321,52 @@ test('an order stuck waiting for Yoco is reprocessable via refetch; a dead-lette
   assert.equal(row.canReprocess, true);
   assert.equal(row.reprocessAction, 'requeue-dead-letter');
   assert.equal(row.reprocessRawEventId, rawEventId);
+});
+
+test('an order stuck on the broken payment.created retry path is reprocessable via refetch, not silently left for a daily reconciliation tick', async () => {
+  // Live incident, 2026-08-31 (Gonubie): payment.created correctly refuses to record a still-open
+  // order and asks the queue to retry — but queue redelivery for delayed retries is independently
+  // broken in production, and reconciliation only attempts once per 24h per workspace, so a row like
+  // this had NO reliable automatic path back. It must be manually reprocessable, same as any other
+  // stuck bucket — PROCESSING must not be treated as "will sort itself out."
+  const db = createDb();
+  seedCore(db);
+  await configureApiKey(db);
+  const env = envFor(db, { YOCO_V2_RATE_GATE: openOrderRateGate() });
+
+  const { rawEventId, result } = await ingest(
+    env,
+    JSON.stringify({ type: 'payment.created', data: { order: { id: 'ord_multi' }, payment: { order_id: 'ord_multi' } } }),
+    'payment.created',
+    'evt_payment_stuck'
+  );
+  assert.equal(result.action, 'retry');
+
+  const log = await callAdmin(env, 'webhook-log');
+  const row = log.rows.find((r: any) => r.sourceOrderId === 'ord_multi');
+  assert.ok(row, 'expected ord_multi to appear in the log');
+  assert.equal(row.bucket, 'PROCESSING');
+  assert.equal(row.canReprocess, true);
+  assert.equal(row.reprocessAction, 'refetch');
+  assert.equal(row.reprocessRawEventId, rawEventId);
+});
+
+test('a plain (non-admin) webhook delivery always bypasses the order-detail cache, not just admin refetch', async () => {
+  // Live incident, 2026-08-31 (Gonubie, Leo's Demo): "create order, add an item, pay" routinely
+  // completes inside YOCO_V2_ORDER_CACHE_TTL_MS's 30s window. Before this fix, only an explicit
+  // admin refetch passed forceRefresh through to fetchYocoV2Order — an ordinary live webhook
+  // delivery (the entire normal path) could get served a stale pre-payment "open" snapshot cached
+  // by an earlier webhook for the same order, misjudging a genuinely-closed order as not final.
+  const db = createDb();
+  seedCore(db);
+  await configureApiKey(db);
+  const { gate, seenForceRefresh } = recordingOrderRateGate('completed');
+  const env = envFor(db, { YOCO_V2_RATE_GATE: gate });
+
+  // No admin action involved anywhere in this call — force_refresh is never set on the queue
+  // message for a normal webhook delivery (see capture.ts).
+  const { result } = await ingest(env, JSON.stringify({ type: 'order.completed', data: { order: { id: 'ord_multi' } } }), 'order.completed', 'evt_plain');
+  assert.equal(result.status, 'COMPLETED');
+  assert.ok(seenForceRefresh.length > 0, 'expected the rate gate to have been called');
+  assert.ok(seenForceRefresh.every((v) => v === true), `expected every order-detail request to force-refresh, got ${JSON.stringify(seenForceRefresh)}`);
 });

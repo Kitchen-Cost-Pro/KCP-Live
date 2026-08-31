@@ -123,6 +123,34 @@ test('opening/actual resolve from the real live app state shape: item.balances[l
   assert.equal(row.openingQty, 969, 'opening = actual (989) minus the period\'s net movement (+20)');
 });
 
+// Regression: a Product Sales Adjustment (postSalesAdjustment) is deliberately stock-deduction
+// only -- it must land in the generic Adjustments bucket (positiveAdjustments/negativeAdjustments/
+// stockOut), never in Sales Usage (that would fabricate a revenue/GP impact with no real sale
+// recorded) and never in Wastage.
+test('a sale adjustment is bucketed as a generic Adjustment, not Sales Usage or Wastage', () => {
+  const dataSet = { stockItems: [{ id: 'flour', name: 'Flour', currentStock: 100, baseUom: 'kg' }] };
+  const model = buildOperationsDashboardModel({
+    ledgerRows: [ledgerRow({
+      source: 'Sale Adjustment',
+      movementType: 'Sale Adjustment',
+      sourceType: 'sale_adjustment',
+      qtyIn: 0,
+      qtyOut: 3,
+      netQty: -3,
+      movementValue: -30,
+    })],
+    filters: { startDate: '2020-01-01' },
+    dataSet
+  });
+  const row = model.views.overview.find((item) => item.locationId === 'main');
+  assert.ok(row);
+  assert.equal(row.salesUsage, 0, 'must not be counted as Sales Usage');
+  assert.equal(row.manualWastage, 0);
+  assert.equal(row.manufacturingWastage, 0);
+  assert.equal(row.adjustments, -30);
+  assert.equal(row.stockOut, 30, 'the deduction must still reduce expected closing stock via the adjustments bucket');
+});
+
 test('opening stays unavailable (not fabricated as 0) when the actual balance itself cannot be trusted for a historical period', () => {
   const dataSet = {
     stockItems: [{ id: 'flour', name: 'Flour', currentStock: 999, baseUom: 'kg' }]

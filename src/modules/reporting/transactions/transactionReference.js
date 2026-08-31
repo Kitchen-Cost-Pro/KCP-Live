@@ -4,6 +4,7 @@ const PREFIXES = Object.freeze({
   manufacturing_batch: "MFG",
   transfer: "TRF",
   stock_take: "STK",
+  adjustment: "ADJ",
 });
 
 function clean(value) {
@@ -64,7 +65,7 @@ export function historicalTransactionReference(
 export function isTransactionReference(value, entityType = "") {
   const prefix = entityType
     ? transactionPrefix(entityType)
-    : "(?:GRV|CN|MFG|TRF|STK)";
+    : "(?:GRV|CN|MFG|TRF|STK|ADJ)";
   return new RegExp(`^${prefix}-\\d{6}-(?:\\d{4,}|H[A-Z0-9]{6})$`, "i").test(
     clean(value),
   );

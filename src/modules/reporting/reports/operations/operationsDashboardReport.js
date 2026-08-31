@@ -645,9 +645,12 @@ function isAdjustment(row = {}) {
   const sourceType = text(row.sourceType);
   const source = text(row.source);
   const movementType = text(row.movementType);
-  return ['adjustment', 'stockTake', 'stockTakeCorrection', 'systemCorrection', 'manufacturingCorrection', 'SystemCorrection', 'StockTakeCorrection', 'ManufacturingCorrection'].includes(sourceType)
-    || ['Manual Adjustment', 'Stock Take Variance', 'Stock Take Correction', 'System Correction', 'Manufacturing Correction'].includes(source)
-    || /manual adjustment|stock take variance|stock take correction|system correction|manufacturing correction/i.test(movementType);
+  // A Product Sales Adjustment (manual deduction for a missed/uncaptured sale, see
+  // postSalesAdjustment in routes.ts) is deliberately stock-deduction only — it must land in the
+  // generic Adjustments bucket here, never in isSalesUsage (no revenue/GP impact was recorded).
+  return ['adjustment', 'stockTake', 'stockTakeCorrection', 'systemCorrection', 'manufacturingCorrection', 'SystemCorrection', 'StockTakeCorrection', 'ManufacturingCorrection', 'saleAdjustment', 'sale_adjustment'].includes(sourceType)
+    || ['Manual Adjustment', 'Stock Take Variance', 'Stock Take Correction', 'System Correction', 'Manufacturing Correction', 'Sale Adjustment'].includes(source)
+    || /manual adjustment|stock take variance|stock take correction|system correction|manufacturing correction|sale adjustment/i.test(movementType);
 }
 
 function isTransferIn(row = {}) {

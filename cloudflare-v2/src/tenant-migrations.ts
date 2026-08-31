@@ -725,5 +725,18 @@ CREATE INDEX IF NOT EXISTS idx_adjustments_workspace_type
   ON stock_movements(
     workspace_id,
     (CASE WHEN document_type IN ('grv', 'credit_note', 'adjustment', 'wastage_adjustment', 'manufacturing_batch') THEN created_at ELSE occurred_at END)
+  );`,
+  // 44 — Product Sales Adjustment (postSalesAdjustment in routes.ts) is a new date-only-picker
+  // document type ('sale_adjustment', same backdating behaviour as adjustment/wastage_adjustment
+  // above), so it must join BACKDATABLE_LEDGER_DOCUMENT_TYPES/EFFECTIVE_MOVEMENT_DATE_SQL in
+  // reporting-routes.ts. The expression index from migration 43 has to be recreated (not just left
+  // as-is) because SQLite only uses an expression index when the query's CASE expression matches it
+  // textually — an index migration 43 style but missing 'sale_adjustment' would silently stop being
+  // used the moment the app-side expression changed, falling back to a full per-workspace scan.
+  `DROP INDEX IF EXISTS idx_stock_movements_workspace_effective_date;
+CREATE INDEX IF NOT EXISTS idx_stock_movements_workspace_effective_date
+  ON stock_movements(
+    workspace_id,
+    (CASE WHEN document_type IN ('grv', 'credit_note', 'adjustment', 'wastage_adjustment', 'sale_adjustment', 'manufacturing_batch') THEN created_at ELSE occurred_at END)
   );`
 ];

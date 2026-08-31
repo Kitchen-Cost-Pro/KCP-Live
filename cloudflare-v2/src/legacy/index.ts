@@ -149,6 +149,7 @@ import {
   postGmailSendSupplierEmail,
   postAdjustment,
   postWastageAdjustment,
+  postSalesAdjustment,
   postCreditNote,
   postGoodsReceipt,
   postImportPreview,
@@ -1280,6 +1281,10 @@ export async function dispatchWorkspaceRoute(
 
   if (request.method === "POST" && resource === "wastage-adjustments") {
     return postWastageAdjustment(request, env, auth, workspaceId);
+  }
+
+  if (request.method === "POST" && resource === "sale-adjustments") {
+    return postSalesAdjustment(request, env, auth, workspaceId);
   }
 
   if (request.method === "GET" && resource === "credit-notes") {

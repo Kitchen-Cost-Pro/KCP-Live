@@ -12312,6 +12312,131 @@ async function saveWastageDraft() {
   }
 }
 
+// Product Sales Adjustment: mirrors the Wastage functions above exactly (same product picker, same
+// recipe-expansion mechanic) but posts to postSalesAdjustment and is stored/labelled distinctly so
+// it never counts as wastage or as a real recorded sale.
+function updateSaleAdjustmentDraft(updates = {}) {
+  const draft = appState.adjustments.saleAdjustmentDraft || createEmptySaleAdjustmentDraft();
+  appState.adjustments = { ...appState.adjustments, saleAdjustmentDraft: { ...draft, ...updates } };
+  renderApp();
+}
+
+function toggleSaleAdjustmentSelection(productId, checked) {
+  const ids = new Set((appState.adjustments.filters.saleSelectedIds || []).map(String));
+  checked ? ids.add(String(productId)) : ids.delete(String(productId));
+  updateAdjustmentFilters({ saleSelectedIds: [...ids] });
+}
+
+function addSaleAdjustmentSelectedProducts() {
+  const ids = new Set((appState.adjustments.filters.saleSelectedIds || []).map(String));
+  if (!ids.size) return;
+  const products = appState.adjustments.products || [];
+  const draft = appState.adjustments.saleAdjustmentDraft || createEmptySaleAdjustmentDraft();
+  const existingIds = new Set((draft.items || []).map((i) => String(i.productId)));
+  const newItems = [...ids]
+    .filter((id) => !existingIds.has(id))
+    .map((id) => {
+      const product = products.find((p) => String(p.id) === id);
+      return product ? { productId: product.id, productName: product.name, category: product.category, quantity: '', unitCost: Number(product.unitCost || 0) || 0, estimatedCost: 0 } : null;
+    })
+    .filter(Boolean);
+  appState.adjustments = {
+    ...appState.adjustments,
+    saleAdjustmentDraft: { ...draft, items: [...(draft.items || []), ...newItems] },
+    filters: { ...appState.adjustments.filters, overlay: '', saleSelectedIds: [] }
+  };
+  renderApp();
+}
+
+function removeSaleAdjustmentLine(index) {
+  const draft = appState.adjustments.saleAdjustmentDraft || createEmptySaleAdjustmentDraft();
+  const items = (draft.items || []).filter((_, i) => i !== index);
+  appState.adjustments = { ...appState.adjustments, saleAdjustmentDraft: { ...draft, items } };
+  renderApp();
+}
+
+function updateSaleAdjustmentQty(index, value) {
+  const draft = appState.adjustments.saleAdjustmentDraft || createEmptySaleAdjustmentDraft();
+  const items = (draft.items || []).map((item, i) => {
+    if (i !== index) return item;
+    const qty = Number(parseDecimalInputValue(value)) || 0;
+    const unitCost = Number(item.unitCost || 0) || 0;
+    const estimatedCost = unitCost > 0 ? qty * unitCost : 0;
+    return { ...item, quantity: value, estimatedCost };
+  });
+  appState.adjustments = { ...appState.adjustments, saleAdjustmentDraft: { ...draft, items } };
+  // Live-update the estimated-cost cell + total directly (renderApp is suppressed while the qty
+  // input is focused, so a normal re-render wouldn't reflect the new value until blur).
+  const row = items[index];
+  const costCell = document.querySelector(`[data-sale-cost="${index}"]`);
+  if (costCell && row) {
+    costCell.textContent = Number(row.unitCost || 0) > 0 ? formatCurrency(row.estimatedCost || 0) : 'Cost unavailable';
+  }
+  const totalCell = document.querySelector('[data-sale-total]');
+  if (totalCell) {
+    const total = items.reduce((sum, it) => sum + Number(it.estimatedCost || 0), 0);
+    totalCell.textContent = formatCurrency(total);
+  }
+  renderApp();
+}
+
+async function saveSaleAdjustmentDraft() {
+  const draft = appState.adjustments.saleAdjustmentDraft || createEmptySaleAdjustmentDraft();
+  const locations = appState.adjustments.locations || [];
+  const locationObj = getLocationById(locations, draft.locationId);
+  const locationId = String(draft.locationId || '').trim();
+  const locationName = locationId ? getLocationNameById(locations, locationId, locationObj?.name || 'Main Store') : '';
+  const items = Array.isArray(draft.items) ? draft.items : [];
+  let validationError = '';
+  if (!items.length) validationError = 'Select at least one menu item that was sold.';
+  else if (!locationId || !locationObj) validationError = 'Select a valid location before recording this sale adjustment.';
+  else if (!String(draft.saleReason || '').trim()) validationError = 'Select a reason before recording this sale adjustment.';
+  else {
+    const invalidItem = items.find((item) => !(Number(parseDecimalInputValue(item.quantity)) > 0));
+    if (invalidItem) validationError = `Enter a quantity greater than zero for ${invalidItem.productName || 'every menu item'}.`;
+  }
+  if (validationError) {
+    appState.adjustments = { ...appState.adjustments, saleAdjustmentStatus: '', saleAdjustmentError: validationError };
+    renderApp();
+    return;
+  }
+
+  if (!draft.id) draft.id = makeStableSubmitId('sale_adj');
+  appState.adjustments = { ...appState.adjustments, saleAdjustmentDraft: draft, saleAdjustmentStatus: 'saving', saleAdjustmentError: '' };
+  renderApp();
+  showGlobalSaving('Recording Sale Adjustment');
+
+  try {
+    const { saveSalesAdjustment } = await import('./services/adjustmentService.js');
+    const result = await saveSalesAdjustment(appState.workspace?.id, {
+      ...draft,
+      id: draft.id,
+      locationId,
+      locationName,
+      items: (draft.items || []).map((item) => ({
+        ...item,
+        quantity: parseDecimalInputValue(item.quantity)
+      }))
+    });
+    appState.adjustments = {
+      ...appState.adjustments,
+      saleAdjustmentStatus: '',
+      saleAdjustmentError: '',
+      saleAdjustmentDraft: createEmptySaleAdjustmentDraft(),
+      filters: { ...appState.adjustments.filters, overlay: '', saleSelectedIds: [] }
+    };
+    renderApp();
+    refreshActiveTabFromApi().catch(() => {});
+    const movCount = result?.movements || 0;
+    showAdjustmentToast(`Sale adjustment recorded — ${movCount} stock movement${movCount !== 1 ? 's' : ''} created.`, 'success');
+  } catch (error) {
+    appState.adjustments = { ...appState.adjustments, saleAdjustmentStatus: '', saleAdjustmentError: error.message || 'Could not save sale adjustment.' };
+    renderApp();
+  } finally {
+    hideGlobalSaving();
+  }
+}
+
 function normalizeAdjustmentDraftLocation(draft = {}) {
   const locations = appState.adjustments.locations || [];
   const fallback = getDefaultLocation(locations);
@@ -19837,7 +19962,13 @@ function renderApp() {
       onRemoveWastageLine: removeWastageLine,
       onWastageQtyChange: updateWastageQty,
       onWastageDraftChange: updateWastageDraft,
-      onWastageSave: saveWastageDraft
+      onWastageSave: saveWastageDraft,
+      onToggleSaleAdjustmentSelection: toggleSaleAdjustmentSelection,
+      onAddSaleAdjustmentSelected: addSaleAdjustmentSelectedProducts,
+      onRemoveSaleAdjustmentLine: removeSaleAdjustmentLine,
+      onSaleAdjustmentQtyChange: updateSaleAdjustmentQty,
+      onSaleAdjustmentDraftChange: updateSaleAdjustmentDraft,
+      onSaleAdjustmentSave: saveSaleAdjustmentDraft
     },
     onTransferFilterChange: updateTransferFilters,
     onTransferAction: {
@@ -21211,6 +21342,9 @@ function createAdjustmentState(status, filters = {}) {
     wastageDraft: createEmptyWastageDraft(),
     wastageStatus: '',
     wastageError: '',
+    saleAdjustmentDraft: createEmptySaleAdjustmentDraft(),
+    saleAdjustmentStatus: '',
+    saleAdjustmentError: '',
     actionStatus: '',
     actionError: '',
     toast: null,
@@ -21228,6 +21362,10 @@ function createAdjustmentState(status, filters = {}) {
       wastageCategory: '',
       wastagePage: 1,
       wastageSelectedIds: [],
+      saleSearch: '',
+      saleCategory: '',
+      salePage: 1,
+      saleSelectedIds: [],
       ...filters
     }
   };
@@ -21238,6 +21376,17 @@ function createEmptyWastageDraft() {
     locationId: 'main',
     locationName: 'Main Store',
     wasteReason: '',
+    note: '',
+    date: '',
+    items: []
+  };
+}
+
+function createEmptySaleAdjustmentDraft() {
+  return {
+    locationId: 'main',
+    locationName: 'Main Store',
+    saleReason: '',
     note: '',
     date: '',
     items: []

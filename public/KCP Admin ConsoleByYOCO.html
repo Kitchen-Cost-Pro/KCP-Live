@@ -4355,12 +4355,16 @@ function renderWebhookLogRow(row) {
     const meta = saleBucketMeta(row.bucket);
     const rowId = `webhook-log-row-${adminEscapeHtml(row.reprocessRawEventId || row.sourceOrderId)}`;
     const isRealOrder = !String(row.sourceOrderId || '').startsWith('unknown:');
+    // Order/Receipt/Yoco links all resolve via the canonical domain event, which only exists once
+    // resolutionStatus is set — a bucket like SKIPPED_NOT_FINAL_YET or PROCESSING has none yet, so
+    // linking there would just 404. Hide rather than offer a dead link.
+    const hasCanonicalSale = isRealOrder && Boolean(row.resolutionStatus);
     return `
         <tr class="border-b border-white/5" id="${rowId}">
             <td class="py-2 pr-2">
                 <div class="flex items-center gap-2">
                     <span class="font-mono text-slate-300">${adminEscapeHtml(row.sourceOrderId)}</span>
-                    ${isRealOrder ? `<button onclick="viewSaleOrderDetail(${adminInlineString(row.sourceOrderId)})" title="Open order" class="w-5 h-5 flex items-center justify-center rounded bg-white/5 hover:bg-white/15 text-slate-400 hover:text-white"><i class="fa-solid fa-arrow-up-right-from-square text-[8px]"></i></button>` : ''}
+                    ${hasCanonicalSale ? `<button onclick="viewSaleOrderDetail(${adminInlineString(row.sourceOrderId)})" title="Open order" class="w-5 h-5 flex items-center justify-center rounded bg-white/5 hover:bg-white/15 text-slate-400 hover:text-white"><i class="fa-solid fa-arrow-up-right-from-square text-[8px]"></i></button>` : ''}
                 </div>
             </td>
             <td class="py-2 pr-2"><span class="px-2 py-1 rounded-md font-bold" style="background:${meta.color}22;color:${meta.color}">${adminEscapeHtml(meta.label)}</span></td>
@@ -4369,7 +4373,8 @@ function renderWebhookLogRow(row) {
             <td class="py-2 pr-2 text-red-300">${adminEscapeHtml(row.lastErrorMessage || '')}</td>
             <td class="py-2 text-right">
                 <div class="flex items-center justify-end gap-1.5">
-                    ${isRealOrder ? `<button onclick="viewSaleReceipt(${adminInlineString(row.sourceOrderId)})" class="btn-ghost text-[9px] px-2 py-1"><i class="fa-solid fa-receipt mr-1"></i>Receipt</button>` : ''}
+                    ${hasCanonicalSale ? `<button onclick="viewSaleReceipt(${adminInlineString(row.sourceOrderId)})" class="btn-ghost text-[9px] px-2 py-1"><i class="fa-solid fa-receipt mr-1"></i>Receipt</button>` : ''}
+                    ${hasCanonicalSale ? `<button onclick="openYocoReceipt(${adminInlineString(row.sourceOrderId)})" title="Open the official Yoco receipt" class="btn-ghost text-[9px] px-2 py-1"><i class="fa-solid fa-arrow-up-right-from-square mr-1"></i>Yoco</button>` : ''}
                     ${row.canReprocess
                         ? `<button onclick="reprocessWebhookLogOrder(${adminInlineString(row.reprocessRawEventId)}, ${adminInlineString(row.reprocessAction)}, ${adminInlineString(row.sourceOrderId)})" class="btn-ghost text-[9px] px-2 py-1"><i class="fa-solid fa-rotate-right mr-1"></i>Reprocess</button>`
                         : ''}
@@ -4422,6 +4427,17 @@ async function fetchSaleDetail(sourceOrderId) {
     return callAdminApi('GET', `/api/admin/workspaces/${encodeURIComponent(wsId)}/yoco-v2/sales/${encodeURIComponent(sourceOrderId)}`);
 }
 
+async function openYocoReceipt(sourceOrderId) {
+    try {
+        const detail = await fetchSaleDetail(sourceOrderId);
+        const paymentId = detail?.domainEvent?.payload?.source_payment_id;
+        if (!paymentId) { showToast('No Yoco payment reference captured for this order yet.', 'info'); return; }
+        window.open(`https://receipts.yoco.co.za/receipts/${encodeURIComponent(paymentId)}?linkSource=kcp-admin-portal`, '_blank', 'noopener');
+    } catch (e) {
+        showToast(`Could not look up the Yoco receipt: ${e.message}`, 'error');
+    }
+}
+
 function formatMoney(amount, currency) {
     const n = Number(amount || 0);
     return `${adminEscapeHtml(currency || 'ZAR')} ${n.toFixed(2)}`;
@@ -4437,7 +4453,13 @@ async function viewSaleReceipt(sourceOrderId) {
         if (!canonical) { body.innerHTML = '<p class="text-slate-500">No canonical sale data available for this order yet.</p>'; return; }
         const meta = saleBucketMeta(detail.domainEvent.resolution_status);
         const lines = canonical.lines || [];
+        const yocoReceiptUrl = canonical.source_payment_id
+            ? `https://receipts.yoco.co.za/receipts/${encodeURIComponent(canonical.source_payment_id)}?linkSource=kcp-admin-portal`
+            : '';
         body.innerHTML = `
+            ${yocoReceiptUrl
+                ? `<a href="${adminEscapeHtml(yocoReceiptUrl)}" target="_blank" rel="noopener" class="flex items-center justify-center gap-2 w-full py-2.5 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 text-xs font-bold text-white transition-all"><i class="fa-solid fa-arrow-up-right-from-square"></i>Open Official Yoco Receipt</a>`
+                : `<p class="text-[10px] text-slate-500 text-center py-2">No Yoco payment reference captured for this order yet — the official receipt link isn't available.</p>`}
             <div class="border border-dashed border-white/15 rounded-2xl p-5 bg-black/20 font-mono">
                 <div class="flex items-center justify-between mb-1">
                     <p class="text-sm font-black text-white">Order ${adminEscapeHtml(canonical.source_order_id)}</p>

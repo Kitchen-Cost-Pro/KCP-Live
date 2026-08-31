@@ -141,7 +141,15 @@ function classifySaleBucket(orderId: string, domain: Row | null, deliveries: Row
   else bucket = 'PROCESSING';
 
   const reprocessRawEventId = latest ? text(latest.id) : (domain ? text(domain.raw_event_id) : '');
-  const canReprocess = Boolean(reprocessRawEventId) && bucket !== 'RESOLVED_FULL' && bucket !== 'RESOLVED_REPORTING_ONLY' && bucket !== 'PROCESSING';
+  // PROCESSING is reprocessable too, not just the terminal-stuck buckets: queue redelivery for
+  // delayed retries (e.g. the payment.created "not final yet" retry-throw) is independently broken
+  // in production (confirmed live, 2026-08-31 and again 2026-08-31 — see sale-resolver.ts), and
+  // reconciliation now only attempts once per 24h per workspace (2026-08-28 write-storm fix), so an
+  // order that lands here has no reliable automatic path back — refusing a manual nudge here left an
+  // administrator with no way to unstick a live order for up to a day. Reprocessing a genuinely
+  // still-in-flight row is harmless: resolution is lock-protected (acquireProcessingLock), so a
+  // manual refetch against something mid-processing simply no-ops rather than racing it.
+  const canReprocess = Boolean(reprocessRawEventId) && bucket !== 'RESOLVED_FULL' && bucket !== 'RESOLVED_REPORTING_ONLY';
   const reprocessAction: SaleBucketRow['reprocessAction'] = !canReprocess ? null
     : (bucket === 'DEAD_LETTER' || bucket === 'FAILED_PERMANENTLY') ? 'requeue-dead-letter'
     : 'refetch';

@@ -50,6 +50,7 @@ const BACKDATABLE_LEDGER_DOCUMENT_TYPES = new Set([
   "credit_note",
   "adjustment",
   "wastage_adjustment",
+  "sale_adjustment",
   "manufacturing_batch",
 ]);
 
@@ -59,7 +60,7 @@ const BACKDATABLE_LEDGER_DOCUMENT_TYPES = new Set([
 // the IN-list contents and in overall shape, or SQLite won't recognize it can use that index and
 // will fall back to a full scan for date-range filtering.
 const EFFECTIVE_MOVEMENT_DATE_SQL =
-  "(CASE WHEN sm.document_type IN ('grv', 'credit_note', 'adjustment', 'wastage_adjustment', 'manufacturing_batch') THEN sm.created_at ELSE sm.occurred_at END)";
+  "(CASE WHEN sm.document_type IN ('grv', 'credit_note', 'adjustment', 'wastage_adjustment', 'sale_adjustment', 'manufacturing_batch') THEN sm.created_at ELSE sm.occurred_at END)";
 
 export async function getDetailedActivityReport(
   request: Request,
@@ -195,7 +196,7 @@ export async function getDetailedActivityReport(
        LEFT JOIN suppliers s ON s.id = g.supplier_id AND s.workspace_id = g.workspace_id
        LEFT JOIN purchase_orders po ON po.workspace_id = sm.workspace_id AND (po.id = g.purchase_order_id OR (po.id = sm.document_id AND sm.document_type = 'purchase_order'))
        LEFT JOIN credit_notes cn ON cn.id = sm.document_id AND cn.workspace_id = sm.workspace_id AND sm.document_type = 'credit_note'
-       LEFT JOIN adjustments a ON a.id = sm.document_id AND a.workspace_id = sm.workspace_id AND sm.document_type IN ('adjustment', 'wastage_adjustment')
+       LEFT JOIN adjustments a ON a.id = sm.document_id AND a.workspace_id = sm.workspace_id AND sm.document_type IN ('adjustment', 'wastage_adjustment', 'sale_adjustment')
        LEFT JOIN stocktake_sessions st ON st.id = sm.document_id AND st.workspace_id = sm.workspace_id AND sm.document_type = 'stock_take'
        LEFT JOIN transfers t ON t.id = sm.document_id AND t.workspace_id = sm.workspace_id AND sm.document_type = 'transfer'
        LEFT JOIN manufacturing_batches mb ON mb.id = sm.document_id AND mb.workspace_id = sm.workspace_id AND sm.document_type = 'manufacturing_batch'
@@ -7309,6 +7310,7 @@ async function enrichTransactionReferenceReportRows(
     stock_take: "stock_take",
     adjustment: "adjustment",
     wastage_adjustment: "adjustment",
+    sale_adjustment: "adjustment",
   };
   for (const [documentType, entityType] of Object.entries(
     entityByDocumentType,
@@ -8109,6 +8111,12 @@ function classifySourceType(row: Row, metadata: Row) {
     clean(metadata.wasteReason)
   )
     return "Wastage Adjustment";
+  // Checked BEFORE the generic `movement.includes("sale")` fallback below, which would otherwise
+  // misclassify this as "Sale Usage" (a real POS sale) — a Product Sales Adjustment is a manual
+  // correction for a sale the POS never captured, deliberately kept out of Sales Usage/GP reporting
+  // (see postSalesAdjustment in routes.ts) and must stay a distinct Adjustments-report entry.
+  if (document === "sale_adjustment" || movement === "sale_adjustment")
+    return "Sale Adjustment";
   if (
     document === "yoco_order" &&
     movementComponentType(metadata) === "modifier"
@@ -8202,11 +8210,12 @@ function resolveDocumentNumber(
 function resolveNotes(row: Row, metadata: Row, sourceType: string) {
   if (sourceType === "Credit Note")
     return clean(row.credit_note_reason || metadata.note || metadata.reason);
-  if (sourceType === "Manual Adjustment" || sourceType === "Wastage Adjustment")
+  if (sourceType === "Manual Adjustment" || sourceType === "Wastage Adjustment" || sourceType === "Sale Adjustment")
     return clean(
       row.adjustment_reason ||
         metadata.note ||
         metadata.wasteReason ||
+        metadata.saleReason ||
         metadata.refundReason ||
         metadata.refundNote ||
         metadata.reason,

@@ -7,6 +7,7 @@ import { detailedActivityReport } from './detailedActivityReport.js';
 import {
   buildMenuItemWastageRows,
   isProductWastageMovement,
+  isSalesAdjustmentMovement,
   resolveProductWastageIdentity,
   resolveProductWastageQuantity,
   resolveWastageSourceLabel,
@@ -510,13 +511,17 @@ function countWarning(rows = [], code = '', level = 'warning', message = '', pre
 }
 
 function isAdjustmentLedgerRow(row = {}) {
+  // Stock take variances/corrections have their own dedicated Stock Take Audit report — they must
+  // never also appear here, even though they share the generic "adjustment" ledger classification
+  // and a "correction" substring that would otherwise match the regex fallback below.
+  if (isStockTakeVariance(row)) return false;
   const source = text(row.source);
   const movementType = text(row.movementType);
   const sourceType = text(row.sourceType);
-  if (['Manual Adjustment', 'Wastage Adjustment', 'Manual Wastage', 'Stock Take Variance', 'Stock Take Correction', 'System Correction', 'Manufacturing Correction'].includes(source)) return true;
-  if (['Manual Adjustment', 'Wastage Adjustment', 'Manual Wastage', 'Stock Take Variance', 'Stock Take Correction', 'System Correction', 'Manufacturing Correction'].includes(movementType)) return true;
-  if (['adjustment', 'wastage', 'manualWastage', 'stockTake', 'stockTakeCorrection', 'systemCorrection', 'manufacturingCorrection'].includes(sourceType)) return true;
-  if (/adjustment|correction|stock take variance|stocktake variance/i.test(source) || /adjustment|correction|stock take variance|stocktake variance/i.test(movementType)) return true;
+  if (['Manual Adjustment', 'Wastage Adjustment', 'Manual Wastage', 'Sale Adjustment', 'System Correction', 'Manufacturing Correction'].includes(source)) return true;
+  if (['Manual Adjustment', 'Wastage Adjustment', 'Manual Wastage', 'Sale Adjustment', 'System Correction', 'Manufacturing Correction'].includes(movementType)) return true;
+  if (['adjustment', 'wastage', 'manualWastage', 'saleAdjustment', 'sale_adjustment', 'systemCorrection', 'manufacturingCorrection'].includes(sourceType)) return true;
+  if (/adjustment|correction/i.test(source) || /adjustment|correction/i.test(movementType)) return true;
   return false;
 }
 
@@ -524,6 +529,7 @@ function resolveAdjustmentType(row = {}) {
   const source = text(row.source);
   const movementType = text(row.movementType);
   if (isStockTakeVariance(row)) return 'Stock Take Variance';
+  if (isSalesAdjustmentMovement(row)) return 'Sale Adjustment';
   if (isWastageAdjustment(row)) return resolveWastageSourceLabel(row, source || movementType);
   if (isSystemCorrection(row)) return 'System Correction';
   if (source) return source;
@@ -666,6 +672,7 @@ function duplicateAdjustmentPredicate(rows = []) {
 }
 
 function isWastageAdjustment(row = {}) {
+  if (isSalesAdjustmentMovement(row)) return false;
   const source = text(row.source || row.adjustmentType);
   const sourceType = text(row.sourceType);
   const movementType = text(row.movementType);

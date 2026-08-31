@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { TENANT_SCHEMA_SQL } from '../src/tenant-schema.generated';
 import type { DbLike, DbResult, DbStatementLike } from '../src/legacy/types';
-import { loadAdjustmentDetail } from '../src/legacy/transaction-detail-routes';
+import { loadAdjustmentDetail, loadMovements } from '../src/legacy/transaction-detail-routes';
 
 // The Adjustments report's Summary table now groups one row per posted adjustment/wastage
 // submission (matching how GRV Log's summary already groups by grvId) and opens the same shared
@@ -122,6 +122,43 @@ test('a wastage adjustment (document_type wastage_adjustment) is labelled distin
   assert.match(detail!.title, /Wastage Adjustment/);
   const typeCard = detail!.summaryCards.find((card) => card.key === 'adjustmentType');
   assert.equal(typeCard?.value, 'Wastage Adjustment');
+});
+
+test('a sale adjustment (missed sale, document_type sale_adjustment) is labelled distinctly and never confused with wastage', async () => {
+  const env = createEnv();
+  env.DB.database.exec(`
+    INSERT INTO locations (id, workspace_id, name, active) VALUES ('loc-a', 'ws_1', 'Main Store', 1);
+    INSERT INTO stock_items (id, workspace_id, name, category, item_type, unit, unit_cost, active, is_stocked)
+      VALUES ('stock-1', 'ws_1', 'Beef Patty', 'Meat', 'raw', 'ea', 12, 1, 1);
+    INSERT INTO adjustments (id, workspace_id, adjustment_type, occurred_at, reason, created_by, raw_json, created_at)
+      VALUES ('adj-3', 'ws_1', 'sale', '2026-08-31T09:00:00.000Z', 'Sale Adjustment: POS offline', 'user_1', '{"saleReason":"POS offline"}', '2026-08-31T09:00:00.000Z');
+    INSERT INTO adjustment_lines (id, workspace_id, adjustment_id, stock_item_id, location_id, quantity_delta, unit_cost)
+      VALUES ('line-1', 'ws_1', 'adj-3', 'stock-1', 'loc-a', -4, 12);
+  `);
+
+  const detail = await loadAdjustmentDetail(env, 'ws_1', 'adj-3');
+  assert.ok(detail);
+  assert.match(detail!.title, /Sale Adjustment/);
+  assert.doesNotMatch(detail!.title, /Wastage/);
+  const typeCard = detail!.summaryCards.find((card) => card.key === 'adjustmentType');
+  assert.equal(typeCard?.value, 'Sale Adjustment');
+  assert.equal(detail!.metadata?.saleReason, 'POS offline');
+});
+
+test('loadMovements finds stock_movements rows stamped document_type=sale_adjustment under the shared "adjustment" entity type', async () => {
+  const env = createEnv();
+  env.DB.database.exec(`
+    INSERT INTO locations (id, workspace_id, name, active) VALUES ('loc-a', 'ws_1', 'Main Store', 1);
+    INSERT INTO stock_items (id, workspace_id, name, category, item_type, unit, unit_cost, active, is_stocked)
+      VALUES ('stock-1', 'ws_1', 'Beef Patty', 'Meat', 'raw', 'ea', 12, 1, 1);
+    INSERT INTO stock_movements (id, workspace_id, stock_item_id, location_id, movement_type, document_type, document_id, quantity_delta, unit_cost, value_delta, occurred_at, created_by, metadata_json, created_at)
+      VALUES ('mov-1', 'ws_1', 'stock-1', 'loc-a', 'sale_adjustment', 'sale_adjustment', 'adj-3', -4, 12, -48, '2026-08-31T09:00:00.000Z', 'user_1', '{}', '2026-08-31T09:00:00.000Z');
+  `);
+
+  const movements = await loadMovements(env, 'ws_1', 'adjustment', 'adj-3');
+  assert.equal(movements.length, 1);
+  assert.equal(movements[0].movementType, 'sale_adjustment');
+  assert.equal(movements[0].quantity, -4);
 });
 
 test('an unknown adjustment id returns null rather than throwing', async () => {

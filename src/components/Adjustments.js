@@ -2,9 +2,10 @@ import '../styles/adjustments.css';
 import '../styles/fieldHelp.css';
 import { bindFieldHelpTooltips, renderFieldHelpLabel } from './fieldHelp.js';
 import { renderLoadingPanel } from './LoadingPanel.js';
-import { isWastageAdjustment } from '../services/wastageClassifier.js';
+import { isSalesAdjustment, isWastageAdjustment } from '../services/wastageClassifier.js';
 
 const WASTE_REASONS = ['Damaged', 'Expired', 'Burnt', 'Prep Error', 'Spillage', 'Theft/Loss', 'Other'];
+const SALE_ADJUSTMENT_REASONS = ['POS/Till Offline', 'Order Not Rung Up', 'Staff Meal / Comp', 'Manual/Phone Order', 'Other'];
 const ADJUSTMENT_PAGE_SIZE = 25;
 
 export function renderAdjustments({ state, onAdjustmentFilterChange, onAdjustmentAction = {} } = {}) {
@@ -24,9 +25,13 @@ export function renderAdjustments({ state, onAdjustmentFilterChange, onAdjustmen
     wastageCategory: '',
     wastagePage: 1,
     wastageSelectedIds: [],
+    saleSearch: '',
+    saleCategory: '',
+    salePage: 1,
+    saleSelectedIds: [],
     ...adjustments.filters
   };
-  const activeTab = filters.adjustmentTab === 'wastage' ? 'wastage' : 'stock';
+  const activeTab = ['wastage', 'sale'].includes(filters.adjustmentTab) ? filters.adjustmentTab : 'stock';
   // Bulk is now the only stock-adjustment flow (the "Normal" single-item flow was removed).
   const selectedStockIds = new Set((filters.selectedStockIds || []).map(String));
   const stockMatches = getStockMatches(adjustments.stockItems || [], filters.stockSearch || '', filters.stockCategory || '', draft.items || []);
@@ -50,10 +55,15 @@ export function renderAdjustments({ state, onAdjustmentFilterChange, onAdjustmen
       <button type="button" class="adj-tabBtn ${activeTab === 'wastage' ? 'is-active' : ''}" data-adj-tab="wastage">
         ${icon('flame')} Product Wastage Adjustment
       </button>
+      <button type="button" class="adj-tabBtn ${activeTab === 'sale' ? 'is-active' : ''}" data-adj-tab="sale">
+        ${icon('list')} Product Sales Adjustment
+      </button>
     </div>
 
     ${activeTab === 'wastage'
       ? renderWastageTab(adjustments, filters, onAdjustmentFilterChange, onAdjustmentAction)
+      : activeTab === 'sale'
+      ? renderSaleAdjustmentTab(adjustments, filters, onAdjustmentFilterChange, onAdjustmentAction)
       : `
     ${adjustments.actionError && !adjustments.lineDetailDraft?.entries?.length ? renderNotice(adjustments.actionError, 'error') : ''}
     <div class="adj-frame">
@@ -183,6 +193,72 @@ function bindAdjustmentEvents(view, adjustments, filters, onAdjustmentFilterChan
     });
   });
 
+  // Sale Adjustment tab events (mirrors the wastage tab above)
+  view.querySelectorAll('[data-sale-open-picker]').forEach((button) => {
+    button.addEventListener('click', () => {
+      onAdjustmentFilterChange?.({ overlay: 'sale-picker', openDropdown: '', saleSelectedIds: [] });
+    });
+  });
+
+  view.querySelector('[data-sale-picker-close]')?.addEventListener('click', () => {
+    onAdjustmentFilterChange?.({ overlay: '', saleSelectedIds: [] });
+  });
+
+  view.querySelector('[data-sale-search]')?.addEventListener('input', (e) => {
+    onAdjustmentFilterChange?.({ saleSearch: e.target.value, salePage: 1 });
+  });
+
+  view.querySelectorAll('[data-sale-category]').forEach((button) => {
+    button.addEventListener('click', () => {
+      onAdjustmentFilterChange?.({ saleCategory: button.dataset.saleCategory, salePage: 1 });
+    });
+  });
+
+  view.querySelectorAll('[data-sale-select]').forEach((checkbox) => {
+    checkbox.addEventListener('change', () => {
+      onAdjustmentAction.onToggleSaleAdjustmentSelection?.(checkbox.dataset.saleSelect, checkbox.checked);
+    });
+  });
+
+  view.querySelector('[data-sale-add-selected]')?.addEventListener('click', () => {
+    onAdjustmentAction.onAddSaleAdjustmentSelected?.();
+  });
+
+  view.querySelectorAll('[data-sale-remove]').forEach((button) => {
+    button.addEventListener('click', () => {
+      onAdjustmentAction.onRemoveSaleAdjustmentLine?.(Number(button.dataset.saleRemove));
+    });
+  });
+
+  view.querySelectorAll('[data-sale-qty]').forEach((input) => {
+    input.addEventListener('input', () => {
+      onAdjustmentAction.onPreserveFocus?.(input);
+      onAdjustmentAction.onSaleAdjustmentQtyChange?.(Number(input.dataset.saleQty), input.value);
+    });
+  });
+
+  view.querySelector('[data-sale-note]')?.addEventListener('input', (e) => {
+    onAdjustmentAction.onPreserveFocus?.(e.currentTarget);
+    onAdjustmentAction.onSaleAdjustmentDraftChange?.({ note: e.currentTarget.value });
+  });
+
+  view.querySelectorAll('[data-sale-option]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const field = button.dataset.saleOptionField;
+      const value = button.dataset.saleOptionValue;
+      onAdjustmentAction.onSaleAdjustmentDraftChange?.({ [field]: value });
+      onAdjustmentFilterChange?.({ openDropdown: '' });
+    });
+  });
+
+  view.querySelector('[data-sale-save]')?.addEventListener('click', () => onAdjustmentAction.onSaleAdjustmentSave?.());
+
+  view.querySelectorAll('[data-sale-page]').forEach((button) => {
+    button.addEventListener('click', () => {
+      onAdjustmentFilterChange?.({ salePage: Number(button.dataset.salePageValue || 1) || 1 });
+    });
+  });
+
   view.querySelectorAll('[data-adj-open-stock]').forEach((button) => {
     button.addEventListener('click', () => {
       onAdjustmentFilterChange?.({
@@ -230,6 +306,8 @@ function bindAdjustmentEvents(view, adjustments, filters, onAdjustmentFilterChan
         onAdjustmentFilterChange?.({ stockCategory: value, stockPage: 1 });
       } else if (action === 'wastageCategory') {
         onAdjustmentFilterChange?.({ wastageCategory: value, wastagePage: 1 });
+      } else if (action === 'saleCategory') {
+        onAdjustmentFilterChange?.({ saleCategory: value, salePage: 1 });
       }
       onAdjustmentFilterChange?.({ openDropdown: '' });
     });
@@ -607,6 +685,7 @@ function renderOverlayDropdown({ id, action, selectedValue, fallbackLabel, optio
   const selected = options.find((option) => String(option.value) === String(selectedValue));
   const isOpen = openDropdown === id;
   const isWastageDropdown = fieldPrefix === 'wastage' && fieldName;
+  const isSaleDropdown = fieldPrefix === 'sale' && fieldName;
   return `
     <div class="adj-dropdown ${isOpen ? 'adj-dropdown--open' : ''}" data-adj-dropdown-root>
       <button type="button" data-adj-dropdown="${escapeAttribute(id)}" aria-expanded="${isOpen}">
@@ -619,6 +698,8 @@ function renderOverlayDropdown({ id, action, selectedValue, fallbackLabel, optio
             type="button"
             ${isWastageDropdown
       ? `data-wastage-option data-wastage-option-field="${escapeAttribute(fieldName)}" data-wastage-option-value="${escapeAttribute(option.value)}"`
+      : isSaleDropdown
+      ? `data-sale-option data-sale-option-field="${escapeAttribute(fieldName)}" data-sale-option-value="${escapeAttribute(option.value)}"`
       : `data-adj-option data-adj-option-action="${escapeAttribute(action)}" data-adj-option-value="${escapeAttribute(option.value)}"`
     }
             class="${String(option.value) === String(selectedValue) ? 'is-active' : ''}"
@@ -1039,6 +1120,285 @@ function createEmptyWastageDraft() {
     locationId: 'main',
     locationName: 'Main Store',
     wasteReason: '',
+    note: '',
+    date: '',
+    items: []
+  };
+}
+
+// Product Sales Adjustment: a manual way to deduct stock for a sale the POS never captured (till
+// offline, a comp/staff meal never rung up, etc). Mirrors the Product Wastage tab above exactly —
+// same product picker, same recipe-expansion mechanic — but is stored/labelled distinctly on the
+// backend (see postSalesAdjustment in routes.ts) so it never counts as wastage or as a real sale.
+function renderSaleAdjustmentTab(adjustments, filters, onAdjustmentFilterChange, onAdjustmentAction) {
+  const draft = adjustments.saleAdjustmentDraft || createEmptySaleAdjustmentDraft();
+  const products = adjustments.products || [];
+  const locations = adjustments.locations || [];
+  const hasDraftLines = (draft.items || []).length > 0;
+  const isSaving = adjustments.saleAdjustmentStatus === 'saving';
+
+  const locationOptions = locations.map((loc) => ({ value: loc.id, label: loc.displayName || loc.name }));
+  const saleReasonOptions = SALE_ADJUSTMENT_REASONS.map((r) => ({ value: r, label: r }));
+  const totalCostImpact = (draft.items || []).reduce((sum, item) => sum + Number(item.estimatedCost || 0), 0);
+  const validationMessage = getSaleAdjustmentValidationMessage(draft);
+  const canRecord = !validationMessage && !isSaving;
+
+  if (filters.overlay === 'sale-picker') {
+    return renderSaleAdjustmentPickerOverlay(products, filters);
+  }
+
+  return `
+    ${adjustments.saleAdjustmentError ? renderNotice(adjustments.saleAdjustmentError, 'error') : ''}
+    <div class="adj-frame">
+      <div class="adj-engineShell">
+        ${!hasDraftLines ? `
+          <section class="adj-card adj-engineIntro">
+            <div class="adj-engineIcon">${icon('list')}</div>
+            <div class="adj-engineHead">
+              <h3 class="adj-title">Product Sales Adjustment</h3>
+            </div>
+            <p class="adj-engineLead">Select menu items that were sold but never captured by Yoco (till offline, a comp or staff meal, a manual/phone order). KCP will automatically deduct all recipe ingredients from the selected location's stock and record it as a sale adjustment.</p>
+            <div class="adj-engineActions">
+              <button type="button" class="adj-primary adj-enginePrimary" data-sale-open-picker>Choose Menu Items</button>
+            </div>
+          </section>
+        ` : `
+          <section class="adj-card adj-draftPanel">
+            <div class="adj-panelHead">
+              <div>
+                <h3>Sale Adjustment Draft</h3>
+                <span>${(draft.items || []).length} ${(draft.items || []).length === 1 ? 'menu item' : 'menu items'}</span>
+              </div>
+              <button type="button" class="adj-secondary adj-addItemsButton" data-sale-open-picker>Add Items</button>
+            </div>
+
+            <div class="adj-draftScroll">
+              <table class="adj-table">
+                <thead>
+                  <tr><th>Menu Item</th><th>Qty Sold</th><th>Est. Cost</th><th></th></tr>
+                </thead>
+                <tbody>
+                  ${(draft.items || []).map((item, index) => `
+                    <tr>
+                      <td>
+                        <strong>${escapeHtml(item.productName || '')}</strong>
+                        <span>${escapeHtml(item.category || '')}</span>
+                      </td>
+                      <td>
+                        <input
+                          type="text"
+                          inputmode="decimal"
+                          class="adj-inlineQty"
+                          value="${escapeAttribute(String(item.quantity ?? ''))}"
+                          data-sale-qty="${index}"
+                          data-focus-key="sale-qty-${index}"
+                          placeholder="0"
+                        />
+                      </td>
+                      <td data-sale-cost="${index}">${Number(item.unitCost || 0) > 0 ? formatCurrency(item.estimatedCost || 0) : 'Cost unavailable'}</td>
+                      <td>
+                        <button type="button" class="adj-removeBtn" data-sale-remove="${index}" aria-label="Remove">${icon('x')}</button>
+                      </td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            </div>
+
+            <div class="adj-wastageMetaRow">
+              <label>
+                <span>Location</span>
+                ${renderOverlayDropdown({
+    id: 'sale-location',
+    action: '',
+    selectedValue: draft.locationId || '',
+    fallbackLabel: 'Select location…',
+    options: locationOptions,
+    openDropdown: filters.openDropdown,
+    fieldPrefix: 'sale',
+    fieldName: 'locationId'
+  })}
+              </label>
+              <label>
+                <span>Reason</span>
+                ${renderOverlayDropdown({
+    id: 'sale-reason',
+    action: '',
+    selectedValue: draft.saleReason || '',
+    fallbackLabel: 'Select reason…',
+    options: saleReasonOptions,
+    openDropdown: filters.openDropdown,
+    fieldPrefix: 'sale',
+    fieldName: 'saleReason'
+  })}
+              </label>
+              <label>
+                <span>Note (optional)</span>
+                <input
+                  type="text"
+                  value="${escapeAttribute(draft.note || '')}"
+                  placeholder="What happened…"
+                  data-sale-note
+                  data-focus-key="sale-note"
+                />
+              </label>
+            </div>
+
+            <div class="adj-footer">
+              <div class="adj-impact">
+                <span>Est. Stock Cost</span>
+                <strong data-sale-total>${formatCurrency(totalCostImpact)}</strong>
+              </div>
+              <button type="button" class="adj-primary ${canRecord ? '' : 'adj-primary--blocked'}" data-sale-save aria-disabled="${canRecord ? 'false' : 'true'}" data-sale-validation="${escapeAttribute(validationMessage)}" ${isSaving ? 'disabled' : ''}>${isSaving ? 'Saving…' : 'Record Sale Adjustment'}</button>
+            </div>
+          </section>
+        `}
+      </div>
+    </div>
+    ${renderSaleAdjustmentLog(adjustments)}
+  `;
+}
+
+function getSaleAdjustmentValidationMessage(draft = {}) {
+  const items = Array.isArray(draft.items) ? draft.items : [];
+  if (!items.length) return 'Select at least one menu item that was sold.';
+  if (!String(draft.locationId || '').trim()) return 'Select a location before recording this sale adjustment.';
+  if (!String(draft.saleReason || '').trim()) return 'Select a reason before recording this sale adjustment.';
+  const invalidItem = items.find((item) => !(Number(String(item.quantity ?? '').replace(',', '.')) > 0));
+  if (invalidItem) return `Enter a quantity greater than zero for ${invalidItem.productName || 'every menu item'}.`;
+  return '';
+}
+
+function renderSaleAdjustmentLog(adjustments) {
+  const allAdj = adjustments.adjustments || [];
+  const saleLines = allAdj.filter((log) => isSalesAdjustment(log));
+  if (!saleLines.length) return '';
+
+  // Group by adjustmentId so one record = one sale-adjustment event
+  const byId = new Map();
+  for (const line of saleLines) {
+    const key = line.adjustmentId || line.id;
+    if (!byId.has(key)) {
+      byId.set(key, {
+        date: line.date || line.timestamp || '',
+        reason: line.note || 'Other',
+        locationName: line.locationName || '',
+        user: line.user || line.createdByName || '',
+        lines: []
+      });
+    }
+    byId.get(key).lines.push(line);
+  }
+
+  const events = [...byId.values()].sort((a, b) => String(b.date).localeCompare(String(a.date))).slice(0, 50);
+
+  return `
+    <div class="adj-wastageLog">
+      <h3 class="adj-wastageLogTitle">Sale Adjustment History</h3>
+      <table class="adj-table adj-table--log">
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Reason</th>
+            <th>Location</th>
+            <th>Ingredients Deducted</th>
+            <th>User</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${events.map((ev) => `
+            <tr>
+              <td>${escapeHtml(ev.date ? ev.date.slice(0, 10) : '')}</td>
+              <td>${escapeHtml(ev.reason)}</td>
+              <td>${escapeHtml(ev.locationName || 'Main Store')}</td>
+              <td>
+                ${ev.lines.map((l) => `<span class="adj-wastageIngredient">${escapeHtml(l.stockItemName || l.itemName || '')} (${formatQty(Math.abs(l.qty || l.impactQty || 0))} ${escapeHtml(l.unit || '')})</span>`).join('')}
+              </td>
+              <td>${escapeHtml(ev.user)}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderSaleAdjustmentPickerOverlay(products, filters) {
+  const q = String(filters.saleSearch || '').trim().toLowerCase();
+  const cat = String(filters.saleCategory || '').trim();
+  const selectedIds = new Set((filters.saleSelectedIds || []).map(String));
+  const categoryOptions = [...new Set(products.map((p) => String(p.category || '').trim()).filter(Boolean))].sort();
+
+  const matches = products.filter((p) => {
+    if (cat && p.category !== cat) return false;
+    if (!q) return true;
+    return String(p.name || '').toLowerCase().includes(q) || String(p.category || '').toLowerCase().includes(q);
+  });
+
+  const paginated = paginateItems(matches, filters.salePage, ADJUSTMENT_PAGE_SIZE);
+
+  return `
+    <div class="adj-overlayBackdrop">
+      <section class="adj-overlayCard adj-overlayCard--picker">
+        <header>
+          <div>
+            <p>Product Sales Adjustment</p>
+            <h3>Choose menu items that were sold</h3>
+          </div>
+          <button type="button" class="adj-iconButton" data-sale-picker-close aria-label="Close">${icon('x')}</button>
+        </header>
+        <div class="adj-overlayFilters">
+          <label class="adj-overlaySearchLabel">
+            <span>Search</span>
+            <input type="search" value="${escapeAttribute(filters.saleSearch || '')}" placeholder="Type name…" data-sale-search data-focus-key="sale-search" />
+          </label>
+          <label>
+            <span>Category</span>
+            ${renderOverlayDropdown({
+    id: 'sale-category',
+    action: 'saleCategory',
+    selectedValue: cat,
+    fallbackLabel: 'All categories',
+    options: [{ value: '', label: 'All categories' }, ...categoryOptions.map((c) => ({ value: c, label: c }))],
+    openDropdown: filters.openDropdown
+  })}
+          </label>
+        </div>
+        <div class="adj-pickerTable" data-scroll-key="sale-picker">
+          <table class="adj-table adj-table--picker">
+            <thead>
+              <tr><th></th><th>Menu Item</th><th>Category</th></tr>
+            </thead>
+            <tbody>
+              ${paginated.items.map((p) => {
+    const isSelected = selectedIds.has(String(p.id));
+    return `
+                <tr>
+                  <td><input type="checkbox" data-sale-select="${escapeAttribute(p.id)}" ${isSelected ? 'checked' : ''} /></td>
+                  <td><strong>${escapeHtml(p.name || '')}</strong></td>
+                  <td>${escapeHtml(p.category || '')}</td>
+                </tr>`;
+  }).join('') || '<tr><td colspan="3"><div class="adj-empty"><span>No menu items found.</span></div></td></tr>'}
+            </tbody>
+          </table>
+        </div>
+        ${renderPagination('salePage', paginated)}
+        <div class="adj-overlayActions">
+          <div class="adj-overlaySelectionCount">${selectedIds.size} selected</div>
+          <div class="adj-overlayActionRail">
+            <button type="button" class="adj-primary" data-sale-add-selected ${selectedIds.size ? '' : 'disabled'}>Add to Draft</button>
+          </div>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function createEmptySaleAdjustmentDraft() {
+  return {
+    locationId: 'main',
+    locationName: 'Main Store',
+    saleReason: '',
     note: '',
     date: '',
     items: []

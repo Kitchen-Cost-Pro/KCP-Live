@@ -474,7 +474,19 @@ export async function resolveCanonicalYocoSale(env: YocoV2ApiClientEnv, input: R
       traceId,
       attempt: numberValue(input.processingRun.attempt_number, 1),
       orderId: sourceOrderId,
-      forceRefresh: input.forceRefresh
+      // Always bypass YOCO_V2_ORDER_CACHE_TTL_MS (default 30s) here, not just when an admin
+      // explicitly asked for a refetch. A cached read can serve an "open" snapshot taken moments
+      // earlier by a DIFFERENT webhook for the same order — e.g. the order.updated fired when an
+      // item was added — even though the order has genuinely closed since. Live incident,
+      // 2026-08-31 (Gonubie, Leo's Demo): the ordinary "create order, add an item, pay" sequence
+      // routinely completes well inside that 30s window, so the real close-out webhook's own
+      // "fresh" lookup kept seeing the stale pre-payment snapshot and deferred unnecessarily via
+      // the skip path below — not a rare edge case, the common case for a fast sale. Matches the
+      // precedent already set by listYocoV2Orders/listYocoV2Refunds, which default forceRefresh to
+      // true for exactly this reason (reconciliation never trusts this cache either). The cache
+      // still exists and is still populated — this only stops resolution from treating it as
+      // authoritative for the one check (finality) it cannot safely answer.
+      forceRefresh: true
     });
     apiRequestId = fetched.requestId;
     if (!fetched.found || !fetched.data) {

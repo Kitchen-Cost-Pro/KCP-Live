@@ -178,21 +178,21 @@ async function attachActor(
   };
 }
 
-async function loadMovements(
+export async function loadMovements(
   env: Env,
   workspaceId: string,
   entityType: TransactionEntityType,
   entityId: string,
 ): Promise<Row[]> {
-  // A plain adjustment and a wastage adjustment both write to the SAME `adjustments`/`adjustment_lines`
-  // tables (see postAdjustment/postWastageAdjustment in routes.ts) but stamp their stock_movements
-  // rows with different document_type values ('adjustment' vs 'wastage_adjustment') — a given
-  // entityId is always exactly one of the two, so matching both is safe and avoids needing to know
-  // which subtype this particular adjustment document is.
+  // A plain adjustment, a wastage adjustment, and a sale adjustment all write to the SAME
+  // `adjustments`/`adjustment_lines` tables (see postAdjustment/postWastageAdjustment/
+  // postSalesAdjustment in routes.ts) but stamp their stock_movements rows with different
+  // document_type values — a given entityId is always exactly one of the three, so matching all of
+  // them is safe and avoids needing to know which subtype this particular adjustment document is.
   const documentTypes = entityType === "stock_take"
     ? ["stock_take"]
     : entityType === "adjustment"
-      ? ["adjustment", "wastage_adjustment"]
+      ? ["adjustment", "wastage_adjustment", "sale_adjustment"]
       : [entityType];
   const documentTypePlaceholders = documentTypes.map((_, index) => `?${index + 3}`).join(", ");
   const rows = await env.DB.prepare(
@@ -1018,7 +1018,7 @@ export async function loadAdjustmentDetail(env: Env, workspaceId: string, entity
   if (!row) return null;
 
   const raw = objectValue(jsonParse(row.raw_json));
-  const isWastage = text(row.adjustment_type) === "wastage";
+  const adjustmentTypeCode = text(row.adjustment_type);
   const linesResult = await env.DB.prepare(
     `SELECT al.id, al.stock_item_id, si.name AS item_name, si.category, si.unit AS item_unit,
             al.location_id, COALESCE(l.display_name, l.name) AS location_name,
@@ -1050,7 +1050,11 @@ export async function loadAdjustmentDetail(env: Env, workspaceId: string, entity
   const actor = await attachActor(env, workspaceId, text(row.created_by));
   const totalQtyAdjusted = lineItems.reduce((sum, line) => sum + Math.abs(numberValue(line.quantityDelta)), 0);
   const totalValueImpact = lineItems.reduce((sum, line) => sum + numberValue(line.valueImpact), 0);
-  const adjustmentTypeLabel = isWastage ? "Wastage Adjustment" : "Manual Adjustment";
+  const adjustmentTypeLabel = adjustmentTypeCode === "wastage"
+    ? "Wastage Adjustment"
+    : adjustmentTypeCode === "sale"
+      ? "Sale Adjustment"
+      : "Manual Adjustment";
 
   return {
     entityType: "adjustment",
@@ -1088,6 +1092,7 @@ export async function loadAdjustmentDetail(env: Env, workspaceId: string, entity
       adjustmentType: text(row.adjustment_type),
       reason: text(row.reason),
       wasteReason: rawText(raw, ["wasteReason", "waste_reason"]),
+      saleReason: rawText(raw, ["saleReason", "sale_reason"]),
     },
   };
 }
