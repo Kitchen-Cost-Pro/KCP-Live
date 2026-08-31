@@ -16,6 +16,7 @@ import {
   syncXeroNow,
   syncYocoCatalogue
 } from '../services/integrationService.js';
+import { canManagePermissionSets } from '../services/roleService.js';
 
 const INTEGRATIONS = [
   {
@@ -149,7 +150,10 @@ export function renderIntegrations({ state } = {}) {
   const workspaceName = state?.workspace?.siteName || 'Workspace';
   const workspaceId = state?.workspace?.id || '';
   const canDisconnectYoco = state?.access?.currentIsKcpSuperUser === true;
-  const canManageXero = state?.access?.currentIsKcpSuperUser === true;
+  // Matches the backend's canManageXero gate (modules/xero-engine/admin-permissions.ts): a
+  // workspace owner/admin, or a KCP superuser — not the stricter currentIsKcpSuperUser-only bar
+  // Yoco disconnect uses, since connecting Xero is meant to be a normal workspace-owner action.
+  const canManageXero = canManagePermissionSets(state?.access?.currentRole, state?.access?.currentIsSuperUser === true || state?.access?.currentIsKcpSuperUser === true);
   const cachedYocoStatus = getCachedYocoStatus(workspaceId);
   const cachedGmailStatus = getCachedGmailStatus(workspaceId);
   const cachedXeroStatus = getCachedXeroStatus(workspaceId);

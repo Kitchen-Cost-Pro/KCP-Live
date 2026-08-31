@@ -2,7 +2,7 @@ import type { AuthContext, Env } from '../../legacy/types';
 import { text, nowIso, xeroConfigured, xeroRedirectUri } from './config';
 import { signXeroState, verifyXeroState, buildXeroAuthorizeUrl, exchangeXeroCode, fetchXeroConnections } from './oauth';
 import { getXeroConnection, saveXeroConnection, disconnectXero } from './connection';
-import { hasXeroAdminPermission } from './admin-permissions';
+import { canManageXero } from './admin-permissions';
 import { syncXeroItemsForWorkspace } from './item-sync';
 import { syncXeroDailyInvoice, claimDailyInvoiceSyncIfDue, releaseDailyInvoiceSyncClaim, yesterdayDateKey } from './invoice-sync';
 
@@ -216,13 +216,25 @@ export async function handleXeroAdminRoute(
   if (!resource.startsWith('xero/')) return null;
   if (!auth.uid) return response({ ok: false, error: 'Authentication required.' }, 401);
 
+  // The front Worker already confirmed this user has access to this workspace at all
+  // (assertWorkspaceAccess) before forwarding here, so status/sync-now — reads and a one-off
+  // push, no config change — are open to any workspace member, matching postYocoSyncCatalogue's
+  // bar (`scoped` only) rather than requiring an owner/admin role.
   if (request.method === 'GET' && resource === 'xero/status') {
     return getStatus(env, workspaceId);
   }
+  if (request.method === 'POST' && resource.startsWith('xero/sync-now')) {
+    const kind = new URL(request.url).searchParams.get('kind') || 'invoice';
+    return postSyncNow(env, workspaceId, kind);
+  }
 
-  // Everything below mutates the connection/config or triggers a push — admin-only.
-  if (!hasXeroAdminPermission(auth, 'xero.configure') && resource !== 'xero/sync-now') {
-    return response({ ok: false, error: 'Administrator access required.' }, 403);
+  // Connecting/disconnecting Xero and changing the account-code mapping is a workspace-owner-level
+  // action — the same bar as connecting Yoco (denyUnlessPermissionManager in legacy/routes.ts):
+  // the workspace's own owner/admin, or a KCP superuser. NOT auth.systemRole === 'admin', which is
+  // the separate internal KCP admin-portal role and would never be true for an ordinary business
+  // owner configuring their own workspace.
+  if (!(await canManageXero(env, auth, workspaceId))) {
+    return response({ ok: false, error: 'Only workspace owners, admins, and super users can manage the Xero connection.' }, 403);
   }
 
   if (request.method === 'POST' && resource === 'xero/connect-start') {
@@ -233,13 +245,6 @@ export async function handleXeroAdminRoute(
   }
   if (request.method === 'POST' && resource === 'xero/settings') {
     return postSettings(request, env, workspaceId);
-  }
-  if (request.method === 'POST' && resource.startsWith('xero/sync-now')) {
-    if (!hasXeroAdminPermission(auth, 'xero.sync') && !hasXeroAdminPermission(auth, 'xero.configure')) {
-      return response({ ok: false, error: 'Administrator access required.' }, 403);
-    }
-    const kind = new URL(request.url).searchParams.get('kind') || 'invoice';
-    return postSyncNow(env, workspaceId, kind);
   }
 
   return null;

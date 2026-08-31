@@ -1,13 +1,14 @@
-import type { AuthContext } from '../../legacy/types';
+import type { AuthContext, Env } from '../../legacy/types';
+import { getWorkspaceActorRole, PERMISSION_MANAGER_ROLE_KEYS } from '../../legacy/routes';
 
-export const XERO_ADMIN_PERMISSIONS = ['xero.view', 'xero.configure', 'xero.sync'] as const;
-export type XeroAdminPermission = typeof XERO_ADMIN_PERMISSIONS[number];
-
-/** Mirrors modules/yoco-engine-v2/admin-permissions.ts: only workspace admins may touch the Xero
- * connection at all, and only a superuser (or an explicit permission grant) may configure/trigger
- * a sync — a plain admin can view status but not change account-code mappings or push data. */
-export function hasXeroAdminPermission(auth: AuthContext, permission: XeroAdminPermission): boolean {
-  if (auth.systemRole !== 'admin') return false;
-  if (String(auth.adminRole || '').toLowerCase() === 'superuser') return true;
-  return Array.isArray(auth.permissions) && auth.permissions.includes(permission);
+/**
+ * "Configuring Xero" is a workspace-owner-level action, same bar as connecting Yoco or managing
+ * permission sets (denyUnlessPermissionManager in legacy/routes.ts) — the workspace's own owner,
+ * admin, or a KCP superuser. This is deliberately NOT auth.systemRole === 'admin' (that field is
+ * the internal KCP admin-portal role used by modules/yoco-engine-v2's diagnostics console, which a
+ * normal business owner configuring their own workspace's integrations will never have).
+ */
+export async function canManageXero(env: Env, auth: AuthContext, workspaceId: string): Promise<boolean> {
+  const role = await getWorkspaceActorRole(env, auth, workspaceId);
+  return PERMISSION_MANAGER_ROLE_KEYS.has(role);
 }

@@ -3505,7 +3505,7 @@ async function scoped(
   await assertWorkspaceAccess(env, auth, workspaceId);
 }
 
-const PERMISSION_MANAGER_ROLE_KEYS = new Set([
+export const PERMISSION_MANAGER_ROLE_KEYS = new Set([
   "owner",
   "admin",
   "super",
@@ -3547,7 +3547,7 @@ function normalizeRoleKey(value: unknown) {
     .replace(/[_\s]+/g, "-");
 }
 
-async function getWorkspaceActorRole(
+export async function getWorkspaceActorRole(
   env: Env,
   auth: AuthContext,
   workspaceId: string,
