@@ -71,7 +71,14 @@ export function renderReportViewer({
   const reportLink = allowUrlConfiguration
     ? readReportLinkConfiguration()
     : { view: "", filters: {}, hasExplicitConfiguration: false };
-  const dataSet = createReportingDataSet(state || sourceData);
+  // Reassigned (not const) — draw() below recomputes this on every real reload so that a report
+  // viewer left open picks up client state loaded AFTER it first mounted (e.g. Operations
+  // Dashboard's live stock balances, background-loaded on entering Reporting — see
+  // ensureStockItemsAvailableForReporting in main.js). Without this, `dataSet` stayed frozen at
+  // whatever appState looked like at the exact moment this report was opened, for as long as it
+  // stayed open — Refresh/Apply/pagination all call draw() directly and never re-mount this
+  // component, so a stale snapshot here could never self-correct no matter what the user clicked.
+  let dataSet = createReportingDataSet(state || sourceData);
   const route = resolveReportRoute(reportId, { preferRedirect });
   const activeGroupChildId =
     initialActiveReportId || route?.activeReportId || "";
@@ -151,6 +158,10 @@ export function renderReportViewer({
   };
 
   const draw = async ({ reload = true } = {}) => {
+    // See the `let dataSet` comment above: refresh it from current app state on every real reload,
+    // not just at initial mount, so client-state-dependent report logic (e.g. Operations
+    // Dashboard's live stock balance fallback) reflects data that arrived after this viewer opened.
+    if (reload) dataSet = createReportingDataSet(state || sourceData);
     // activeFilters is resolved once at mount (and whenever the filter form is submitted) and
     // otherwise never touched — so a relative preset like "Today" silently goes stale the moment
     // the calendar day rolls over while this viewer instance stays open, even across a manual
