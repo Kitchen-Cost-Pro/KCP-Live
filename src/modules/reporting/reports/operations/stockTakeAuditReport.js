@@ -894,6 +894,12 @@ function buildSessionRows(lines = []) {
     return {
       id: `stock-take-session:${sourceId}`,
       reportSummaryRow: true,
+      // applyReportFilters resolves a row's comparable date only from `date`/`timestamp`/
+      // `createdAt` (see normalizeStockTakeRows above) — without this alias a session row is
+      // "undated" to the shared date-range filter and gets silently dropped by any exact-day
+      // preset (Today, Yesterday), while a wider preset spanning multiple days can still let it
+      // through elsewhere in the pipeline, producing exactly this lopsided symptom.
+      date: first.stockTakeDate,
       stockTakeDate: first.stockTakeDate,
       stockTakeDateTime:
         first.countedAt || first.committedAt || first.stockTakeDate,
@@ -935,6 +941,9 @@ function buildByCategoryRows(lines = []) {
     return {
       id: `stock-take-category:${key}`,
       reportSummaryRow: true,
+      // See the matching comment in buildSessionRows — applyReportFilters needs this alias.
+      date: first.stockTakeDate,
+      stockTakeDate: first.stockTakeDate,
       category: first.category || "General",
       locationId: first.locationId,
       locationName: first.locationName,
@@ -990,6 +999,8 @@ function buildByItemRows(lines = []) {
       countedValue,
       varianceValue,
       variancePercent: calculateValueVariancePercent(varianceValue, expectedValue),
+      // See the matching comment in buildSessionRows — applyReportFilters needs this alias.
+      date: first.stockTakeDate,
       stockTakeDate: first.stockTakeDate,
       committedBy: first.committedBy,
       sourceId: first.sourceId,

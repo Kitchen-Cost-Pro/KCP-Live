@@ -447,6 +447,7 @@
   min-height: 0;
   flex: 1;
   overflow: auto;
+  padding: 0 28px 20px;
 }
 
 #view-grv .grv-table {
