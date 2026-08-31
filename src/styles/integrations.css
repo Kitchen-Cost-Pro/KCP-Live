@@ -531,36 +531,29 @@
   height: 18px;
 }
 
-.xeroSettingsForm {
-  display: grid;
-  gap: 12px;
+/* Xero modal — built with daisyUI/Tailwind utilities (see tailwind.css) instead of the yoco*
+   hand-written classes, deliberately more compact: fits in one view without the vertical stack
+   of stat-card/section/notice blocks the Yoco/Gmail modals use. Still nests inside the shared
+   .yocoModalBackdrop for its [hidden] handling and backdrop blur (kept — the backdrop rules are
+   generic, only the card content underneath is daisyUI). */
+.xeroModalBox {
+  width: min(680px, 92vw);
+  animation: yocoDrawerDrop 180ms ease-out;
 }
 
-.xeroSettingsForm label {
-  display: grid;
-  gap: 8px;
+.xeroModalNotice[data-tone='success'] {
+  color: #10b981;
+  opacity: 1;
 }
 
-.xeroSettingsForm input[type="text"] {
-  min-height: 44px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-  background: var(--surface-primary);
-  color: var(--text-main);
-  padding: 0 14px;
-  font: inherit;
+.xeroModalNotice[data-tone='error'] {
+  color: #ef4444;
+  opacity: 1;
 }
 
-.xeroCheckboxRow {
-  display: flex !important;
-  flex-direction: row;
-  align-items: center;
-  gap: 10px;
-}
-
-.xeroSettingsForm .integrationPrimaryAction {
-  justify-self: start;
-  min-width: 180px;
+.xeroModalNotice[data-tone='busy'] {
+  color: var(--accent-blue);
+  opacity: 1;
 }
 
 .yocoKeyHelper {
