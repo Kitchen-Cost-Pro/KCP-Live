@@ -46,6 +46,7 @@ const byItemColumns = [
   { key: 'sku', label: 'SKU', sortable: true },
   { key: 'category', label: 'Category', sortable: true },
   { key: 'locationName', label: 'Location', sortable: true },
+  qtyColumn('openingStock', 'Opening Stock'),
   qtyColumn('currentStock', 'Current Stock'),
   { key: 'baseUom', label: 'Base UOM', sortable: true },
   moneyColumn('unitCostExVat', 'Unit Cost Ex VAT', 'unitCostExVat'),
@@ -69,10 +70,16 @@ const byUomColumns = [
 ];
 
 const lineDetailColumns = [
-  ...byItemColumns.slice(0, 8),
+  { key: 'itemName', label: 'Item', sortable: true },
+  { key: 'sku', label: 'SKU', sortable: true },
+  { key: 'category', label: 'Category', sortable: true },
+  { key: 'locationName', label: 'Location', sortable: true },
   qtyColumn('openingStock', 'Opening Stock'),
   qtyColumn('qtyIn', 'Qty In'),
   qtyColumn('qtyOut', 'Qty Out'),
+  qtyColumn('currentStock', 'Current Stock'),
+  moneyColumn('unitCostExVat', 'Unit Cost Ex VAT', 'unitCostExVat'),
+  moneyColumn('stockValue', 'Stock Value', 'stockValue'),
   { key: 'lastMovementType', label: 'Last Movement Type', sortable: true },
   { key: 'lastMovementDate', label: 'Last Movement Date', type: 'date', sortable: true },
   { key: 'supplierName', label: 'Supplier', sortable: true },
@@ -93,9 +100,9 @@ export const stockOnHandReport = {
     summary: ['search', 'location', 'status'],
     by_location: ['search', 'location', 'category', 'status'],
     by_category: ['search', 'location', 'category', 'supplier', 'status'],
-    by_item: ['search', 'location', 'category', 'supplier', 'status'],
+    by_item: ['search', 'location', 'category', 'supplier', 'status', 'dateRange'],
     by_uom: ['search', 'location', 'category'],
-    line_detail: ['search', 'location', 'category', 'supplier', 'status']
+    line_detail: ['search', 'location', 'category', 'supplier', 'status', 'dateRange']
   },
   columns: {
     summary: summaryColumns,
@@ -110,7 +117,7 @@ export const stockOnHandReport = {
     by_location: mapColumns(byLocationColumns),
     by_category: mapColumns(byCategoryColumns),
     by_item: {
-      itemName: 'Item', sku: 'SKU', category: 'Category', locationName: 'Location', currentStock: 'Current Stock', baseUom: 'UOM', unitCostExVat: 'Unit Cost Ex VAT', stockValue: 'Stock Value', lowStockThreshold: 'Low Stock Threshold', parLevel: 'Par Level', status: 'Status', supplierName: 'Supplier', lastMovementDate: 'Last Movement Date'
+      itemName: 'Item', sku: 'SKU', category: 'Category', locationName: 'Location', openingStock: 'Opening Stock', currentStock: 'Current Stock', baseUom: 'UOM', unitCostExVat: 'Unit Cost Ex VAT', stockValue: 'Stock Value', lowStockThreshold: 'Low Stock Threshold', parLevel: 'Par Level', status: 'Status', supplierName: 'Supplier', lastMovementDate: 'Last Movement Date'
     },
     by_uom: mapColumns(byUomColumns),
     line_detail: mapColumns(lineDetailColumns)
@@ -287,7 +294,7 @@ function buildTotals(rows, view) {
   // Each by_uom cell is a "qty + unit label" string mixing different units row to row (kg, ea,
   // Bottle, Box...), so a summed total column would add incompatible units together — no totals row.
   if (view === 'by_uom') return {};
-  return { currentStock: sumBy(rows, 'currentStock'), stockValue: roundMoney(sumBy(rows, 'stockValue')), qtyIn: sumBy(rows, 'qtyIn'), qtyOut: sumBy(rows, 'qtyOut') };
+  return { openingStock: sumBy(rows, 'openingStock'), currentStock: sumBy(rows, 'currentStock'), stockValue: roundMoney(sumBy(rows, 'stockValue')), qtyIn: sumBy(rows, 'qtyIn'), qtyOut: sumBy(rows, 'qtyOut') };
 }
 
 function addCountWarning(rows, warnings, code, level, message, predicate) {

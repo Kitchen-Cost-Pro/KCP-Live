@@ -104,3 +104,29 @@ test('a malformed date falls back to the current instant rather than throwing', 
   const after = new Date().toISOString();
   assert.ok(countedAt >= before && countedAt <= after);
 });
+
+test('a stock take dated as the workspace\'s actual current trading day uses the real submission instant, not a synthetic midnight/anchor', async () => {
+  const env = createEnv(0);
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const before = new Date().toISOString();
+  const countedAt = await resolveStockTakeCountedAt(env, 'ws_1', todayIso);
+  const after = new Date().toISOString();
+  assert.ok(
+    countedAt >= before && countedAt <= after,
+    `expected ${countedAt} to be the real submission instant, within [${before}, ${after}]`,
+  );
+});
+
+test('a backdated stock take (a past date, not the workspace\'s current trading day) is anchored to that day\'s trading-day start', async () => {
+  const env = createEnv(6);
+  const countedAt = await resolveStockTakeCountedAt(env, 'ws_1', '2020-01-01');
+
+  const bounds = localDateRangeToUtcBounds({
+    from: '2020-01-01',
+    to: '2020-01-01',
+    timeZone: 'Africa/Johannesburg',
+    tradingDayStartMinutes: 6 * 60,
+  });
+
+  assert.equal(countedAt, bounds.fromUtc);
+});

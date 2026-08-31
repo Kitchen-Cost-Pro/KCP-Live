@@ -51,6 +51,19 @@ export async function getStockOnHandReport(
       "Stock on Hand cannot load because stock_items or locations are missing.",
     );
 
+  // A date range narrows "Qty In"/"Qty Out" to movements within that period, and re-anchors
+  // "Opening Stock" to the balance at the START of that period — computed backwards from the live
+  // current balance minus every movement from the period start through now (unbounded above, since
+  // "current stock" always means right now regardless of the selected period). No date range means
+  // fromUtc/toExclusiveUtc are both '', which the SQL below treats as "no bound" — preserving the
+  // original all-time behaviour (opening stock = balance before the very first ever movement).
+  const { fromUtc, toExclusiveUtc } = localDateRangeToUtcBounds({
+    from: filters.from,
+    to: filters.to,
+    timeZone,
+    tradingDayStartMinutes,
+  });
+
   const useBalances = tables.stock_balances;
   if (!useBalances && !tables.stock_movements)
     return emptyReport(
@@ -74,9 +87,10 @@ export async function getStockOnHandReport(
     ? `
     movement_totals AS (
       SELECT workspace_id, stock_item_id, location_id,
-             SUM(CASE WHEN quantity_delta > 0 THEN quantity_delta ELSE 0 END) AS qty_in,
-             SUM(CASE WHEN quantity_delta < 0 THEN -quantity_delta ELSE 0 END) AS qty_out,
+             SUM(CASE WHEN quantity_delta > 0 AND (?2 = '' OR occurred_at >= ?2) AND (?3 = '' OR occurred_at < ?3) THEN quantity_delta ELSE 0 END) AS qty_in,
+             SUM(CASE WHEN quantity_delta < 0 AND (?2 = '' OR occurred_at >= ?2) AND (?3 = '' OR occurred_at < ?3) THEN -quantity_delta ELSE 0 END) AS qty_out,
              SUM(quantity_delta) AS ledger_closing_stock,
+             SUM(CASE WHEN (?2 = '' OR occurred_at >= ?2) THEN quantity_delta ELSE 0 END) AS net_since_period_start,
              MAX(occurred_at) AS last_movement_date
         FROM stock_movements WHERE workspace_id = ?1
        GROUP BY workspace_id, stock_item_id, location_id
@@ -89,7 +103,7 @@ export async function getStockOnHandReport(
       ) WHERE rn = 1
     )`
     : `
-    movement_totals AS (SELECT '' workspace_id, '' stock_item_id, '' location_id, 0 qty_in, 0 qty_out, 0 ledger_closing_stock, '' last_movement_date WHERE 0),
+    movement_totals AS (SELECT '' workspace_id, '' stock_item_id, '' location_id, 0 qty_in, 0 qty_out, 0 ledger_closing_stock, 0 net_since_period_start, '' last_movement_date WHERE 0),
     latest_movement AS (SELECT '' workspace_id, '' stock_item_id, '' location_id, '' movement_type, '' document_id, '' occurred_at, 1 rn WHERE 0)`;
   const purchaseCte =
     tables.grvs && tables.grv_lines
@@ -131,6 +145,7 @@ export async function getStockOnHandReport(
            ${currentStock} AS current_stock, ${updatedAt} AS balance_updated_at,
            ${priceSelect} AS resolved_unit_cost,
            COALESCE(mt.qty_in, 0) AS qty_in, COALESCE(mt.qty_out, 0) AS qty_out,
+           COALESCE(mt.net_since_period_start, 0) AS net_since_period_start,
            lm.movement_type AS last_movement_type, lm.occurred_at AS last_movement_date,
            lm.document_id AS last_source_id, lp.supplier_id, lp.supplier_name
       FROM ${baseFrom}
@@ -141,7 +156,7 @@ export async function getStockOnHandReport(
      WHERE ${baseWorkspace} = ?1 AND COALESCE(si.active, 1) = 1 AND COALESCE(l.active, 1) = 1
      ORDER BY location_name, si.category, si.name LIMIT ${MAX_ROWS}`,
   )
-    .bind(workspaceId)
+    .bind(workspaceId, fromUtc || "", toExclusiveUtc || "")
     .all<Row>();
 
   const canonicalSourceRows = dedupeRowsByKey(
@@ -160,6 +175,7 @@ export async function getStockOnHandReport(
     const unitCost = number(row.resolved_unit_cost);
     const qtyIn = number(row.qty_in);
     const qtyOut = number(row.qty_out);
+    const netSincePeriodStart = number(row.net_since_period_start);
     const threshold = number(row.threshold_qty);
     const par = number(row.par_level_qty);
     return [
@@ -188,7 +204,7 @@ export async function getStockOnHandReport(
         status: stockStatus(currentStock, threshold, par),
         supplierId: clean(row.supplier_id),
         supplierName: clean(row.supplier_name),
-        openingStock: quantity(currentStock - qtyIn + qtyOut),
+        openingStock: quantity(currentStock - netSincePeriodStart),
         qtyIn: quantity(qtyIn),
         qtyOut: quantity(qtyOut),
         lastMovementType: title(clean(row.last_movement_type)),

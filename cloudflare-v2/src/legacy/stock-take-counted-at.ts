@@ -2,6 +2,7 @@ import type { Env } from "./types";
 // @ts-ignore Shared timezone helpers used by the reporting client and Worker.
 import {
   zonedLocalDateTimeToUtc,
+  localDateRangeToUtcBounds,
   normalizeReportTimeZone,
   normalizeTradingDayStartMinutes,
 } from "../../../src/modules/reporting/engine/timezone.js";
@@ -10,12 +11,19 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-// Anchors a user-picked stock-take date ("YYYY-MM-DD") to the workspace's actual trading-day start
-// in UTC, matching exactly how getStockTakeAuditReport/addZonedDateRange computes its "Today" /
-// "Yesterday" query bounds — otherwise a naive UTC-midnight timestamp can fall on the wrong side of
-// the workspace's timezone or configured trading-day-start hour and the count silently disappears
-// from those exact-day filters even though it was captured today. Extracted to its own module (not
-// inline in routes.ts) so it's testable without pulling in routes.ts's heavy transitive imports.
+// Resolves the `counted_at` to store for a user-picked stock-take date ("YYYY-MM-DD").
+//
+// When the picked date is the workspace's current trading day (the common case — counting today),
+// the real submission instant is used, so the Stock Take Log shows the actual time it was counted
+// AND it naturally falls inside "Today"'s report window (see getStockTakeAuditReport/addZonedDateRange,
+// which the report queries against with the same timezone + trading-day-start).
+//
+// When the picked date is a different day (backdating a count), there is no real "now" to anchor to,
+// so the count is stamped to that day's trading-day start instead — still landing inside the correct
+// day's window, just without a meaningful clock time.
+//
+// Extracted to its own module (not inline in routes.ts) so it's testable without pulling in
+// routes.ts's heavy transitive imports.
 export async function resolveStockTakeCountedAt(
   env: Env,
   workspaceId: string,
@@ -39,6 +47,16 @@ export async function resolveStockTakeCountedAt(
     settings = {};
   }
   const tradingDayStartMinutes = normalizeTradingDayStartMinutes(settings as any);
+
+  const now = nowIso();
+  const bounds = localDateRangeToUtcBounds({
+    from: isoDate,
+    to: isoDate,
+    timeZone,
+    tradingDayStartMinutes,
+  });
+  if (now >= bounds.fromUtc && now < bounds.toExclusiveUtc) return now;
+
   const startHour = Math.floor(tradingDayStartMinutes / 60);
   const startMinute = tradingDayStartMinutes % 60;
   return zonedLocalDateTimeToUtc(

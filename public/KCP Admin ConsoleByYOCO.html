@@ -40,6 +40,7 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/js/all.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-chart-sankey@0.12.0/dist/chartjs-chart-sankey.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/fuse.js@6.6.2"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
     <style>
@@ -4170,25 +4171,227 @@ function closeWebhookHealthMenus() {
     document.querySelectorAll('.webhook-health-menu').forEach(m => m.remove());
 }
 
+// ─── Sale Bucket Log + Funnel ───
+const SALE_BUCKET_META = {
+    RESOLVED_FULL: { label: 'Resolved (reported + stock)', color: '#34d399' },
+    RESOLVED_REPORTING_ONLY: { label: 'Resolved (reported only)', color: '#2dd4bf' },
+    RESOLVED_NOT_APPLIED: { label: 'Resolved, not yet applied', color: '#fbbf24' },
+    SKIPPED_NOT_FINAL_YET: { label: 'Not final yet (self-healing)', color: '#94a3b8' },
+    PROCESSING: { label: 'In flight', color: '#94a3b8' },
+    WAITING_FOR_YOCO: { label: 'Waiting for Yoco', color: '#fbbf24' },
+    PARTIALLY_RESOLVED: { label: 'Partially resolved', color: '#fb923c' },
+    ITEM_MAPPING_MISSING: { label: 'Item mapping missing', color: '#fb923c' },
+    LOCATION_MAPPING_MISSING: { label: 'Location mapping missing', color: '#fb923c' },
+    MODIFIER_MAPPING_MISSING: { label: 'Modifier mapping missing', color: '#fb923c' },
+    MANUAL_REVIEW_REQUIRED: { label: 'Manual review required', color: '#e879f9' },
+    UNSUPPORTED_ORDER_STATE: { label: 'Unsupported order state', color: '#f87171' },
+    DEAD_LETTER: { label: 'Dead-lettered', color: '#ef4444' },
+    FAILED_PERMANENTLY: { label: 'Failed permanently', color: '#ef4444' }
+};
+const WEBHOOK_LOG_WINDOW_OPTIONS = [
+    { hours: 24, label: 'Last 24 Hours' },
+    { hours: 72, label: 'Last 3 Days' },
+    { hours: 24 * 7, label: 'Last 7 Days' },
+    { hours: 24 * 30, label: 'Last 30 Days' }
+];
+let webhookLogState = { wsId: '', windowHours: 24, bucket: '', rows: [], total: 0, funnel: null };
+let webhookFunnelChart = null;
+
+function saleBucketMeta(bucket) {
+    return SALE_BUCKET_META[bucket] || { label: bucket || 'Unknown', color: '#64748b' };
+}
+
 async function viewWebhookLogsForWorkspace(wsId) {
-    openModal(`<div class="space-y-4"><h3 class="text-sm font-black uppercase tracking-widest text-white">Webhook Logs</h3><div id="webhook-logs-body" class="text-xs text-slate-400">Loading...</div></div>`);
+    webhookLogState = { wsId, windowHours: 24, bucket: '', rows: [], total: 0, funnel: null };
+    openModal(`
+        <div class="space-y-4">
+            <div class="flex items-center justify-between flex-wrap gap-3">
+                <div>
+                    <h3 class="text-sm font-black uppercase tracking-widest text-white">Webhook Log &amp; Sale Funnel</h3>
+                    <p class="text-[10px] text-slate-500 font-semibold mt-1">One row per Yoco order — which bucket it landed in, and whether reporting/stock actually posted.</p>
+                </div>
+                <div class="flex items-center gap-2">
+                    <select id="webhook-log-window" onchange="setWebhookLogWindow(this.value)" class="bg-white/5 border border-white/10 rounded-lg px-3 py-1.5 text-[10px] font-bold text-slate-300 focus:outline-none focus:border-violet-500/50">
+                        ${WEBHOOK_LOG_WINDOW_OPTIONS.map(o => `<option value="${o.hours}">${o.label}</option>`).join('')}
+                    </select>
+                    <button onclick="loadWebhookLogData()" class="btn-ghost text-[10px]"><i class="fa-solid fa-sync mr-2"></i>Refresh</button>
+                    <button id="webhook-log-reprocess-all-btn" onclick="reprocessAllInView()" class="btn-ghost text-[10px] text-amber-300 border-amber-500/30 hover:bg-amber-500/10"><i class="fa-solid fa-bolt mr-2"></i>Reprocess All In View</button>
+                </div>
+            </div>
+            <div class="glass p-4">
+                <div class="relative h-64 w-full"><canvas id="webhook-funnel-chart"></canvas></div>
+                <div id="webhook-funnel-empty" class="hidden text-center text-[11px] text-slate-500 py-10">No completed-sale-trigger webhooks in this window.</div>
+            </div>
+            <div id="webhook-log-bucket-filters" class="flex flex-wrap gap-1.5"></div>
+            <div id="webhook-log-table-wrap" class="text-xs text-slate-400">Loading...</div>
+        </div>
+    `, true);
+    await loadWebhookLogData();
+}
+
+async function loadWebhookLogData() {
+    const { wsId, windowHours, bucket } = webhookLogState;
+    const tableWrap = document.getElementById('webhook-log-table-wrap');
     try {
-        const result = await callAdminApi('GET', `/api/admin/workspaces/${encodeURIComponent(wsId)}/yoco-v2/receipts?limit=50`);
-        const rows = result?.rows || [];
-        const body = document.getElementById('webhook-logs-body');
-        if (!body) return;
-        if (!rows.length) { body.innerHTML = '<p class="text-slate-500">No webhook receipts recorded for this workspace.</p>'; return; }
-        body.innerHTML = `
-            <table class="w-full text-left text-[10px]">
-                <thead><tr class="text-slate-500 uppercase border-b border-white/10"><th class="py-2 pr-2">Received</th><th class="py-2 pr-2">Event</th><th class="py-2 pr-2">Signature</th><th class="py-2 pr-2">Capture</th><th class="py-2">Queue</th></tr></thead>
-                <tbody>${rows.map(r => `<tr class="border-b border-white/5"><td class="py-2 pr-2">${adminEscapeHtml(formatAdminDateTime(r.received_at))}</td><td class="py-2 pr-2">${adminEscapeHtml(r.event_type || '')}</td><td class="py-2 pr-2">${adminEscapeHtml(r.signature_status || '')}</td><td class="py-2 pr-2">${adminEscapeHtml(r.capture_status || '')}</td><td class="py-2">${adminEscapeHtml(r.queue_status || '')}</td></tr>`).join('')}</tbody>
-            </table>
-        `;
+        const [log, funnel] = await Promise.all([
+            callAdminApi('GET', `/api/admin/workspaces/${encodeURIComponent(wsId)}/yoco-v2/webhook-log?windowHours=${windowHours}&limit=200${bucket ? `&bucket=${encodeURIComponent(bucket)}` : ''}`),
+            callAdminApi('GET', `/api/admin/workspaces/${encodeURIComponent(wsId)}/yoco-v2/webhook-funnel?windowHours=${windowHours}`)
+        ]);
+        webhookLogState.rows = log?.rows || [];
+        webhookLogState.total = log?.total || 0;
+        webhookLogState.funnel = funnel || null;
+        const windowSelect = document.getElementById('webhook-log-window');
+        if (windowSelect) windowSelect.value = String(windowHours);
+        renderWebhookFunnelChart(funnel);
+        renderWebhookLogBucketFilters(funnel);
+        renderWebhookLogTable();
+        if (log?.truncated) showToast(`Scanned the ${log.scanned} most recent webhooks in this window — narrow the window to see everything.`, 'warning');
     } catch (e) {
-        const body = document.getElementById('webhook-logs-body');
-        if (body) body.innerHTML = `<p class="text-red-400">Failed to load logs: ${adminEscapeHtml(e.message)}</p>`;
+        if (tableWrap) tableWrap.innerHTML = `<p class="text-red-400">Failed to load webhook log: ${adminEscapeHtml(e.message)}</p>`;
     }
 }
+
+function setWebhookLogWindow(hours) {
+    webhookLogState.windowHours = Number(hours) || 24;
+    loadWebhookLogData();
+}
+
+function setWebhookLogBucketFilter(bucket) {
+    webhookLogState.bucket = webhookLogState.bucket === bucket ? '' : bucket;
+    loadWebhookLogData();
+}
+
+function renderWebhookFunnelChart(funnel) {
+    const canvas = document.getElementById('webhook-funnel-chart');
+    const empty = document.getElementById('webhook-funnel-empty');
+    if (!canvas) return;
+    if (webhookFunnelChart) { webhookFunnelChart.destroy(); webhookFunnelChart = null; }
+    const links = funnel?.links || [];
+    if (!links.length) {
+        canvas.classList.add('hidden');
+        if (empty) empty.classList.remove('hidden');
+        return;
+    }
+    canvas.classList.remove('hidden');
+    if (empty) empty.classList.add('hidden');
+    const sankeyRegistered = () => { try { return Boolean(Chart.registry.controllers.get('sankey')); } catch { return false; } };
+    if (typeof window.SankeyController !== 'undefined' && typeof window.Flow !== 'undefined' && !sankeyRegistered()) {
+        Chart.register(window.SankeyController, window.Flow);
+    }
+    if (!sankeyRegistered()) {
+        // Sankey plugin failed to load (e.g. CDN blocked) — fall back to a simple horizontal bar
+        // of bucket counts rather than leaving a blank canvas with no explanation.
+        webhookFunnelChart = new Chart(canvas, {
+            type: 'bar',
+            data: {
+                labels: (funnel?.buckets || []).map(b => saleBucketMeta(b.bucket).label),
+                datasets: [{ data: (funnel?.buckets || []).map(b => b.count), backgroundColor: (funnel?.buckets || []).map(b => saleBucketMeta(b.bucket).color) }]
+            },
+            options: { indexAxis: 'y', plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#94a3b8' } }, y: { ticks: { color: '#cbd5e1', font: { size: 10 } } } } }
+        });
+        return;
+    }
+    const colorOf = (label) => saleBucketMeta(label).color || (/^(reported|resolved)/i.test(label) ? '#34d399' : '#6366f1');
+    webhookFunnelChart = new Chart(canvas, {
+        type: 'sankey',
+        data: {
+            datasets: [{
+                data: links.map(l => ({ from: l.from, to: l.to, flow: l.value })),
+                colorFrom: (c) => colorOf(c.dataset.data[c.dataIndex].from),
+                colorTo: (c) => colorOf(c.dataset.data[c.dataIndex].to),
+                color: '#cbd5e1',
+                labels: Object.fromEntries(links.flatMap(l => [[l.from, saleBucketMeta(l.from).label !== l.from ? saleBucketMeta(l.from).label : l.from], [l.to, saleBucketMeta(l.to).label]]))
+            }]
+        },
+        options: {
+            plugins: { legend: { display: false }, tooltip: { callbacks: { label: (ctx) => `${ctx.raw.from} → ${ctx.raw.to}: ${ctx.raw.flow}` } } }
+        }
+    });
+}
+
+function renderWebhookLogBucketFilters(funnel) {
+    const wrap = document.getElementById('webhook-log-bucket-filters');
+    if (!wrap) return;
+    const buckets = funnel?.buckets || [];
+    if (!buckets.length) { wrap.innerHTML = ''; return; }
+    wrap.innerHTML = buckets.map(b => {
+        const meta = saleBucketMeta(b.bucket);
+        const active = webhookLogState.bucket === b.bucket;
+        return `<button onclick="setWebhookLogBucketFilter(${adminInlineString(b.bucket)})" class="px-3 py-1.5 rounded-lg text-[10px] font-bold border transition-all ${active ? 'text-white' : 'text-slate-400 border-white/10 hover:border-white/20'}" style="${active ? `background:${meta.color}33;border-color:${meta.color};color:${meta.color}` : ''}">${adminEscapeHtml(meta.label)} <span class="opacity-70">${b.count}</span></button>`;
+    }).join('') + (webhookLogState.bucket ? `<button onclick="setWebhookLogBucketFilter('')" class="px-3 py-1.5 rounded-lg text-[10px] font-bold text-slate-500 hover:text-white">Clear filter ✕</button>` : '');
+}
+
+function renderWebhookLogTable() {
+    const wrap = document.getElementById('webhook-log-table-wrap');
+    if (!wrap) return;
+    const rows = webhookLogState.rows;
+    if (!rows.length) { wrap.innerHTML = '<p class="text-slate-500 py-6 text-center">No orders in this window/filter.</p>'; return; }
+    wrap.innerHTML = `
+        <p class="text-[10px] text-slate-500 font-semibold mb-2">${webhookLogState.total} order${webhookLogState.total === 1 ? '' : 's'}${webhookLogState.bucket ? ` in ${saleBucketMeta(webhookLogState.bucket).label}` : ''}${rows.length < webhookLogState.total ? ` (showing ${rows.length})` : ''}</p>
+        <table class="w-full text-left text-[10px]">
+            <thead><tr class="text-slate-500 uppercase border-b border-white/10">
+                <th class="py-2 pr-2">Order</th><th class="py-2 pr-2">Bucket</th><th class="py-2 pr-2">Deliveries</th>
+                <th class="py-2 pr-2">Last Seen</th><th class="py-2 pr-2">Error</th><th class="py-2 text-right">Action</th>
+            </tr></thead>
+            <tbody>${rows.map(renderWebhookLogRow).join('')}</tbody>
+        </table>
+    `;
+}
+
+function renderWebhookLogRow(row) {
+    const meta = saleBucketMeta(row.bucket);
+    const rowId = `webhook-log-row-${adminEscapeHtml(row.reprocessRawEventId || row.sourceOrderId)}`;
+    return `
+        <tr class="border-b border-white/5" id="${rowId}">
+            <td class="py-2 pr-2 font-mono text-slate-300">${adminEscapeHtml(row.sourceOrderId)}</td>
+            <td class="py-2 pr-2"><span class="px-2 py-1 rounded-md font-bold" style="background:${meta.color}22;color:${meta.color}">${adminEscapeHtml(meta.label)}</span></td>
+            <td class="py-2 pr-2 text-slate-400">${row.deliveryCount} (${adminEscapeHtml((row.eventTypes || []).join(', '))})</td>
+            <td class="py-2 pr-2 text-slate-500">${adminEscapeHtml(formatAdminDateTime(row.lastReceivedAt))}</td>
+            <td class="py-2 pr-2 text-red-300">${adminEscapeHtml(row.lastErrorMessage || '')}</td>
+            <td class="py-2 text-right">${row.canReprocess
+                ? `<button onclick="reprocessWebhookLogOrder(${adminInlineString(row.reprocessRawEventId)}, ${adminInlineString(row.reprocessAction)}, ${adminInlineString(row.sourceOrderId)})" class="btn-ghost text-[9px] px-2 py-1"><i class="fa-solid fa-rotate-right mr-1"></i>Reprocess</button>`
+                : '<span class="text-slate-600">—</span>'}</td>
+        </tr>
+    `;
+}
+
+async function reprocessWebhookLogOrder(rawEventId, action, sourceOrderId, silent) {
+    const wsId = webhookLogState.wsId;
+    const row = document.getElementById(`webhook-log-row-${rawEventId}`);
+    if (!silent && !confirm(`Reprocess order ${sourceOrderId} with LIVE effects (real reporting/stock writes, not a dry run)?`)) return false;
+    if (row) row.style.opacity = '0.5';
+    try {
+        await callAdminApi('POST', `/api/admin/workspaces/${encodeURIComponent(wsId)}/yoco-v2/events/${encodeURIComponent(rawEventId)}/${action}`, { apply_live_effects: true });
+        if (!silent) showToast(`Queued live reprocessing for ${sourceOrderId}.`, 'success');
+        return true;
+    } catch (e) {
+        if (!silent) showToast(`Failed to reprocess ${sourceOrderId}: ${e.message}`, 'error');
+        if (row) row.style.opacity = '1';
+        return false;
+    }
+}
+
+async function reprocessAllInView() {
+    const rows = webhookLogState.rows.filter(r => r.canReprocess);
+    if (!rows.length) { showToast('Nothing reprocessable in the current view.', 'info'); return; }
+    if (!confirm(`Reprocess all ${rows.length} order(s) currently in view with LIVE effects? This queues real reporting/stock writes for each, spaced out to respect rate limits — it can take a while for a large batch.`)) return;
+    const btn = document.getElementById('webhook-log-reprocess-all-btn');
+    if (btn) { btn.disabled = true; btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin mr-2"></i>Reprocessing 0/${rows.length}`; }
+    let done = 0, failed = 0;
+    for (const row of rows) {
+        const ok = await reprocessWebhookLogOrder(row.reprocessRawEventId, row.reprocessAction, row.sourceOrderId, true);
+        if (!ok) failed += 1;
+        done += 1;
+        if (btn) btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin mr-2"></i>Reprocessing ${done}/${rows.length}`;
+        // Spaced out to stay under the ~60 req/min admin-token rate limit, same pacing used for
+        // the manual Gonubie backfill batch this tool replaces.
+        await new Promise(resolve => setTimeout(resolve, 1100));
+    }
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-bolt mr-2"></i>Reprocess All In View'; }
+    showToast(`Queued ${done - failed}/${done} order(s) for live reprocessing.${failed ? ` ${failed} failed to queue.` : ''}`, failed ? 'warning' : 'success');
+    setTimeout(() => loadWebhookLogData(), 3000);
+}
+
 
 async function viewWebhookAuditTrailForWorkspace(wsId) {
     openModal(`<div class="space-y-4"><h3 class="text-sm font-black uppercase tracking-widest text-white">Webhook Admin Actions</h3><div id="webhook-actions-body" class="text-xs text-slate-400">Loading...</div></div>`);
@@ -6371,9 +6574,9 @@ async function executeFixBrokenAccess() {
 }
 
 // ─── Modal ───
-function openModal(html) {
+function openModal(html, wide) {
     const container = document.getElementById('modal-container');
-    container.className = 'glass w-full max-w-2xl p-7 md:p-8 space-y-5 max-h-[86vh] overflow-y-auto';
+    container.className = `glass w-full ${wide ? 'max-w-5xl' : 'max-w-2xl'} p-7 md:p-8 space-y-5 max-h-[86vh] overflow-y-auto`;
     container.innerHTML = `
         <div class="relative w-full">
             <div class="absolute -top-4 -right-4 z-[250]">

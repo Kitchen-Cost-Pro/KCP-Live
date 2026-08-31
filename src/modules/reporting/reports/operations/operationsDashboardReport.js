@@ -787,6 +787,22 @@ function resolveQuantitySnapshot(kind = 'opening', first = {}, rows = [], dataSe
     if (stockTakeValue.available) return stockTakeValue;
   }
 
+  // No stored point-in-time opening snapshot exists for most workspaces (dataSet.stockSnapshots is
+  // typically empty, and a live stock item has no "openingQty"-style field to fall back to the way it
+  // does for "actual"/current stock above) — Opening Stock Value/Qty was silently showing R0 for
+  // everyone as a result. Derive it instead the same way Stock on Hand's backend now derives its
+  // date-bounded opening stock: actual (current) balance minus the net of every ledger movement
+  // already included for this item/location within the selected period — `rows` here is exactly that
+  // date-filtered set (see createSnapshotResolver/getTrustedLedgerRows). Only meaningful once we have
+  // a resolved actual balance to walk back from; otherwise stay unavailable rather than fabricate 0.
+  if (kind === 'opening') {
+    const actual = resolveQuantitySnapshot('actual', first, rows, dataSet, stockSnapshotLookup, filters);
+    if (actual.available) {
+      const netQtyForPeriod = sumBy(rows, 'netQty');
+      return { value: actual.value - netQtyForPeriod, available: true };
+    }
+  }
+
   return { value: 0, available: false };
 }
 
