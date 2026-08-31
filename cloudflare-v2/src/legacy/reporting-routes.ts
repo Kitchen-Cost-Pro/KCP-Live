@@ -7307,6 +7307,8 @@ async function enrichTransactionReferenceReportRows(
     manufacturing_batch: "manufacturing_batch",
     transfer: "transfer",
     stock_take: "stock_take",
+    adjustment: "adjustment",
+    wastage_adjustment: "adjustment",
   };
   for (const [documentType, entityType] of Object.entries(
     entityByDocumentType,

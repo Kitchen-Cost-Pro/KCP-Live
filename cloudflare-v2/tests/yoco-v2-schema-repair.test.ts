@@ -3,6 +3,8 @@ import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import { splitSqlStatements, isRetryableAddColumnError } from '../src/d1-facade';
 import {
+  YOCO_V2_RECONCILIATION_FINDINGS_COLUMNS_SCHEMA_REPAIR,
+  YOCO_V2_RECONCILIATION_FINDINGS_COLUMNS_SCHEMA_REPAIR_ID,
   YOCO_V2_RUNTIME_SCHEMA_REPAIR,
   YOCO_V2_RUNTIME_SCHEMA_REPAIR_ID,
   YOCO_V2_VAT_SNAPSHOT_SCHEMA_REPAIR,
@@ -152,4 +154,74 @@ test('WorkspaceDO runs the V2 schema repair once per tenant and retries failed r
   // that distinction matters — it's what a real production CPU-limit incident was traced to).
   assert.match(workspaceSource, /if \(!vatSnapshotRepairApplied\)/);
   assert.match(workspaceSource, /this\.db\.execScript\(YOCO_V2_VAT_SNAPSHOT_SCHEMA_REPAIR\)/);
+  // Same wiring, for the findings-table follow-up repair — see its own schema-repair.ts comment
+  // for the live 2026-08-31 incident (a drifted tenant's reconciliation run failing outright on
+  // its first finding) this closes.
+  assert.match(workspaceSource, /if \(!reconciliationFindingsColumnsRepairApplied\)/);
+  assert.match(workspaceSource, /this\.db\.execScript\(YOCO_V2_RECONCILIATION_FINDINGS_COLUMNS_SCHEMA_REPAIR\)/);
+});
+
+test('reconciliation-findings-columns repair backfills a drifted tenant and is safe to run repeatedly', () => {
+  const database = new DatabaseSync(':memory:');
+  database.exec(`
+    CREATE TABLE yoco_v2_reconciliation_findings (
+      id TEXT PRIMARY KEY,
+      reconciliation_run_id TEXT NOT NULL,
+      workspace_id TEXT NOT NULL,
+      integration_id TEXT NOT NULL,
+      source_entity_type TEXT NOT NULL,
+      source_entity_id TEXT NOT NULL,
+      finding_type TEXT NOT NULL,
+      severity TEXT NOT NULL,
+      status TEXT NOT NULL,
+      details_json TEXT NOT NULL DEFAULT '{}',
+      repair_action TEXT,
+      repaired_at TEXT,
+      created_at TEXT NOT NULL
+    );
+  `);
+  // A row written before this tenant ever got the missing columns/index — exactly the state a
+  // drifted tenant is in when it hits this bug live.
+  database.exec(
+    `INSERT INTO yoco_v2_reconciliation_findings
+      (id, reconciliation_run_id, workspace_id, integration_id, source_entity_type, source_entity_id,
+       finding_type, severity, status, created_at)
+     VALUES ('finding_1', 'run_1', 'ws_1', 'yoco:ws_1', 'ORDER', 'ord_1', 'MISSING_SALE_EVENT', 'HIGH', 'OPEN', '2026-08-30T00:00:00.000Z')`
+  );
+
+  applyScript(database, YOCO_V2_RECONCILIATION_FINDINGS_COLUMNS_SCHEMA_REPAIR);
+  applyScript(database, YOCO_V2_RECONCILIATION_FINDINGS_COLUMNS_SCHEMA_REPAIR);
+
+  const columns = database.prepare(`PRAGMA table_info(yoco_v2_reconciliation_findings)`).all() as Array<{ name: string }>;
+  const names = new Set(columns.map((c) => c.name));
+  for (const required of ['last_seen_at', 'last_run_id', 'occurrence_count']) {
+    assert.ok(names.has(required), `missing yoco_v2_reconciliation_findings.${required}`);
+  }
+  const indexes = database.prepare(`PRAGMA index_list(yoco_v2_reconciliation_findings)`).all() as Array<{ name: string; unique: number }>;
+  assert.ok(indexes.some((i) => i.name === 'ux_yoco_v2_reconciliation_findings_entity' && i.unique === 1), 'missing unique findings index');
+
+  const existing = database.prepare(`SELECT last_seen_at, occurrence_count FROM yoco_v2_reconciliation_findings WHERE id = 'finding_1'`).get() as any;
+  assert.equal(existing.last_seen_at, '2026-08-30T00:00:00.000Z');
+  assert.equal(existing.occurrence_count, 1);
+
+  // Exercises the exact upsert shape addFinding() uses in production — this is what threw
+  // "no such column: last_seen_at" live before this repair existed.
+  database.exec(
+    `INSERT INTO yoco_v2_reconciliation_findings
+      (id, reconciliation_run_id, workspace_id, integration_id, source_entity_type, source_entity_id,
+       finding_type, severity, status, details_json, repair_action, repaired_at, created_at, last_seen_at, last_run_id, occurrence_count)
+     VALUES ('finding_2', 'run_2', 'ws_1', 'yoco:ws_1', 'ORDER', 'ord_1', 'MISSING_SALE_EVENT', 'HIGH', 'OPEN', '{}', NULL, NULL, '2026-08-31T00:00:00.000Z', '2026-08-31T00:00:00.000Z', 'run_2', 1)
+     ON CONFLICT(workspace_id, integration_id, finding_type, source_entity_type, source_entity_id)
+     DO UPDATE SET
+       last_seen_at = excluded.last_seen_at,
+       last_run_id = excluded.last_run_id,
+       occurrence_count = yoco_v2_reconciliation_findings.occurrence_count + 1`
+  );
+  const recurred = database.prepare(`SELECT COUNT(*) AS n FROM yoco_v2_reconciliation_findings WHERE workspace_id = 'ws_1'`).get() as any;
+  assert.equal(recurred.n, 1, 'the ON CONFLICT upsert should update the existing row, not insert a second one');
+  const updated = database.prepare(`SELECT occurrence_count, last_run_id FROM yoco_v2_reconciliation_findings WHERE id = 'finding_1'`).get() as any;
+  assert.equal(updated.occurrence_count, 2);
+  assert.equal(updated.last_run_id, 'run_2');
+
+  assert.match(YOCO_V2_RECONCILIATION_FINDINGS_COLUMNS_SCHEMA_REPAIR_ID, /^yoco-v2-reconciliation-findings-columns-v\d+$/);
 });

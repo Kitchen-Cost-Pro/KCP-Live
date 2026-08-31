@@ -303,7 +303,9 @@ function resolveTransactionIdentity(row = {}, result = {}, reference = "") {
             ? "transfer"
             : reportId === "stock_take_audit" || prefix === "STK"
               ? "stock_take"
-              : "";
+              : reportId === "adjustments" || prefix === "ADJ"
+                ? "adjustment"
+                : "";
   const entityId = text(
     row.grvId ||
       row.creditNoteId ||

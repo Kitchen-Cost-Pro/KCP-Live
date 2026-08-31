@@ -234,3 +234,75 @@ CREATE INDEX IF NOT EXISTS idx_adjustments_workspace_type
 `;
 
 export const ADJUSTMENT_LINES_INDEX_SCHEMA_REPAIR_ID = 'adjustment-lines-index-v1';
+
+/**
+ * Same drift problem again, for the SECOND half of migration 33 (YOCO_V2_RECONCILIATION_BACKOFF_MIGRATION)
+ * that YOCO_V2_VAT_SNAPSHOT_SCHEMA_REPAIR deliberately left out. That repair's own comment explains
+ * why: at the time, the findings-table columns/dedupe looked like "a data-cleanliness improvement,
+ * not something blocking correctness". That turned out to be wrong. addFinding()'s upsert
+ * unconditionally references last_seen_at/last_run_id/occurrence_count and relies on
+ * ux_yoco_v2_reconciliation_findings_entity for its ON CONFLICT target — on a drifted tenant
+ * missing either, the INSERT throws outright (confirmed live, 2026-08-31, WS-leo-s-demo-de3159:
+ * "no such column: last_seen_at" on literally the first finding recorded), which fails the ENTIRE
+ * reconciliation run, not just findings bookkeeping. Reconciliation is the backstop that resolves an
+ * order left deliberately unwritten by the order.updated/order.completed "not final yet" skip path
+ * (see sale-resolver.ts) — a drifted tenant hitting this had that backstop silently broken.
+ *
+ * Reuses the same single-pass GROUP BY dedupe as the original migration (not the correlated-subquery
+ * form that caused the 2026-08-27 quota incident) — safe here too, and for the same reason: a tenant
+ * that never got these columns also never successfully wrote a finding through the broken upsert, so
+ * there is no accumulated duplicate backlog to collapse. Included anyway for parity with the real
+ * migration, in case a drifted tenant has some pre-existing rows from before this exact combination
+ * of gaps.
+ */
+export const YOCO_V2_RECONCILIATION_FINDINGS_COLUMNS_SCHEMA_REPAIR = `
+ALTER TABLE yoco_v2_reconciliation_findings ADD COLUMN last_seen_at TEXT;
+ALTER TABLE yoco_v2_reconciliation_findings ADD COLUMN last_run_id TEXT;
+ALTER TABLE yoco_v2_reconciliation_findings ADD COLUMN occurrence_count INTEGER NOT NULL DEFAULT 1;
+
+UPDATE yoco_v2_reconciliation_findings
+   SET last_seen_at = COALESCE(last_seen_at, created_at),
+       last_run_id = COALESCE(last_run_id, reconciliation_run_id);
+
+DROP TABLE IF EXISTS _kcp_v2_findings_rollup_repair;
+CREATE TABLE _kcp_v2_findings_rollup_repair (
+  keep_rowid INTEGER PRIMARY KEY,
+  occurrence_count INTEGER NOT NULL,
+  last_seen_at TEXT,
+  any_repaired INTEGER NOT NULL,
+  repaired_at TEXT
+);
+INSERT INTO _kcp_v2_findings_rollup_repair (keep_rowid, occurrence_count, last_seen_at, any_repaired, repaired_at)
+SELECT MIN(rowid),
+       COUNT(*),
+       MAX(COALESCE(last_seen_at, created_at)),
+       MAX(CASE WHEN status = 'REPAIRED' THEN 1 ELSE 0 END),
+       MAX(repaired_at)
+  FROM yoco_v2_reconciliation_findings
+ GROUP BY workspace_id, integration_id, finding_type, source_entity_type, source_entity_id;
+
+UPDATE yoco_v2_reconciliation_findings
+   SET occurrence_count = MAX(1, (
+         SELECT r.occurrence_count FROM _kcp_v2_findings_rollup_repair r
+          WHERE r.keep_rowid = yoco_v2_reconciliation_findings.rowid)),
+       last_seen_at = COALESCE((
+         SELECT r.last_seen_at FROM _kcp_v2_findings_rollup_repair r
+          WHERE r.keep_rowid = yoco_v2_reconciliation_findings.rowid), last_seen_at),
+       status = CASE WHEN (
+         SELECT r.any_repaired FROM _kcp_v2_findings_rollup_repair r
+          WHERE r.keep_rowid = yoco_v2_reconciliation_findings.rowid) = 1 THEN 'REPAIRED' ELSE status END,
+       repaired_at = COALESCE(repaired_at, (
+         SELECT r.repaired_at FROM _kcp_v2_findings_rollup_repair r
+          WHERE r.keep_rowid = yoco_v2_reconciliation_findings.rowid))
+ WHERE rowid IN (SELECT keep_rowid FROM _kcp_v2_findings_rollup_repair);
+
+DELETE FROM yoco_v2_reconciliation_findings
+ WHERE rowid NOT IN (SELECT keep_rowid FROM _kcp_v2_findings_rollup_repair);
+
+DROP TABLE _kcp_v2_findings_rollup_repair;
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_yoco_v2_reconciliation_findings_entity
+  ON yoco_v2_reconciliation_findings(workspace_id, integration_id, finding_type, source_entity_type, source_entity_id);
+`;
+
+export const YOCO_V2_RECONCILIATION_FINDINGS_COLUMNS_SCHEMA_REPAIR_ID = 'yoco-v2-reconciliation-findings-columns-v1';

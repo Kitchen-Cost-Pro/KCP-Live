@@ -7354,6 +7354,16 @@ export async function postAdjustment(
   const reason = text(payload.note || payload.reason);
   const wasteReason = text(payload.wasteReason);
   const createdAt = nowIso();
+  // Stamped at post time (not derived lazily on read) so the reference returned in this response is
+  // the same one the Adjustments report's Transaction Detail drawer resolves later — same pattern as
+  // every other document-posting route (GRV, stock take, credit note, transfers, manufacturing).
+  const transactionReference = await ensureTransactionReference(
+    env,
+    workspaceId,
+    "adjustment",
+    adjustmentId,
+    occurredAt,
+  );
   const statements = [
     env.DB.prepare(
       `INSERT INTO adjustments (id, workspace_id, adjustment_type, occurred_at, reason, created_by, raw_json, created_at)
@@ -7551,7 +7561,12 @@ export async function postAdjustment(
   );
 
   await env.DB.batch(statements);
-  return json(request, env, { ok: true, id: adjustmentId, entries });
+  return json(request, env, {
+    ok: true,
+    id: adjustmentId,
+    transactionReference,
+    entries,
+  });
 }
 
 export async function postWastageAdjustment(
@@ -7602,6 +7617,13 @@ export async function postWastageAdjustment(
     }
   }
   const createdAt = nowIso();
+  const transactionReference = await ensureTransactionReference(
+    env,
+    workspaceId,
+    "adjustment",
+    adjustmentId,
+    occurredAt,
+  );
   const statements: DbStatementLike[] = [
     env.DB.prepare(
       `INSERT INTO adjustments (id, workspace_id, adjustment_type, occurred_at, reason, created_by, raw_json, created_at)
@@ -7784,6 +7806,7 @@ export async function postWastageAdjustment(
   return json(request, env, {
     ok: true,
     id: adjustmentId,
+    transactionReference,
     movements: movementCount,
     summary,
   });

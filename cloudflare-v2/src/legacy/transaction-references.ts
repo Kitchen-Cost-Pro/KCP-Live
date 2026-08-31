@@ -1,7 +1,7 @@
 import type { Env } from "./types";
 
 export type TransactionEntityType =
-  "grv" | "credit_note" | "manufacturing_batch" | "transfer" | "stock_take";
+  "grv" | "credit_note" | "manufacturing_batch" | "transfer" | "stock_take" | "adjustment";
 
 const ENTITY_PREFIX: Record<TransactionEntityType, string> = {
   grv: "GRV",
@@ -9,6 +9,7 @@ const ENTITY_PREFIX: Record<TransactionEntityType, string> = {
   manufacturing_batch: "MFG",
   transfer: "TRF",
   stock_take: "STK",
+  adjustment: "ADJ",
 };
 
 let schemaReady: Promise<void> | null = null;

@@ -21,10 +21,11 @@ const summaryColumns = [
   { key: 'locationName', label: 'Location', sortable: true },
   { key: 'adjustmentType', label: 'Adjustment Type', sortable: true },
   { key: 'reason', label: 'Reason', sortable: true },
+  { key: 'itemsAdjusted', label: 'Items Adjusted', type: 'number', align: 'right', sortable: true },
   { key: 'totalQtyAdjusted', label: 'Total Qty Adjusted', type: 'number', align: 'right', tooltipKey: 'adjustmentQty', cellTooltip: adjustmentQtyTooltip, sortable: true },
   { key: 'totalValueAdjusted', label: 'Total Value Adjusted', type: 'money', align: 'right', tooltipKey: 'adjustmentValue', cellTooltip: adjustmentValueTooltip, sortable: true },
-  { key: 'adjustmentEvents', label: 'Adjustment Events', type: 'number', align: 'right', sortable: true },
-  { key: 'createdBy', label: 'Created By', sortable: true }
+  { key: 'createdBy', label: 'Created By', sortable: true },
+  { key: 'transactionReference', label: 'Transaction ID', type: 'transaction_id', sortable: true }
 ];
 
 const bySourceColumns = [
@@ -174,10 +175,11 @@ export const adjustmentsReport = {
       locationName: 'Location',
       adjustmentType: 'Adjustment Type',
       reason: 'Reason',
+      itemsAdjusted: 'Items Adjusted',
       totalQtyAdjusted: 'Total Qty Adjusted',
       totalValueAdjusted: 'Total Value Adjusted',
-      adjustmentEvents: 'Adjustment Events',
-      createdBy: 'Created By'
+      createdBy: 'Created By',
+      transactionReference: 'Transaction ID'
     },
     by_source: {
       adjustmentSource: 'Source',
@@ -295,6 +297,7 @@ function normalizeAdjustmentRow(row = {}, index = 0) {
     createdBy: text(row.createdBy || row.user || row.createdByName),
     notes: text(row.notes || row.note),
     sourceId: text(row.sourceId),
+    transactionReference: text(row.transactionReference),
     documentNumber: text(row.documentNumber),
     signedDirection,
     isWastageAdjustment: isWastageAdjustment(row),
@@ -325,20 +328,31 @@ function summarizeAdjustmentRows(rows = [], keySelector, rowBuilder) {
   return Array.from(groupBy(rows, keySelector).entries()).map(([key, groupRows]) => rowBuilder(key, groupRows));
 }
 
+// One summary row = one posted adjustment/wastage/correction submission (matching how GRV Log's
+// summary groups by grvId, not by date/location/type/reason which can span several distinct
+// submissions) — this is what makes a summary row map 1:1 onto a single transaction drawer.
 function toSummaryRow(key, rows = []) {
   const first = rows[0] || {};
+  const locationNames = uniqueValues(rows, 'locationName');
   return {
     id: `adjustments-summary:${key}`,
     date: first.date || '',
-    locationName: first.locationName || 'Unassigned',
+    locationName: locationNames.length === 1 ? locationNames[0] : (locationNames.length > 1 ? 'Multiple Locations' : 'Unassigned'),
     adjustmentType: first.adjustmentType || 'Adjustment',
     reason: first.reason || 'No reason captured',
+    itemsAdjusted: uniqueValues(rows, (row) => row.itemId || row.itemName).length,
     totalQtyAdjusted: sumAbs(rows, 'qtyAdjusted'),
     totalValueAdjusted: sumBy(rows, 'valueImpact'),
-    adjustmentEvents: rows.length,
     createdBy: listTopText(rows, 'createdBy'),
+    sourceId: text(first.sourceId, key),
+    transactionReference: text(first.transactionReference),
     __sourceRows: rows
   };
+}
+
+function uniqueValues(rows = [], keySelector) {
+  const selector = typeof keySelector === 'function' ? keySelector : (row) => row[keySelector];
+  return [...new Set(toArray(rows).map((row) => text(selector(row))).filter(Boolean))];
 }
 
 function toSourceRow(key, rows = []) {
@@ -412,9 +426,9 @@ function getTotalsForView(view = 'summary', rows = []) {
   const reportRows = toArray(rows);
   if (view === 'summary') {
     return {
+      itemsAdjusted: sumBy(reportRows, 'itemsAdjusted'),
       totalQtyAdjusted: sumBy(reportRows, 'totalQtyAdjusted'),
-      totalValueAdjusted: sumBy(reportRows, 'totalValueAdjusted'),
-      adjustmentEvents: sumBy(reportRows, 'adjustmentEvents')
+      totalValueAdjusted: sumBy(reportRows, 'totalValueAdjusted')
     };
   }
   if (view === 'by_source') {
@@ -568,7 +582,7 @@ function parseMetadata(value) {
 }
 
 function summaryKey(row = {}) {
-  return [row.date, row.locationId || row.locationName, row.adjustmentType, row.reason, row.createdBy].map(text).join('::');
+  return text(row.sourceId) || [row.date, row.locationId || row.locationName, row.adjustmentType, row.reason, row.createdBy].map(text).join('::');
 }
 
 function sourceKey(row = {}) {
