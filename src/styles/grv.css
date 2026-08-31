@@ -451,7 +451,7 @@
 
 #view-grv .grv-table {
   width: 100%;
-  min-width: 920px;
+  min-width: 1440px;
   table-layout: fixed;
   border-collapse: separate;
   border-spacing: 0;
@@ -459,6 +459,10 @@
 
 #view-grv .grv-tableCol--check {
   width: 42px;
+}
+
+#view-grv .grv-tableCol--item {
+  width: 240px;
 }
 
 #view-grv .grv-tableCol--uom {

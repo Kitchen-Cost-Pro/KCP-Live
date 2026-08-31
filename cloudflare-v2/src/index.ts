@@ -1466,7 +1466,11 @@ export default {
     ).all<{ id: string }>();
     const ids = (list.results || []).map((r) => String(r.id)).filter(Boolean);
     console.log(`[low-stock-cron] evaluating ${ids.length} active workspaces`);
-    const isCatalogueSyncTick = _event.cron === '*/45 * * * *';
+    // Single `*/15 * * * *` trigger now (see wrangler.toml) — catalogue sync stays on its intended
+    // 45-minute cadence via a wall-clock check instead of a second, independently-firing cron
+    // trigger (the previous `*/45 * * * *` pair double-ran the other three jobs whenever both
+    // triggers landed on the same minute; see CRON_BACKUP_RESTORE.md).
+    const isCatalogueSyncTick = new Date(_event.scheduledTime).getUTCMinutes() % 45 === 0;
     const jobs = ids.flatMap((id) => [
       () => callWorkspaceDO(env, id, 'admin-action/low-stock-due', { uid: 'system', email: '' }, 'POST', {})
         .catch((cause) => { console.error(`[low-stock-cron] ws=${id} failed: ${cause}`); return null; }),

@@ -167,6 +167,16 @@ async function rebuildSale(env: YocoV2ApiClientEnv, raw: Row): Promise<boolean> 
   const run = await createProcessingRun(env.DB, locked);
   try {
     const resolved = await resolveCanonicalYocoSale(env, { rawEvent: locked, processingRun: run, forceRefresh: false });
+    // Reachable in practice, not just for type-narrowing: the synthetic event's embedded order (from
+    // Yoco's Orders API list, fetched fresh by fetchReconciliationPages) is genuinely still open for
+    // a real still-open tab reconciliation happened to scan. isSkippableNonFinalEvent then skips this
+    // the same way a live order.completed/order.updated webhook would — leave it unresolved rather
+    // than permanently stamp UNSUPPORTED_ORDER_STATE; the NEXT reconciliation run (or a live webhook
+    // in the meantime) gets its own fresh look.
+    if (resolved.skipped) {
+      await updateRunAndRawEvent(env.DB, { rawEventId: text(locked.id), processingRunId: text(run.id), status: 'COMPLETED', currentStep: 'RECONCILIATION_SALE_SKIPPED', completedAt: nowIso() });
+      return false;
+    }
     await buildSaleEffectProposals(env, resolved.domainEvent, resolved.canonical, text(locked.id), text(run.id));
     await applyControlledLiveSaleEffects(env, { domainEvent: resolved.domainEvent, canonical: resolved.canonical, rawEvent: locked, rawEventId: text(locked.id), processingRunId: text(run.id), message: { raw_event_id: text(locked.id), workspace_id: text(locked.workspace_id), integration_id: text(locked.integration_id), event_type: text(locked.event_type), trace_id: text(locked.trace_id), live_effects: true } });
     await updateRunAndRawEvent(env.DB, { rawEventId: text(locked.id), processingRunId: text(run.id), status: 'COMPLETED', currentStep: 'RECONCILIATION_REBUILT_SALE', completedAt: nowIso() });

@@ -36,11 +36,17 @@ new_sqlite_classes = ["YocoV2RateGateDO"]
 tag = "v3-yoco-write-budget"
 new_sqlite_classes = ["YocoV2WriteBudgetDO"]
 
-# --- Cron triggers: TEMPORARILY DISABLED for DO read/write investigation (2026-08-20) -------------
-# See CRON_BACKUP_RESTORE.md in this directory for what fired here, why it was removed, and the
-# exact steps to restore it once the DO read/write root cause is confirmed fixed.
+# --- Cron triggers: restored 2026-08-31 (see CRON_BACKUP_RESTORE.md for the investigation that
+# disabled them 2026-08-20, and for what each fan-out task does). Single trigger, not two — the
+# original `*/15` + `*/45` pair independently fired at :00/:45 every hour, double-running
+# low-stock-due/report-schedules-due/reconciliation in that overlap minute. scheduled() below now
+# gates the 45-minute-only catalogue-sync job on a wall-clock check instead of a second trigger, per
+# "Recommended fixes before restoring" #2 in that doc. #1 (catalogue-sync due-check) and #3
+# (report-schedule schema-ensure hot path) were already fixed independently since that doc was
+# written — see claimCatalogueSyncIfDue in legacy/routes.ts and the schedulingSchemaPromises memo in
+# legacy/report-scheduling-routes.ts.
 [triggers]
-crons = []
+crons = ["*/15 * * * *"]
 
 # --- Central plane: shared D1 for identity / registry / members / cross-tenant coordination ------
 [[d1_databases]]

@@ -3730,7 +3730,7 @@ body > .reportActionMenu__panel--portal {
 }
 
 .transactionDetailDrawer {
-  width: min(1040px, 94vw);
+  width: min(1320px, 96vw);
   height: 100%;
   display: flex;
   flex-direction: column;
@@ -3996,7 +3996,7 @@ body > .reportActionMenu__panel--portal {
 
 .transactionDetailTable {
   width: 100%;
-  min-width: 700px;
+  min-width: 980px;
   border-collapse: collapse;
   background: #121a26;
   font-size: 12px;

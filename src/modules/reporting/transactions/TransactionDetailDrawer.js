@@ -162,7 +162,10 @@ function renderAuditTrail(rows = []) {
 
 function renderTable(rows = [], columns = []) {
   const safeColumns = columns.filter((column) => column?.key);
-  return `<div class="transactionDetailTableWrap"><table class="transactionDetailTable"><thead><tr>${safeColumns.map((column) => `<th>${escapeHtml(column.label || humanize(column.key))}</th>`).join("")}</tr></thead><tbody>${rows.map((row) => {
+  return `<div class="transactionDetailTableWrap"><table class="transactionDetailTable"><thead><tr>${safeColumns.map((column) => {
+    const headerNumericClass = column.type === "money" || column.type === "number" ? "is-numeric" : "";
+    return `<th class="${headerNumericClass}">${escapeHtml(column.label || humanize(column.key))}</th>`;
+  }).join("")}</tr></thead><tbody>${rows.map((row) => {
     const direction = String(row.varianceDirection || "").toLowerCase();
     const rowClass = direction === "positive"
       ? "is-positive-variance"
