@@ -720,100 +720,105 @@ function renderXeroModal({ canManageXero = false } = {}) {
   const isConfigured = status.configured !== false;
   const settings = status.settings || {};
   const syncEnabled = settings.enabled === true;
-  const noticeTone = xeroDrawerState.tone || '';
-  const badgeClass = isConnected ? 'badge-success' : isConfigured ? 'badge-ghost' : 'badge-warning';
-  const badgeLabel = isConnected ? 'Connected' : isConfigured ? 'Ready' : 'Not configured';
-  const smallIcon = (name) => icon(name).replace('<svg ', '<svg class="w-4 h-4" ');
+  const noticeTone = xeroDrawerState.tone ? ` data-tone="${escapeAttribute(xeroDrawerState.tone)}"` : '';
 
   return `
     <div class="yocoModalBackdrop" data-xero-modal ${xeroDrawerState.open ? '' : 'hidden'}>
-      <section class="modal-box xeroModalBox" role="dialog" aria-modal="true" aria-labelledby="xero-modal-title">
-        <div class="flex items-start justify-between gap-3 border-b border-base-300 pb-2.5">
-          <div class="min-w-0">
-            <p class="text-[10px] font-semibold uppercase tracking-wide text-primary">Accounting</p>
-            <h2 id="xero-modal-title" class="text-base font-semibold leading-tight">Connect Xero</h2>
-            <span class="text-xs opacity-70" data-xero-live-status>${isConnected ? `Connected to ${escapeHtml(status.tenantName || 'Xero')}` : isConfigured ? 'Disconnected' : 'Setup required'}</span>
+      <section class="yocoModalCard gmailModalCard xeroModalCard" role="dialog" aria-modal="true" aria-labelledby="xero-modal-title">
+        <header class="yocoModalHead">
+          <div>
+            <p>Accounting</p>
+            <h2 id="xero-modal-title">Connect Xero</h2>
+            <span data-xero-live-status>${isConnected ? `Connected to ${escapeHtml(status.tenantName || 'Xero')}` : isConfigured ? 'Disconnected' : 'Setup required'}</span>
           </div>
-          <button type="button" class="btn btn-ghost btn-square btn-sm" data-xero-close aria-label="Close Xero setup">${smallIcon('x')}</button>
-        </div>
+          <button type="button" class="integrationIconAction" data-xero-close aria-label="Close Xero setup">${icon('x')}</button>
+        </header>
 
-        <div class="grid grid-cols-4 gap-2 py-2.5">
-          <div class="rounded-lg bg-base-200 px-2 py-1.5">
-            <p class="text-[10px] uppercase opacity-60">Status</p>
-            <p class="text-sm font-medium truncate"><span class="badge ${badgeClass} badge-sm" data-xero-status>${badgeLabel}</span></p>
-          </div>
-          <div class="rounded-lg bg-base-200 px-2 py-1.5 min-w-0">
-            <p class="text-[10px] uppercase opacity-60">Organisation</p>
-            <p class="text-sm font-medium truncate" data-xero-tenant title="${escapeAttribute(status.tenantName || 'No organisation')}">${escapeHtml(status.tenantName || 'No organisation')}</p>
-          </div>
-          <div class="rounded-lg bg-base-200 px-2 py-1.5 min-w-0">
-            <p class="text-[10px] uppercase opacity-60">Last item sync</p>
-            <p class="text-sm font-medium truncate" data-xero-item-sync>${formatDateTime(settings.lastItemSyncAt) || 'Not synced yet'}</p>
-          </div>
-          <div class="rounded-lg bg-base-200 px-2 py-1.5 min-w-0">
-            <p class="text-[10px] uppercase opacity-60">Last invoice</p>
-            <p class="text-sm font-medium truncate" data-xero-invoice-sync>${escapeHtml(settings.lastInvoiceSyncDate || 'None yet')}</p>
-          </div>
-        </div>
-
-        <div class="grid grid-cols-2 gap-4 border-t border-base-300 pt-3">
-          <div class="min-w-0">
-            <p class="mb-2 text-xs font-semibold uppercase opacity-70">Account mapping</p>
-            ${canManageXero ? `
-            <form class="flex flex-col gap-2" data-xero-settings-form>
-              <div>
-                <label class="mb-1 block text-xs opacity-70">Sales account code</label>
-                <input type="text" class="input input-bordered input-sm w-full" placeholder="e.g. 200" value="${escapeAttribute(settings.salesAccountCode || '')}" data-xero-sales-account />
-              </div>
-              <div>
-                <label class="mb-1 block text-xs opacity-70">Tax type</label>
-                <input type="text" class="input input-bordered input-sm w-full" placeholder="e.g. OUTPUT2" value="${escapeAttribute(settings.defaultTaxType || '')}" data-xero-tax-type />
-              </div>
-              <div>
-                <label class="mb-1 block text-xs opacity-70">Item account (optional)</label>
-                <input type="text" class="input input-bordered input-sm w-full" placeholder="Defaults to sales account" value="${escapeAttribute(settings.itemAccountCode || '')}" data-xero-item-account />
-              </div>
-              <label class="label cursor-pointer justify-start gap-2 px-0 py-1">
-                <input type="checkbox" class="checkbox checkbox-sm" data-xero-enabled ${syncEnabled ? 'checked' : ''} />
-                <span class="label-text text-xs">Enable daily sync</span>
-              </label>
-              <button type="submit" class="btn btn-primary btn-sm self-start" data-xero-settings-submit>
-                ${smallIcon('shieldCheck')}
-                Save settings
-              </button>
-            </form>` : `
-            <div class="flex items-start gap-2 rounded-lg bg-base-200 p-3 text-xs" title="Only a KCP super user can configure Xero account mapping.">
-              ${smallIcon('lock')}
-              <span class="opacity-80">Only a KCP super user can map accounts or enable sync.</span>
-            </div>`}
+        <div class="yocoDrawerBody">
+          <div class="yocoStatusGrid">
+            <article>
+              <span>Status</span>
+              <strong data-xero-status>${isConnected ? 'Connected' : isConfigured ? 'Ready' : 'Not configured'}</strong>
+            </article>
+            <article>
+              <span>Organisation</span>
+              <strong data-xero-tenant>${escapeHtml(status.tenantName || 'No organisation')}</strong>
+            </article>
+            <article>
+              <span>Last item sync</span>
+              <strong data-xero-item-sync>${formatDateTime(settings.lastItemSyncAt) || 'Not synced yet'}</strong>
+            </article>
+            <article>
+              <span>Last invoice pushed</span>
+              <strong data-xero-invoice-sync>${escapeHtml(settings.lastInvoiceSyncDate || 'None yet')}</strong>
+            </article>
           </div>
 
-          <div class="min-w-0">
-            <p class="mb-2 text-xs font-semibold uppercase opacity-70">Connection & manual sync</p>
-            <div class="flex flex-col gap-2">
-              <button type="button" class="btn btn-outline btn-sm justify-start" data-xero-connect ${isConfigured ? '' : 'disabled'}>
-                ${smallIcon('link')}
-                ${isConnected ? 'Reconnect Xero' : 'Connect Xero'}
-              </button>
-              <button type="button" class="btn btn-outline btn-sm justify-start" data-xero-sync-items ${isConnected ? '' : 'disabled'}>
-                ${smallIcon('boxes')}
-                Push catalogue now
-              </button>
-              <button type="button" class="btn btn-outline btn-sm justify-start" data-xero-sync-invoice ${isConnected ? '' : 'disabled'}>
-                ${smallIcon('link')}
-                Push yesterday's sales
-              </button>
+          <div class="xeroPanelsGrid">
+            <section class="yocoActionPanel" aria-label="Xero account mapping">
+              <div class="yocoActionPanelHead">
+                <span>Account mapping</span>
+                <strong>Required before sync can be turned on.</strong>
+              </div>
               ${canManageXero ? `
-              <button type="button" class="btn btn-outline btn-error btn-sm justify-start" data-xero-disconnect ${isConnected ? '' : 'disabled'}>
-                ${smallIcon('unlink')}
-                Disconnect
-              </button>` : ''}
-            </div>
-          </div>
-        </div>
+              <form class="xeroSettingsForm" data-xero-settings-form>
+                <label>
+                  <span>Sales account code</span>
+                  <input type="text" placeholder="e.g. 200" value="${escapeAttribute(settings.salesAccountCode || '')}" data-xero-sales-account />
+                </label>
+                <label>
+                  <span>Tax type</span>
+                  <input type="text" placeholder="e.g. OUTPUT2" value="${escapeAttribute(settings.defaultTaxType || '')}" data-xero-tax-type />
+                </label>
+                <label>
+                  <span>Item account (optional)</span>
+                  <input type="text" placeholder="Defaults to sales account" value="${escapeAttribute(settings.itemAccountCode || '')}" data-xero-item-account />
+                </label>
+                <label class="xeroCheckboxRow">
+                  <input type="checkbox" data-xero-enabled ${syncEnabled ? 'checked' : ''} />
+                  <span>Enable daily sync</span>
+                </label>
+                <button type="submit" class="xeroCompactButton xeroCompactButton--primary" data-xero-settings-submit>
+                  ${icon('shieldCheck')}
+                  <span>Save settings</span>
+                </button>
+              </form>` : `
+              <div class="yocoActionLock" title="Only a KCP super user can configure Xero account mapping.">
+                <span class="yocoActionIcon">${icon('lock')}</span>
+                <span><strong>Configuration locked</strong><small>Contact a KCP super user to map accounts or enable sync.</small></span>
+              </div>`}
+            </section>
 
-        <div class="xeroModalNotice mt-3 border-t border-base-300 pt-2 text-xs opacity-70" data-xero-modal-status data-tone="${escapeAttribute(noticeTone)}">
-          ${escapeHtml(xeroDrawerState.message)}
+            <section class="yocoActionPanel" aria-label="Xero connection and manual sync">
+              <div class="yocoActionPanelHead">
+                <span>Connection & sync</span>
+                <strong>Run a one-off push or manage the connection.</strong>
+              </div>
+              <div class="xeroActionStack">
+                <button type="button" class="xeroCompactButton" data-xero-connect ${isConfigured ? '' : 'disabled'}>
+                  ${icon('link')}
+                  <span>${isConnected ? 'Reconnect Xero' : 'Connect Xero'}</span>
+                </button>
+                <button type="button" class="xeroCompactButton" data-xero-sync-items ${isConnected ? '' : 'disabled'}>
+                  ${icon('boxes')}
+                  <span>Push catalogue now</span>
+                </button>
+                <button type="button" class="xeroCompactButton" data-xero-sync-invoice ${isConnected ? '' : 'disabled'}>
+                  ${icon('link')}
+                  <span>Push yesterday's sales</span>
+                </button>
+                ${canManageXero ? `
+                <button type="button" class="xeroCompactButton xeroCompactButton--danger" data-xero-disconnect ${isConnected ? '' : 'disabled'}>
+                  ${icon('unlink')}
+                  <span>Disconnect</span>
+                </button>` : ''}
+              </div>
+            </section>
+          </div>
+
+          <div class="yocoModalNotice" data-xero-modal-status${noticeTone}>
+            ${escapeHtml(xeroDrawerState.message)}
+          </div>
         </div>
       </section>
     </div>

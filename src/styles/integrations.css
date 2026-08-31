@@ -531,29 +531,122 @@
   height: 18px;
 }
 
-/* Xero modal — built with daisyUI/Tailwind utilities (see tailwind.css) instead of the yoco*
-   hand-written classes, deliberately more compact: fits in one view without the vertical stack
-   of stat-card/section/notice blocks the Yoco/Gmail modals use. Still nests inside the shared
-   .yocoModalBackdrop for its [hidden] handling and backdrop blur (kept — the backdrop rules are
-   generic, only the card content underneath is daisyUI). */
-.xeroModalBox {
-  width: min(680px, 92vw);
-  animation: yocoDrawerDrop 180ms ease-out;
+/* Xero modal — same hand-written design language as the Yoco/Gmail modals (yocoModalCard,
+   yocoActionPanel, yocoModalNotice, etc. — a daisyUI/Tailwind-utility version of this modal was
+   tried and didn't render reliably in the built app, so this reverts to the proven classes) with
+   two additions: a smaller card width, and the two yocoActionPanel sections placed side by side
+   instead of stacked, to fit everything in view without scrolling. */
+.xeroModalCard {
+  width: min(720px, 94vw);
 }
 
-.xeroModalNotice[data-tone='success'] {
-  color: #10b981;
-  opacity: 1;
+.xeroPanelsGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  align-items: start;
 }
 
-.xeroModalNotice[data-tone='error'] {
-  color: #ef4444;
-  opacity: 1;
+.xeroSettingsForm {
+  display: grid;
+  gap: 10px;
 }
 
-.xeroModalNotice[data-tone='busy'] {
+.xeroSettingsForm label {
+  display: grid;
+  gap: 6px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  font-weight: 700;
+}
+
+.xeroSettingsForm input[type="text"] {
+  min-height: 38px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-primary);
+  color: var(--text-main);
+  padding: 0 12px;
+  font: inherit;
+  font-weight: 400;
+}
+
+.xeroCheckboxRow {
+  display: flex !important;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+}
+
+.xeroActionStack {
+  display: grid;
+  gap: 8px;
+}
+
+/* Compact button variant used only inside the Xero modal — the shared .yocoActionButton (used by
+   Yoco/Gmail) is a large two-line tile (icon block + title + subtitle); Xero's side-by-side layout
+   has half the width to work with, so this is a plain single-line button instead. */
+.xeroCompactButton {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 0 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-secondary);
+  color: var(--text-main);
+  font-size: 0.85rem;
+  font-weight: 700;
+  text-align: left;
+  transition: border-color 0.18s ease, background 0.18s ease;
+}
+
+.xeroCompactButton svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
   color: var(--accent-blue);
-  opacity: 1;
+}
+
+.xeroCompactButton:hover:not(:disabled) {
+  border-color: rgba(96, 165, 250, 0.55);
+  background: color-mix(in srgb, var(--surface-secondary) 82%, var(--accent-blue));
+}
+
+.xeroCompactButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.xeroCompactButton--primary {
+  border-color: var(--accent-blue);
+  background: var(--accent-blue);
+  color: #ffffff;
+}
+
+.xeroCompactButton--primary svg {
+  color: #ffffff;
+}
+
+.xeroCompactButton--primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent-blue) 88%, black);
+}
+
+.xeroCompactButton--danger svg {
+  color: #ef4444;
+}
+
+.xeroCompactButton--danger:hover:not(:disabled) {
+  border-color: rgba(239, 68, 68, 0.48);
+  background: rgba(127, 29, 29, 0.18);
+}
+
+@media (max-width: 720px) {
+  .xeroPanelsGrid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .yocoKeyHelper {
