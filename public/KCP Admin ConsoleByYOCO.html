@@ -163,6 +163,14 @@
             border-radius: 1.5rem;
             box-shadow: 0 4px 24px -1px rgba(0, 0, 0, 0.1);
         }
+        .glass.modal-solid {
+            background: rgba(10, 14, 23, 0.98);
+            backdrop-filter: none;
+            -webkit-backdrop-filter: none;
+        }
+        html.light .glass.modal-solid {
+            background: rgba(255, 255, 255, 0.99);
+        }
 
         html.light .glass {
             box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.05);
@@ -4189,9 +4197,13 @@ const SALE_BUCKET_META = {
     FAILED_PERMANENTLY: { label: 'Failed permanently', color: '#ef4444' }
 };
 const WEBHOOK_LOG_WINDOW_OPTIONS = [
-    { hours: 24, label: 'Last 24 Hours' },
+    { hours: 6, label: 'Last 6 Hours' },
+    { hours: 12, label: 'Last 12 Hours' },
+    { hours: 24, label: 'Last 1 Day' },
+    { hours: 48, label: 'Last 2 Days' },
     { hours: 72, label: 'Last 3 Days' },
-    { hours: 24 * 7, label: 'Last 7 Days' },
+    { hours: 24 * 7, label: 'Last 1 Week' },
+    { hours: 24 * 14, label: 'Last 2 Weeks' },
     { hours: 24 * 30, label: 'Last 30 Days' }
 ];
 let webhookLogState = { wsId: '', windowHours: 24, bucket: '', rows: [], total: 0, funnel: null };
@@ -4218,14 +4230,14 @@ async function viewWebhookLogsForWorkspace(wsId) {
                     <button id="webhook-log-reprocess-all-btn" onclick="reprocessAllInView()" class="btn-ghost text-[10px] text-amber-300 border-amber-500/30 hover:bg-amber-500/10"><i class="fa-solid fa-bolt mr-2"></i>Reprocess All In View</button>
                 </div>
             </div>
-            <div class="glass p-4">
-                <div class="relative h-64 w-full"><canvas id="webhook-funnel-chart"></canvas></div>
+            <div class="glass p-4 w-full">
+                <div class="relative h-80 w-full"><canvas id="webhook-funnel-chart"></canvas></div>
                 <div id="webhook-funnel-empty" class="hidden text-center text-[11px] text-slate-500 py-10">No completed-sale-trigger webhooks in this window.</div>
             </div>
             <div id="webhook-log-bucket-filters" class="flex flex-wrap gap-1.5"></div>
             <div id="webhook-log-table-wrap" class="text-xs text-slate-400">Loading...</div>
         </div>
-    `, true);
+    `, true, true);
     await loadWebhookLogData();
 }
 
@@ -4287,7 +4299,7 @@ function renderWebhookFunnelChart(funnel) {
                 labels: (funnel?.buckets || []).map(b => saleBucketMeta(b.bucket).label),
                 datasets: [{ data: (funnel?.buckets || []).map(b => b.count), backgroundColor: (funnel?.buckets || []).map(b => saleBucketMeta(b.bucket).color) }]
             },
-            options: { indexAxis: 'y', plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#94a3b8' } }, y: { ticks: { color: '#cbd5e1', font: { size: 10 } } } } }
+            options: { indexAxis: 'y', maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { ticks: { color: '#94a3b8' } }, y: { ticks: { color: '#cbd5e1', font: { size: 10 } } } } }
         });
         return;
     }
@@ -4304,6 +4316,7 @@ function renderWebhookFunnelChart(funnel) {
             }]
         },
         options: {
+            maintainAspectRatio: false,
             plugins: { legend: { display: false }, tooltip: { callbacks: { label: (ctx) => `${ctx.raw.from} → ${ctx.raw.to}: ${ctx.raw.flow}` } } }
         }
     });
@@ -4341,16 +4354,27 @@ function renderWebhookLogTable() {
 function renderWebhookLogRow(row) {
     const meta = saleBucketMeta(row.bucket);
     const rowId = `webhook-log-row-${adminEscapeHtml(row.reprocessRawEventId || row.sourceOrderId)}`;
+    const isRealOrder = !String(row.sourceOrderId || '').startsWith('unknown:');
     return `
         <tr class="border-b border-white/5" id="${rowId}">
-            <td class="py-2 pr-2 font-mono text-slate-300">${adminEscapeHtml(row.sourceOrderId)}</td>
+            <td class="py-2 pr-2">
+                <div class="flex items-center gap-2">
+                    <span class="font-mono text-slate-300">${adminEscapeHtml(row.sourceOrderId)}</span>
+                    ${isRealOrder ? `<button onclick="viewSaleOrderDetail(${adminInlineString(row.sourceOrderId)})" title="Open order" class="w-5 h-5 flex items-center justify-center rounded bg-white/5 hover:bg-white/15 text-slate-400 hover:text-white"><i class="fa-solid fa-arrow-up-right-from-square text-[8px]"></i></button>` : ''}
+                </div>
+            </td>
             <td class="py-2 pr-2"><span class="px-2 py-1 rounded-md font-bold" style="background:${meta.color}22;color:${meta.color}">${adminEscapeHtml(meta.label)}</span></td>
             <td class="py-2 pr-2 text-slate-400">${row.deliveryCount} (${adminEscapeHtml((row.eventTypes || []).join(', '))})</td>
             <td class="py-2 pr-2 text-slate-500">${adminEscapeHtml(formatAdminDateTime(row.lastReceivedAt))}</td>
             <td class="py-2 pr-2 text-red-300">${adminEscapeHtml(row.lastErrorMessage || '')}</td>
-            <td class="py-2 text-right">${row.canReprocess
-                ? `<button onclick="reprocessWebhookLogOrder(${adminInlineString(row.reprocessRawEventId)}, ${adminInlineString(row.reprocessAction)}, ${adminInlineString(row.sourceOrderId)})" class="btn-ghost text-[9px] px-2 py-1"><i class="fa-solid fa-rotate-right mr-1"></i>Reprocess</button>`
-                : '<span class="text-slate-600">—</span>'}</td>
+            <td class="py-2 text-right">
+                <div class="flex items-center justify-end gap-1.5">
+                    ${isRealOrder ? `<button onclick="viewSaleReceipt(${adminInlineString(row.sourceOrderId)})" class="btn-ghost text-[9px] px-2 py-1"><i class="fa-solid fa-receipt mr-1"></i>Receipt</button>` : ''}
+                    ${row.canReprocess
+                        ? `<button onclick="reprocessWebhookLogOrder(${adminInlineString(row.reprocessRawEventId)}, ${adminInlineString(row.reprocessAction)}, ${adminInlineString(row.sourceOrderId)})" class="btn-ghost text-[9px] px-2 py-1"><i class="fa-solid fa-rotate-right mr-1"></i>Reprocess</button>`
+                        : ''}
+                </div>
+            </td>
         </tr>
     `;
 }
@@ -4390,6 +4414,105 @@ async function reprocessAllInView() {
     if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-bolt mr-2"></i>Reprocess All In View'; }
     showToast(`Queued ${done - failed}/${done} order(s) for live reprocessing.${failed ? ` ${failed} failed to queue.` : ''}`, failed ? 'warning' : 'success');
     setTimeout(() => loadWebhookLogData(), 3000);
+}
+
+// ─── Order Detail / Receipt ───
+async function fetchSaleDetail(sourceOrderId) {
+    const wsId = webhookLogState.wsId;
+    return callAdminApi('GET', `/api/admin/workspaces/${encodeURIComponent(wsId)}/yoco-v2/sales/${encodeURIComponent(sourceOrderId)}`);
+}
+
+function formatMoney(amount, currency) {
+    const n = Number(amount || 0);
+    return `${adminEscapeHtml(currency || 'ZAR')} ${n.toFixed(2)}`;
+}
+
+async function viewSaleReceipt(sourceOrderId) {
+    openModal(`<div class="space-y-4"><h3 class="text-sm font-black uppercase tracking-widest text-white">Receipt</h3><div id="sale-receipt-body" class="text-xs text-slate-400">Loading...</div></div>`, false, true);
+    const body = document.getElementById('sale-receipt-body');
+    try {
+        const detail = await fetchSaleDetail(sourceOrderId);
+        const canonical = detail?.domainEvent?.payload;
+        if (!body) return;
+        if (!canonical) { body.innerHTML = '<p class="text-slate-500">No canonical sale data available for this order yet.</p>'; return; }
+        const meta = saleBucketMeta(detail.domainEvent.resolution_status);
+        const lines = canonical.lines || [];
+        body.innerHTML = `
+            <div class="border border-dashed border-white/15 rounded-2xl p-5 bg-black/20 font-mono">
+                <div class="flex items-center justify-between mb-1">
+                    <p class="text-sm font-black text-white">Order ${adminEscapeHtml(canonical.source_order_id)}</p>
+                    <span class="px-2 py-0.5 rounded text-[9px] font-bold" style="background:${meta.color}22;color:${meta.color}">${adminEscapeHtml(meta.label)}</span>
+                </div>
+                <p class="text-[10px] text-slate-500 mb-4">${adminEscapeHtml(formatAdminDateTime(canonical.occurred_at))} · ${adminEscapeHtml(canonical.payment_method || 'unknown payment method')}</p>
+                <div class="border-t border-b border-dashed border-white/15 py-3 space-y-2">
+                    ${lines.length ? lines.map(line => `
+                        <div>
+                            <div class="flex justify-between text-[11px] text-slate-200">
+                                <span>${line.quantity} × ${adminEscapeHtml(line.source_name)}</span>
+                                <span>${formatMoney(line.gross_amount, canonical.currency)}</span>
+                            </div>
+                            ${(line.modifiers || []).map(mod => `
+                                <div class="flex justify-between text-[10px] text-slate-500 pl-4">
+                                    <span>+ ${adminEscapeHtml(mod.source_name)}${mod.quantity > 1 ? ` ×${mod.quantity}` : ''}</span>
+                                    <span>${mod.gross_amount ? formatMoney(mod.gross_amount, canonical.currency) : ''}</span>
+                                </div>
+                            `).join('')}
+                        </div>
+                    `).join('') : '<p class="text-slate-500 text-[11px]">No line items resolved for this order.</p>'}
+                </div>
+                <div class="pt-3 space-y-1 text-[11px]">
+                    <div class="flex justify-between text-slate-400"><span>Subtotal</span><span>${formatMoney(canonical.net_amount, canonical.currency)}</span></div>
+                    ${canonical.discount_amount ? `<div class="flex justify-between text-slate-400"><span>Discount</span><span>-${formatMoney(canonical.discount_amount, canonical.currency)}</span></div>` : ''}
+                    <div class="flex justify-between text-slate-400"><span>Tax</span><span>${formatMoney(canonical.tax_amount, canonical.currency)}</span></div>
+                    ${canonical.tip_amount ? `<div class="flex justify-between text-slate-400"><span>Tip</span><span>${formatMoney(canonical.tip_amount, canonical.currency)}</span></div>` : ''}
+                    <div class="flex justify-between text-white font-black text-sm pt-1 border-t border-dashed border-white/15 mt-1"><span>Total</span><span>${formatMoney(canonical.gross_amount, canonical.currency)}</span></div>
+                </div>
+            </div>
+            <div class="flex justify-end">
+                <button onclick="viewSaleOrderDetail(${adminInlineString(sourceOrderId)})" class="btn-ghost text-[10px]"><i class="fa-solid fa-code mr-2"></i>View Technical Detail</button>
+            </div>
+        `;
+    } catch (e) {
+        if (body) body.innerHTML = `<p class="text-red-400">Failed to load receipt: ${adminEscapeHtml(e.message)}</p>`;
+    }
+}
+
+async function viewSaleOrderDetail(sourceOrderId) {
+    openModal(`<div class="space-y-4"><h3 class="text-sm font-black uppercase tracking-widest text-white">Order ${adminEscapeHtml(sourceOrderId)}</h3><div id="sale-order-detail-body" class="text-xs text-slate-400">Loading...</div></div>`, true, true);
+    const body = document.getElementById('sale-order-detail-body');
+    try {
+        const detail = await fetchSaleDetail(sourceOrderId);
+        if (!body) return;
+        if (!detail?.domainEvent) { body.innerHTML = '<p class="text-slate-500">No canonical sale found for this order yet — it may still be resolving, or never produced one (see the webhook log row for its bucket).</p>'; return; }
+        const meta = saleBucketMeta(detail.domainEvent.resolution_status);
+        const timeline = detail.timeline || [];
+        body.innerHTML = `
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div class="glass p-3"><p class="text-[9px] text-slate-500 uppercase font-black">Resolution</p><p class="text-xs font-bold mt-1" style="color:${meta.color}">${adminEscapeHtml(meta.label)}</p></div>
+                <div class="glass p-3"><p class="text-[9px] text-slate-500 uppercase font-black">Reporting</p><p class="text-xs font-bold mt-1 ${detail.legacySale ? 'text-emerald-300' : 'text-slate-400'}">${detail.legacySale ? 'Posted' : 'Not posted'}</p></div>
+                <div class="glass p-3"><p class="text-[9px] text-slate-500 uppercase font-black">Stock Movements</p><p class="text-xs font-bold mt-1 ${(detail.legacyMovements || []).length ? 'text-emerald-300' : 'text-slate-400'}">${(detail.legacyMovements || []).length}</p></div>
+                <div class="glass p-3"><p class="text-[9px] text-slate-500 uppercase font-black">Raw Event</p><p class="text-xs font-bold mt-1 text-slate-300">${adminEscapeHtml(detail.rawEvent?.event_type || '')}</p></div>
+            </div>
+            <div class="flex justify-end">
+                <button onclick="viewSaleReceipt(${adminInlineString(sourceOrderId)})" class="btn-ghost text-[10px]"><i class="fa-solid fa-receipt mr-2"></i>View Receipt</button>
+            </div>
+            <div>
+                <p class="text-[10px] font-black uppercase tracking-widest text-slate-300 mb-2">Processing Timeline</p>
+                ${timeline.length ? `
+                    <table class="w-full text-left text-[10px]">
+                        <thead><tr class="text-slate-500 uppercase border-b border-white/10"><th class="py-2 pr-2">When</th><th class="py-2 pr-2">Step</th><th class="py-2 pr-2">Status</th><th class="py-2">Message</th></tr></thead>
+                        <tbody>${timeline.map(t => `<tr class="border-b border-white/5"><td class="py-2 pr-2 text-slate-500">${adminEscapeHtml(formatAdminDateTime(t.created_at))}</td><td class="py-2 pr-2 text-slate-300">${adminEscapeHtml(t.step || '')}</td><td class="py-2 pr-2 text-slate-400">${adminEscapeHtml(t.status || '')}</td><td class="py-2 text-slate-400">${adminEscapeHtml(t.message || '')}</td></tr>`).join('')}</tbody>
+                    </table>
+                ` : '<p class="text-slate-500">No timeline entries.</p>'}
+            </div>
+            <details class="glass p-3">
+                <summary class="cursor-pointer text-[10px] font-black uppercase tracking-widest text-slate-300">Raw Payload</summary>
+                <pre class="mt-2 text-[9px] text-slate-400 whitespace-pre-wrap break-all max-h-64 overflow-y-auto">${adminEscapeHtml(JSON.stringify(detail.domainEvent.payload, null, 2))}</pre>
+            </details>
+        `;
+    } catch (e) {
+        if (body) body.innerHTML = `<p class="text-red-400">Failed to load order detail: ${adminEscapeHtml(e.message)}</p>`;
+    }
 }
 
 
@@ -6574,9 +6697,9 @@ async function executeFixBrokenAccess() {
 }
 
 // ─── Modal ───
-function openModal(html, wide) {
+function openModal(html, wide, solid) {
     const container = document.getElementById('modal-container');
-    container.className = `glass w-full ${wide ? 'max-w-5xl' : 'max-w-2xl'} p-7 md:p-8 space-y-5 max-h-[86vh] overflow-y-auto`;
+    container.className = `glass w-full ${wide ? 'max-w-6xl' : 'max-w-2xl'} p-7 md:p-8 space-y-5 max-h-[86vh] overflow-y-auto ${solid ? 'modal-solid' : ''}`;
     container.innerHTML = `
         <div class="relative w-full">
             <div class="absolute -top-4 -right-4 z-[250]">

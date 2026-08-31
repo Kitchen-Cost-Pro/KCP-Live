@@ -102,6 +102,27 @@ test('opening qty/value is derived from the live actual balance minus the period
   assert.equal(overviewRow.openingStockValue, 979 * 5, 'openingValue = openingQty * unit cost (5)');
 });
 
+// Regression: production still showed R0 after the fix above, because the live app never stores a
+// stock item's quantity as `currentStock`/`stockOnHand` or as an array-of-objects `locationStocks` —
+// real state.stock.items[] entries carry a plain { [locationId]: qty } map on `item.balances`
+// (see main.js's getLocationStock()/getManufacturingLocationQuantity()). The fallback chain must
+// read that real shape, not just the field names the tests above happened to use.
+test('opening/actual resolve from the real live app state shape: item.balances[locationId]', () => {
+  const dataSet = {
+    stockItems: [{ id: 'flour', name: 'Flour', baseUom: 'kg', balances: { main: 989 } }],
+    locations: [{ id: 'main', name: 'Main Kitchen' }, { id: 'other', name: 'Other Store' }]
+  };
+  const model = buildOperationsDashboardModel({
+    ledgerRows: [ledgerRow()], // netQty: 20 for the period, locationId: 'main'
+    filters: { startDate: '2020-01-01' },
+    dataSet
+  });
+  const row = model.views.by_item.find((item) => item.itemId === 'flour');
+  assert.ok(row);
+  assert.equal(row.actualClosingQty, 989, 'actual balance must be read from item.balances[locationId], the real live shape');
+  assert.equal(row.openingQty, 969, 'opening = actual (989) minus the period\'s net movement (+20)');
+});
+
 test('opening stays unavailable (not fabricated as 0) when the actual balance itself cannot be trusted for a historical period', () => {
   const dataSet = {
     stockItems: [{ id: 'flour', name: 'Flour', currentStock: 999, baseUom: 'kg' }]

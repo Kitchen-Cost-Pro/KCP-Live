@@ -19,6 +19,21 @@ export const formulaTooltips = {
     formula: 'Previous Running Qty + Net Qty',
     description: 'Running stock balance for the item at the selected ledger location.'
   },
+  movementDirection: {
+    label: 'Movement Type',
+    formula: 'Stock In or Stock Out, by movement type',
+    description: 'GRV, Purchase Order Receive, Manufacturing In, Transfer In, and positive Adjustments/Stock Take Variances increase stock (+). Sale Usage, Modifier Usage, Wastage, Manufacturing Out, Transfer Out, and negative Adjustments/Stock Take Variances decrease stock (-).'
+  },
+  openingBalance: {
+    label: 'Opening Balance',
+    formula: 'Closing Balance - Net Qty',
+    description: 'Running stock balance for this item/location immediately before this movement.'
+  },
+  closingBalance: {
+    label: 'Closing Balance',
+    formula: 'Opening Balance + Net Qty',
+    description: 'Running stock balance for this item/location immediately after this movement (same figure as Running Qty).'
+  },
   runningValue: {
     label: 'Running Value',
     formula: 'Running Qty x Unit Cost Ex VAT',
