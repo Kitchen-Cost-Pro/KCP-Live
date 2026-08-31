@@ -1,13 +1,19 @@
 import '../styles/integrations.css';
 import gmailLogo from '../assets/integrations/gmail.svg';
 import yocoLogo from '../assets/integrations/yoco.svg';
+import xeroLogo from '../assets/integrations/xero.png';
 import {
   connectYocoIntegration,
   disconnectGmailIntegration,
+  disconnectXeroIntegration,
   disconnectYocoIntegration,
+  saveXeroSettings,
   startGmailConnection,
+  startXeroConnection,
   subscribeGmailIntegration,
+  subscribeXeroIntegration,
   subscribeYocoIntegration,
+  syncXeroNow,
   syncYocoCatalogue
 } from '../services/integrationService.js';
 
@@ -35,20 +41,84 @@ const INTEGRATIONS = [
     logo: gmailLogo,
     tone: 'red',
     action: 'Connect Gmail'
+  },
+  {
+    id: 'google-drive',
+    name: 'Google Drive',
+    category: 'Cloud Storage',
+    status: 'Coming Soon',
+    stage: 'Planned',
+    popular: false,
+    description: 'Back up exports, recipes, and reports straight to a connected Google Drive folder.',
+    icon: 'drive',
+    tone: 'amber',
+    action: 'Coming Soon'
+  },
+  {
+    id: 'xero',
+    name: 'Xero',
+    category: 'Accounting',
+    status: 'Available',
+    stage: 'Live',
+    popular: false,
+    description: 'Push daily sales summaries and your product catalogue into your Xero ledger.',
+    logo: xeroLogo,
+    tone: 'blue',
+    action: 'Connect Xero'
+  },
+  {
+    id: 'square',
+    name: 'Square',
+    category: 'POS & Payments',
+    status: 'Coming Soon',
+    stage: 'Planned',
+    popular: false,
+    description: 'Bring Square sales, payments, and catalogue data into Kitchen Cost Pro.',
+    icon: 'square',
+    tone: 'amber',
+    action: 'Coming Soon'
+  },
+  {
+    id: 'digitot',
+    name: 'Digitot',
+    category: 'POS & Payments',
+    status: 'Coming Soon',
+    stage: 'Planned',
+    popular: false,
+    description: 'Connect Digitot sales and till data for automatic cost and stock reconciliation.',
+    icon: 'boxes',
+    tone: 'amber',
+    action: 'Coming Soon'
+  },
+  {
+    id: 'stockmate',
+    name: 'StockMate',
+    category: 'Inventory & Stock',
+    status: 'Coming Soon',
+    stage: 'Planned',
+    popular: false,
+    description: 'Keep StockMate inventory counts and Kitchen Cost Pro stock levels in sync.',
+    icon: 'boxes',
+    tone: 'amber',
+    action: 'Coming Soon'
   }
 ];
 
 const CATEGORY_OPTIONS = [
   { value: 'all', label: 'All Categories' },
   { value: 'POS & Payments', label: 'POS & Payments' },
-  { value: 'Email & Communications', label: 'Email & Communications' }
+  { value: 'Email & Communications', label: 'Email & Communications' },
+  { value: 'Accounting', label: 'Accounting' },
+  { value: 'Cloud Storage', label: 'Cloud Storage' },
+  { value: 'Inventory & Stock', label: 'Inventory & Stock' }
 ];
 
 const STATUS_OPTIONS = [
   { value: 'all', label: 'All Statuses' },
   { value: 'Active', label: 'Active' },
   { value: 'Available', label: 'Available' },
-  { value: 'Setup Required', label: 'Setup Required' }
+  { value: 'Setup Required', label: 'Setup Required' },
+  { value: 'Coming Soon', label: 'Coming Soon' }
 ];
 
 const yocoDrawerState = {
@@ -67,13 +137,23 @@ const gmailDrawerState = {
   status: null
 };
 
+const xeroDrawerState = {
+  open: false,
+  busy: false,
+  message: 'Connect Xero, then set a sales account code and tax type before turning sync on. KCP pushes one summarized invoice per day for completed sales, plus your product catalogue as Xero Items.',
+  tone: '',
+  status: null
+};
+
 export function renderIntegrations({ state } = {}) {
   const workspaceName = state?.workspace?.siteName || 'Workspace';
   const workspaceId = state?.workspace?.id || '';
   const canDisconnectYoco = state?.access?.currentIsKcpSuperUser === true;
+  const canManageXero = state?.access?.currentIsKcpSuperUser === true;
   const cachedYocoStatus = getCachedYocoStatus(workspaceId);
   const cachedGmailStatus = getCachedGmailStatus(workspaceId);
-  const integrations = getRenderedIntegrations(cachedYocoStatus, cachedGmailStatus);
+  const cachedXeroStatus = getCachedXeroStatus(workspaceId);
+  const integrations = getRenderedIntegrations(cachedYocoStatus, cachedGmailStatus, cachedXeroStatus);
   const view = document.createElement('section');
   view.className = 'integrationsView';
   view.dataset.workspaceId = workspaceId;
@@ -131,16 +211,20 @@ export function renderIntegrations({ state } = {}) {
 
       ${renderYocoModal({ canDisconnectYoco })}
       ${renderGmailModal()}
+      ${renderXeroModal({ canManageXero })}
     </div>
   `;
 
   bindIntegrationEvents(view);
   if (cachedYocoStatus) updateYocoStatus(view, cachedYocoStatus, { skipCache: true });
   if (cachedGmailStatus) updateGmailStatus(view, cachedGmailStatus, { skipCache: true });
+  if (cachedXeroStatus) updateXeroStatus(view, cachedXeroStatus, { skipCache: true });
   bindYocoStatus(view, workspaceId);
   bindGmailStatus(view, workspaceId);
+  bindXeroStatus(view, workspaceId);
   setYocoBusy(view, yocoDrawerState.busy);
   setGmailBusy(view, gmailDrawerState.busy);
+  setXeroBusy(view, xeroDrawerState.busy);
   applyIntegrationFilters(view);
   return view;
 }
@@ -212,12 +296,20 @@ function bindIntegrationEvents(view) {
     openGmailModal(view);
   });
 
+  view.querySelector('[data-xero-open]')?.addEventListener('click', () => {
+    openXeroModal(view);
+  });
+
   view.querySelectorAll('[data-yoco-close]').forEach((button) => {
     button.addEventListener('click', () => closeYocoModal(view));
   });
 
   view.querySelectorAll('[data-gmail-close]').forEach((button) => {
     button.addEventListener('click', () => closeGmailModal(view));
+  });
+
+  view.querySelectorAll('[data-xero-close]').forEach((button) => {
+    button.addEventListener('click', () => closeXeroModal(view));
   });
 
   view.querySelector('[data-yoco-connect-form]')?.addEventListener('submit', async (event) => {
@@ -270,11 +362,71 @@ function bindIntegrationEvents(view) {
     });
   });
 
+  view.querySelector('[data-xero-connect]')?.addEventListener('click', async () => {
+    await runXeroAction(view, 'Opening Xero consent...', async () => {
+      const result = await startXeroConnection(view.dataset.workspaceId || '');
+      if (!result.authUrl) throw new Error('Xero did not return a connection link.');
+      const popup = window.open(result.authUrl, 'kcp-xero-oauth', 'width=520,height=720,noopener,noreferrer');
+      if (!popup) window.location.href = result.authUrl;
+      setXeroModalStatus(view, 'Finish the Xero consent screen, then this tile will update.', 'busy');
+    }, { keepMessage: true });
+  });
+
+  view.querySelector('[data-xero-disconnect]')?.addEventListener('click', async () => {
+    await runXeroAction(view, 'Disconnecting Xero...', async () => {
+      await disconnectXeroIntegration(view.dataset.workspaceId || '');
+      setXeroModalStatus(view, 'Xero disconnected for this workspace.', 'success');
+      updateXeroStatus(view, { status: 'disconnected', configured: true, connectionActive: false, settings: xeroDrawerState.status?.settings });
+    });
+  });
+
+  view.querySelector('[data-xero-settings-form]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const salesAccountCode = String(view.querySelector('[data-xero-sales-account]')?.value || '').trim();
+    const defaultTaxType = String(view.querySelector('[data-xero-tax-type]')?.value || '').trim();
+    const itemAccountCode = String(view.querySelector('[data-xero-item-account]')?.value || '').trim();
+    const enabled = view.querySelector('[data-xero-enabled]')?.checked === true;
+    await runXeroAction(view, 'Saving Xero settings...', async () => {
+      await saveXeroSettings(view.dataset.workspaceId || '', { salesAccountCode, defaultTaxType, itemAccountCode, enabled });
+      setXeroModalStatus(view, 'Xero settings saved.', 'success');
+      bindXeroStatus(view, view.dataset.workspaceId || '', { once: true });
+    });
+  });
+
+  view.querySelector('[data-xero-sync-items]')?.addEventListener('click', async () => {
+    await runXeroAction(view, 'Pushing catalogue to Xero...', async () => {
+      const result = await syncXeroNow(view.dataset.workspaceId || '', 'items');
+      const pushed = Number(result?.result?.pushed || 0);
+      const failed = Number(result?.result?.failed || 0);
+      setXeroModalStatus(view, `Pushed ${pushed} item${pushed === 1 ? '' : 's'} to Xero${failed ? ` (${failed} failed)` : ''}.`, failed ? 'error' : 'success');
+    });
+  });
+
+  view.querySelector('[data-xero-sync-invoice]')?.addEventListener('click', async () => {
+    await runXeroAction(view, 'Pushing yesterday’s sales to Xero...', async () => {
+      const result = await syncXeroNow(view.dataset.workspaceId || '', 'invoice');
+      const status = String(result?.result?.status || '');
+      const label = status === 'applied' ? 'Invoice pushed to Xero.'
+        : status === 'duplicate' ? 'Already pushed for that day.'
+        : status === 'skipped_no_sales' ? 'No completed sales found for that day.'
+        : result?.result?.error || 'Invoice push failed.';
+      setXeroModalStatus(view, label, status === 'failed' ? 'error' : 'success');
+    });
+  });
+
   window.addEventListener('message', (event) => {
     if (event.data?.type !== 'kcp:gmail-oauth') return;
     setGmailModalStatus(view, event.data.message || (event.data.ok ? 'Gmail connected.' : 'Gmail connection failed.'), event.data.ok ? 'success' : 'error');
     if (event.data.ok) {
       bindGmailStatus(view, view.dataset.workspaceId || '', { once: true });
+    }
+  }, { once: true });
+
+  window.addEventListener('message', (event) => {
+    if (event.data?.type !== 'kcp:xero-oauth') return;
+    setXeroModalStatus(view, event.data.message || (event.data.ok ? 'Xero connected.' : 'Xero connection failed.'), event.data.ok ? 'success' : 'error');
+    if (event.data.ok) {
+      bindXeroStatus(view, view.dataset.workspaceId || '', { once: true });
     }
   }, { once: true });
 }
@@ -356,7 +508,7 @@ function renderIntegrationCard(item) {
   const statusClass = getIntegrationStatusClass(item.status);
   return `
     <article
-      class="integrationCard ${item.id === 'yoco' || item.id === 'gmail' ? 'integrationCard--featured' : ''}"
+      class="integrationCard ${item.id === 'yoco' || item.id === 'gmail' || item.id === 'xero' ? 'integrationCard--featured' : ''}"
       data-integration-card
       data-integration-id="${escapeAttribute(item.id)}"
       data-category="${escapeAttribute(item.category)}"
@@ -382,8 +534,8 @@ function renderIntegrationCard(item) {
         ${item.popular ? '<span>Popular</span>' : '<span>Workspace Tool</span>'}
       </div>
       <div class="integrationActions">
-        <button type="button" class="${item.id === 'yoco' || item.id === 'gmail' ? 'integrationPrimaryAction' : 'integrationGhostAction'}" ${item.id === 'yoco' ? 'data-yoco-open' : ''} ${item.id === 'gmail' ? 'data-gmail-open' : ''}>
-          ${item.id === 'yoco' || item.id === 'gmail' ? icon('link') : icon('clock')}
+        <button type="button" class="${item.id === 'yoco' || item.id === 'gmail' || item.id === 'xero' ? 'integrationPrimaryAction' : 'integrationGhostAction'}" ${item.id === 'yoco' ? 'data-yoco-open' : ''} ${item.id === 'gmail' ? 'data-gmail-open' : ''} ${item.id === 'xero' ? 'data-xero-open' : ''}>
+          ${item.id === 'yoco' || item.id === 'gmail' || item.id === 'xero' ? icon('link') : icon('clock')}
           <span data-integration-action-label>${escapeHtml(item.action)}</span>
         </button>
       </div>
@@ -562,6 +714,124 @@ function renderGmailModal() {
   `;
 }
 
+function renderXeroModal({ canManageXero = false } = {}) {
+  const status = xeroDrawerState.status || {};
+  const isConnected = status.connectionActive === true;
+  const isConfigured = status.configured !== false;
+  const settings = status.settings || {};
+  const syncEnabled = settings.enabled === true;
+  const noticeTone = xeroDrawerState.tone ? ` data-tone="${escapeAttribute(xeroDrawerState.tone)}"` : '';
+  return `
+    <div class="yocoModalBackdrop" data-xero-modal ${xeroDrawerState.open ? '' : 'hidden'}>
+      <section class="yocoModalCard gmailModalCard" role="dialog" aria-modal="true" aria-labelledby="xero-modal-title">
+        <header class="yocoModalHead">
+          <div>
+            <p>Accounting</p>
+            <h2 id="xero-modal-title">Connect Xero</h2>
+            <span data-xero-live-status>${isConnected ? `Connected to ${escapeHtml(status.tenantName || 'Xero')}` : isConfigured ? 'Disconnected' : 'Setup required'}</span>
+          </div>
+          <button type="button" class="integrationIconAction" data-xero-close aria-label="Close Xero setup">${icon('x')}</button>
+        </header>
+
+        <div class="yocoDrawerBody">
+          <aside class="yocoKeyHelper gmailHelper" aria-label="Xero sync helper">
+            <div class="yocoKeyHelperIcon">${icon('link')}</div>
+            <div>
+              <strong>One summarized invoice a day</strong>
+              <span>KCP pushes yesterday's completed sales as a single daily Xero Invoice, plus your product catalogue as Xero Items. Nothing syncs back from Xero into KCP.</span>
+            </div>
+          </aside>
+
+          <div class="yocoStatusGrid">
+            <article>
+              <span>Status</span>
+              <strong data-xero-status>${isConnected ? 'Connected' : isConfigured ? 'Ready' : 'Not configured'}</strong>
+            </article>
+            <article>
+              <span>Organisation</span>
+              <strong data-xero-tenant>${escapeHtml(status.tenantName || 'No organisation')}</strong>
+            </article>
+            <article>
+              <span>Last item sync</span>
+              <strong data-xero-item-sync>${formatDateTime(settings.lastItemSyncAt) || 'Not synced yet'}</strong>
+            </article>
+            <article>
+              <span>Last invoice pushed</span>
+              <strong data-xero-invoice-sync>${escapeHtml(settings.lastInvoiceSyncDate || 'None yet')}</strong>
+            </article>
+          </div>
+
+          <section class="yocoActionPanel" aria-label="Xero account mapping">
+            <div class="yocoActionPanelHead">
+              <span>Account mapping</span>
+              <strong>Required before daily sync can be turned on.</strong>
+            </div>
+            ${canManageXero ? `
+            <form class="xeroSettingsForm" data-xero-settings-form>
+              <label>
+                <span>Sales account code</span>
+                <input type="text" placeholder="e.g. 200" value="${escapeAttribute(settings.salesAccountCode || '')}" data-xero-sales-account />
+              </label>
+              <label>
+                <span>Tax type</span>
+                <input type="text" placeholder="e.g. OUTPUT2" value="${escapeAttribute(settings.defaultTaxType || '')}" data-xero-tax-type />
+              </label>
+              <label>
+                <span>Item account code (optional, defaults to sales account)</span>
+                <input type="text" placeholder="e.g. 200" value="${escapeAttribute(settings.itemAccountCode || '')}" data-xero-item-account />
+              </label>
+              <label class="xeroCheckboxRow">
+                <input type="checkbox" data-xero-enabled ${syncEnabled ? 'checked' : ''} />
+                <span>Enable daily sync</span>
+              </label>
+              <button type="submit" class="integrationPrimaryAction" data-xero-settings-submit>
+                ${icon('shieldCheck')}
+                <span>Save settings</span>
+              </button>
+            </form>` : `
+            <div class="yocoActionLock" title="Only a KCP super user can configure Xero account mapping.">
+              <span class="yocoActionIcon">${icon('lock')}</span>
+              <span><strong>Configuration locked</strong><small>Contact a KCP super user to map accounts or enable sync.</small></span>
+            </div>`}
+          </section>
+
+          <section class="yocoActionPanel" aria-label="Xero controls">
+            <div class="yocoActionPanelHead">
+              <span>Connection & manual sync</span>
+              <strong>Run a one-off push or manage the connection.</strong>
+            </div>
+            <div class="yocoActionRow">
+              <button type="button" class="yocoActionButton" data-xero-connect ${isConfigured ? '' : 'disabled'}>
+                <span class="yocoActionIcon">${icon('link')}</span>
+                <span><strong>${isConnected ? 'Reconnect Xero' : 'Connect Xero'}</strong><small>Xero consent flow</small></span>
+              </button>
+              ${canManageXero ? `
+              <button type="button" class="yocoActionButton yocoActionButton--danger" data-xero-disconnect ${isConnected ? '' : 'disabled'}>
+                <span class="yocoActionIcon">${icon('unlink')}</span>
+                <span><strong>Disconnect</strong><small>Super user action</small></span>
+              </button>` : ''}
+            </div>
+            <div class="yocoActionRow">
+              <button type="button" class="yocoActionButton" data-xero-sync-items ${isConnected ? '' : 'disabled'}>
+                <span class="yocoActionIcon">${icon('boxes')}</span>
+                <span><strong>Push catalogue now</strong><small>Send products as Xero Items</small></span>
+              </button>
+              <button type="button" class="yocoActionButton" data-xero-sync-invoice ${isConnected ? '' : 'disabled'}>
+                <span class="yocoActionIcon">${icon('link')}</span>
+                <span><strong>Push yesterday's sales</strong><small>One summary invoice</small></span>
+              </button>
+            </div>
+          </section>
+
+          <div class="yocoModalNotice" data-xero-modal-status${noticeTone}>
+            ${escapeHtml(xeroDrawerState.message)}
+          </div>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
 function bindYocoStatus(view, workspaceId) {
   if (!workspaceId) return;
   const unsubscribe = subscribeYocoIntegration(workspaceId, (status) => updateYocoStatus(view, status));
@@ -577,6 +847,21 @@ function bindGmailStatus(view, workspaceId, options = {}) {
   if (!workspaceId) return;
   const unsubscribe = subscribeGmailIntegration(workspaceId, (status) => {
     updateGmailStatus(view, status);
+    if (options.once) unsubscribe?.();
+  });
+  if (options.once) return;
+  const observer = new MutationObserver(() => {
+    if (document.body.contains(view)) return;
+    unsubscribe?.();
+    observer.disconnect();
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+}
+
+function bindXeroStatus(view, workspaceId, options = {}) {
+  if (!workspaceId) return;
+  const unsubscribe = subscribeXeroIntegration(workspaceId, (status) => {
+    updateXeroStatus(view, status);
     if (options.once) unsubscribe?.();
   });
   if (options.once) return;
@@ -636,6 +921,24 @@ function updateGmailStatus(view, status = {}, options = {}) {
   else if (status.message && status.configured === false) setGmailModalStatus(view, status.message, 'error');
 }
 
+function updateXeroStatus(view, status = {}, options = {}) {
+  xeroDrawerState.status = status;
+  if (!options.skipCache) cacheXeroStatus(view.dataset.workspaceId || '', status);
+  const settings = status.settings || {};
+  const nextStatus = status.configured === false
+    ? 'Setup Required'
+    : status.connectionActive === true
+      ? 'Active'
+      : 'Available';
+  setText(view, '[data-xero-live-status]', status.connectionActive ? `Connected to ${status.tenantName || 'Xero'}` : status.configured === false ? 'Setup required' : 'Disconnected');
+  setText(view, '[data-xero-status]', status.connectionActive ? 'Connected' : status.configured === false ? 'Not configured' : 'Ready');
+  setText(view, '[data-xero-tenant]', status.tenantName || 'No organisation');
+  setText(view, '[data-xero-item-sync]', formatDateTime(settings.lastItemSyncAt) || 'Not synced yet');
+  setText(view, '[data-xero-invoice-sync]', settings.lastInvoiceSyncDate || 'None yet');
+  updateIntegrationCardStatus(view, 'xero', nextStatus, nextStatus === 'Active' ? 'Manage Xero' : nextStatus === 'Setup Required' ? 'Needs Config' : 'Connect Xero');
+  if (status.lastError) setXeroModalStatus(view, status.lastError, 'error');
+}
+
 function updateIntegrationCardStatus(view, integrationId, nextStatus, nextActionLabel) {
   const card = view.querySelector(`[data-integration-id="${integrationId}"]`);
   if (!card) return;
@@ -651,11 +954,16 @@ function updateIntegrationCardStatus(view, integrationId, nextStatus, nextAction
   applyIntegrationFilters(view);
 }
 
-function getRenderedIntegrations(yocoStatus, gmailStatus) {
+function getRenderedIntegrations(yocoStatus, gmailStatus, xeroStatus) {
   const yocoActive = isYocoStatusActive(yocoStatus);
   const gmailCardStatus = gmailStatus?.configured === false
     ? 'Setup Required'
     : gmailStatus?.connectionActive === true
+      ? 'Active'
+      : 'Available';
+  const xeroCardStatus = xeroStatus?.configured === false
+    ? 'Setup Required'
+    : xeroStatus?.connectionActive === true
       ? 'Active'
       : 'Available';
   return INTEGRATIONS.map((item) => {
@@ -664,6 +972,13 @@ function getRenderedIntegrations(yocoStatus, gmailStatus) {
         ...item,
         status: gmailCardStatus,
         action: gmailCardStatus === 'Active' ? 'Manage Gmail' : gmailCardStatus === 'Setup Required' ? 'Needs Config' : item.action
+      };
+    }
+    if (item.id === 'xero') {
+      return {
+        ...item,
+        status: xeroCardStatus,
+        action: xeroCardStatus === 'Active' ? 'Manage Xero' : xeroCardStatus === 'Setup Required' ? 'Needs Config' : item.action
       };
     }
     if (item.id !== 'yoco') return item;
@@ -753,6 +1068,40 @@ function cacheGmailStatus(workspaceId, status = {}) {
   }
 }
 
+function xeroCacheKey(workspaceId) {
+  return `kcp-xero-status:${String(workspaceId || 'default')}`;
+}
+
+function getCachedXeroStatus(workspaceId) {
+  if (!workspaceId || typeof window === 'undefined') return null;
+  try {
+    const value = window.localStorage.getItem(xeroCacheKey(workspaceId));
+    if (!value) return null;
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch (error) {
+    console.warn('[Xero] Could not read cached integration status:', error);
+    return null;
+  }
+}
+
+function cacheXeroStatus(workspaceId, status = {}) {
+  if (!workspaceId || typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(xeroCacheKey(workspaceId), JSON.stringify({
+      status: String(status.status || '').trim().toLowerCase() || 'disconnected',
+      configured: status.configured !== false,
+      connectionActive: status.connectionActive === true,
+      tenantName: status.tenantName || '',
+      lastError: status.lastError || '',
+      settings: status.settings || {},
+      cachedAt: new Date().toISOString()
+    }));
+  } catch (error) {
+    console.warn('[Xero] Could not cache integration status:', error);
+  }
+}
+
 function getIntegrationStatusClass(status) {
   if (status === 'Active') return 'is-active';
   if (status === 'Available') return 'is-available';
@@ -782,6 +1131,18 @@ function openGmailModal(view) {
 function closeGmailModal(view) {
   gmailDrawerState.open = false;
   const modal = view.querySelector('[data-gmail-modal]');
+  if (modal) modal.hidden = true;
+}
+
+function openXeroModal(view) {
+  xeroDrawerState.open = true;
+  const modal = view.querySelector('[data-xero-modal]');
+  if (modal) modal.hidden = false;
+}
+
+function closeXeroModal(view) {
+  xeroDrawerState.open = false;
+  const modal = view.querySelector('[data-xero-modal]');
   if (modal) modal.hidden = true;
 }
 
@@ -815,6 +1176,21 @@ async function runGmailAction(view, message, task, options = {}) {
   }
 }
 
+async function runXeroAction(view, message, task, options = {}) {
+  window.__KCP_SUPPRESS_INTEGRATIONS_RENDER__ = true;
+  setXeroBusy(view, true);
+  setXeroModalStatus(view, message, 'busy');
+  try {
+    await task();
+  } catch (error) {
+    setXeroModalStatus(view, error.message || 'Xero action failed.', 'error');
+  } finally {
+    setXeroBusy(view, false);
+    window.__KCP_SUPPRESS_INTEGRATIONS_RENDER__ = false;
+    if (!options.keepMessage) window.dispatchEvent(new CustomEvent('kcp:integrations-sync-complete'));
+  }
+}
+
 function setYocoBusy(view, busy) {
   yocoDrawerState.busy = busy;
   view.querySelectorAll('[data-yoco-submit], [data-yoco-sync-catalogue], [data-yoco-disconnect]').forEach((button) => {
@@ -833,6 +1209,19 @@ function setGmailBusy(view, busy) {
   });
 }
 
+function setXeroBusy(view, busy) {
+  xeroDrawerState.busy = busy;
+  view.querySelectorAll('[data-xero-connect], [data-xero-disconnect], [data-xero-sync-items], [data-xero-sync-invoice], [data-xero-settings-submit]').forEach((button) => {
+    const isDisconnect = button.hasAttribute('data-xero-disconnect');
+    const isConnect = button.hasAttribute('data-xero-connect');
+    const isSync = button.hasAttribute('data-xero-sync-items') || button.hasAttribute('data-xero-sync-invoice');
+    button.disabled = busy ||
+      (isConnect && xeroDrawerState.status?.configured === false) ||
+      (isDisconnect && xeroDrawerState.status?.connectionActive !== true) ||
+      (isSync && xeroDrawerState.status?.connectionActive !== true);
+  });
+}
+
 function setYocoModalStatus(view, message, tone = 'busy') {
   yocoDrawerState.message = message;
   yocoDrawerState.tone = tone;
@@ -846,6 +1235,15 @@ function setGmailModalStatus(view, message, tone = 'busy') {
   gmailDrawerState.message = message;
   gmailDrawerState.tone = tone;
   const target = view.querySelector('[data-gmail-modal-status]');
+  if (!target) return;
+  target.textContent = message;
+  target.dataset.tone = tone;
+}
+
+function setXeroModalStatus(view, message, tone = 'busy') {
+  xeroDrawerState.message = message;
+  xeroDrawerState.tone = tone;
+  const target = view.querySelector('[data-xero-modal-status]');
   if (!target) return;
   target.textContent = message;
   target.dataset.tone = tone;
@@ -900,6 +1298,8 @@ function icon(name) {
     chevronRight: '<path d="m9 18 6-6-6-6"/>',
     clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
     boxes: '<path d="M2.5 7.5 12 2l9.5 5.5L12 13z"/><path d="M2.5 7.5V16L12 22l9.5-6V7.5"/><path d="M12 13v9"/><path d="m7 4.8 9.6 5.5"/>',
+    drive: '<path d="M7.5 3h9L22 12l-4.5 8h-11L2 12z"/><path d="M8.5 15h7"/><path d="m8.5 15-2-3"/><path d="m15.5 15 2-3"/>',
+    square: '<rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 12h6"/>',
     external: '<path d="M14 3h7v7"/><path d="M10 14 21 3"/><path d="M20 14v6H4V4h6"/>',
     keyRound: '<path d="M2 18a6 6 0 1 1 11.2-3H22l-2 2 2 2-2 2h-3l-2-2h-1.8A6 6 0 0 1 2 18z"/><circle cx="8" cy="18" r="1.5"/>',
     link: '<path d="M10 13a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1"/><path d="M14 11a5 5 0 0 0-7.1 0l-2 2A5 5 0 0 0 12 20.1l1.1-1.1"/>',

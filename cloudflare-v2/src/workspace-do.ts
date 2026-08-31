@@ -12,6 +12,7 @@ import {
 import type { Env } from './types';
 import { dispatchWorkspaceRoute } from './legacy/index';
 import { dispatchYocoV2WorkspaceRoute } from './modules/yoco-engine-v2/route-dispatch';
+import { dispatchXeroWorkspaceRoute } from './modules/xero-engine/route-dispatch';
 import { getEffectRuntime } from './modules/yoco-engine-v2/effect-gate';
 import {
   ADJUSTMENT_LINES_INDEX_SCHEMA_REPAIR,
@@ -745,7 +746,12 @@ export class WorkspaceDO extends DurableObject<Env> {
     const v2Response = await dispatchYocoV2WorkspaceRoute(request, tenantEnv, auth, workspaceId, resource);
     if (v2Response) return v2Response;
 
-    // Non-Yoco workspace routes still use the shared tenant dispatcher. Yoco webhook, queue,
+    // Xero routes (connection/OAuth, settings, item/invoice push) are likewise isolated from the
+    // legacy dispatcher — see modules/xero-engine/route-dispatch.ts.
+    const xeroResponse = await dispatchXeroWorkspaceRoute(request, tenantEnv, auth, workspaceId, resource);
+    if (xeroResponse) return xeroResponse;
+
+    // Non-Yoco/Xero workspace routes still use the shared tenant dispatcher. Yoco webhook, queue,
     // reconciliation, sale, and refund effects are handled exclusively by the V2 dispatcher above.
     return dispatchWorkspaceRoute(request, tenantEnv, auth, workspaceId, resource);
   }

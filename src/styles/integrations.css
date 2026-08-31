@@ -264,6 +264,11 @@
   color: #f87171;
 }
 
+.integrationLogo--amber {
+  background: color-mix(in srgb, #f59e0b 12%, var(--surface-secondary));
+  color: #f59e0b;
+}
+
 .integrationCard h2 {
   color: var(--text-main);
   font-size: 1rem;
@@ -524,6 +529,38 @@
 .yocoModalHead .integrationIconAction svg {
   width: 18px;
   height: 18px;
+}
+
+.xeroSettingsForm {
+  display: grid;
+  gap: 12px;
+}
+
+.xeroSettingsForm label {
+  display: grid;
+  gap: 8px;
+}
+
+.xeroSettingsForm input[type="text"] {
+  min-height: 44px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-primary);
+  color: var(--text-main);
+  padding: 0 14px;
+  font: inherit;
+}
+
+.xeroCheckboxRow {
+  display: flex !important;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+}
+
+.xeroSettingsForm .integrationPrimaryAction {
+  justify-self: start;
+  min-width: 180px;
 }
 
 .yocoKeyHelper {

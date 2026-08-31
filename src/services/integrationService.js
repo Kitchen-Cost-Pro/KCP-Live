@@ -91,6 +91,73 @@ export async function sendSupplierEmailWithGmail(workspaceId, payload = {}) {
   return callCloudflareGmailRoute(workspaceId, 'send-supplier-email', payload);
 }
 
+export function subscribeXeroIntegration(workspaceId, callback) {
+  let cancelled = false;
+  const load = async () => {
+    try {
+      const status = await callCloudflareXeroRoute(workspaceId, 'status', {}, { method: 'GET' });
+      if (!cancelled) callback?.(normalizeXeroStatus(status));
+    } catch (error) {
+      if (!cancelled) {
+        callback?.(normalizeXeroStatus({
+          status: 'error',
+          configured: false,
+          lastError: error.message || 'Could not load Xero status.'
+        }));
+      }
+    }
+  };
+  load();
+  return () => {
+    cancelled = true;
+  };
+}
+
+export async function startXeroConnection(workspaceId) {
+  return callCloudflareXeroRoute(workspaceId, 'connect-start');
+}
+
+export async function disconnectXeroIntegration(workspaceId) {
+  return callCloudflareXeroRoute(workspaceId, 'disconnect');
+}
+
+export async function saveXeroSettings(workspaceId, settings = {}) {
+  return callCloudflareXeroRoute(workspaceId, 'settings', settings);
+}
+
+export async function syncXeroNow(workspaceId, kind) {
+  return callCloudflareWorkspaceRoute(workspaceId, `xero/sync-now?kind=${encodeURIComponent(kind)}`, { method: 'POST' });
+}
+
+async function callCloudflareXeroRoute(workspaceId, action, payload = {}, options = {}) {
+  const method = String(options.method || 'POST').toUpperCase();
+  return callCloudflareWorkspaceRoute(workspaceId, `xero/${action}`, {
+    method,
+    payload
+  });
+}
+
+function normalizeXeroStatus(value = {}) {
+  const status = value && typeof value === 'object' ? value : {};
+  const rawStatus = String(status.status || '').trim().toLowerCase();
+  const settings = status.settings && typeof status.settings === 'object' ? status.settings : {};
+  return {
+    status: rawStatus || 'disconnected',
+    configured: status.configured !== false,
+    connectionActive: rawStatus === 'connected',
+    tenantName: status.tenantName || '',
+    lastError: status.lastError || '',
+    settings: {
+      salesAccountCode: settings.salesAccountCode || '',
+      defaultTaxType: settings.defaultTaxType || '',
+      itemAccountCode: settings.itemAccountCode || '',
+      enabled: settings.enabled === true,
+      lastItemSyncAt: settings.lastItemSyncAt || '',
+      lastInvoiceSyncDate: settings.lastInvoiceSyncDate || ''
+    }
+  };
+}
+
 async function callCloudflareYocoRoute(workspaceId, action, payload = {}, options = {}) {
   const method = String(options.method || 'POST').toUpperCase();
   return callCloudflareWorkspaceRoute(workspaceId, `yoco/${action}`, {
