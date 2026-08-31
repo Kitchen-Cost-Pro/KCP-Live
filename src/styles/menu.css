@@ -1100,18 +1100,35 @@
   display: flex !important;
   flex-direction: row;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   cursor: pointer;
+  padding: 12px 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--surface-secondary) 58%, transparent);
+  transition: border-color 140ms ease, background 140ms ease;
+}
+
+.menuCatalogue__toggleField:hover {
+  border-color: color-mix(in srgb, var(--accent-blue) 42%, var(--border-subtle));
+}
+
+.menuCatalogue__toggleField:has(input:checked) {
+  border-color: color-mix(in srgb, var(--accent-blue) 46%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent-blue) 10%, var(--surface-secondary));
 }
 
 .menuCatalogue__toggleField input[type="checkbox"] {
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   flex-shrink: 0;
+  accent-color: var(--accent-blue);
+  cursor: pointer;
 }
 
 .menuCatalogue__toggleField span {
   color: var(--text-main) !important;
+  font-weight: 950;
 }
 
 .menuCatalogue__modal input,

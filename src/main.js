@@ -5310,6 +5310,11 @@ function openRecipeEditor(itemId) {
     ...appState.recipes,
     editingItem: item,
     draftRecipe: structuredCloneSafe(item.recipe || []),
+    // Kept as its own top-level field for the same reason draftRecipe is: renderRecipes() resolves
+    // `selectedItem` from the master items list when the item is already loaded there (so
+    // concurrent list updates don't get lost mid-edit), which silently discards any change written
+    // onto `editingItem` itself — a value nested there never survives past the next render.
+    draftNoRecipeRequired: item.noRecipeRequired === true,
     pickerOpen: false,
     pickerStep: 'select',
     pickerSelectedIds: [],
@@ -5389,6 +5394,7 @@ function closeRecipeEditor() {
     ...appState.recipes,
     editingItem: null,
     draftRecipe: [],
+    draftNoRecipeRequired: false,
     pickerOpen: false,
     pickerStep: 'select',
     pickerSelectedIds: [],
@@ -5910,10 +5916,7 @@ function toggleRecipeNoRecipeRequired(checked = false) {
   if (!item || item.recipeOwnerType === 'yoco_modifier') return;
   appState.recipes = {
     ...appState.recipes,
-    editingItem: {
-      ...item,
-      noRecipeRequired: checked === true
-    }
+    draftNoRecipeRequired: checked === true
   };
   renderApp();
 }
@@ -6274,7 +6277,8 @@ async function saveCurrentRecipe() {
 
   try {
     const { updateRecipe } = await import('./services/recipeService.js');
-    await updateRecipe(appState.workspace?.id, item, appState.recipes.draftRecipe || []);
+    const itemToSave = { ...item, noRecipeRequired: appState.recipes.draftNoRecipeRequired === true };
+    await updateRecipe(appState.workspace?.id, itemToSave, appState.recipes.draftRecipe || []);
     // Ensure the success render cannot be skipped if focus changed while the request
     // was pending. This render closes the editor and clears its saving state.
     pendingFocusField = null;
@@ -6285,6 +6289,7 @@ async function saveCurrentRecipe() {
       ...appState.recipes,
       editingItem: null,
       draftRecipe: [],
+      draftNoRecipeRequired: false,
       pickerOpen: false,
       pickerStep: 'select',
       pickerSelectedIds: [],

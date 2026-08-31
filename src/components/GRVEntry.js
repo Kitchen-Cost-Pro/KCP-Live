@@ -790,7 +790,7 @@ function renderDraftRow(line, index, pricesIncludeVat, vatRate, vatRegistered, s
     : '';
 
   return `
-    <tr>
+    <tr class="grv-lineRow grv-lineRow--${costVarianceTone}">
       <td class="grv-lineCheck">
         <input type="checkbox" data-grv-line-select="${index}" ${selectedLineIndexes.has(String(index)) ? 'checked' : ''} />
       </td>

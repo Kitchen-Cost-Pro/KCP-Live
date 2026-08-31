@@ -486,11 +486,11 @@
 }
 
 #view-grv .grv-tableCol--vat {
-  width: 92px;
+  width: 108px;
 }
 
 #view-grv .grv-tableCol--total {
-  width: 104px;
+  width: 124px;
 }
 
 #view-grv .grv-tableCol--actions {
@@ -659,6 +659,25 @@
 /* Subtle zebra striping for readability across the line rows. */
 #view-grv .grv-table tbody tr:nth-child(even) td {
   background: rgba(255, 255, 255, 0.03);
+}
+
+/* Whole-row cost-variance highlight — a bigger, harder-to-miss signal than the badge alone that
+   this line's received cost differs meaningfully from the item's current cost, at a glance across
+   a long draft table. Wins over the zebra striping above (same specificity, declared after it). */
+#view-grv .grv-table tbody tr.grv-lineRow--over td {
+  background: rgba(248, 113, 113, 0.09);
+}
+
+#view-grv .grv-table tbody tr.grv-lineRow--under td {
+  background: rgba(16, 185, 129, 0.09);
+}
+
+#view-grv .grv-table tbody tr.grv-lineRow--over td:first-child {
+  box-shadow: inset 3px 0 0 rgba(248, 113, 113, 0.65);
+}
+
+#view-grv .grv-table tbody tr.grv-lineRow--under td:first-child {
+  box-shadow: inset 3px 0 0 rgba(16, 185, 129, 0.65);
 }
 
 #view-grv .grv-lineCheck {
@@ -888,8 +907,14 @@
   color: rgba(255, 255, 255, 0.94);
   font-size: 0.92rem;
   font-weight: 950;
-  line-height: 1.1;
-  white-space: nowrap;
+  line-height: 1.25;
+  /* A large amount (e.g. R150 000,00) with table-layout: fixed columns must wrap onto a second
+     line inside its own cell instead of visually bleeding into the next column — nowrap here was
+     the direct cause of that overlap. word-break/overflow-wrap cover locale currency formatting
+     that uses a non-breaking space as its thousands separator, which "normal" alone can't break at. */
+  white-space: normal;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 #view-grv .grv-tableStat span {
@@ -909,6 +934,7 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  max-width: 100%;
   padding: 4px 9px;
   border-radius: 999px;
   border: 1px solid transparent;
@@ -920,6 +946,10 @@
 #view-grv .grv-costVariance strong {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   font-weight: 950;
+  /* An extreme outlier variance (a capture typo more often than a real price swing) can produce a
+     percentage wider than the pill's column — wrap it inside the pill instead of letting the pill
+     bleed into the next cell like the VAT/Total overlap above. */
+  overflow-wrap: break-word;
 }
 
 #view-grv .grv-costVarianceArrow {
@@ -1030,7 +1060,10 @@
   color: rgba(255, 255, 255, 0.94);
   font-size: 0.92rem;
   font-weight: 950;
-  white-space: nowrap;
+  line-height: 1.25;
+  white-space: normal;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 #view-grv .grv-actionsCell {

@@ -1836,21 +1836,36 @@
 .recipesModule__toggleField {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   cursor: pointer;
-  padding: 4px 0;
+  padding: 12px 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--surface-secondary) 58%, transparent);
+  transition: border-color 140ms ease, background 140ms ease;
+}
+
+.recipesModule__toggleField:hover {
+  border-color: color-mix(in srgb, var(--accent-blue) 42%, var(--border-subtle));
+}
+
+.recipesModule__toggleField:has(input:checked) {
+  border-color: color-mix(in srgb, var(--accent-blue) 46%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent-blue) 10%, var(--surface-secondary));
 }
 
 .recipesModule__toggleField input[type="checkbox"] {
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   flex-shrink: 0;
+  accent-color: var(--accent-blue);
+  cursor: pointer;
 }
 
 .recipesModule__toggleField span {
   color: var(--text-main);
-  font-size: 0.78rem;
-  font-weight: 900;
+  font-size: 0.82rem;
+  font-weight: 950;
 }
 
 .recipesModule__linkedRecipeNote {

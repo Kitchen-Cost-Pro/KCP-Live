@@ -12,6 +12,7 @@ import {
   isTransactionReference,
   type TransactionEntityType,
 } from "./transaction-references";
+import { buildGrvRawLinePool, takeGrvRawLine } from "./reporting-phase21-routes";
 
 type Row = Record<string, unknown>;
 
@@ -276,7 +277,7 @@ async function loadAuditTrail(
   return result;
 }
 
-async function loadGrvDetail(env: Env, workspaceId: string, entityId: string): Promise<DetailPayload | null> {
+export async function loadGrvDetail(env: Env, workspaceId: string, entityId: string): Promise<DetailPayload | null> {
   const row = await env.DB.prepare(
     `SELECT g.*, s.name AS supplier_name, po.po_number
        FROM grvs g
@@ -287,7 +288,6 @@ async function loadGrvDetail(env: Env, workspaceId: string, entityId: string): P
   ).bind(workspaceId, entityId).first<Row>();
   if (!row) return null;
   const raw = objectValue(jsonParse(row.raw_json));
-  const rawLines = arrayValue(raw.lines || raw.items).map(objectValue);
   const linesResult = await env.DB.prepare(
     `SELECT gl.id, gl.stock_item_id, si.name AS item_name, si.category, gl.location_id,
             COALESCE(l.display_name, l.name) AS location_name,
@@ -298,19 +298,33 @@ async function loadGrvDetail(env: Env, workspaceId: string, entityId: string): P
       WHERE gl.workspace_id = ?1 AND gl.grv_id = ?2
       ORDER BY gl.rowid`,
   ).bind(workspaceId, entityId).all<Row>();
+  // Pairs each flat grv_lines row back up with its original Draft-time entry in raw_json.items[]
+  // (same pool/matching used by GRV Log — see reporting-phase21-routes.ts) — grv_lines only stores
+  // the already-converted base-unit total, not the pack size / custom UOM / pack qty the user
+  // actually entered, and grv_lines carries no id back to its raw_json counterpart to join on
+  // directly. Matching by (stockItemId, locationId, baseQuantity) is exact for the common case and
+  // order-independent, unlike the plain "first stockItemId match" this used to do (which grabbed
+  // the wrong raw entry whenever a GRV split the same item across two locations, and separately
+  // always reported the converted base quantity as "Received Qty" instead of what was actually
+  // purchased).
+  const rawLinePool = buildGrvRawLinePool(row.raw_json);
   const lineItems = (linesResult.results || []).map((line) => {
-    const rawLine = rawLines.find((entry) => text(entry.id || entry.lineId) === text(line.id)
-      || text(entry.stockItemId || entry.itemId) === text(line.stock_item_id)) || {};
     const quantity = numberValue(line.quantity);
+    const rawLine = takeGrvRawLine(rawLinePool, text(line.stock_item_id), text(line.location_id), quantity);
+    const packSize = rawNumber(rawLine, ["packSize", "pack_size"], 1) || 1;
+    const receivedUomQuantity = rawNumber(rawLine, ["receivedQty", "qty"], packSize ? quantity / packSize : quantity);
+    const receivedUom = rawText(rawLine, ["selectedUom", "receivingUom", "unit"], text(line.unit));
     const totalExVat = numberValue(line.total_ex, quantity * numberValue(line.unit_price));
     const vat = numberValue(line.total_vat);
     return {
       id: text(line.id), itemId: text(line.stock_item_id), itemName: text(line.item_name),
       category: text(line.category, "General"), locationId: text(line.location_id), locationName: text(line.location_name),
-      receivedUomQuantity: quantity, receivedUom: text(line.unit),
-      baseQuantity: rawNumber(rawLine, ["baseQuantity", "baseQty", "quantityInBase"], quantity),
-      baseUom: rawText(rawLine, ["baseUom", "baseUnit"], text(line.unit)),
-      conversionFactor: rawNumber(rawLine, ["conversionFactor", "qtyInBase", "conversion"], 1),
+      // "How they bought it" — e.g. 1 Bottle — as opposed to baseQuantity/baseUom below, which is
+      // always the true converted total that actually posted to the stock ledger (e.g. 30 Tot).
+      receivedUomQuantity, receivedUom,
+      baseQuantity: quantity,
+      baseUom: text(line.unit),
+      conversionFactor: packSize,
       unitCostExVat: numberValue(line.unit_price), totalExVat, vat,
       totalInclVat: numberValue(line.total_inc, totalExVat + vat),
     };

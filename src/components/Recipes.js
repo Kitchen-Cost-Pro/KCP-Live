@@ -165,7 +165,15 @@ export function renderRecipes({ state, onRecipeFilterChange, onRecipeAction = {}
 
     ${recipes.actionError && !selectedItem && !recipes.confirmDelete ? renderNotice(recipes.actionError, 'error') : ''}
     ${renderRecipeBody(displayRecipes, items, selectedIds, 'products')}
-    ${selectedItem ? renderRecipeModal(selectedItem, draftRecipe, displayRecipes, filters) : ''}
+    ${selectedItem ? renderRecipeModal(
+      // draftNoRecipeRequired lives outside selectedItem for the same reason draftRecipe does:
+      // selectedItem is re-resolved from the master items list whenever the item is already
+      // loaded there, which would otherwise silently discard this toggle every render.
+      { ...selectedItem, noRecipeRequired: recipes.draftNoRecipeRequired ?? selectedItem.noRecipeRequired },
+      draftRecipe,
+      displayRecipes,
+      filters
+    ) : ''}
     ${selectedItem && recipes.pickerOpen ? renderRecipePickerModal(draftRecipe, displayRecipes, filters) : ''}
     ${renderDeleteDialog(recipes)}
     ${filters.exportPlatformPicker?.open ? `
