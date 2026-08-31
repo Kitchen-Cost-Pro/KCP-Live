@@ -76,3 +76,93 @@ test('a dashboard run with no end-date filter still uses the live stock balance 
   assert.ok(row);
   assert.equal(row.actualClosingQty, 999, 'an "as of right now" query (no endDate) should still use the live balance');
 });
+
+// Regression: Opening Stock Value/Qty had no fallback at all once there was no stored point-in-time
+// opening snapshot (the common case — most workspaces never populate dataSet.stockSnapshots), so it
+// silently showed 0 for everyone, even when the actual/current balance resolved fine via the live
+// stock item. Opening should instead be derived by walking the resolved actual balance backwards by
+// the net of the period's own ledger movements.
+test('opening qty/value is derived from the live actual balance minus the period\'s net movement when no snapshot exists', () => {
+  const dataSet = {
+    stockItems: [{ id: 'flour', name: 'Flour', currentStock: 999, baseUom: 'kg' }]
+  };
+  const model = buildOperationsDashboardModel({
+    ledgerRows: [ledgerRow()], // netQty: 20 for the period
+    filters: { startDate: '2020-01-01' },
+    dataSet
+  });
+  const row = model.views.by_item.find((item) => item.itemId === 'flour');
+  assert.ok(row);
+  assert.equal(row.actualClosingQty, 999);
+  assert.equal(row.openingQty, 979, 'opening = actual (999) minus the period\'s net movement (+20)');
+
+  const overviewRow = model.views.overview.find((item) => item.locationId === 'main');
+  assert.ok(overviewRow);
+  assert.ok(overviewRow.openingStockValue !== 0, 'opening stock value must not silently fall back to 0 when it can be derived');
+  assert.equal(overviewRow.openingStockValue, 979 * 5, 'openingValue = openingQty * unit cost (5)');
+});
+
+// Regression: production still showed R0 after the fix above, because the live app never stores a
+// stock item's quantity as `currentStock`/`stockOnHand` or as an array-of-objects `locationStocks` —
+// real state.stock.items[] entries carry a plain { [locationId]: qty } map on `item.balances`
+// (see main.js's getLocationStock()/getManufacturingLocationQuantity()). The fallback chain must
+// read that real shape, not just the field names the tests above happened to use.
+test('opening/actual resolve from the real live app state shape: item.balances[locationId]', () => {
+  const dataSet = {
+    stockItems: [{ id: 'flour', name: 'Flour', baseUom: 'kg', balances: { main: 989 } }],
+    locations: [{ id: 'main', name: 'Main Kitchen' }, { id: 'other', name: 'Other Store' }]
+  };
+  const model = buildOperationsDashboardModel({
+    ledgerRows: [ledgerRow()], // netQty: 20 for the period, locationId: 'main'
+    filters: { startDate: '2020-01-01' },
+    dataSet
+  });
+  const row = model.views.by_item.find((item) => item.itemId === 'flour');
+  assert.ok(row);
+  assert.equal(row.actualClosingQty, 989, 'actual balance must be read from item.balances[locationId], the real live shape');
+  assert.equal(row.openingQty, 969, 'opening = actual (989) minus the period\'s net movement (+20)');
+});
+
+// Regression: a Product Sales Adjustment (postSalesAdjustment) is deliberately stock-deduction
+// only -- it must land in the generic Adjustments bucket (positiveAdjustments/negativeAdjustments/
+// stockOut), never in Sales Usage (that would fabricate a revenue/GP impact with no real sale
+// recorded) and never in Wastage.
+test('a sale adjustment is bucketed as a generic Adjustment, not Sales Usage or Wastage', () => {
+  const dataSet = { stockItems: [{ id: 'flour', name: 'Flour', currentStock: 100, baseUom: 'kg' }] };
+  const model = buildOperationsDashboardModel({
+    ledgerRows: [ledgerRow({
+      source: 'Sale Adjustment',
+      movementType: 'Sale Adjustment',
+      sourceType: 'sale_adjustment',
+      qtyIn: 0,
+      qtyOut: 3,
+      netQty: -3,
+      movementValue: -30,
+    })],
+    filters: { startDate: '2020-01-01' },
+    dataSet
+  });
+  const row = model.views.overview.find((item) => item.locationId === 'main');
+  assert.ok(row);
+  assert.equal(row.salesUsage, 0, 'must not be counted as Sales Usage');
+  assert.equal(row.manualWastage, 0);
+  assert.equal(row.manufacturingWastage, 0);
+  assert.equal(row.adjustments, -30);
+  assert.equal(row.stockOut, 30, 'the deduction must still reduce expected closing stock via the adjustments bucket');
+});
+
+test('opening stays unavailable (not fabricated as 0) when the actual balance itself cannot be trusted for a historical period', () => {
+  const dataSet = {
+    stockItems: [{ id: 'flour', name: 'Flour', currentStock: 999, baseUom: 'kg' }]
+  };
+  const model = buildOperationsDashboardModel({
+    ledgerRows: [ledgerRow()],
+    filters: { startDate: '2020-01-01', endDate: '2020-01-02' },
+    dataSet
+  });
+  const row = model.views.by_item.find((item) => item.itemId === 'flour');
+  assert.ok(row);
+  assert.equal(row.actualClosingQty, null, 'sanity: no trustworthy actual balance for this historical period (see earlier test)');
+  assert.equal(row.openingQty, 0);
+  assert.equal(row.missingOpeningCount, 1, 'must be flagged as missing, not silently reported as a real 0');
+});

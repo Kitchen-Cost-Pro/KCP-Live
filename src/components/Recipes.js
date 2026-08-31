@@ -165,7 +165,15 @@ export function renderRecipes({ state, onRecipeFilterChange, onRecipeAction = {}
 
     ${recipes.actionError && !selectedItem && !recipes.confirmDelete ? renderNotice(recipes.actionError, 'error') : ''}
     ${renderRecipeBody(displayRecipes, items, selectedIds, 'products')}
-    ${selectedItem ? renderRecipeModal(selectedItem, draftRecipe, displayRecipes, filters) : ''}
+    ${selectedItem ? renderRecipeModal(
+      // draftNoRecipeRequired lives outside selectedItem for the same reason draftRecipe does:
+      // selectedItem is re-resolved from the master items list whenever the item is already
+      // loaded there, which would otherwise silently discard this toggle every render.
+      { ...selectedItem, noRecipeRequired: recipes.draftNoRecipeRequired ?? selectedItem.noRecipeRequired },
+      draftRecipe,
+      displayRecipes,
+      filters
+    ) : ''}
     ${selectedItem && recipes.pickerOpen ? renderRecipePickerModal(draftRecipe, displayRecipes, filters) : ''}
     ${renderDeleteDialog(recipes)}
     ${filters.exportPlatformPicker?.open ? `
@@ -615,6 +623,10 @@ function bindRecipeEvents(view, visibleItems, filters, onRecipeFilterChange, onR
     onRecipeAction.onSave?.();
   });
 
+  view.querySelector('[data-recipe-toggle-no-recipe-required]')?.addEventListener('change', (event) => {
+    onRecipeAction.onToggleNoRecipeRequired?.(event.currentTarget.checked);
+  });
+
   view.querySelector('[data-recipe-confirm-delete]')?.addEventListener('click', () => {
     onRecipeAction.onConfirmDelete?.();
   });
@@ -800,7 +812,9 @@ function renderRecipeRow(item, ingredients, isSelected, showLinkedProduct = fals
   const linkedProduct = getModifierLinkedProductDisplay(item);
   const isModifierLinked = isModifier && isModifierProductLinked(item);
   const statusLabel = getRecipeStatusLabel(item);
-  const statusClass = item.status === 'complete' ? 'complete' : 'missing';
+  const statusClass = (item.noRecipeRequired === true || item.recipeStatus === 'NOT_REQUIRED')
+    ? 'notRequired'
+    : item.status === 'complete' ? 'complete' : 'missing';
   const linkedStockItemName = String(item.recipeSourceStockItemName || item.recipeSourceStockItem?.name || '').trim();
   const sourceDetail = linkedStockItemName && !isModifier
     ? `${recipeSourceDetail(item)} · ${linkedStockItemName}`
@@ -895,6 +909,13 @@ function renderRecipeModal(item, draftRecipe, recipes, filters) {
         ${modifierRuleValidation ? `<div class="recipesModule__inlineError" role="alert">${escapeHtml(modifierRuleValidation)}</div>` : ''}
         ${recipes.actionError ? `<div class="recipesModule__inlineError" role="alert">${escapeHtml(recipes.actionError)}</div>` : ''}
         ${renderLineRemovalConfirm(recipes.confirmLineRemoval)}
+
+        ${!isModifier ? `
+          <label class="recipesModule__toggleField" title="Turn on for items that legitimately never have a recipe — a resold bottled drink, a gift card, a service charge. Stops this item from showing up as a Missing Recipe problem on Menu &amp; Recipe Health, onboarding, and stock deduction.">
+            <input type="checkbox" data-recipe-toggle-no-recipe-required ${item.noRecipeRequired === true ? 'checked' : ''} />
+            <span>No Recipe Required</span>
+          </label>
+        ` : ''}
 
         <footer class="recipesModule__modalFooter">
 	          ${linkedProductMode ? `
@@ -1192,6 +1213,7 @@ function getRecipeStatusLabel(item = {}) {
   if (item.recipeStatus === 'COMPLETE_VIA_LINKED_STOCK_ITEM' || item.recipeSource === 'linked_stock_item') {
     return 'Complete via linked stock item';
   }
+  if (item.noRecipeRequired === true || item.recipeStatus === 'NOT_REQUIRED') return 'No recipe required';
   if (item.recipeStatus === 'COMPLETE' || item.status === 'complete') return 'Recipe Assigned';
   return 'Missing recipe';
 }

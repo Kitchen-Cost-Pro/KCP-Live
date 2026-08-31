@@ -447,11 +447,12 @@
   min-height: 0;
   flex: 1;
   overflow: auto;
+  padding: 0 28px 20px;
 }
 
 #view-grv .grv-table {
   width: 100%;
-  min-width: 920px;
+  min-width: 1470px;
   table-layout: fixed;
   border-collapse: separate;
   border-spacing: 0;
@@ -459,6 +460,10 @@
 
 #view-grv .grv-tableCol--check {
   width: 42px;
+}
+
+#view-grv .grv-tableCol--item {
+  width: 260px;
 }
 
 #view-grv .grv-tableCol--uom {
@@ -477,16 +482,20 @@
   width: 112px;
 }
 
+#view-grv .grv-tableCol--variance {
+  width: 108px;
+}
+
 #view-grv .grv-tableCol--price {
   width: 140px;
 }
 
 #view-grv .grv-tableCol--vat {
-  width: 92px;
+  width: 148px;
 }
 
 #view-grv .grv-tableCol--total {
-  width: 104px;
+  width: 164px;
 }
 
 #view-grv .grv-tableCol--actions {
@@ -636,7 +645,7 @@
 }
 
 #view-grv .grv-table th {
-  padding: 18px 14px;
+  padding: 18px 18px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   color: rgba(255, 255, 255, 0.35);
   font-size: 10px;
@@ -647,7 +656,7 @@
 }
 
 #view-grv .grv-table td {
-  padding: 16px 14px;
+  padding: 18px 18px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   vertical-align: top;
 }
@@ -655,6 +664,25 @@
 /* Subtle zebra striping for readability across the line rows. */
 #view-grv .grv-table tbody tr:nth-child(even) td {
   background: rgba(255, 255, 255, 0.03);
+}
+
+/* Whole-row cost-variance highlight — a bigger, harder-to-miss signal than the badge alone that
+   this line's received cost differs meaningfully from the item's current cost, at a glance across
+   a long draft table. Wins over the zebra striping above (same specificity, declared after it). */
+#view-grv .grv-table tbody tr.grv-lineRow--over td {
+  background: rgba(248, 113, 113, 0.09);
+}
+
+#view-grv .grv-table tbody tr.grv-lineRow--under td {
+  background: rgba(16, 185, 129, 0.09);
+}
+
+#view-grv .grv-table tbody tr.grv-lineRow--over td:first-child {
+  box-shadow: inset 3px 0 0 rgba(248, 113, 113, 0.65);
+}
+
+#view-grv .grv-table tbody tr.grv-lineRow--under td:first-child {
+  box-shadow: inset 3px 0 0 rgba(16, 185, 129, 0.65);
 }
 
 #view-grv .grv-lineCheck {
@@ -885,6 +913,9 @@
   font-size: 0.92rem;
   font-weight: 950;
   line-height: 1.1;
+  /* Kept on one line — the VAT/Total columns were widened instead of wrapping large amounts,
+     which read as broken/ugly. The table's scroll container (.grv-draft-scroll) is the fallback
+     for a value wide enough to still exceed the widened column. */
   white-space: nowrap;
 }
 
@@ -899,6 +930,51 @@
 
 #view-grv .grv-tableStat--price strong {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+#view-grv .grv-costVariance {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 0.78rem;
+  font-weight: 950;
+  white-space: nowrap;
+}
+
+#view-grv .grv-costVariance strong {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-weight: 950;
+  /* An extreme outlier variance (a capture typo more often than a real price swing) can produce a
+     percentage wider than the pill's column — wrap it inside the pill instead of letting the pill
+     bleed into the next cell like the VAT/Total overlap above. */
+  overflow-wrap: break-word;
+}
+
+#view-grv .grv-costVarianceArrow {
+  font-size: 0.66rem;
+  line-height: 1;
+}
+
+#view-grv .grv-costVariance--over {
+  border-color: rgba(248, 113, 113, 0.32);
+  background: rgba(248, 113, 113, 0.12);
+  color: #f87171;
+}
+
+#view-grv .grv-costVariance--under {
+  border-color: rgba(16, 185, 129, 0.32);
+  background: rgba(16, 185, 129, 0.12);
+  color: #34d399;
+}
+
+#view-grv .grv-costVariance--flat {
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.5);
 }
 
 #view-grv .grv-tableInput {
@@ -1237,7 +1313,7 @@
 
 #view-grv .grv-overlayCard--draft {
   position: relative;
-  width: min(1240px, 82vw);
+  width: min(1560px, 96vw);
   height: 100vh;
   max-height: 100vh;
   display: flex;

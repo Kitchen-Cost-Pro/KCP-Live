@@ -71,7 +71,14 @@ export function renderReportViewer({
   const reportLink = allowUrlConfiguration
     ? readReportLinkConfiguration()
     : { view: "", filters: {}, hasExplicitConfiguration: false };
-  const dataSet = createReportingDataSet(state || sourceData);
+  // Reassigned (not const) — draw() below recomputes this on every real reload so that a report
+  // viewer left open picks up client state loaded AFTER it first mounted (e.g. Operations
+  // Dashboard's live stock balances, background-loaded on entering Reporting — see
+  // ensureStockItemsAvailableForReporting in main.js). Without this, `dataSet` stayed frozen at
+  // whatever appState looked like at the exact moment this report was opened, for as long as it
+  // stayed open — Refresh/Apply/pagination all call draw() directly and never re-mount this
+  // component, so a stale snapshot here could never self-correct no matter what the user clicked.
+  let dataSet = createReportingDataSet(state || sourceData);
   const route = resolveReportRoute(reportId, { preferRedirect });
   const activeGroupChildId =
     initialActiveReportId || route?.activeReportId || "";
@@ -151,6 +158,10 @@ export function renderReportViewer({
   };
 
   const draw = async ({ reload = true } = {}) => {
+    // See the `let dataSet` comment above: refresh it from current app state on every real reload,
+    // not just at initial mount, so client-state-dependent report logic (e.g. Operations
+    // Dashboard's live stock balance fallback) reflects data that arrived after this viewer opened.
+    if (reload) dataSet = createReportingDataSet(state || sourceData);
     // activeFilters is resolved once at mount (and whenever the filter form is submitted) and
     // otherwise never touched — so a relative preset like "Today" silently goes stale the moment
     // the calendar day rolls over while this viewer instance stays open, even across a manual
@@ -247,7 +258,7 @@ export function renderReportViewer({
         ));
       root.append(reportHeader);
       root.append(renderReportViewTabs(result.report, result.view));
-      const filterOptions = deriveReportFilterOptions(dataSet, result.rows, services?.reportingPermissions || {});
+      const filterOptions = deriveReportFilterOptions(dataSet, result.rows, services?.reportingPermissions || {}, result.meta);
       root.append(
         renderReportFilters({
           filters: activeFilters,
@@ -935,11 +946,11 @@ function resolveFilterConfig(report = {}, view = "") {
   return config[view] || config.default || null;
 }
 
-function deriveReportFilterOptions(dataSet = {}, rows = [], reportingPermissions = {}) {
+function deriveReportFilterOptions(dataSet = {}, rows = [], reportingPermissions = {}, meta = {}) {
   return {
-    locations: deriveLocations(dataSet, rows, reportingPermissions.locations),
-    categories: deriveCategories(dataSet, rows),
-    sources: deriveSources(rows),
+    locations: deriveLocations(dataSet, rows, reportingPermissions.locations, meta),
+    categories: deriveCategories(dataSet, rows, meta),
+    sources: deriveSources(rows, meta),
     paymentMethods: uniqueValues(rows, (row) => row.paymentMethod),
     statuses: uniqueValues(rows, (row) => row.status),
     menuCategories: uniqueValues(rows, (row) => row.menuCategory),
@@ -1015,41 +1026,47 @@ function uniqueObjects(rows = [], getValue, getLabel) {
   return [...seen.values()].sort((a, b) => a.label.localeCompare(b.label));
 }
 
-function deriveSources(rows = []) {
+function deriveSources(rows = [], meta = {}) {
   const fromRows = (rows || [])
     .map((row) => row.source || row.sourceType)
     .filter(Boolean);
-  const fromMeta = extractFilterOptions(rows, "sources").map(
+  // The API-level meta (result.meta.filterOptions, see getReportFilterOptions on the backend) is
+  // the authoritative, UNFILTERED list — it must be checked directly, not just via extractFilterOptions
+  // scanning individual rows' __apiMeta, which returns nothing the moment `rows` is empty (e.g. the
+  // active date range/filters matched zero rows) even though the report itself has plenty of other
+  // sources available. Without this, picking one source (or any filter that narrows rows to a
+  // small/empty set) collapses the dropdown down to just that one value, trapping the user.
+  const fromApiMeta = extractFilterOptions(rows, "sources", meta).map(
     (source) => source.label || source.value || source,
   );
   return Array.from(
-    new Set([...fromRows, ...fromMeta].map(text).filter(Boolean)),
+    new Set([...fromRows, ...fromApiMeta].map(text).filter(Boolean)),
   ).sort();
 }
 
-function deriveCategories(dataSet = {}, rows = []) {
+function deriveCategories(dataSet = {}, rows = [], meta = {}) {
   const fromLedger = (rows || [])
     .map((row) => row.category || row.categoryName)
     .filter(Boolean);
   const fromStock = (dataSet.stockItems || [])
     .map((item) => item.category || item.stockCategory)
     .filter(Boolean);
-  const fromMeta = extractFilterOptions(rows, "categories").map(
+  const fromApiMeta = extractFilterOptions(rows, "categories", meta).map(
     (category) => category.label || category.value || category,
   );
   return Array.from(
     new Set(
-      [...fromLedger, ...fromStock, ...fromMeta].map(text).filter(Boolean),
+      [...fromLedger, ...fromStock, ...fromApiMeta].map(text).filter(Boolean),
     ),
   ).sort();
 }
 
-function deriveLocations(dataSet = {}, rows = [], authoritativeLocations = undefined) {
+function deriveLocations(dataSet = {}, rows = [], authoritativeLocations = undefined, meta = {}) {
   const sourceLocations = Array.isArray(authoritativeLocations)
     ? authoritativeLocations
     : [
         ...(dataSet.locations || []),
-        ...extractFilterOptions(rows, "locations"),
+        ...extractFilterOptions(rows, "locations", meta),
         ...(rows || []).map((row) => ({
           id: row.locationId || row.locationName,
           name: row.locationName || row.locationId,
@@ -1090,7 +1107,9 @@ function normalizeLocationIdentity(value = "") {
   return text(value).normalize("NFKC").toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
-function extractFilterOptions(rows = [], key = "") {
+function extractFilterOptions(rows = [], key = "", meta = {}) {
+  const fromReportMeta = meta?.filterOptions?.[key];
+  if (Array.isArray(fromReportMeta) && fromReportMeta.length) return fromReportMeta;
   for (const row of rows || []) {
     const direct = row?.__apiMeta?.filterOptions?.[key];
     if (Array.isArray(direct)) return direct;
@@ -1358,4 +1377,8 @@ function updateDateRangeDisplay(display, startDate, endDate) {
 export const __reportViewerInternals = {
   getBulkOrderRows,
   buildLowStockOrderPayload,
+  deriveReportFilterOptions,
+  deriveSources,
+  deriveCategories,
+  extractFilterOptions,
 };

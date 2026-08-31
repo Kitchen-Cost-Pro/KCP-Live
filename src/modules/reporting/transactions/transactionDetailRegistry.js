@@ -4,6 +4,7 @@ const REGISTRY = Object.freeze({
   manufacturing_batch: { label: "Manufacturing", icon: "MFG" },
   transfer: { label: "Transfer", icon: "TRF" },
   stock_take: { label: "Stock Take", icon: "STK" },
+  adjustment: { label: "Adjustment", icon: "ADJ" },
 });
 
 export function getTransactionDetailDefinition(entityType = "") {

@@ -1091,6 +1091,118 @@
   background: color-mix(in srgb, var(--surface-secondary) 72%, transparent);
 }
 
+.stockModule__sectionHint {
+  color: var(--text-soft);
+  font-size: 0.78rem;
+  font-weight: 850;
+}
+
+.stockModule__costFieldShell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.stockModule__costFieldShell input {
+  flex: 1;
+  min-width: 0;
+}
+
+.stockModule__costByLocationButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 0 12px;
+  height: 40px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: var(--surface-secondary);
+  color: var(--text-main);
+  font-size: 0.72rem;
+  font-weight: 900;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.stockModule__costByLocationButton:hover {
+  border-color: var(--accent-blue);
+  color: var(--accent-blue);
+}
+
+.stockModule__costByLocationButton svg {
+  width: 14px;
+  height: 14px;
+}
+
+.stockModule__locationCostingModal--costByLocation {
+  max-width: 640px;
+}
+
+.stockModule__locationCostGrid {
+  display: grid;
+  gap: 10px;
+}
+
+.stockModule__locationCostRow {
+  display: grid;
+  grid-template-columns: minmax(140px, 0.9fr) minmax(140px, 0.6fr) minmax(160px, 0.9fr);
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface-secondary) 42%, transparent);
+}
+
+.stockModule__locationCostName {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.stockModule__locationCostName strong {
+  color: var(--text-main);
+  font-size: 0.86rem;
+  font-weight: 950;
+}
+
+.stockModule__badge {
+  display: inline-flex;
+  align-self: flex-start;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent-blue) 16%, transparent);
+  color: var(--accent-blue);
+  font-size: 0.62rem;
+  font-weight: 950;
+  text-transform: uppercase;
+}
+
+.stockModule__badge--muted {
+  background: color-mix(in srgb, var(--surface-secondary) 72%, transparent);
+  color: var(--text-soft);
+}
+
+.stockModule__locationCostHint {
+  color: var(--text-soft);
+  font-size: 0.68rem;
+  font-weight: 850;
+}
+
+.stockModule__locationCostActions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+@media (max-width: 640px) {
+  .stockModule__locationCostRow {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .stockModule__specPanel {
   align-content: start;
 }

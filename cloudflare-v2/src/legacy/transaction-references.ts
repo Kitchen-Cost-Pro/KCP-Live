@@ -1,7 +1,7 @@
 import type { Env } from "./types";
 
 export type TransactionEntityType =
-  "grv" | "credit_note" | "manufacturing_batch" | "transfer" | "stock_take";
+  "grv" | "credit_note" | "manufacturing_batch" | "transfer" | "stock_take" | "adjustment";
 
 const ENTITY_PREFIX: Record<TransactionEntityType, string> = {
   grv: "GRV",
@@ -9,6 +9,7 @@ const ENTITY_PREFIX: Record<TransactionEntityType, string> = {
   manufacturing_batch: "MFG",
   transfer: "TRF",
   stock_take: "STK",
+  adjustment: "ADJ",
 };
 
 let schemaReady: Promise<void> | null = null;
@@ -80,7 +81,7 @@ export function isTransactionReference(
 ): boolean {
   const prefix = entityType
     ? transactionPrefix(entityType)
-    : "(?:GRV|CN|MFG|TRF|STK)";
+    : "(?:GRV|CN|MFG|TRF|STK|ADJ)";
   return new RegExp(`^${prefix}-\\d{6}-(?:\\d{4,}|H[A-Z0-9]{6})$`, "i").test(
     clean(value),
   );

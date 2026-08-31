@@ -84,6 +84,25 @@ export async function saveWastageAdjustment(workspaceId, payload = {}) {
   });
 }
 
+// A manual, product/recipe-based way to deduct stock for a sale that was never captured by the
+// Yoco integration (POS offline, a comp/staff sale never rung up, etc.) — same shape as the wastage
+// flow above (same product picker, same recipe-expansion mechanic), posted to its own endpoint so
+// it's stored/labelled distinctly and never counted as wastage or as a real recorded sale.
+export async function saveSalesAdjustment(workspaceId, payload = {}) {
+  const workspaceKey = String(workspaceId || '').trim();
+  if (!workspaceKey) throw new Error('Workspace id is required to save a sale adjustment.');
+
+  const draft = normalizeSalesAdjustmentPayload(payload);
+  if (!draft.items.length) throw new Error('Select at least one menu item that was sold.');
+  if (!draft.saleReason) throw new Error('Select a reason for this sale adjustment.');
+  if (!draft.locationId) throw new Error('Select a location.');
+
+  return callCloudflareWorkspaceRoute(workspaceKey, 'sale-adjustments', {
+    method: 'POST',
+    payload: draft
+  });
+}
+
 export async function saveManualAdjustments(workspaceId, payload = {}) {
   const workspaceKey = String(workspaceId || '').trim();
   if (!workspaceKey) throw new Error('Workspace id is required to save adjustments.');
@@ -237,6 +256,22 @@ function normalizeWastagePayload(payload = {}) {
     locationName: String(payload.locationName || '').trim(),
     wasteReason: String(payload.wasteReason || '').trim(),
     note: String(payload.note || '').trim(),
+    date: String(payload.date || todayLocal()).trim(),
+    items: (payload.items || []).map((item) => ({
+      productId: String(item.productId || item.id || '').trim(),
+      productName: String(item.productName || item.name || '').trim(),
+      quantity: Math.max(parseAdjustmentQuantity(item.quantity ?? item.qty ?? 0), 0)
+    })).filter((item) => item.productId && item.quantity > 0)
+  };
+}
+
+function normalizeSalesAdjustmentPayload(payload = {}) {
+  return {
+    id: String(payload.id || '').trim(),
+    locationId: String(payload.locationId || '').trim(),
+    locationName: String(payload.locationName || '').trim(),
+    saleReason: String(payload.saleReason || '').trim(),
+    note: String(payload.note || payload.saleReason || '').trim(),
     date: String(payload.date || todayLocal()).trim(),
     items: (payload.items || []).map((item) => ({
       productId: String(item.productId || item.id || '').trim(),

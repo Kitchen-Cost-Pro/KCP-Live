@@ -25,7 +25,7 @@ test('Phase 33.19 reporting navigation opens the directory and reports choose th
   const main = source('src/main.js');
   const dashboard = source('src/modules/reporting/ReportingDashboard.js');
 
-  assert.match(main, /nextSection === 'reporting'\) clearReportingNavigationParameters\(\)/);
+  assert.match(main, /nextSection === 'reporting'\)\s*\{?\s*clearReportingNavigationParameters\(\)/);
   assert.match(dashboard, /if \(!initialRoute\) clearReportingRouteState\(\)/);
   assert.equal(getFirstReportView({ availableViews: ['overview', 'detail'], defaultView: 'detail' }), 'overview');
   assert.equal(getFirstReportView({ availableViews: [], defaultView: 'summary' }), 'summary');

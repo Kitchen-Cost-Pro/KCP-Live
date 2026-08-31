@@ -96,6 +96,7 @@ import {
   getSiteConfiguration,
   getSuppliers,
   getStockItems,
+  getStockItemLocationCosts,
   getStockTakeDrafts,
   getStockTakeTemplates,
   getStockTakes,
@@ -148,6 +149,7 @@ import {
   postGmailSendSupplierEmail,
   postAdjustment,
   postWastageAdjustment,
+  postSalesAdjustment,
   postCreditNote,
   postGoodsReceipt,
   postImportPreview,
@@ -171,6 +173,7 @@ import {
   postStockCategoryAction,
   postStockImport,
   postStockLocationCostsImport,
+  postStockItemLocationCosts,
   postStockItem,
   postStockResetDashboardHistory,
   postStockTake,
@@ -1192,6 +1195,28 @@ export async function dispatchWorkspaceRoute(
     return patchStockLevel(request, env, auth, workspaceId, stockLevelMatch[1]);
   }
 
+  const stockItemLocationCostsMatch = resource.match(
+    /^stock-items\/([^/]+)\/location-costs$/,
+  );
+  if (request.method === "GET" && stockItemLocationCostsMatch) {
+    return getStockItemLocationCosts(
+      request,
+      env,
+      auth,
+      workspaceId,
+      stockItemLocationCostsMatch[1],
+    );
+  }
+  if (request.method === "POST" && stockItemLocationCostsMatch) {
+    return postStockItemLocationCosts(
+      request,
+      env,
+      auth,
+      workspaceId,
+      stockItemLocationCostsMatch[1],
+    );
+  }
+
   const stockItemMatch = resource.match(/^stock-items\/([^/]+)$/);
   if (
     (request.method === "PATCH" || request.method === "PUT") &&
@@ -1256,6 +1281,10 @@ export async function dispatchWorkspaceRoute(
 
   if (request.method === "POST" && resource === "wastage-adjustments") {
     return postWastageAdjustment(request, env, auth, workspaceId);
+  }
+
+  if (request.method === "POST" && resource === "sale-adjustments") {
+    return postSalesAdjustment(request, env, auth, workspaceId);
   }
 
   if (request.method === "GET" && resource === "credit-notes") {

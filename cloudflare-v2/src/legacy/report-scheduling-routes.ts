@@ -86,7 +86,7 @@ const REPORTS: Record<string, { title: string; groupId?: string; views: string[]
   modifier_report: { title: 'Modifier Report', views: ['summary', 'gp_tracker', 'by_group', 'by_menu_item', 'by_modifier', 'sales_log'], source: 'modifier' },
   menu_recipe_health: { title: 'Menu & Recipe Health', views: ['overview', 'menu_items', 'recipe_detail', 'pricing', 'warnings'], source: 'menu' },
   stock_control: { title: 'Stock Control', views: ['location_summary', 'category_summary', 'item_detail', 'reorder_detail', 'warnings'], source: 'stock' },
-  stock_on_hand: { title: 'Stock on Hand', views: ['summary', 'by_location', 'by_category', 'by_item', 'line_detail'], source: 'stock_on_hand' },
+  stock_on_hand: { title: 'Stock on Hand', views: ['summary', 'by_location', 'by_category', 'by_item', 'by_uom', 'line_detail'], source: 'stock_on_hand' },
   stock_out_forecast: { title: 'Stock-Out Forecast', views: ['forecast_summary', 'risk_matrix', 'by_location', 'by_category', 'by_item', 'usage_detail'], source: 'advanced' },
   price_volatility_analysis: { title: 'Price Volatility Analysis', views: ['summary', 'volatility_matrix', 'by_supplier', 'by_category', 'by_item', 'price_history'], source: 'advanced' },
   theoretical_vs_actual: { title: 'Theoretical vs Actual', views: ['summary', 'variance_heatmap', 'by_location', 'by_category', 'by_item', 'variance_detail', 'formula_breakdown'], source: 'advanced' },

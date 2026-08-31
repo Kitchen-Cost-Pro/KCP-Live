@@ -178,7 +178,11 @@ function createDb() {
 
 function seedCore(db: SqliteDb) {
   db.database.exec(`
-    INSERT INTO workspace_settings (workspace_id, vat_rate) VALUES ('ws_1', 15);
+    -- getEffectRuntime() in effect-gate.ts gates STOCK effects (not reporting) on the merchant
+    -- having clicked "Go Live" (workspace_settings.raw_json.stockDepletionEnabled) — a fixture
+    -- representing an already-connected, live tenant must set it, or SALE_STOCK/REFUND_STOCK
+    -- silently return "SKIPPED" before ever reaching the business logic under test here.
+    INSERT INTO workspace_settings (workspace_id, vat_rate, raw_json) VALUES ('ws_1', 15, '{"stockDepletionEnabled":true}');
     INSERT INTO locations (id, workspace_id, name, active, external_provider, external_location_id)
       VALUES ('loc_1', 'ws_1', 'Main', 1, 'yoco', 'yoco_loc_1');
     INSERT INTO stock_items (id, workspace_id, name, item_type, unit, unit_cost, active, is_stocked)

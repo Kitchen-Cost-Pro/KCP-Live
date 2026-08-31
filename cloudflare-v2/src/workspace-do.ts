@@ -20,6 +20,8 @@ import {
   HOT_PATH_INDEX_SCHEMA_REPAIR_ID,
   RECONCILIATION_AND_PURCHASE_SUMMARY_SCHEMA_REPAIR,
   RECONCILIATION_AND_PURCHASE_SUMMARY_SCHEMA_REPAIR_ID,
+  YOCO_V2_RECONCILIATION_FINDINGS_COLUMNS_SCHEMA_REPAIR,
+  YOCO_V2_RECONCILIATION_FINDINGS_COLUMNS_SCHEMA_REPAIR_ID,
   YOCO_V2_RUNTIME_SCHEMA_REPAIR,
   YOCO_V2_RUNTIME_SCHEMA_REPAIR_ID,
   YOCO_V2_VAT_SNAPSHOT_SCHEMA_REPAIR,
@@ -427,6 +429,27 @@ export class WorkspaceDO extends DurableObject<Env> {
           sql.exec(
             `INSERT OR REPLACE INTO _kcp_runtime_repairs (repair_id, applied_at) VALUES (?1, datetime('now'))`,
             ADJUSTMENT_LINES_INDEX_SCHEMA_REPAIR_ID,
+          );
+        });
+      }
+
+      // Same drift problem, for the second half of migration 33 that YOCO_V2_VAT_SNAPSHOT_SCHEMA_REPAIR
+      // deliberately left out (yoco_v2_reconciliation_findings.last_seen_at/last_run_id/occurrence_count
+      // and its unique index) — see that repair's own comment and this one's for the live incident this
+      // closes. Without it, a drifted tenant's reconciliation run fails outright on its first finding,
+      // silently disabling the backstop that resolves an order left unwritten by the
+      // order.updated/order.completed "not final yet" skip path.
+      const reconciliationFindingsColumnsRepairApplied = sql.exec(
+        `SELECT repair_id FROM _kcp_runtime_repairs WHERE repair_id = ?1`,
+        YOCO_V2_RECONCILIATION_FINDINGS_COLUMNS_SCHEMA_REPAIR_ID,
+      ).toArray()[0];
+      if (!reconciliationFindingsColumnsRepairApplied) {
+        markInProgress();
+        storage.transactionSync(() => {
+          this.db.execScript(YOCO_V2_RECONCILIATION_FINDINGS_COLUMNS_SCHEMA_REPAIR);
+          sql.exec(
+            `INSERT OR REPLACE INTO _kcp_runtime_repairs (repair_id, applied_at) VALUES (?1, datetime('now'))`,
+            YOCO_V2_RECONCILIATION_FINDINGS_COLUMNS_SCHEMA_REPAIR_ID,
           );
         });
       }

@@ -162,6 +162,20 @@ async function completeCanonicalProcessing(
     processingRun: run,
     forceRefresh: Boolean(message.force_refresh)
   });
+  if (resolved.skipped) {
+    // A completed-sale-trigger event (order.updated, or order.completed itself) resolved to a
+    // still-open order after a fresh Yoco lookup — sale-resolver.ts already wrote the timeline entry
+    // (SALE_EVENT_NOT_FINAL_YET) and deliberately wrote no domain event, so no reporting/stock effect
+    // was attempted or blocked. Ack cleanly; a later webhook or reconciliation resolves it.
+    await updateRunAndRawEvent(env.DB, {
+      rawEventId,
+      processingRunId: runId,
+      status: 'COMPLETED',
+      currentStep: 'SALE_EVENT_NOT_FINAL_YET',
+      completedAt: nowIso()
+    });
+    return { ok: true, action: 'ack', status: 'COMPLETED' };
+  }
   const stage = message.rerun_stage || 'all';
   if (stage === 'resolution') {
     await updateRunAndRawEvent(env.DB, {

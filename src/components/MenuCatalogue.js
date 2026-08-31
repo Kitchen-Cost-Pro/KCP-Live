@@ -403,7 +403,8 @@ function bindActions(view, visibleItems, onMenuAction, menu = {}, posLock = {}) 
       sellingPrice,
       priceLocationId,
       locationPrices,
-      barcodes: formData.get('barcodes')
+      barcodes: formData.get('barcodes'),
+      noRecipeRequired: formData.get('noRecipeRequired') === 'on'
     });
   });
 
@@ -919,6 +920,10 @@ function renderEditModal(menu) {
               </button>
             </div>
           </label>
+          <label class="menuCatalogue__toggleField" title="Turn on for items that legitimately never have a recipe — a resold bottled drink, a gift card, a service charge. Stops this item from showing up as a Missing Recipe problem on Menu &amp; Recipe Health, onboarding, and stock deduction.">
+            <input type="checkbox" name="noRecipeRequired" ${item.noRecipeRequired === true ? 'checked' : ''} />
+            <span>No Recipe Required</span>
+          </label>
           ${menu.actionError ? `<div class="menuCatalogue__inlineError" role="alert">${escapeHtml(menu.actionError)}</div>` : ''}
           <div class="menuCatalogue__modalActions">
             <button type="button" data-menu-close-edit>Cancel</button>
@@ -1102,6 +1107,14 @@ function renderPageButtons(prefix, paging) {
 }
 
 function renderStatus(item) {
+  if (item.noRecipeRequired === true || item.recipeStatus === 'NOT_REQUIRED') {
+    return `
+      <em class="menuCatalogue__status menuCatalogue__status--notRequired">
+        No Recipe Required
+      </em>
+    `;
+  }
+
   if (item.status === 'complete') {
     const label = item.recipeStatus === 'COMPLETE_VIA_LINKED_STOCK_ITEM' || item.recipeSource === 'linked_stock_item'
       ? 'Complete via linked stock item'

@@ -1,4 +1,4 @@
-import { safeNumber } from '../../engine/calculations.js';
+import { roundMoney, safeNumber } from '../../engine/calculations.js';
 import { applyReportFilters, sumBy, text, toArray } from '../../engine/grouping.js';
 import { buildRowWarnings } from '../../validators/rowWarningUtils.js';
 import { buildStockLedger, finalizeLedgerRows } from '../../engine/stockLedgerMapper.js';
@@ -13,12 +13,14 @@ const ledgerColumns = [
   { key: 'locationName', label: 'Location', sortable: true },
   { key: 'itemName', label: 'Item', sortable: true },
   { key: 'category', label: 'Category', sortable: true },
-  { key: 'movementType', label: 'Movement Type', sortable: true },
+  { key: 'movementType', label: 'Movement Type', tooltipKey: 'movementDirection', sortable: true },
+  { key: 'openingBalance', label: 'Opening Balance', type: 'number', align: 'right', tooltipKey: 'openingBalance', sortable: true },
   { key: 'source', label: 'Source', tooltipKey: 'source', sortable: true },
   { key: 'documentNumber', label: 'Document Number', sortable: true },
   { key: 'qtyIn', label: 'Qty In', type: 'number', align: 'right', sortable: true },
   { key: 'qtyOut', label: 'Qty Out', type: 'number', align: 'right', sortable: true },
   { key: 'netQty', label: 'Net Qty', type: 'number', align: 'right', tooltipKey: 'netMovement', sortable: true },
+  { key: 'closingBalance', label: 'Closing Balance', type: 'number', align: 'right', tooltipKey: 'closingBalance', sortable: true },
   { key: 'baseUom', label: 'Base UOM', sortable: true },
   { key: 'unitCostExVat', label: 'Unit Cost Ex VAT', type: 'money', align: 'right', tooltipKey: 'unitCostExVat', sortable: true },
   { key: 'movementValue', label: 'Movement Value', type: 'money', align: 'right', tooltipKey: 'movementValue', sortable: true },
@@ -33,7 +35,7 @@ export const detailedActivityReport = {
   id: 'detailed_activity',
   title: 'Detailed Activity',
   section: 'operations',
-  description: 'Full stock movement ledger showing every inventory event.',
+  description: 'Full stock movement ledger showing every inventory event: opening/closing balance per movement, and why each movement type increases or decreases stock.',
   emptyState: { title: 'No stock activity found', message: 'No stock activity found for this period.' },
   defaultView: 'ledger',
   availableViews: ['ledger'],
@@ -53,6 +55,7 @@ export const detailedActivityReport = {
     const response = await loadDetailedActivityLedger({ workspaceId, filters, services, dataSet });
     const ledgerRows = finalizeLedgerRows(response.rows).map((row) => ({
       ...row,
+      ...deriveBalanceColumns(row),
       __apiWarnings: response.warnings || [],
       __apiMeta: response.meta || {}
     }));
@@ -66,6 +69,10 @@ export const detailedActivityReport = {
     movementValue: sumBy(rows, 'movementValue')
   }),
 
+  // Totals for openingBalance/closingBalance are deliberately omitted from getTotals: they are
+  // running per-item/location balances, not additive quantities, so summing them across rows for
+  // different items (or different points in the same item's timeline) would not mean anything.
+
   validate: ({ rows, services }) => validateDetailedActivityRows(rows, services),
 
   exportMapping: {
@@ -76,11 +83,13 @@ export const detailedActivityReport = {
       itemName: 'Item',
       category: 'Category',
       movementType: 'Movement Type',
+      openingBalance: 'Opening Balance',
       source: 'Source',
       documentNumber: 'Document Number',
       qtyIn: 'Qty In',
       qtyOut: 'Qty Out',
       netQty: 'Net Qty',
+      closingBalance: 'Closing Balance',
       baseUom: 'Base UOM',
       unitCostExVat: 'Unit Cost Ex VAT',
       movementValue: 'Movement Value',
@@ -92,6 +101,19 @@ export const detailedActivityReport = {
     }
   }
 };
+
+// Closing Balance is the same figure as Running Qty (the balance for this item/location immediately
+// after this movement) — Opening Balance is simply that minus this row's own Net Qty. Both stay null
+// (not a fabricated 0) whenever Running Qty itself is unavailable (see addRunningBalances in
+// stockLedgerMapper.js), matching how the rest of the report treats unresolved balances.
+function deriveBalanceColumns(row = {}) {
+  const closingBalance = row.runningQty === null || row.runningQty === undefined ? null : safeNumber(row.runningQty);
+  const openingBalance = closingBalance === null ? null : roundMoney(closingBalance - safeNumber(row.netQty), 3);
+  return {
+    openingBalance,
+    closingBalance: closingBalance === null ? null : roundMoney(closingBalance, 3)
+  };
+}
 
 
 async function loadDetailedActivityLedger({ workspaceId, filters, services = {}, dataSet = {} }) {

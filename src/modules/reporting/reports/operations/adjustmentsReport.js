@@ -7,6 +7,7 @@ import { detailedActivityReport } from './detailedActivityReport.js';
 import {
   buildMenuItemWastageRows,
   isProductWastageMovement,
+  isSalesAdjustmentMovement,
   resolveProductWastageIdentity,
   resolveProductWastageQuantity,
   resolveWastageSourceLabel,
@@ -21,10 +22,11 @@ const summaryColumns = [
   { key: 'locationName', label: 'Location', sortable: true },
   { key: 'adjustmentType', label: 'Adjustment Type', sortable: true },
   { key: 'reason', label: 'Reason', sortable: true },
+  { key: 'itemsAdjusted', label: 'Items Adjusted', type: 'number', align: 'right', sortable: true },
   { key: 'totalQtyAdjusted', label: 'Total Qty Adjusted', type: 'number', align: 'right', tooltipKey: 'adjustmentQty', cellTooltip: adjustmentQtyTooltip, sortable: true },
   { key: 'totalValueAdjusted', label: 'Total Value Adjusted', type: 'money', align: 'right', tooltipKey: 'adjustmentValue', cellTooltip: adjustmentValueTooltip, sortable: true },
-  { key: 'adjustmentEvents', label: 'Adjustment Events', type: 'number', align: 'right', sortable: true },
-  { key: 'createdBy', label: 'Created By', sortable: true }
+  { key: 'createdBy', label: 'Created By', sortable: true },
+  { key: 'transactionReference', label: 'Transaction ID', type: 'transaction_id', sortable: true }
 ];
 
 const bySourceColumns = [
@@ -174,10 +176,11 @@ export const adjustmentsReport = {
       locationName: 'Location',
       adjustmentType: 'Adjustment Type',
       reason: 'Reason',
+      itemsAdjusted: 'Items Adjusted',
       totalQtyAdjusted: 'Total Qty Adjusted',
       totalValueAdjusted: 'Total Value Adjusted',
-      adjustmentEvents: 'Adjustment Events',
-      createdBy: 'Created By'
+      createdBy: 'Created By',
+      transactionReference: 'Transaction ID'
     },
     by_source: {
       adjustmentSource: 'Source',
@@ -295,6 +298,7 @@ function normalizeAdjustmentRow(row = {}, index = 0) {
     createdBy: text(row.createdBy || row.user || row.createdByName),
     notes: text(row.notes || row.note),
     sourceId: text(row.sourceId),
+    transactionReference: text(row.transactionReference),
     documentNumber: text(row.documentNumber),
     signedDirection,
     isWastageAdjustment: isWastageAdjustment(row),
@@ -325,20 +329,31 @@ function summarizeAdjustmentRows(rows = [], keySelector, rowBuilder) {
   return Array.from(groupBy(rows, keySelector).entries()).map(([key, groupRows]) => rowBuilder(key, groupRows));
 }
 
+// One summary row = one posted adjustment/wastage/correction submission (matching how GRV Log's
+// summary groups by grvId, not by date/location/type/reason which can span several distinct
+// submissions) — this is what makes a summary row map 1:1 onto a single transaction drawer.
 function toSummaryRow(key, rows = []) {
   const first = rows[0] || {};
+  const locationNames = uniqueValues(rows, 'locationName');
   return {
     id: `adjustments-summary:${key}`,
     date: first.date || '',
-    locationName: first.locationName || 'Unassigned',
+    locationName: locationNames.length === 1 ? locationNames[0] : (locationNames.length > 1 ? 'Multiple Locations' : 'Unassigned'),
     adjustmentType: first.adjustmentType || 'Adjustment',
     reason: first.reason || 'No reason captured',
+    itemsAdjusted: uniqueValues(rows, (row) => row.itemId || row.itemName).length,
     totalQtyAdjusted: sumAbs(rows, 'qtyAdjusted'),
     totalValueAdjusted: sumBy(rows, 'valueImpact'),
-    adjustmentEvents: rows.length,
     createdBy: listTopText(rows, 'createdBy'),
+    sourceId: text(first.sourceId, key),
+    transactionReference: text(first.transactionReference),
     __sourceRows: rows
   };
+}
+
+function uniqueValues(rows = [], keySelector) {
+  const selector = typeof keySelector === 'function' ? keySelector : (row) => row[keySelector];
+  return [...new Set(toArray(rows).map((row) => text(selector(row))).filter(Boolean))];
 }
 
 function toSourceRow(key, rows = []) {
@@ -412,9 +427,9 @@ function getTotalsForView(view = 'summary', rows = []) {
   const reportRows = toArray(rows);
   if (view === 'summary') {
     return {
+      itemsAdjusted: sumBy(reportRows, 'itemsAdjusted'),
       totalQtyAdjusted: sumBy(reportRows, 'totalQtyAdjusted'),
-      totalValueAdjusted: sumBy(reportRows, 'totalValueAdjusted'),
-      adjustmentEvents: sumBy(reportRows, 'adjustmentEvents')
+      totalValueAdjusted: sumBy(reportRows, 'totalValueAdjusted')
     };
   }
   if (view === 'by_source') {
@@ -496,13 +511,17 @@ function countWarning(rows = [], code = '', level = 'warning', message = '', pre
 }
 
 function isAdjustmentLedgerRow(row = {}) {
+  // Stock take variances/corrections have their own dedicated Stock Take Audit report — they must
+  // never also appear here, even though they share the generic "adjustment" ledger classification
+  // and a "correction" substring that would otherwise match the regex fallback below.
+  if (isStockTakeVariance(row)) return false;
   const source = text(row.source);
   const movementType = text(row.movementType);
   const sourceType = text(row.sourceType);
-  if (['Manual Adjustment', 'Wastage Adjustment', 'Manual Wastage', 'Stock Take Variance', 'Stock Take Correction', 'System Correction', 'Manufacturing Correction'].includes(source)) return true;
-  if (['Manual Adjustment', 'Wastage Adjustment', 'Manual Wastage', 'Stock Take Variance', 'Stock Take Correction', 'System Correction', 'Manufacturing Correction'].includes(movementType)) return true;
-  if (['adjustment', 'wastage', 'manualWastage', 'stockTake', 'stockTakeCorrection', 'systemCorrection', 'manufacturingCorrection'].includes(sourceType)) return true;
-  if (/adjustment|correction|stock take variance|stocktake variance/i.test(source) || /adjustment|correction|stock take variance|stocktake variance/i.test(movementType)) return true;
+  if (['Manual Adjustment', 'Wastage Adjustment', 'Manual Wastage', 'Sale Adjustment', 'System Correction', 'Manufacturing Correction'].includes(source)) return true;
+  if (['Manual Adjustment', 'Wastage Adjustment', 'Manual Wastage', 'Sale Adjustment', 'System Correction', 'Manufacturing Correction'].includes(movementType)) return true;
+  if (['adjustment', 'wastage', 'manualWastage', 'saleAdjustment', 'sale_adjustment', 'systemCorrection', 'manufacturingCorrection'].includes(sourceType)) return true;
+  if (/adjustment|correction/i.test(source) || /adjustment|correction/i.test(movementType)) return true;
   return false;
 }
 
@@ -510,6 +529,7 @@ function resolveAdjustmentType(row = {}) {
   const source = text(row.source);
   const movementType = text(row.movementType);
   if (isStockTakeVariance(row)) return 'Stock Take Variance';
+  if (isSalesAdjustmentMovement(row)) return 'Sale Adjustment';
   if (isWastageAdjustment(row)) return resolveWastageSourceLabel(row, source || movementType);
   if (isSystemCorrection(row)) return 'System Correction';
   if (source) return source;
@@ -568,7 +588,7 @@ function parseMetadata(value) {
 }
 
 function summaryKey(row = {}) {
-  return [row.date, row.locationId || row.locationName, row.adjustmentType, row.reason, row.createdBy].map(text).join('::');
+  return text(row.sourceId) || [row.date, row.locationId || row.locationName, row.adjustmentType, row.reason, row.createdBy].map(text).join('::');
 }
 
 function sourceKey(row = {}) {
@@ -652,6 +672,7 @@ function duplicateAdjustmentPredicate(rows = []) {
 }
 
 function isWastageAdjustment(row = {}) {
+  if (isSalesAdjustmentMovement(row)) return false;
   const source = text(row.source || row.adjustmentType);
   const sourceType = text(row.sourceType);
   const movementType = text(row.movementType);

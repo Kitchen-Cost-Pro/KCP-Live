@@ -57,6 +57,29 @@ test('menu item with add-on or upsell modifiers still returns MISSING_RECIPE', (
   );
 });
 
+test('a menu item with no recipe but noRecipeRequired set returns NOT_REQUIRED instead of MISSING_RECIPE', () => {
+  assert.equal(
+    getRecipeStatus({ noRecipeRequired: true }),
+    RECIPE_STATUS.NOT_REQUIRED
+  );
+});
+
+test('noRecipeRequired never overrides a real recipe — a direct recipe still wins', () => {
+  assert.equal(
+    getRecipeStatus({
+      noRecipeRequired: true,
+      recipeLines: [{ stockItemId: 'bun', quantity: 1 }]
+    }),
+    RECIPE_STATUS.COMPLETE
+  );
+});
+
+test('a falsy/non-true noRecipeRequired value does not suppress MISSING_RECIPE', () => {
+  assert.equal(getRecipeStatus({ noRecipeRequired: 'true' }), RECIPE_STATUS.MISSING_RECIPE);
+  assert.equal(getRecipeStatus({ noRecipeRequired: 1 }), RECIPE_STATUS.MISSING_RECIPE);
+  assert.equal(getRecipeStatus({ noRecipeRequired: false }), RECIPE_STATUS.MISSING_RECIPE);
+});
+
 test('direct recipe takes precedence over linked recipe source stock item', () => {
   assert.equal(
     getRecipeStatus({

@@ -9,6 +9,7 @@ import { runYocoV2Reconciliation, setYocoV2ReconciliationPause } from './reconci
 import { getEffectRuntime, pauseEffect, resumeEffect } from './effect-gate';
 import { countActiveYocoWebhookSubscriptions, disconnectYoco, getYocoConnection, reconcileYocoWebhookSubscription } from './integration-service';
 import { processYocoV2QueueMessage } from './processor';
+import { extractYocoV2OrderId, isSupportedCompletedSaleEvent, normalizeYocoV2EventType } from './sale-resolver';
 
 const RECEIPT_STATS_WINDOWS_MINUTES: Array<[string, number]> = [
   ['last5m', 5],
@@ -42,7 +43,11 @@ function response(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
 }
 
+// Number(null) and Number('') both evaluate to 0 (not NaN), so a naive Number(value) parse treats
+// an OMITTED query param the same as an explicit "0" — every caller here wants the fallback default
+// when the param is simply absent, not a silently zeroed limit/offset/window.
 function positiveInteger(value: string | null, fallback: number, max: number): number {
+  if (value === null || value === '') return fallback;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? Math.max(0, Math.min(max, Math.floor(parsed))) : fallback;
 }
@@ -51,6 +56,196 @@ async function loadEvent(env: Env, workspaceId: string, rawEventId: string) {
   return env.DB.prepare(
     `SELECT * FROM yoco_v2_raw_events WHERE workspace_id = ?1 AND id = ?2 LIMIT 1`
   ).bind(workspaceId, rawEventId).first<Row>();
+}
+
+// The webhook log / funnel below cover only completed-sale-trigger events (the ones
+// isSupportedCompletedSaleEvent recognises) — the same set sale-resolver.ts and processor.ts act on.
+// Refund events have their own resolution machinery (yoco_v2_refund_workflows) and aren't mixed in
+// here; a workspace's refund volume is small enough that it doesn't need the same bucket/reprocess
+// tooling yet.
+const SALE_BUCKET_MAX_SCAN = 3000;
+
+type SaleBucket =
+  | 'RESOLVED_FULL' | 'RESOLVED_REPORTING_ONLY' | 'RESOLVED_NOT_APPLIED'
+  | 'ITEM_MAPPING_MISSING' | 'LOCATION_MAPPING_MISSING' | 'MODIFIER_MAPPING_MISSING' | 'PARTIALLY_RESOLVED'
+  | 'MANUAL_REVIEW_REQUIRED' | 'WAITING_FOR_YOCO' | 'UNSUPPORTED_ORDER_STATE'
+  | 'SKIPPED_NOT_FINAL_YET' | 'DEAD_LETTER' | 'FAILED_PERMANENTLY' | 'PROCESSING';
+
+interface SaleBucketRow {
+  sourceOrderId: string;
+  reprocessRawEventId: string;
+  entryEventType: string;
+  eventTypes: string[];
+  firstReceivedAt: string;
+  lastReceivedAt: string;
+  deliveryCount: number;
+  processingStatus: string;
+  lastErrorCode: string | null;
+  lastErrorMessage: string | null;
+  resolutionStatus: string | null;
+  bucket: SaleBucket;
+  reportingApplied: boolean;
+  stockApplied: boolean;
+  canReprocess: boolean;
+  reprocessAction: 'refetch' | 'requeue-dead-letter' | null;
+}
+
+// Bucket order also doubles as the Sankey's middle-column ordering (top to bottom = healthiest to
+// most stuck), so a glance at node position alone tells you severity.
+const SALE_BUCKET_ORDER: SaleBucket[] = [
+  'RESOLVED_FULL', 'RESOLVED_REPORTING_ONLY', 'RESOLVED_NOT_APPLIED', 'SKIPPED_NOT_FINAL_YET',
+  'PROCESSING', 'WAITING_FOR_YOCO', 'PARTIALLY_RESOLVED', 'ITEM_MAPPING_MISSING',
+  'LOCATION_MAPPING_MISSING', 'MODIFIER_MAPPING_MISSING', 'MANUAL_REVIEW_REQUIRED',
+  'UNSUPPORTED_ORDER_STATE', 'DEAD_LETTER', 'FAILED_PERMANENTLY'
+];
+
+function text(value: unknown): string {
+  return value === null || value === undefined ? '' : String(value);
+}
+
+/**
+ * Classifies one Yoco order into a bucket from its full set of webhook deliveries in the scanned
+ * window (`deliveries`, newest first) plus its canonical resolution (`domain`, if one exists).
+ *
+ * This is deliberately keyed by ORDER, not by individual webhook delivery: yoco_v2_domain_events'
+ * raw_event_id column is pinned to whichever delivery FIRST created the row (see the rank-guarded
+ * upsert in sale-resolver.ts) and is never updated when a later delivery upgrades the resolution —
+ * so a per-delivery join would misattribute an order's real outcome to the wrong (often much
+ * earlier, non-final) webhook. An order genuinely IS one bucket; classifying per-delivery would show
+ * confusing, sometimes-contradictory rows for the same order.
+ */
+function classifySaleBucket(orderId: string, domain: Row | null, deliveries: Row[]): SaleBucketRow {
+  const resolutionStatus = domain ? text(domain.resolution_status) || null : null;
+  const reportingApplied = domain ? Boolean(domain.reporting_applied) : false;
+  const stockApplied = domain ? Boolean(domain.stock_applied) : false;
+  const latest = deliveries[0] || null;
+  const oldest = deliveries[deliveries.length - 1] || null;
+
+  const anyDeadLetter = deliveries.some((d) => text(d.processing_status) === 'DEAD_LETTERED');
+  const anyFailedPermanently = deliveries.some((d) => text(d.processing_status) === 'FAILED_PERMANENTLY');
+  const anyManualReview = deliveries.some((d) => text(d.processing_status) === 'MANUAL_REVIEW_REQUIRED');
+  const latestStep = latest ? text(latest.last_step) : '';
+
+  let bucket: SaleBucket;
+  if (anyDeadLetter) bucket = 'DEAD_LETTER';
+  else if (anyFailedPermanently) bucket = 'FAILED_PERMANENTLY';
+  else if (anyManualReview) bucket = 'MANUAL_REVIEW_REQUIRED';
+  else if (resolutionStatus === 'RESOLVED') bucket = reportingApplied && stockApplied ? 'RESOLVED_FULL' : reportingApplied ? 'RESOLVED_REPORTING_ONLY' : 'RESOLVED_NOT_APPLIED';
+  else if (resolutionStatus === 'WAITING_FOR_YOCO') bucket = 'WAITING_FOR_YOCO';
+  else if (resolutionStatus === 'PARTIALLY_RESOLVED') bucket = 'PARTIALLY_RESOLVED';
+  else if (resolutionStatus === 'ITEM_MAPPING_MISSING') bucket = 'ITEM_MAPPING_MISSING';
+  else if (resolutionStatus === 'LOCATION_MAPPING_MISSING') bucket = 'LOCATION_MAPPING_MISSING';
+  else if (resolutionStatus === 'MODIFIER_MAPPING_MISSING') bucket = 'MODIFIER_MAPPING_MISSING';
+  else if (resolutionStatus === 'UNSUPPORTED_ORDER_STATE') bucket = 'UNSUPPORTED_ORDER_STATE';
+  else if (!resolutionStatus && latestStep === 'SALE_EVENT_NOT_FINAL_YET') bucket = 'SKIPPED_NOT_FINAL_YET';
+  else bucket = 'PROCESSING';
+
+  const reprocessRawEventId = latest ? text(latest.id) : (domain ? text(domain.raw_event_id) : '');
+  // PROCESSING is reprocessable too, not just the terminal-stuck buckets: queue redelivery for
+  // delayed retries (e.g. the payment.created "not final yet" retry-throw) is independently broken
+  // in production (confirmed live, 2026-08-31 and again 2026-08-31 — see sale-resolver.ts), and
+  // reconciliation now only attempts once per 24h per workspace (2026-08-28 write-storm fix), so an
+  // order that lands here has no reliable automatic path back — refusing a manual nudge here left an
+  // administrator with no way to unstick a live order for up to a day. Reprocessing a genuinely
+  // still-in-flight row is harmless: resolution is lock-protected (acquireProcessingLock), so a
+  // manual refetch against something mid-processing simply no-ops rather than racing it.
+  const canReprocess = Boolean(reprocessRawEventId) && bucket !== 'RESOLVED_FULL' && bucket !== 'RESOLVED_REPORTING_ONLY';
+  const reprocessAction: SaleBucketRow['reprocessAction'] = !canReprocess ? null
+    : (bucket === 'DEAD_LETTER' || bucket === 'FAILED_PERMANENTLY') ? 'requeue-dead-letter'
+    : 'refetch';
+
+  const receivedAts = deliveries.map((d) => text(d.received_at)).filter(Boolean).sort();
+  return {
+    sourceOrderId: orderId,
+    reprocessRawEventId,
+    entryEventType: oldest ? normalizeYocoV2EventType(oldest.event_type) : 'unknown',
+    eventTypes: [...new Set(deliveries.map((d) => normalizeYocoV2EventType(d.event_type)))],
+    firstReceivedAt: receivedAts[0] || text(domain?.occurred_at) || '',
+    lastReceivedAt: receivedAts[receivedAts.length - 1] || text(domain?.updated_at) || '',
+    deliveryCount: deliveries.length,
+    processingStatus: latest ? text(latest.processing_status) : (domain ? 'COMPLETED' : ''),
+    lastErrorCode: latest?.last_error_code ? text(latest.last_error_code) : null,
+    lastErrorMessage: latest?.last_error_message ? text(latest.last_error_message) : null,
+    resolutionStatus,
+    bucket,
+    reportingApplied,
+    stockApplied,
+    canReprocess,
+    reprocessAction
+  };
+}
+
+/**
+ * Scans the most recent completed-sale-trigger raw events for a workspace (bounded by
+ * SALE_BUCKET_MAX_SCAN, newest first) plus every canonical sale resolved in the same window, groups
+ * both by the Yoco order id (extracted in JS via extractYocoV2OrderId — payload shapes vary too much
+ * across event types for a reliable SQL-side extraction), and classifies each order into one bucket.
+ * Pagination/filtering happens in JS for the same reason described on classifySaleBucket: the bucket
+ * is a derived, cross-table value, not a column any single query can filter on directly — and this
+ * admin tool's data volumes (thousands of events per workspace, not millions) don't need index-level
+ * filtering.
+ */
+async function fetchSaleBuckets(
+  env: Env,
+  workspaceId: string,
+  input: { sinceIso: string }
+): Promise<{ rows: SaleBucketRow[]; truncated: boolean }> {
+  const [rawScanned, domainScanned] = await Promise.all([
+    env.DB.prepare(
+      `SELECT re.id, re.received_at, re.event_type, re.payload_json, re.processing_status,
+              re.processing_attempts, re.last_error_code, re.last_error_message,
+              (SELECT t.step FROM yoco_v2_processing_timeline t WHERE t.raw_event_id = re.id ORDER BY t.created_at DESC, t.id DESC LIMIT 1) AS last_step
+         FROM yoco_v2_raw_events re
+        WHERE re.workspace_id = ?1 AND re.received_at >= ?2
+        ORDER BY re.received_at DESC
+        LIMIT ?3`
+    ).bind(workspaceId, input.sinceIso, SALE_BUCKET_MAX_SCAN + 1).all<Row>(),
+    env.DB.prepare(
+      `SELECT de.source_entity_id, de.raw_event_id, de.resolution_status, de.occurred_at, de.updated_at,
+              (rep.id IS NOT NULL) AS reporting_applied,
+              EXISTS(
+                SELECT 1 FROM yoco_v2_live_sale_stock_effects se
+                 WHERE se.workspace_id = de.workspace_id AND se.source_order_id = de.source_entity_id AND se.status = 'APPLIED'
+              ) AS stock_applied
+         FROM yoco_v2_domain_events de
+         LEFT JOIN yoco_v2_live_sale_reporting_effects rep
+           ON rep.workspace_id = de.workspace_id AND rep.source_order_id = de.source_entity_id
+        WHERE de.workspace_id = ?1 AND de.event_type = 'sale.completed' AND de.occurred_at >= ?2`
+    ).bind(workspaceId, input.sinceIso).all<Row>()
+  ]);
+
+  const rawResults = rawScanned.results || [];
+  const truncated = rawResults.length > SALE_BUCKET_MAX_SCAN;
+  const rawRows = rawResults.slice(0, SALE_BUCKET_MAX_SCAN).filter((row) => isSupportedCompletedSaleEvent(text(row.event_type)));
+
+  const domainByOrder = new Map<string, Row>();
+  for (const domainRow of domainScanned.results || []) domainByOrder.set(text(domainRow.source_entity_id), domainRow);
+
+  const groups = new Map<string, Row[]>();
+  const unresolvableRows: Row[] = [];
+  for (const rawRow of rawRows) {
+    let payload: Row = {};
+    try { payload = JSON.parse(text(rawRow.payload_json) || '{}') as Row; } catch { payload = {}; }
+    const orderId = extractYocoV2OrderId(payload);
+    if (!orderId) { unresolvableRows.push(rawRow); continue; }
+    const list = groups.get(orderId);
+    if (list) list.push(rawRow); else groups.set(orderId, [rawRow]);
+  }
+  // A resolved order with no raw delivery inside this window (e.g. resolved by reconciliation's own
+  // synthetic event, which is itself a raw_events row but could have landed just outside the window
+  // while occurred_at is inside it) still needs a group so it shows up as resolved, not silently drops.
+  for (const orderId of domainByOrder.keys()) if (!groups.has(orderId)) groups.set(orderId, []);
+
+  const rows: SaleBucketRow[] = [];
+  for (const [orderId, deliveries] of groups) {
+    deliveries.sort((a, b) => text(b.received_at).localeCompare(text(a.received_at)));
+    rows.push(classifySaleBucket(orderId, domainByOrder.get(orderId) || null, deliveries));
+  }
+  // Raw events whose payload didn't carry a recognisable order id at all (malformed/unexpected
+  // shape) are rare but must never silently vanish from the log — surface each individually.
+  for (const rawRow of unresolvableRows) rows.push(classifySaleBucket(`unknown:${text(rawRow.id)}`, null, [rawRow]));
+
+  return { rows, truncated };
 }
 
 function buildAdminReplayMessage(
@@ -193,6 +388,74 @@ export async function handleYocoV2AdminRoute(
         LIMIT ?4 OFFSET ?5`
     ).bind(workspaceId, eventType, status, limit, offset).all<Row>();
     return response({ ok: true, rows: rows.results || [], limit, offset });
+  }
+
+  // Bucket + reprocess view over completed-sale-trigger webhooks, one row per Yoco order — see
+  // classifySaleBucket. windowHours bounds how far back to scan; the row list itself is paginated
+  // in JS after classification (see fetchSaleBuckets for why).
+  if (request.method === 'GET' && suffix === 'webhook-log') {
+    const limit = positiveInteger(url.searchParams.get('limit'), 50, 200);
+    const offset = positiveInteger(url.searchParams.get('offset'), 0, 100_000);
+    const windowHours = positiveInteger(url.searchParams.get('windowHours'), 24, 24 * 30);
+    const bucketFilter = String(url.searchParams.get('bucket') || '');
+    const eventTypeFilter = String(url.searchParams.get('eventType') || '');
+    const sinceIso = new Date(Date.now() - windowHours * 60 * 60_000).toISOString();
+    const { rows: allRows, truncated } = await fetchSaleBuckets(env, workspaceId, { sinceIso });
+    const filtered = allRows
+      .filter((row) => !bucketFilter || row.bucket === bucketFilter)
+      .filter((row) => !eventTypeFilter || row.eventTypes.includes(eventTypeFilter))
+      .sort((a, b) => b.lastReceivedAt.localeCompare(a.lastReceivedAt));
+    return response({
+      ok: true,
+      rows: filtered.slice(offset, offset + limit),
+      total: filtered.length,
+      limit,
+      offset,
+      windowHours,
+      scanned: allRows.length,
+      truncated
+    });
+  }
+
+  // Aggregate funnel: entry event type -> bucket -> effect outcome, as Sankey-ready {from,to,value} links.
+  if (request.method === 'GET' && suffix === 'webhook-funnel') {
+    const windowHours = positiveInteger(url.searchParams.get('windowHours'), 24, 24 * 30);
+    const sinceIso = new Date(Date.now() - windowHours * 60 * 60_000).toISOString();
+    const { rows, truncated } = await fetchSaleBuckets(env, workspaceId, { sinceIso });
+
+    // Keyed on a JSON tuple, not a delimited string — several node labels (e.g. "Reported Only (no
+    // stock effect)") contain spaces, so a naive delimited key would collide/mis-split.
+    const linkCounts = new Map<string, { from: string; to: string; value: number }>();
+    const addLink = (from: string, to: string) => {
+      const key = JSON.stringify([from, to]);
+      const existing = linkCounts.get(key);
+      if (existing) existing.value += 1;
+      else linkCounts.set(key, { from, to, value: 1 });
+    };
+    const EFFECT_OUTCOME_LABEL: Record<string, string> = {
+      RESOLVED_FULL: 'Reported + Stock Applied',
+      RESOLVED_REPORTING_ONLY: 'Reported Only (no stock effect)',
+      RESOLVED_NOT_APPLIED: 'Resolved, Not Yet Applied'
+    };
+    for (const row of rows) {
+      addLink(row.entryEventType, row.bucket);
+      const effectLabel = EFFECT_OUTCOME_LABEL[row.bucket];
+      if (effectLabel) addLink(row.bucket, effectLabel);
+    }
+    const links = [...linkCounts.values()].sort((a, b) => b.value - a.value);
+    const bucketCounts = SALE_BUCKET_ORDER.map((bucket) => ({
+      bucket,
+      count: rows.filter((row) => row.bucket === bucket).length
+    })).filter((entry) => entry.count > 0);
+
+    return response({
+      ok: true,
+      windowHours,
+      totalEvents: rows.length,
+      links,
+      buckets: bucketCounts,
+      truncated
+    });
   }
 
   if (request.method === 'GET' && suffix === 'api-requests') {
@@ -540,6 +803,14 @@ export async function handleYocoV2AdminRoute(
     const event = await loadEvent(env, workspaceId, rawEventId);
     if (!event) return response({ ok: false, error: 'V2 raw event not found.' }, 404);
     if (Number(event.signature_valid || 0) !== 1) return response({ ok: false, error: 'Invalid-signature events cannot enter V2 processing.' }, 409);
+    // Explicit opt-in only — buildAdminReplayMessage defaults live_effects to false (a safe "shadow"
+    // reprocess: it corrects the stored resolution_status but writes no reporting/stock effect at
+    // all), which is the right default for routine replay/debugging. Controlled historical backfills
+    // (e.g. reprocessing orders that were stuck UNSUPPORTED_ORDER_STATE so they actually post to
+    // payment reporting) need the real effects applied, so this lets an administrator ask for that
+    // explicitly per call rather than changing the default for every other use of this action.
+    const actionBody = await request.json<{ apply_live_effects?: boolean }>().catch(() => ({} as { apply_live_effects?: boolean }));
+    const applyLiveEffects = Boolean(actionBody.apply_live_effects);
 
     // Cleans up a stock effect that was proposed but never actually applied to the stock ledger
     // (e.g. a test order stuck by a since-fixed race condition) — deletes the unapplied proposal
@@ -606,16 +877,17 @@ export async function handleYocoV2AdminRoute(
     try {
       const replayMessage = buildAdminReplayMessage(event, action, {
         force_refresh: action === 'refetch',
-        rerun_stage: rerunStage
+        rerun_stage: rerunStage,
+        live_effects: applyLiveEffects
       });
       await publishAdminReplay(env, replayMessage);
       await markRawEventQueued(env.DB, rawEventId);
       await appendTimeline(env.DB, {
         rawEventId,
-        step: action === 'requeue-dead-letter' ? 'DEAD_LETTER_REQUEUED' : 'ADMIN_SHADOW_REPROCESS_QUEUED',
+        step: action === 'requeue-dead-letter' ? 'DEAD_LETTER_REQUEUED' : applyLiveEffects ? 'ADMIN_LIVE_REPROCESS_QUEUED' : 'ADMIN_SHADOW_REPROCESS_QUEUED',
         status: 'QUEUED',
-        message: `Administrator queued V2 shadow action ${action}.`,
-        metadata: { actor_uid: auth.uid, actor_email: auth.email, action, rerun_stage: rerunStage, force_refresh: action === 'refetch', action_id: newId('yoco_v2_admin_action') }
+        message: `Administrator queued V2 ${applyLiveEffects ? 'LIVE-EFFECTS' : 'shadow'} action ${action}.`,
+        metadata: { actor_uid: auth.uid, actor_email: auth.email, action, rerun_stage: rerunStage, force_refresh: action === 'refetch', live_effects: applyLiveEffects, action_id: newId('yoco_v2_admin_action') }
       });
       // The durable Cloudflare Queue message above is the fallback of record, but its delivery
       // latency has been observed in production to run well past its configured 5s batch window

@@ -1,7 +1,8 @@
 export const RECIPE_STATUS = Object.freeze({
   COMPLETE: 'COMPLETE',
   COMPLETE_VIA_LINKED_STOCK_ITEM: 'COMPLETE_VIA_LINKED_STOCK_ITEM',
-  MISSING_RECIPE: 'MISSING_RECIPE'
+  MISSING_RECIPE: 'MISSING_RECIPE',
+  NOT_REQUIRED: 'NOT_REQUIRED'
 });
 
 export function normalizeRecipeLinesForStatus(recipe = []) {
@@ -28,6 +29,10 @@ export function getRecipeStatus(menuItem = {}) {
   if (normalizeRecipeLinesForStatus(linkedRecipeLines).length > 0) {
     return RECIPE_STATUS.COMPLETE_VIA_LINKED_STOCK_ITEM;
   }
+
+  // A user-set opt-out (e.g. a resold bottled drink, gift card, or service charge) — these items
+  // legitimately never have a recipe, so a genuinely missing one must not read as a problem.
+  if (menuItem.noRecipeRequired === true) return RECIPE_STATUS.NOT_REQUIRED;
 
   return RECIPE_STATUS.MISSING_RECIPE;
 }

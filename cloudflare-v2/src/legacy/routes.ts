@@ -59,8 +59,10 @@ import {
   resolveTransactionReferences,
 } from "./transaction-references";
 import { resolveLocationDisplayName } from "./location-display";
+import { removeStockItemFromRecipeLines } from "./recipe-line-cleanup";
 // @ts-ignore Shared unit-aware Yoco Money conversion. Money objects are minor units; normalized scalars are major units.
 import { yocoMoneyToMajor } from "../../../src/modules/reporting/engine/yocoFinancials.js";
+import { resolveStockTakeCountedAt } from "./stock-take-counted-at";
 import { KCP_WORKER_RELEASE, KCP_REFUND_PIPELINE_VERSION } from "../release";
 import {
   ModifierRuleValidationError,
@@ -5495,11 +5497,17 @@ export async function getProducts(
     const effectiveRecipeLines = recipeLines.length
       ? recipeLines
       : recipeSourceRecipeLines;
+    // A user-set opt-out (e.g. a resold bottled drink, gift card, or service charge) — these
+    // items legitimately never have a recipe, so a genuinely missing one must not be reported as
+    // a problem here or anywhere downstream (Menu & Recipe Health, onboarding readiness).
+    const noRecipeRequired = raw.noRecipeRequired === true;
     const recipeStatus = recipeLines.length
       ? "COMPLETE"
       : recipeSourceRecipeLines.length
         ? "COMPLETE_VIA_LINKED_STOCK_ITEM"
-        : "MISSING_RECIPE";
+        : noRecipeRequired
+          ? "NOT_REQUIRED"
+          : "MISSING_RECIPE";
     const normalizedRecipeSourceStockItem = recipeSourceStockItem
       ? {
           id: text(recipeSourceStockItem.id),
@@ -5569,7 +5577,9 @@ export async function getProducts(
           ? "linked_stock_item"
           : recipeLines.length
             ? "direct"
-            : "missing",
+            : noRecipeRequired
+              ? "not_required"
+              : "missing",
       recipeSourceStockItemId,
       recipeSourceStockItem: normalizedRecipeSourceStockItem,
       recipeSourceStockItemName: normalizedRecipeSourceStockItem?.name || "",
@@ -5581,8 +5591,9 @@ export async function getProducts(
       combinedGpMin: modifierSummary.gpMin,
       combinedGpMax: modifierSummary.gpMax,
       combinedGpDisplay: modifierSummary.gpDisplay,
-      status: effectiveRecipeLines.length ? "complete" : "missing",
-      missingRecipe: effectiveRecipeLines.length === 0,
+      status: noRecipeRequired || effectiveRecipeLines.length ? "complete" : "missing",
+      missingRecipe: !noRecipeRequired && effectiveRecipeLines.length === 0,
+      noRecipeRequired,
       active: row.active !== 0,
       archived: false,
       deleted: false,
@@ -6356,6 +6367,14 @@ export async function deleteStockItemRoute(
   if (!target) return error(request, env, 404, "Stock item was not found.");
   const before = stockAuditSnapshot(target);
   const after = { ...before, active: false, deletedAt: now };
+  const recipeLineStatements = await removeStockItemFromRecipeLines(
+    env,
+    workspaceId,
+    auth.uid,
+    stockItemId,
+    text(target.name),
+    now,
+  );
   await env.DB.batch([
     env.DB.prepare(
       `UPDATE stock_items
@@ -6376,6 +6395,7 @@ export async function deleteStockItemRoute(
       JSON.stringify(after),
       now,
     ),
+    ...recipeLineStatements,
   ]);
   return json(request, env, { ok: true, id: stockItemId });
 }
@@ -6416,6 +6436,27 @@ export async function postStockBulkDelete(
         active: false,
       })),
     );
+
+    const recipeLineStatements: DbStatementLike[] = [];
+    for (const row of rows.results || []) {
+      recipeLineStatements.push(
+        ...(await removeStockItemFromRecipeLines(
+          env,
+          workspaceId,
+          auth.uid,
+          text(row.id),
+          text(row.name),
+          now,
+        )),
+      );
+    }
+    // A single widely-used base ingredient can appear in hundreds of recipe lines across
+    // products/sub-recipes — each removed line is 2 statements (DELETE + audit insert), so this
+    // must stay chunked the same way the id-list SELECT/UPDATE above are, rather than handing D1
+    // one unbounded batch that can exceed its statement-count limit and fail the whole request.
+    for (const statementChunk of chunkValues(recipeLineStatements, chunkSize * 2)) {
+      await env.DB.batch(statementChunk);
+    }
 
     const result = await env.DB.prepare(
       `UPDATE stock_items
@@ -6509,6 +6550,191 @@ export async function patchStockLevel(
     locationId,
     quantity,
   });
+}
+
+export async function getStockItemLocationCosts(
+  request: Request,
+  env: Env,
+  auth: AuthContext,
+  workspaceId: string,
+  stockItemId: string,
+) {
+  await scoped(request, env, auth, workspaceId);
+  await assertWorkspacePermission(env, auth, workspaceId, "nav-ingredients");
+  const stockItem = await env.DB.prepare(
+    `SELECT id, name, unit_cost
+       FROM stock_items
+      WHERE workspace_id = ?1
+        AND id = ?2
+      LIMIT 1`,
+  )
+    .bind(workspaceId, stockItemId)
+    .first<Record<string, unknown>>();
+  if (!stockItem) return error(request, env, 404, "Stock item was not found.");
+
+  const allowedIds = await getUserAllowedLocationIds(env, auth, workspaceId);
+  const locationScopeSql =
+    allowedIds === null
+      ? ""
+      : ` AND l.id IN (${allowedIds.map((_, i) => `?${i + 3}`).join(", ") || "''"})`;
+  const rows = await env.DB.prepare(
+    `SELECT
+        l.id AS location_id,
+        l.name,
+        l.display_name,
+        l.external_name,
+        l.is_default,
+        silp.price AS location_price,
+        silp.updated_at AS location_price_updated_at,
+        lp.unit_price AS last_purchase_cost,
+        lp.received_at AS last_purchased_at
+       FROM locations l
+       LEFT JOIN stock_item_location_prices silp
+         ON silp.workspace_id = l.workspace_id
+        AND silp.location_id = l.id
+        AND silp.stock_item_id = ?2
+       LEFT JOIN stock_item_latest_purchase lp
+         ON lp.workspace_id = l.workspace_id
+        AND lp.location_id = l.id
+        AND lp.stock_item_id = ?2
+      WHERE l.workspace_id = ?1
+        AND l.active = 1
+        ${locationScopeSql}
+      ORDER BY l.is_default DESC, l.name ASC`,
+  )
+    .bind(workspaceId, stockItemId, ...(allowedIds || []))
+    .all<Record<string, unknown>>();
+
+  const unitCost = numberValue(stockItem.unit_cost, 0);
+  const locations = (rows.results || []).map((row) => {
+    const hasOverride =
+      row.location_price !== undefined && row.location_price !== null;
+    return {
+      locationId: text(row.location_id),
+      locationName: resolveLocationDisplayName(row),
+      isDefault: Number(row.is_default || 0) === 1,
+      cost: hasOverride ? numberValue(row.location_price, 0) : unitCost,
+      hasOverride,
+      updatedAt: text(row.location_price_updated_at),
+      lastPurchaseCost:
+        row.last_purchase_cost !== undefined && row.last_purchase_cost !== null
+          ? numberValue(row.last_purchase_cost, 0)
+          : null,
+      lastPurchasedAt: text(row.last_purchased_at),
+    };
+  });
+
+  return json(request, env, {
+    ok: true,
+    stockItemId,
+    itemName: text(stockItem.name),
+    unitCost,
+    locations,
+  });
+}
+
+export async function postStockItemLocationCosts(
+  request: Request,
+  env: Env,
+  auth: AuthContext,
+  workspaceId: string,
+  stockItemId: string,
+) {
+  await scoped(request, env, auth, workspaceId);
+  await assertWorkspacePermission(env, auth, workspaceId, "nav-ingredients");
+  const payload = await readJson<{ updates?: unknown[] }>(request);
+  const updates = arrayValue(payload.updates)
+    .map(objectValue)
+    .filter((entry) => text(entry.locationId));
+  if (!updates.length)
+    return error(
+      request,
+      env,
+      400,
+      "No location cost updates were supplied.",
+    );
+
+  const stockItem = await env.DB.prepare(
+    `SELECT id, name, unit_cost
+       FROM stock_items
+      WHERE workspace_id = ?1
+        AND id = ?2
+      LIMIT 1`,
+  )
+    .bind(workspaceId, stockItemId)
+    .first<Record<string, unknown>>();
+  if (!stockItem) return error(request, env, 404, "Stock item was not found.");
+
+  const now = nowIso();
+  const statements: DbStatementLike[] = [];
+  let updatedCount = 0;
+
+  for (const update of updates) {
+    const locationId = text(update.locationId);
+    const newCost = numberValue(
+      update.cost ?? update.price ?? update.unitCost,
+      NaN,
+    );
+    if (!locationId || !Number.isFinite(newCost) || newCost < 0) continue;
+    await assertLocationAccess(
+      env,
+      auth,
+      workspaceId,
+      locationId,
+      "location_cost_edit",
+    );
+
+    const existing = await env.DB.prepare(
+      `SELECT price
+         FROM stock_item_location_prices
+        WHERE workspace_id = ?1
+          AND stock_item_id = ?2
+          AND location_id = ?3
+        LIMIT 1`,
+    )
+      .bind(workspaceId, stockItemId, locationId)
+      .first<Record<string, unknown>>();
+    const oldCost = numberValue(
+      existing?.price ?? stockItem.unit_cost,
+      0,
+    );
+    if (Math.round(oldCost * 10000) === Math.round(newCost * 10000)) continue;
+
+    statements.push(
+      upsertLocationCostStatement(
+        env,
+        workspaceId,
+        stockItemId,
+        locationId,
+        newCost,
+        now,
+      ),
+    );
+    statements.push(
+      env.DB.prepare(
+        `INSERT INTO audit_events (id, workspace_id, actor_uid, event_type, entity_type, entity_id, before_json, after_json, created_at)
+         VALUES (?1, ?2, ?3, 'location_cost_updated', 'stock_item_location_price', ?4, ?5, ?6, ?7)`,
+      ).bind(
+        id("audit"),
+        workspaceId,
+        auth.uid,
+        stockItemId,
+        JSON.stringify({ locationId, oldCostExVat: oldCost }),
+        JSON.stringify({
+          locationId,
+          newCostExVat: newCost,
+          itemName: stockItem.name || "",
+        }),
+        now,
+      ),
+    );
+    updatedCount += 1;
+  }
+
+  if (!updatedCount)
+    return json(request, env, { ok: true, updatedCount: 0 });
+  await env.DB.batch(statements);
+  return json(request, env, { ok: true, updatedCount });
 }
 
 export async function postStockImport(
@@ -7128,6 +7354,16 @@ export async function postAdjustment(
   const reason = text(payload.note || payload.reason);
   const wasteReason = text(payload.wasteReason);
   const createdAt = nowIso();
+  // Stamped at post time (not derived lazily on read) so the reference returned in this response is
+  // the same one the Adjustments report's Transaction Detail drawer resolves later — same pattern as
+  // every other document-posting route (GRV, stock take, credit note, transfers, manufacturing).
+  const transactionReference = await ensureTransactionReference(
+    env,
+    workspaceId,
+    "adjustment",
+    adjustmentId,
+    occurredAt,
+  );
   const statements = [
     env.DB.prepare(
       `INSERT INTO adjustments (id, workspace_id, adjustment_type, occurred_at, reason, created_by, raw_json, created_at)
@@ -7325,7 +7561,12 @@ export async function postAdjustment(
   );
 
   await env.DB.batch(statements);
-  return json(request, env, { ok: true, id: adjustmentId, entries });
+  return json(request, env, {
+    ok: true,
+    id: adjustmentId,
+    transactionReference,
+    entries,
+  });
 }
 
 export async function postWastageAdjustment(
@@ -7376,6 +7617,13 @@ export async function postWastageAdjustment(
     }
   }
   const createdAt = nowIso();
+  const transactionReference = await ensureTransactionReference(
+    env,
+    workspaceId,
+    "adjustment",
+    adjustmentId,
+    occurredAt,
+  );
   const statements: DbStatementLike[] = [
     env.DB.prepare(
       `INSERT INTO adjustments (id, workspace_id, adjustment_type, occurred_at, reason, created_by, raw_json, created_at)
@@ -7558,6 +7806,263 @@ export async function postWastageAdjustment(
   return json(request, env, {
     ok: true,
     id: adjustmentId,
+    transactionReference,
+    movements: movementCount,
+    summary,
+  });
+}
+
+// A manual, product/recipe-based way to deduct stock for a sale that was never captured by the
+// Yoco integration (POS was offline, a comp/staff sale never rung up, etc.) — same recipe-expansion
+// mechanic as postWastageAdjustment (this IS a real, deliberate deduction of finished-product
+// ingredients), but stored/labelled distinctly ('sale' adjustment_type, 'sale_adjustment'
+// movement/document type) so it never gets swept into the Wastage Report and is never confused with
+// actual stock loss. Deliberately stock-deduction only: no revenue/GP impact is recorded anywhere
+// (no yoco_orders row, no Sales Usage figure) — it only corrects the stock position, exactly the way
+// Adjustments already work for everything else.
+export async function postSalesAdjustment(
+  request: Request,
+  env: Env,
+  auth: AuthContext,
+  workspaceId: string,
+) {
+  await scoped(request, env, auth, workspaceId);
+  await assertWorkspacePermission(env, auth, workspaceId, "nav-adjustments");
+  const payload = await readJson<Record<string, unknown>>(request);
+  const items = arrayValue(payload.items).map(objectValue);
+  const saleReason = text(payload.saleReason || payload.reason) || "Missed sale";
+  const note = text(payload.note || payload.reason);
+  const requestedLocationId = text(payload.locationId);
+  const date = text(payload.date);
+
+  if (!items.length)
+    return error(request, env, 400, "Select at least one menu item that was sold.");
+  if (!text(payload.note || payload.reason || payload.saleReason))
+    return error(request, env, 400, "Enter a reason for this sale adjustment.");
+
+  const locationId = await resolveActiveLocationId(
+    env,
+    workspaceId,
+    requestedLocationId,
+  );
+  if (!locationId)
+    return error(request, env, 400, "A valid location is required.");
+  await assertLocationAccess(env, auth, workspaceId, locationId, "adjustment");
+
+  const occurredAt = date
+    ? new Date(`${date}T00:00:00.000Z`).toISOString()
+    : nowIso();
+  // Idempotency: honour a client-supplied stable id so a retry does not re-deduct stock.
+  const clientSalesAdjustmentId = text(payload.id || payload.clientId);
+  const adjustmentId = clientSalesAdjustmentId || id("sale_adj");
+  if (clientSalesAdjustmentId) {
+    const existing = await env.DB.prepare(
+      `SELECT id FROM adjustments WHERE workspace_id = ?1 AND id = ?2 LIMIT 1`,
+    )
+      .bind(workspaceId, clientSalesAdjustmentId)
+      .first<{ id: string }>();
+    if (existing) {
+      return json(request, env, {
+        ok: true,
+        id: adjustmentId,
+        duplicate: true,
+      });
+    }
+  }
+  const createdAt = nowIso();
+  const transactionReference = await ensureTransactionReference(
+    env,
+    workspaceId,
+    "adjustment",
+    adjustmentId,
+    occurredAt,
+  );
+  const statements: DbStatementLike[] = [
+    env.DB.prepare(
+      `INSERT INTO adjustments (id, workspace_id, adjustment_type, occurred_at, reason, created_by, raw_json, created_at)
+       VALUES (?1, ?2, 'sale', ?3, ?4, ?5, ?6, ?7)`,
+    ).bind(
+      adjustmentId,
+      workspaceId,
+      occurredAt,
+      note || `Sale Adjustment: ${saleReason}`,
+      auth.uid,
+      JSON.stringify(payload),
+      createdAt,
+    ),
+  ];
+
+  const summary: Record<string, unknown>[] = [];
+  let movementCount = 0;
+
+  for (const rawItem of items) {
+    const productId = text(rawItem.productId || rawItem.id);
+    const productName = text(rawItem.productName || rawItem.name);
+    const quantity = Math.max(
+      numberValue(rawItem.quantity ?? rawItem.qty, 0),
+      0,
+    );
+    if (!productId || quantity <= 0) continue;
+
+    const ingredients = await expandProductIngredients(
+      env,
+      workspaceId,
+      productId,
+      quantity,
+    );
+    if (!ingredients.length) {
+      summary.push({ productId, productName, quantity, skipped: "no_recipe" });
+      continue;
+    }
+
+    for (const ingredient of ingredients) {
+      // A custom UOM (e.g. "1 box") that couldn't be matched to a configured ratio has no
+      // reliable base-unit quantity — deducting it anyway would silently deduct the wrong amount
+      // of stock. Skip the deduction and surface it instead of guessing.
+      if (!ingredient.uomResolved) {
+        summary.push({
+          productId,
+          productName,
+          quantity,
+          stockItemId: ingredient.stockItemId,
+          stockItemName: ingredient.stockItemName,
+          skipped: "uom_invalid",
+        });
+        continue;
+      }
+      const balance = await env.DB.prepare(
+        `SELECT quantity FROM stock_balances WHERE workspace_id = ?1 AND stock_item_id = ?2 AND location_id = ?3 LIMIT 1`,
+      )
+        .bind(workspaceId, ingredient.stockItemId, locationId)
+        .first<{ quantity: number }>();
+
+      const previousStock = numberValue(balance?.quantity, 0);
+      // Zero-floor: never deduct more than is on hand at the location (don't drive the balance
+      // negative) — same policy as wastage. A missed sale that would take stock below zero means
+      // the system's stock position was already wrong before this correction; capping here surfaces
+      // that as a skipped "no_stock" line instead of silently reporting a negative balance.
+      const available = Math.max(previousStock, 0);
+      const delta = -Math.min(Math.abs(ingredient.totalQty), available);
+      if (delta === 0) {
+        summary.push({
+          productId,
+          productName,
+          quantity,
+          stockItemId: ingredient.stockItemId,
+          stockItemName: ingredient.stockItemName,
+          skipped: "no_stock",
+        });
+        continue;
+      }
+      const newStock = previousStock + delta;
+      const unitCost = (
+        await resolveLocationUnitCost(
+          env,
+          workspaceId,
+          ingredient.stockItemId,
+          locationId,
+          ingredient.unitCost,
+        )
+      ).cost;
+      const movId = id("mov");
+      const lineId = id("adj_line");
+      const now = nowIso();
+      const meta = JSON.stringify({
+        productId,
+        productName,
+        saleReason,
+        note,
+        previousStock,
+        newStock,
+        mode: "sale_adjustment",
+        soldQty: quantity,
+      });
+
+      statements.push(
+        env.DB.prepare(
+          // Incremental so two adjusted products sharing an ingredient both deduct it.
+          `INSERT INTO stock_balances (workspace_id, stock_item_id, location_id, quantity, updated_at)
+           VALUES (?1, ?2, ?3, ?4, ?5)
+           ON CONFLICT(workspace_id, stock_item_id, location_id) DO UPDATE SET
+            quantity = stock_balances.quantity + ?4, updated_at = excluded.updated_at`,
+        ).bind(workspaceId, ingredient.stockItemId, locationId, delta, now),
+        env.DB.prepare(
+          `INSERT INTO adjustment_lines (id, workspace_id, adjustment_id, stock_item_id, location_id, quantity_delta, unit_cost)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
+        ).bind(
+          lineId,
+          workspaceId,
+          adjustmentId,
+          ingredient.stockItemId,
+          locationId,
+          delta,
+          unitCost,
+        ),
+        env.DB.prepare(
+          `INSERT INTO stock_movements
+            (id, workspace_id, stock_item_id, location_id, movement_type, document_type, document_id,
+             quantity_delta, unit_cost, value_delta, occurred_at, created_by, metadata_json, created_at)
+           VALUES (?1, ?2, ?3, ?4, 'sale_adjustment', 'sale_adjustment', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)`,
+        ).bind(
+          movId,
+          workspaceId,
+          ingredient.stockItemId,
+          locationId,
+          adjustmentId,
+          delta,
+          unitCost,
+          delta * unitCost,
+          occurredAt,
+          auth.uid,
+          meta,
+          now,
+        ),
+      );
+
+      summary.push({
+        productId,
+        productName,
+        quantity,
+        stockItemId: ingredient.stockItemId,
+        stockItemName: ingredient.stockItemName,
+        unit: ingredient.unit,
+        qtyDeducted: Math.abs(delta),
+        costImpact: Math.abs(delta * unitCost),
+      });
+      movementCount += 1;
+    }
+  }
+
+  if (!movementCount) {
+    const noRecipe = summary
+      .filter((s) => s.skipped === "no_recipe")
+      .map((s) => s.productName)
+      .filter(Boolean);
+    const msg = noRecipe.length
+      ? `No recipes found for: ${noRecipe.join(", ")}. Set up a recipe for each menu item before recording a sale adjustment.`
+      : "No valid sale adjustment lines could be processed.";
+    return error(request, env, 400, msg);
+  }
+
+  statements.push(
+    env.DB.prepare(
+      `INSERT INTO audit_events (id, workspace_id, actor_uid, event_type, entity_type, entity_id, after_json, created_at)
+       VALUES (?1, ?2, ?3, 'sale_adjustment_posted', 'adjustment', ?4, ?5, ?6)`,
+    ).bind(
+      id("audit"),
+      workspaceId,
+      auth.uid,
+      adjustmentId,
+      JSON.stringify({ summary }),
+      nowIso(),
+    ),
+  );
+
+  await env.DB.batch(statements);
+  return json(request, env, {
+    ok: true,
+    id: adjustmentId,
+    transactionReference,
     movements: movementCount,
     summary,
   });
@@ -9965,9 +10470,13 @@ export async function postStockTake(
     return error(request, env, 400, "Enter at least one shelf count first.");
 
   const sessionId = requestedSessionId || id("st");
-  const countedAt = text(draft.date)
-    ? new Date(`${text(draft.date)}T00:00:00.000Z`).toISOString()
-    : nowIso();
+  // A user-picked date must be anchored to the WORKSPACE's local trading-day start, not raw UTC
+  // midnight — Stock Take Audit's date-range filters (Today, Yesterday, ...) compute their bounds
+  // from the workspace's timezone AND its configured trading-day-start hour (Settings > trading
+  // day), so a naive UTC-midnight timestamp can land on the wrong side of that boundary and make a
+  // stock take counted "today" invisible to the "Today"/"Yesterday" filters (see
+  // getStockTakeAuditReport/addZonedDateRange, which the report actually queries against).
+  const countedAt = text(draft.date) ? await resolveStockTakeCountedAt(env, workspaceId, text(draft.date)) : nowIso();
   const transactionReference = await ensureTransactionReference(
     env,
     workspaceId,

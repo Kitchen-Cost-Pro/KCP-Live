@@ -69,7 +69,7 @@ export const REQUIRED_FINAL_REPORT_VIEWS = {
   modifier_report: ['summary', 'gp_tracker', 'by_group', 'by_menu_item', 'by_modifier', 'sales_log'],
   menu_recipe_health: ['overview', 'menu_items', 'recipe_detail', 'pricing', 'warnings'],
   stock_control: ['location_summary', 'category_summary', 'item_detail', 'reorder_detail', 'warnings'],
-  stock_on_hand: ['summary', 'by_location', 'by_category', 'by_item', 'line_detail'],
+  stock_on_hand: ['summary', 'by_location', 'by_category', 'by_item', 'by_uom', 'line_detail'],
   stock_out_forecast: ['forecast_summary', 'risk_matrix', 'by_location', 'by_category', 'by_item', 'usage_detail'],
   price_volatility_analysis: ['summary', 'volatility_matrix', 'by_supplier', 'by_category', 'by_item', 'price_history'],
   theoretical_vs_actual: ['summary', 'variance_heatmap', 'by_location', 'by_category', 'by_item', 'variance_detail', 'formula_breakdown'],

@@ -32,10 +32,13 @@ test('only the V2 webhook ingress is registered for Yoco business events', () =>
 });
 
 test('runtime cannot assign Yoco effect ownership back to LEGACY', () => {
+  // cutover.ts/refund-cutover.ts were later consolidated into live-sale.ts/live-refund.ts (sale and
+  // refund runtimes) plus effect-gate.ts (the shared ownership gate check) — same invariant, current files.
   const ownership = read('cloudflare-v2/src/modules/yoco-engine-v2/ownership.ts');
-  const saleRuntime = read('cloudflare-v2/src/modules/yoco-engine-v2/cutover.ts');
-  const refundRuntime = read('cloudflare-v2/src/modules/yoco-engine-v2/refund-cutover.ts');
-  const joined = `${ownership}\n${saleRuntime}\n${refundRuntime}`;
+  const saleRuntime = read('cloudflare-v2/src/modules/yoco-engine-v2/live-sale.ts');
+  const refundRuntime = read('cloudflare-v2/src/modules/yoco-engine-v2/live-refund.ts');
+  const effectGate = read('cloudflare-v2/src/modules/yoco-engine-v2/effect-gate.ts');
+  const joined = `${ownership}\n${saleRuntime}\n${refundRuntime}\n${effectGate}`;
   assert.doesNotMatch(joined, /engine_version\s*=\s*['"]LEGACY['"]/);
   assert.doesNotMatch(joined, /ROLLED_BACK_TO_LEGACY|rollbackSaleEffect|rollbackRefundEffect/);
   assert.match(ownership, /YOCO_V2_OWNERSHIP_REQUIRES_EXPLICIT_MIGRATION/);
@@ -73,8 +76,10 @@ test('reporting catalog uses canonical sales records and stock_movements', () =>
   assert.match(backend, /yoco_orders/);
 });
 
-test('required final audit documents and release name exist', () => {
-  assert.equal(read('RELEASE.txt').trim(), 'phase-v2-final-legacy-removal-reporting-audit');
+test('required final audit documents exist', () => {
+  // RELEASE.txt is updated on every subsequent release (it isn't pinned to this one audit phase),
+  // so this only checks the audit documents this phase produced are still present.
+  assert.ok(read('RELEASE.txt').trim(), 'RELEASE.txt must not be empty');
   [
     'docs/LEGACY_YOCO_REMOVAL_AUDIT.md',
     'docs/YOCO_V2_REPORTING_WIRING_AUDIT.md',

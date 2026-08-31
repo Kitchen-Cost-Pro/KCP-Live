@@ -232,10 +232,10 @@ const HOT_QUERIES: Array<{
     name: 'reporting detailed-activity — effective-date CASE expression plus sargable prefilter',
     sql: `SELECT sm.id FROM stock_movements sm
            WHERE sm.workspace_id = ?1
-             AND datetime((CASE WHEN sm.document_type IN ('grv', 'credit_note', 'adjustment', 'wastage_adjustment', 'manufacturing_batch') THEN sm.created_at ELSE sm.occurred_at END)) >= datetime(?2)
-             AND (CASE WHEN sm.document_type IN ('grv', 'credit_note', 'adjustment', 'wastage_adjustment', 'manufacturing_batch') THEN sm.created_at ELSE sm.occurred_at END) >= ?3
-             AND datetime((CASE WHEN sm.document_type IN ('grv', 'credit_note', 'adjustment', 'wastage_adjustment', 'manufacturing_batch') THEN sm.created_at ELSE sm.occurred_at END)) < datetime(?4)
-             AND (CASE WHEN sm.document_type IN ('grv', 'credit_note', 'adjustment', 'wastage_adjustment', 'manufacturing_batch') THEN sm.created_at ELSE sm.occurred_at END) < ?5`,
+             AND datetime((CASE WHEN sm.document_type IN ('grv', 'credit_note', 'adjustment', 'wastage_adjustment', 'sale_adjustment', 'manufacturing_batch') THEN sm.created_at ELSE sm.occurred_at END)) >= datetime(?2)
+             AND (CASE WHEN sm.document_type IN ('grv', 'credit_note', 'adjustment', 'wastage_adjustment', 'sale_adjustment', 'manufacturing_batch') THEN sm.created_at ELSE sm.occurred_at END) >= ?3
+             AND datetime((CASE WHEN sm.document_type IN ('grv', 'credit_note', 'adjustment', 'wastage_adjustment', 'sale_adjustment', 'manufacturing_batch') THEN sm.created_at ELSE sm.occurred_at END)) < datetime(?4)
+             AND (CASE WHEN sm.document_type IN ('grv', 'credit_note', 'adjustment', 'wastage_adjustment', 'sale_adjustment', 'manufacturing_batch') THEN sm.created_at ELSE sm.occurred_at END) < ?5`,
     binds: [WS, '2026-08-26T22:00:00.000Z', '2026-08-26', '2026-08-27T22:00:00.000Z', '2026-08-28'],
   },
   {

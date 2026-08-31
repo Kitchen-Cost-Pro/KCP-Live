@@ -1636,6 +1636,35 @@ async function refreshStockFromDataVersion(workspaceId) {
   } catch { /* silent — a failed live refresh must never disrupt the app */ }
 }
 
+// Unlike refreshStockFromDataVersion (a background poll reacting to someone else's change), this
+// runs right after the current session's own write — e.g. a GRV that just posted a location price
+// override to stock_item_location_prices. It must not wait on the poll throttle or on the Stock
+// Items tab being the active route, since the whole point is showing that session its own result.
+async function refreshStockAfterOwnMutation(workspaceId) {
+  if (!workspaceId || appState.workspace?.id !== workspaceId) return;
+  stockLiveRefreshLastAt = Date.now();
+  const requestToken = stockMutationToken;
+  try {
+    clearApiCache();
+    const { fetchStock } = await import('./services/stockService.js');
+    const stock = await fetchStock(workspaceId);
+    if (appState.workspace?.id !== workspaceId) return;
+    if (requestToken !== stockMutationToken) return;
+    applyRealtimeSnapshot('stock', () => {
+      appState.stock = {
+        ...appState.stock,
+        status: 'ready',
+        items: stock.items || appState.stock.items || [],
+        locations: stock.locations || appState.stock.locations || [],
+        categories: stock.categories || appState.stock.categories || [],
+        uoms: stock.uoms || appState.stock.uoms || [],
+        updatedAt: stock.updatedAt || new Date().toISOString(),
+        error: ''
+      };
+    });
+  } catch { /* silent — a failed post-GRV refresh must not disrupt the GRV success flow */ }
+}
+
 function installStockLiveRefresh() {
   if (stockLiveRefreshInstalled) return;
   stockLiveRefreshInstalled = true;
@@ -1910,6 +1939,7 @@ function navigateTo(sectionId) {
 
   if (nextSection === 'reporting') {
     clearReportingNavigationParameters();
+    ensureStockItemsAvailableForReporting(appState.workspace?.id);
   } else {
     // clearReportingNavigationParameters() stamps `?route=reporting` into the URL on every visit
     // to Reporting, but nothing ever removed it again on navigating elsewhere — so once a user
@@ -2333,6 +2363,9 @@ function bootstrapActiveRouteForWorkspace(workspaceId) {
   if (isSettingsRoute(nextSection)) {
     loadSettings(workspaceId);
     return;
+  }
+  if (nextSection === 'reporting') {
+    ensureStockItemsAvailableForReporting(workspaceId);
   }
   renderApp();
 }
@@ -2804,6 +2837,52 @@ async function startRecipeSubscription(workspaceId) {
     };
     renderApp();
   }
+}
+
+let stockLoadForReportingInFlight = false;
+
+// Operations Dashboard's client-side model (buildOperationsDashboardModel in
+// operationsDashboardReport.js) falls back to dataSet.stockItems (== appState.stock.items) for its
+// "live current balance" — the only source it has for Opening/Actual Stock Value when no dedicated
+// point-in-time snapshot exists. But appState.stock.items is normally only ever populated by
+// startStockSubscription(), which is hard-gated to the 'ingredients' route (see its
+// appState.route.active !== 'ingredients' guards) — so a user who opens Reporting without having
+// visited Ingredients first (or after 'dashboard'/'products'/'recipes' navigation cleared it via
+// cleanupStockSubscription()) sees Opening/Actual Stock Value stuck at R0 with no way to populate it.
+// This is a plain one-shot fetch (not the guarded live subscription — that stays 'ingredients'-only
+// by design) that only runs when stock isn't already loaded, so it never fights the Ingredients
+// screen's own subscription for control of appState.stock.
+function ensureStockItemsAvailableForReporting(workspaceId) {
+  if (!workspaceId || stockLoadForReportingInFlight) return;
+  if ((appState.stock.items || []).length > 0) return;
+  // Deliberately NOT gated on appState.stock.status === 'loading' -- that field is owned by
+  // startStockSubscription()'s 'ingredients'-only subscription, which can leave status stuck at
+  // 'loading' forever if the user navigates away from Ingredients before its async import resolves
+  // (its own route guard just no-ops without ever resetting status). Guarding on that stale flag
+  // here would permanently and silently disable this background load for the rest of the session.
+  // stockLoadForReportingInFlight above is this function's own dedicated re-entrancy guard.
+  stockLoadForReportingInFlight = true;
+  (async () => {
+    try {
+      const { fetchStock } = await import('./services/stockService.js');
+      const snapshot = await fetchStock(workspaceId);
+      if (appState.workspace?.id !== workspaceId || (appState.stock.items || []).length > 0) return;
+      appState.stock = {
+        ...appState.stock,
+        items: snapshot.items || [],
+        locations: appState.stock.locations?.length ? appState.stock.locations : (snapshot.locations || []),
+        categories: appState.stock.categories?.length ? appState.stock.categories : (snapshot.categories || []),
+        uoms: appState.stock.uoms?.length ? appState.stock.uoms : (snapshot.uoms || []),
+        loaded: { ...appState.stock.loaded, items: true },
+        updatedAt: new Date().toISOString()
+      };
+      renderApp();
+    } catch (error) {
+      console.warn('[Reporting] Could not background-load stock items for Operations Dashboard:', error);
+    } finally {
+      stockLoadForReportingInFlight = false;
+    }
+  })();
 }
 
 async function startStockSubscription(workspaceId) {
@@ -4556,6 +4635,7 @@ async function saveMenuItem(itemId, updates) {
       sellingPrice: priceLocationId ? Number(item.__globalSellingPrice ?? item.sellingPrice ?? 0) || 0 : Number(updates.sellingPrice || 0),
       locationPrices,
       barcodes: parseBarcodeInput(updates.barcodes),
+      noRecipeRequired: updates.noRecipeRequired === true,
       workspaceId: appState.workspace?.id
     }, {
       workspaceId: appState.workspace?.id,
@@ -5280,6 +5360,11 @@ function openRecipeEditor(itemId) {
     ...appState.recipes,
     editingItem: item,
     draftRecipe: structuredCloneSafe(item.recipe || []),
+    // Kept as its own top-level field for the same reason draftRecipe is: renderRecipes() resolves
+    // `selectedItem` from the master items list when the item is already loaded there (so
+    // concurrent list updates don't get lost mid-edit), which silently discards any change written
+    // onto `editingItem` itself — a value nested there never survives past the next render.
+    draftNoRecipeRequired: item.noRecipeRequired === true,
     pickerOpen: false,
     pickerStep: 'select',
     pickerSelectedIds: [],
@@ -5359,6 +5444,7 @@ function closeRecipeEditor() {
     ...appState.recipes,
     editingItem: null,
     draftRecipe: [],
+    draftNoRecipeRequired: false,
     pickerOpen: false,
     pickerStep: 'select',
     pickerSelectedIds: [],
@@ -5875,6 +5961,16 @@ function selectRecipeModifierStockPicker(value = '') {
   renderApp();
 }
 
+function toggleRecipeNoRecipeRequired(checked = false) {
+  const item = appState.recipes.editingItem;
+  if (!item || item.recipeOwnerType === 'yoco_modifier') return;
+  appState.recipes = {
+    ...appState.recipes,
+    draftNoRecipeRequired: checked === true
+  };
+  renderApp();
+}
+
 function updateRecipeSourceStockItem(stockItemId = '') {
   const item = appState.recipes.editingItem;
   if (!item || item.recipeOwnerType === 'yoco_modifier') return;
@@ -6231,7 +6327,8 @@ async function saveCurrentRecipe() {
 
   try {
     const { updateRecipe } = await import('./services/recipeService.js');
-    await updateRecipe(appState.workspace?.id, item, appState.recipes.draftRecipe || []);
+    const itemToSave = { ...item, noRecipeRequired: appState.recipes.draftNoRecipeRequired === true };
+    await updateRecipe(appState.workspace?.id, itemToSave, appState.recipes.draftRecipe || []);
     // Ensure the success render cannot be skipped if focus changed while the request
     // was pending. This render closes the editor and clears its saving state.
     pendingFocusField = null;
@@ -6242,6 +6339,7 @@ async function saveCurrentRecipe() {
       ...appState.recipes,
       editingItem: null,
       draftRecipe: [],
+      draftNoRecipeRequired: false,
       pickerOpen: false,
       pickerStep: 'select',
       pickerSelectedIds: [],
@@ -6546,9 +6644,119 @@ function openStockEditor(itemId) {
   appState.stock = {
     ...appState.stock,
     editingItem: editableItem,
+    locationCostEditor: null,
+    locationCostModalOpen: false,
     actionError: ''
   };
   renderApp();
+}
+
+function openStockLocationCostModal(itemId) {
+  const id = String(itemId || '').trim();
+  if (!id) return;
+  appState.stock = { ...appState.stock, locationCostModalOpen: true };
+  renderApp();
+  loadStockLocationCostEditor(id);
+}
+
+function closeStockLocationCostModal() {
+  appState.stock = { ...appState.stock, locationCostModalOpen: false };
+  renderApp();
+}
+
+async function loadStockLocationCostEditor(itemId) {
+  const id = String(itemId || '').trim();
+  const workspaceId = appState.workspace?.id;
+  if (!id || !workspaceId) return;
+
+  appState.stock = {
+    ...appState.stock,
+    locationCostEditor: { itemId: id, status: 'loading', unitCost: 0, locations: [], draft: {}, error: '' }
+  };
+  renderApp();
+
+  try {
+    const { fetchStockItemLocationCosts } = await import('./services/stockService.js');
+    const result = await fetchStockItemLocationCosts(workspaceId, id);
+    // The user may have closed the drawer or opened a different item while this was in flight.
+    if (String(appState.stock.editingItem?.id || '') !== id) return;
+    appState.stock = {
+      ...appState.stock,
+      locationCostEditor: {
+        itemId: id,
+        status: 'ready',
+        unitCost: result.unitCost,
+        locations: result.locations,
+        draft: {},
+        error: ''
+      }
+    };
+    renderApp();
+  } catch (error) {
+    if (String(appState.stock.editingItem?.id || '') !== id) return;
+    appState.stock = {
+      ...appState.stock,
+      locationCostEditor: { itemId: id, status: 'error', unitCost: 0, locations: [], draft: {}, error: error.message || 'Could not load location costs.' }
+    };
+    renderApp();
+  }
+}
+
+function updateStockLocationCostDraft(locationId, value) {
+  const editor = appState.stock.locationCostEditor;
+  if (!editor) return;
+  appState.stock = {
+    ...appState.stock,
+    locationCostEditor: {
+      ...editor,
+      draft: { ...editor.draft, [String(locationId || '')]: value }
+    }
+  };
+}
+
+async function saveStockLocationCosts(itemId) {
+  const id = String(itemId || '').trim();
+  const editor = appState.stock.locationCostEditor;
+  const workspaceId = appState.workspace?.id;
+  if (!id || !workspaceId || !editor || editor.itemId !== id) return;
+
+  const updates = editor.locations
+    .map((location) => {
+      const locationId = String(location.locationId || '');
+      const draftValue = editor.draft[locationId];
+      if (draftValue === undefined) return null;
+      const cost = Number(String(draftValue).replace(',', '.'));
+      if (!Number.isFinite(cost) || cost < 0) return null;
+      return { locationId, cost };
+    })
+    .filter(Boolean);
+
+  if (!updates.length) {
+    showStockToast('No location cost changes to save.', 'info');
+    return;
+  }
+
+  appState.stock = { ...appState.stock, locationCostEditor: { ...editor, status: 'saving', error: '' } };
+  renderApp();
+
+  try {
+    const { saveStockItemLocationCosts } = await import('./services/stockService.js');
+    await saveStockItemLocationCosts(workspaceId, id, updates);
+    // The user may have switched to editing a different item while this request was in flight —
+    // the toast/refresh below are session-wide (not tied to which modal is open), but still skip
+    // them if the workspace itself changed underneath this save.
+    if (appState.workspace?.id !== workspaceId) return;
+    showStockToast('Location costs updated.', 'success');
+    if (appState.stock.locationCostEditor?.itemId === id) await loadStockLocationCostEditor(id);
+    refreshStockAfterOwnMutation(workspaceId);
+  } catch (error) {
+    if (appState.stock.locationCostEditor?.itemId !== id) return;
+    appState.stock = {
+      ...appState.stock,
+      locationCostEditor: { ...editor, status: 'ready', error: error.message || 'Could not save location costs.' }
+    };
+    renderApp();
+  }
 }
 
 function normalizeStockDraftRecipe(recipe = []) {
@@ -6693,6 +6901,8 @@ function closeStockEditor() {
   appState.stock = {
     ...appState.stock,
     editingItem: null,
+    locationCostEditor: null,
+    locationCostModalOpen: false,
     lookupPicker: createStockLookupPickerState(),
     actionStatus: '',
     actionError: ''
@@ -10496,6 +10706,12 @@ function updateGrvLine(index, updates = {}) {
     const selection = getLineUomSelection(items[index], normalizedUpdates.selectedUom);
     normalizedUpdates.selectedUom = selection.selectedUom;
     normalizedUpdates.packSize = String(selection.ratio);
+    // Pack Price is total cost for one pack (unitCost is per base unit) — switching UOM changes
+    // the pack size (e.g. 1 Bottle = 30 TOT), so the pack price must be re-derived from the
+    // unchanged base unit cost, not left stale from the previous UOM's pack size.
+    const unitCostEx = Number(items[index].unitCost || 0);
+    normalizedUpdates.packPriceEx = String(unitCostEx * selection.ratio);
+    normalizedUpdates.packPriceDisplay = '';
   }
 
   items[index] = {
@@ -10882,6 +11098,12 @@ async function saveGrvReceipt(options = {}) {
     };
     clearPersistedDraft('grv');
     showGrvToast('GRV saved and stock incremented.', 'success');
+    // The data-version poll would eventually pick up this GRV's stock_movements row and refresh
+    // the Stock Items tab (see refreshStockFromDataVersion), but only after its own throttle/poll
+    // cadence (up to ~75s) and only while that tab is the active route. That left the submitting
+    // user's own session showing pre-GRV location costs immediately after a save that "processed
+    // correctly" server-side — refresh now, in this session, regardless of throttle or active tab.
+    refreshStockAfterOwnMutation(appState.workspace?.id);
   } catch (error) {
     appState.grv = {
       ...appState.grv,
@@ -12134,6 +12356,131 @@ async function saveWastageDraft() {
     showAdjustmentToast(`Wastage recorded — ${movCount} stock movement${movCount !== 1 ? 's' : ''} created.`, 'success');
   } catch (error) {
     appState.adjustments = { ...appState.adjustments, wastageStatus: '', wastageError: error.message || 'Could not save wastage.' };
+    renderApp();
+  } finally {
+    hideGlobalSaving();
+  }
+}
+
+// Product Sales Adjustment: mirrors the Wastage functions above exactly (same product picker, same
+// recipe-expansion mechanic) but posts to postSalesAdjustment and is stored/labelled distinctly so
+// it never counts as wastage or as a real recorded sale.
+function updateSaleAdjustmentDraft(updates = {}) {
+  const draft = appState.adjustments.saleAdjustmentDraft || createEmptySaleAdjustmentDraft();
+  appState.adjustments = { ...appState.adjustments, saleAdjustmentDraft: { ...draft, ...updates } };
+  renderApp();
+}
+
+function toggleSaleAdjustmentSelection(productId, checked) {
+  const ids = new Set((appState.adjustments.filters.saleSelectedIds || []).map(String));
+  checked ? ids.add(String(productId)) : ids.delete(String(productId));
+  updateAdjustmentFilters({ saleSelectedIds: [...ids] });
+}
+
+function addSaleAdjustmentSelectedProducts() {
+  const ids = new Set((appState.adjustments.filters.saleSelectedIds || []).map(String));
+  if (!ids.size) return;
+  const products = appState.adjustments.products || [];
+  const draft = appState.adjustments.saleAdjustmentDraft || createEmptySaleAdjustmentDraft();
+  const existingIds = new Set((draft.items || []).map((i) => String(i.productId)));
+  const newItems = [...ids]
+    .filter((id) => !existingIds.has(id))
+    .map((id) => {
+      const product = products.find((p) => String(p.id) === id);
+      return product ? { productId: product.id, productName: product.name, category: product.category, quantity: '', unitCost: Number(product.unitCost || 0) || 0, estimatedCost: 0 } : null;
+    })
+    .filter(Boolean);
+  appState.adjustments = {
+    ...appState.adjustments,
+    saleAdjustmentDraft: { ...draft, items: [...(draft.items || []), ...newItems] },
+    filters: { ...appState.adjustments.filters, overlay: '', saleSelectedIds: [] }
+  };
+  renderApp();
+}
+
+function removeSaleAdjustmentLine(index) {
+  const draft = appState.adjustments.saleAdjustmentDraft || createEmptySaleAdjustmentDraft();
+  const items = (draft.items || []).filter((_, i) => i !== index);
+  appState.adjustments = { ...appState.adjustments, saleAdjustmentDraft: { ...draft, items } };
+  renderApp();
+}
+
+function updateSaleAdjustmentQty(index, value) {
+  const draft = appState.adjustments.saleAdjustmentDraft || createEmptySaleAdjustmentDraft();
+  const items = (draft.items || []).map((item, i) => {
+    if (i !== index) return item;
+    const qty = Number(parseDecimalInputValue(value)) || 0;
+    const unitCost = Number(item.unitCost || 0) || 0;
+    const estimatedCost = unitCost > 0 ? qty * unitCost : 0;
+    return { ...item, quantity: value, estimatedCost };
+  });
+  appState.adjustments = { ...appState.adjustments, saleAdjustmentDraft: { ...draft, items } };
+  // Live-update the estimated-cost cell + total directly (renderApp is suppressed while the qty
+  // input is focused, so a normal re-render wouldn't reflect the new value until blur).
+  const row = items[index];
+  const costCell = document.querySelector(`[data-sale-cost="${index}"]`);
+  if (costCell && row) {
+    costCell.textContent = Number(row.unitCost || 0) > 0 ? formatCurrency(row.estimatedCost || 0) : 'Cost unavailable';
+  }
+  const totalCell = document.querySelector('[data-sale-total]');
+  if (totalCell) {
+    const total = items.reduce((sum, it) => sum + Number(it.estimatedCost || 0), 0);
+    totalCell.textContent = formatCurrency(total);
+  }
+  renderApp();
+}
+
+async function saveSaleAdjustmentDraft() {
+  const draft = appState.adjustments.saleAdjustmentDraft || createEmptySaleAdjustmentDraft();
+  const locations = appState.adjustments.locations || [];
+  const locationObj = getLocationById(locations, draft.locationId);
+  const locationId = String(draft.locationId || '').trim();
+  const locationName = locationId ? getLocationNameById(locations, locationId, locationObj?.name || 'Main Store') : '';
+  const items = Array.isArray(draft.items) ? draft.items : [];
+  let validationError = '';
+  if (!items.length) validationError = 'Select at least one menu item that was sold.';
+  else if (!locationId || !locationObj) validationError = 'Select a valid location before recording this sale adjustment.';
+  else if (!String(draft.saleReason || '').trim()) validationError = 'Select a reason before recording this sale adjustment.';
+  else {
+    const invalidItem = items.find((item) => !(Number(parseDecimalInputValue(item.quantity)) > 0));
+    if (invalidItem) validationError = `Enter a quantity greater than zero for ${invalidItem.productName || 'every menu item'}.`;
+  }
+  if (validationError) {
+    appState.adjustments = { ...appState.adjustments, saleAdjustmentStatus: '', saleAdjustmentError: validationError };
+    renderApp();
+    return;
+  }
+
+  if (!draft.id) draft.id = makeStableSubmitId('sale_adj');
+  appState.adjustments = { ...appState.adjustments, saleAdjustmentDraft: draft, saleAdjustmentStatus: 'saving', saleAdjustmentError: '' };
+  renderApp();
+  showGlobalSaving('Recording Sale Adjustment');
+
+  try {
+    const { saveSalesAdjustment } = await import('./services/adjustmentService.js');
+    const result = await saveSalesAdjustment(appState.workspace?.id, {
+      ...draft,
+      id: draft.id,
+      locationId,
+      locationName,
+      items: (draft.items || []).map((item) => ({
+        ...item,
+        quantity: parseDecimalInputValue(item.quantity)
+      }))
+    });
+    appState.adjustments = {
+      ...appState.adjustments,
+      saleAdjustmentStatus: '',
+      saleAdjustmentError: '',
+      saleAdjustmentDraft: createEmptySaleAdjustmentDraft(),
+      filters: { ...appState.adjustments.filters, overlay: '', saleSelectedIds: [] }
+    };
+    renderApp();
+    refreshActiveTabFromApi().catch(() => {});
+    const movCount = result?.movements || 0;
+    showAdjustmentToast(`Sale adjustment recorded — ${movCount} stock movement${movCount !== 1 ? 's' : ''} created.`, 'success');
+  } catch (error) {
+    appState.adjustments = { ...appState.adjustments, saleAdjustmentStatus: '', saleAdjustmentError: error.message || 'Could not save sale adjustment.' };
     renderApp();
   } finally {
     hideGlobalSaving();
@@ -19471,6 +19818,7 @@ function renderApp() {
 	      onRestoreNoteSuggestion: (noteText) => setRecipeNoteSuggestionDisposition(noteText, 'SUGGESTED'),
 	      onToggleIgnoredNoteSuggestions: toggleRecipeIgnoredNoteSuggestions,
 		      onRecipeSourceStockItemChange: updateRecipeSourceStockItem,
+	      onToggleNoRecipeRequired: toggleRecipeNoRecipeRequired,
 		      onScanBarcode: scanRecipeIngredientBarcode,
 	      onSave: saveCurrentRecipe,
 	      onRequestDelete: withPermission('recipes', ACTION_PERMISSION_MAP.deleteRecords, requestRecipeDelete, 'You do not have permission to delete recipes.'),
@@ -19504,6 +19852,10 @@ function renderApp() {
       onPreserveFocus: preserveFieldFocus,
       onDraftFieldChange: updateStockDraftField,
       onToggleEditorSection: toggleStockEditorSection,
+      onOpenLocationCostModal: openStockLocationCostModal,
+      onCloseLocationCostModal: closeStockLocationCostModal,
+      onLocationCostDraftChange: updateStockLocationCostDraft,
+      onSaveLocationCosts: saveStockLocationCosts,
       onOpenRecipeScreen: openStockRecipeScreen,
       onCloseRecipeScreen: closeStockRecipeScreen,
       onRecipeSearchChange: updateStockRecipeSearch,
@@ -19660,7 +20012,13 @@ function renderApp() {
       onRemoveWastageLine: removeWastageLine,
       onWastageQtyChange: updateWastageQty,
       onWastageDraftChange: updateWastageDraft,
-      onWastageSave: saveWastageDraft
+      onWastageSave: saveWastageDraft,
+      onToggleSaleAdjustmentSelection: toggleSaleAdjustmentSelection,
+      onAddSaleAdjustmentSelected: addSaleAdjustmentSelectedProducts,
+      onRemoveSaleAdjustmentLine: removeSaleAdjustmentLine,
+      onSaleAdjustmentQtyChange: updateSaleAdjustmentQty,
+      onSaleAdjustmentDraftChange: updateSaleAdjustmentDraft,
+      onSaleAdjustmentSave: saveSaleAdjustmentDraft
     },
     onTransferFilterChange: updateTransferFilters,
     onTransferAction: {
@@ -21034,6 +21392,9 @@ function createAdjustmentState(status, filters = {}) {
     wastageDraft: createEmptyWastageDraft(),
     wastageStatus: '',
     wastageError: '',
+    saleAdjustmentDraft: createEmptySaleAdjustmentDraft(),
+    saleAdjustmentStatus: '',
+    saleAdjustmentError: '',
     actionStatus: '',
     actionError: '',
     toast: null,
@@ -21051,6 +21412,10 @@ function createAdjustmentState(status, filters = {}) {
       wastageCategory: '',
       wastagePage: 1,
       wastageSelectedIds: [],
+      saleSearch: '',
+      saleCategory: '',
+      salePage: 1,
+      saleSelectedIds: [],
       ...filters
     }
   };
@@ -21061,6 +21426,17 @@ function createEmptyWastageDraft() {
     locationId: 'main',
     locationName: 'Main Store',
     wasteReason: '',
+    note: '',
+    date: '',
+    items: []
+  };
+}
+
+function createEmptySaleAdjustmentDraft() {
+  return {
+    locationId: 'main',
+    locationName: 'Main Store',
+    saleReason: '',
     note: '',
     date: '',
     items: []

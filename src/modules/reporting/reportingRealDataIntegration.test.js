@@ -690,15 +690,17 @@ test('Adjustments Report uses real ledger rows and includes adjustment source ty
   });
 
   const sources = new Set(result.rows.map((row) => row.adjustmentType));
-  assert.equal(result.rows.length, 4);
+  // Stock Take Variance has its own dedicated Stock Take Audit report and is deliberately excluded
+  // here (see isAdjustmentLedgerRow) — down from 4 rows to 3 once move-adj-002 drops out.
+  assert.equal(result.rows.length, 3);
   assert.ok(sources.has('Manual Adjustment'));
   assert.ok(sources.has('Stock Item Wastage'));
-  assert.ok(sources.has('Stock Take Variance'));
   assert.ok(sources.has('System Correction'));
+  assert.equal(sources.has('Stock Take Variance'), false);
   assert.equal(sources.has('GRV'), false);
   assert.equal(sources.has('Sale Usage'), false);
-  assert.equal(result.totals.qtyAdjusted, -1.5);
-  assert.equal(result.totals.valueImpact, -75);
+  assert.equal(result.totals.qtyAdjusted, -0.5);
+  assert.equal(result.totals.valueImpact, -25);
 });
 
 test('Adjustments Report derives Qty Before and Qty After from running quantity', async () => {
@@ -735,7 +737,15 @@ test('Adjustments Report reconciles to Detailed Activity and Operations Dashboar
   const nonWastageAdjustmentValue = adjustments.rows
     .filter((row) => !['Stock Item Wastage', 'Product Wastage'].includes(row.adjustmentType))
     .reduce((total, row) => total + Number(row.valueImpact || 0), 0);
-  assert.equal(nonWastageAdjustmentValue, operations.totals.adjustments);
+  // Stock Take Variance has its own dedicated Stock Take Audit report and is deliberately excluded
+  // from the Adjustments Report (see isAdjustmentLedgerRow), but Operations Dashboard's generic
+  // "adjustments" bucket still reconciles every stock-affecting cause including stock takes -- these
+  // two totals now have different scope by design, so the stock take contribution must be added back
+  // in separately rather than expecting a direct 1:1 match.
+  const stockTakeVarianceValue = detailed.rows
+    .filter((row) => row.movementType === 'Stock Take Variance')
+    .reduce((total, row) => total + Number(row.movementValue || 0), 0);
+  assert.equal(nonWastageAdjustmentValue + stockTakeVarianceValue, operations.totals.adjustments);
 });
 
 test('Wastage Adjustment values in Adjustments Report reconcile to Wastage Report', async () => {

@@ -34,7 +34,24 @@ export function resolveMovementMetadata(row = {}) {
   return {};
 }
 
+// A Product Sales Adjustment (postSalesAdjustment) carries the exact same product-level metadata
+// shape as a Product Wastage Adjustment (productId/productName, recipe expansion) -- it is NOT
+// wastage (a manually-corrected missed sale, not stock loss) and must never be picked up by the
+// wastage-only classifiers below, or it would silently inflate the Wastage Report / "Menu Items
+// Wasted" figures with sales that were never actually wasted.
+export function isSalesAdjustmentMovement(row = {}) {
+  const source = text(row.source || row.adjustmentType);
+  const sourceType = text(row.sourceType);
+  const movementType = text(row.movementType);
+  return source === 'Sale Adjustment'
+    || sourceType === 'saleAdjustment'
+    || sourceType === 'sale_adjustment'
+    || movementType === 'Sale Adjustment'
+    || movementType === 'sale_adjustment';
+}
+
 export function isProductWastageMovement(row = {}) {
+  if (isSalesAdjustmentMovement(row)) return false;
   const metadata = resolveMovementMetadata(row);
   const documentType = text(
     row.documentType ||

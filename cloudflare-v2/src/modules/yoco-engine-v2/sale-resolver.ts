@@ -121,6 +121,38 @@ function completedOrder(order: Row): boolean {
   return Boolean(timestamp);
 }
 
+/**
+ * Any completed-sale-trigger webhook OTHER than `payment.created` (which has its own retry branch
+ * just below) can land here with a fresh Yoco fetch that still shows the order not yet complete —
+ * most commonly `order.updated`, which fires on every edit to a still-open tab (add a line, change a
+ * modifier), not just close-out; Yoco keeps it subscribed mainly so refund handling has a real-time
+ * signal (see kcp-live-development-vs-kcp-live memory / rebuild plan). But it also happens for
+ * `order.completed` itself: a live audit (2026-08-31, Gonubie Sports Club) found a genuine
+ * `order.completed` webhook whose own fresh fetch still returned `status: "open"` (see
+ * YOCO_V2_ORDER_CACHE_TTL_MS — a 30s order-detail cache means a fetch shortly after a prior "open"
+ * read for the same order can still be served the stale copy).
+ *
+ * Before this fix, any of these fell straight into `resolutionStatus()`, which returns
+ * 'UNSUPPORTED_ORDER_STATE' (the lowest completeness rank) — a permanent, wrong "unsupported" record
+ * for an order that's simply not final yet at THIS particular moment. Worse than just blocking stock:
+ * `applyControlledLiveSaleEffects` short-circuits `UNSUPPORTED_ORDER_STATE` before either effect runs
+ * (see live-sale.ts), so the order was missing from PAYMENT reporting too, not only the stock ledger —
+ * found during a reporting-completeness audit, 2026-08-31. Nothing un-stamps it unless a LATER webhook
+ * happens to arrive with a genuinely-closed fetch.
+ *
+ * Retrying via the queue (the same mechanism `payment.created` uses) was considered and rejected:
+ * queue redelivery for delayed retries is independently broken right now (confirmed live, 2026-08-31
+ * — every `payment.created` retry request sits at attempt 1 forever, never actually redelivered), so
+ * making this retryable through the same path would just move the stuck state, not fix it. Skip
+ * cleanly instead (no domain event write, so no reporting/stock effect is attempted or blocked) — a
+ * later webhook for the same order (another `order.updated`, or the eventual `order.completed`) gets
+ * its own independent fresh fetch and resolves correctly once the order is genuinely closed by then,
+ * and reconciliation is the backstop for an order that never gets another webhook at all.
+ */
+function isSkippableNonFinalEvent(eventType: string, completed: boolean): boolean {
+  return normalizeYocoV2EventType(eventType) !== 'payment.created' && !completed;
+}
+
 function orderLocationId(order: Row): string {
   const location = objectValue(order.location);
   return text(order.location_id || order.locationId || location.id || location.location_id || location.locationId);
@@ -400,7 +432,11 @@ async function upsertCanonicalSaleDomainEvent(
   return domainEvent;
 }
 
-export async function resolveCanonicalYocoSale(env: YocoV2ApiClientEnv, input: ResolveCanonicalSaleInput): Promise<{ domainEvent: Row; canonical: CanonicalSaleCompletedEvent }> {
+export type ResolveCanonicalSaleResult =
+  | { skipped: true; reason: string }
+  | { skipped?: false; domainEvent: Row; canonical: CanonicalSaleCompletedEvent };
+
+export async function resolveCanonicalYocoSale(env: YocoV2ApiClientEnv, input: ResolveCanonicalSaleInput): Promise<ResolveCanonicalSaleResult> {
   const rawEventId = text(input.rawEvent.id);
   const processingRunId = text(input.processingRun.id);
   const workspaceId = text(input.rawEvent.workspace_id);
@@ -438,7 +474,19 @@ export async function resolveCanonicalYocoSale(env: YocoV2ApiClientEnv, input: R
       traceId,
       attempt: numberValue(input.processingRun.attempt_number, 1),
       orderId: sourceOrderId,
-      forceRefresh: input.forceRefresh
+      // Always bypass YOCO_V2_ORDER_CACHE_TTL_MS (default 30s) here, not just when an admin
+      // explicitly asked for a refetch. A cached read can serve an "open" snapshot taken moments
+      // earlier by a DIFFERENT webhook for the same order — e.g. the order.updated fired when an
+      // item was added — even though the order has genuinely closed since. Live incident,
+      // 2026-08-31 (Gonubie, Leo's Demo): the ordinary "create order, add an item, pay" sequence
+      // routinely completes well inside that 30s window, so the real close-out webhook's own
+      // "fresh" lookup kept seeing the stale pre-payment snapshot and deferred unnecessarily via
+      // the skip path below — not a rare edge case, the common case for a fast sale. Matches the
+      // precedent already set by listYocoV2Orders/listYocoV2Refunds, which default forceRefresh to
+      // true for exactly this reason (reconciliation never trusts this cache either). The cache
+      // still exists and is still populated — this only stops resolution from treating it as
+      // authoritative for the one check (finality) it cannot safely answer.
+      forceRefresh: true
     });
     apiRequestId = fetched.requestId;
     if (!fetched.found || !fetched.data) {
@@ -515,6 +563,17 @@ export async function resolveCanonicalYocoSale(env: YocoV2ApiClientEnv, input: R
       retryAfterSeconds: 5,
       details: { source_order_id: sourceOrderId, raw_event_type: eventType }
     });
+  }
+  if (isSkippableNonFinalEvent(eventType, completed)) {
+    await appendTimeline(env.DB, {
+      rawEventId,
+      processingRunId,
+      step: 'SALE_EVENT_NOT_FINAL_YET',
+      status: 'COMPLETED',
+      message: `${eventType} resolved a still-open order via a fresh Yoco lookup; skipped without writing a canonical sale (no reporting or stock effect attempted). The eventual close-out event (or reconciliation) will resolve it.`,
+      metadata: { source_order_id: sourceOrderId, api_request_id: apiRequestId || undefined, event_type: eventType }
+    });
+    return { skipped: true, reason: 'SALE_EVENT_NOT_FINAL_YET' };
   }
   const status = resolutionStatus({ completed, locationId: kcpLocationId, sourceLocationId, lines });
   const financials = deriveYocoFinancialAmounts({

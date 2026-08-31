@@ -123,6 +123,7 @@ export function renderStockItems({ state, onStockFilterChange, onStockAction = {
     ${stock.actionError && !stock.editingItem && !stock.confirmDelete ? renderNotice(stock.actionError, 'error') : ''}
     ${renderStockBody(stock, items, pagedItems, paging, activeFilters, selectedIds, state.settings?.values?.vatRegistered !== false)}
     ${renderStockModal(stock, categories, uoms, stock.locations || [], renderItems, state.settings?.values?.vatRegistered !== false)}
+    ${renderStockLocationCostModal(stock, stock.editingItem)}
     ${renderStockLookupPickerModal(stock, categories, uoms)}
     ${renderStockManagerModal(stock, managerData)}
     ${renderLocationCostingPickerModal(filters, locationOptions, stock.actionStatus || '')}
@@ -430,6 +431,24 @@ function bindStockEvents(view, stock, onStockFilterChange, onStockAction) {
 	      recipe,
 	      uomConfigurations
 	    });
+  });
+
+  view.querySelector('[data-stock-open-location-cost]')?.addEventListener('click', (event) => {
+    onStockAction.onOpenLocationCostModal?.(event.currentTarget.dataset.stockOpenLocationCost);
+  });
+
+  view.querySelector('[data-stock-close-location-cost]')?.addEventListener('click', () => {
+    onStockAction.onCloseLocationCostModal?.();
+  });
+
+  view.querySelectorAll('[data-stock-location-cost-field]').forEach((input) => {
+    input.addEventListener('change', () => {
+      onStockAction.onLocationCostDraftChange?.(input.dataset.stockLocationCostId, input.value);
+    });
+  });
+
+  view.querySelector('[data-stock-save-location-costs]')?.addEventListener('click', () => {
+    onStockAction.onSaveLocationCosts?.(stock.editingItem?.id || '');
   });
 
   view.querySelectorAll('[data-stock-scan-barcode-input]').forEach((button) => {
@@ -1004,7 +1023,14 @@ function renderStockModal(stock, categories = [], uoms = [], locations = [], sto
               </label>
               <label>
                 <span>${withInfo('Unit Cost', 'Latest ex-VAT unit cost used for stock valuation and recipe costing.')}</span>
-                <input name="cost" type="text" inputmode="decimal" value="${escapeAttribute(String(item.cost || 0))}" data-stock-draft-field="cost" />
+                <div class="stockModule__costFieldShell">
+                  <input name="cost" type="text" inputmode="decimal" value="${escapeAttribute(String(item.cost || 0))}" data-stock-draft-field="cost" />
+                  ${item.id ? `
+                    <button type="button" class="stockModule__costByLocationButton" data-stock-open-location-cost="${escapeAttribute(item.id)}">
+                      ${icon('mapPin')}<span>Cost by Location</span>
+                    </button>
+                  ` : ''}
+                </div>
               </label>
               <label>
                 <span>${withInfo('Threshold', 'Low-stock alert quantity. Items below this level show a LOW badge.')}</span>
@@ -1135,6 +1161,86 @@ function renderStockModal(stock, categories = [], uoms = [], locations = [], sto
           </div>
         </form>
       </section>
+    </div>
+  `;
+}
+
+function renderStockLocationCostModal(stock, item) {
+  if (!stock.locationCostModalOpen) return '';
+  const targetItem = item && item.id && item.id !== '__new__' ? item : null;
+  if (!targetItem) return '';
+  return `
+    <div class="stockModule__modalBackdrop stockModule__locationCostingBackdrop" role="presentation">
+      <section class="stockModule__modal stockModule__locationCostingModal stockModule__locationCostingModal--costByLocation" role="dialog" aria-modal="true" aria-labelledby="stock-location-cost-title">
+        <header>
+          <div>
+            <p>Cost by Location</p>
+            <h2 id="stock-location-cost-title">${escapeHtml(getStockItemDisplayName(targetItem) || targetItem.name || 'Stock item')}</h2>
+          </div>
+          <button type="button" class="stockModule__iconButton" data-stock-close-location-cost aria-label="Close">${icon('x')}</button>
+        </header>
+        <div class="stockModule__locationCostingModalBody">
+          ${renderStockLocationCostEditor(stock.locationCostEditor, targetItem)}
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function renderStockLocationCostEditor(editor, item = {}) {
+  const belongsToItem = Boolean(editor) && String(editor.itemId || '') === String(item.id || '');
+  if (!belongsToItem || editor.status === 'loading') {
+    return `<p class="stockModule__sectionHint">Loading location costs…</p>`;
+  }
+  if (editor.status === 'error') {
+    return `<p class="stockModule__inlineError" role="alert">${escapeHtml(editor.error || 'Could not load location costs.')}</p>`;
+  }
+  const locations = Array.isArray(editor.locations) ? editor.locations : [];
+  if (!locations.length) {
+    return `<p class="stockModule__sectionHint">No active locations found for this workspace.</p>`;
+  }
+  const draft = editor.draft || {};
+  const isSaving = editor.status === 'saving';
+  return `
+    <div class="stockModule__locationCostGrid">
+      ${locations.map((location) => {
+        const locationId = String(location.locationId || '');
+        const draftValue = draft[locationId] ?? String(location.cost ?? 0);
+        const hasLastPurchase = location.lastPurchaseCost !== null && location.lastPurchaseCost !== undefined;
+        return `
+          <div class="stockModule__locationCostRow" data-stock-location-cost-row="${escapeAttribute(locationId)}">
+            <div class="stockModule__locationCostName">
+              <strong>${escapeHtml(location.locationName || 'Location')}</strong>
+              ${location.hasOverride
+                ? '<span class="stockModule__badge">Override</span>'
+                : '<span class="stockModule__badge stockModule__badge--muted">Using item cost</span>'}
+            </div>
+            <label>
+              <span>Cost Ex VAT</span>
+              <input
+                type="text"
+                inputmode="decimal"
+                value="${escapeAttribute(draftValue)}"
+                data-stock-location-cost-field
+                data-stock-location-cost-id="${escapeAttribute(locationId)}"
+                ${isSaving ? 'disabled' : ''}
+              />
+            </label>
+            ${hasLastPurchase ? `
+              <span class="stockModule__locationCostHint">
+                Last purchase: ${formatCurrency(location.lastPurchaseCost)}${location.lastPurchasedAt ? ` on ${escapeHtml(String(location.lastPurchasedAt).slice(0, 10))}` : ''}
+              </span>
+            ` : ''}
+          </div>
+        `;
+      }).join('')}
+    </div>
+    ${editor.error ? `<div class="stockModule__inlineError" role="alert">${escapeHtml(editor.error)}</div>` : ''}
+    <div class="stockModule__locationCostActions">
+      <button type="button" class="stockModule__primary" data-stock-save-location-costs ${isSaving ? 'disabled' : ''}>
+        ${icon('check')}
+        <span>${isSaving ? 'Saving' : 'Save Location Costs'}</span>
+      </button>
     </div>
   `;
 }
@@ -2176,6 +2282,7 @@ function icon(name) {
     download: '<path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/>',
     edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
     folder: '<path d="M3 6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8.5A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"/>',
+    mapPin: '<path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/>',
     plus: '<path d="M12 5v14"/><path d="M5 12h14"/>',
     search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
     trash: '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m19 6-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>',

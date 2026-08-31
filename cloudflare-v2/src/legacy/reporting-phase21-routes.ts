@@ -51,6 +51,19 @@ export async function getStockOnHandReport(
       "Stock on Hand cannot load because stock_items or locations are missing.",
     );
 
+  // A date range narrows "Qty In"/"Qty Out" to movements within that period, and re-anchors
+  // "Opening Stock" to the balance at the START of that period — computed backwards from the live
+  // current balance minus every movement from the period start through now (unbounded above, since
+  // "current stock" always means right now regardless of the selected period). No date range means
+  // fromUtc/toExclusiveUtc are both '', which the SQL below treats as "no bound" — preserving the
+  // original all-time behaviour (opening stock = balance before the very first ever movement).
+  const { fromUtc, toExclusiveUtc } = localDateRangeToUtcBounds({
+    from: filters.from,
+    to: filters.to,
+    timeZone,
+    tradingDayStartMinutes,
+  });
+
   const useBalances = tables.stock_balances;
   if (!useBalances && !tables.stock_movements)
     return emptyReport(
@@ -74,9 +87,10 @@ export async function getStockOnHandReport(
     ? `
     movement_totals AS (
       SELECT workspace_id, stock_item_id, location_id,
-             SUM(CASE WHEN quantity_delta > 0 THEN quantity_delta ELSE 0 END) AS qty_in,
-             SUM(CASE WHEN quantity_delta < 0 THEN -quantity_delta ELSE 0 END) AS qty_out,
+             SUM(CASE WHEN quantity_delta > 0 AND (?2 = '' OR occurred_at >= ?2) AND (?3 = '' OR occurred_at < ?3) THEN quantity_delta ELSE 0 END) AS qty_in,
+             SUM(CASE WHEN quantity_delta < 0 AND (?2 = '' OR occurred_at >= ?2) AND (?3 = '' OR occurred_at < ?3) THEN -quantity_delta ELSE 0 END) AS qty_out,
              SUM(quantity_delta) AS ledger_closing_stock,
+             SUM(CASE WHEN (?2 = '' OR occurred_at >= ?2) THEN quantity_delta ELSE 0 END) AS net_since_period_start,
              MAX(occurred_at) AS last_movement_date
         FROM stock_movements WHERE workspace_id = ?1
        GROUP BY workspace_id, stock_item_id, location_id
@@ -89,7 +103,7 @@ export async function getStockOnHandReport(
       ) WHERE rn = 1
     )`
     : `
-    movement_totals AS (SELECT '' workspace_id, '' stock_item_id, '' location_id, 0 qty_in, 0 qty_out, 0 ledger_closing_stock, '' last_movement_date WHERE 0),
+    movement_totals AS (SELECT '' workspace_id, '' stock_item_id, '' location_id, 0 qty_in, 0 qty_out, 0 ledger_closing_stock, 0 net_since_period_start, '' last_movement_date WHERE 0),
     latest_movement AS (SELECT '' workspace_id, '' stock_item_id, '' location_id, '' movement_type, '' document_id, '' occurred_at, 1 rn WHERE 0)`;
   const purchaseCte =
     tables.grvs && tables.grv_lines
@@ -131,6 +145,7 @@ export async function getStockOnHandReport(
            ${currentStock} AS current_stock, ${updatedAt} AS balance_updated_at,
            ${priceSelect} AS resolved_unit_cost,
            COALESCE(mt.qty_in, 0) AS qty_in, COALESCE(mt.qty_out, 0) AS qty_out,
+           COALESCE(mt.net_since_period_start, 0) AS net_since_period_start,
            lm.movement_type AS last_movement_type, lm.occurred_at AS last_movement_date,
            lm.document_id AS last_source_id, lp.supplier_id, lp.supplier_name
       FROM ${baseFrom}
@@ -141,7 +156,7 @@ export async function getStockOnHandReport(
      WHERE ${baseWorkspace} = ?1 AND COALESCE(si.active, 1) = 1 AND COALESCE(l.active, 1) = 1
      ORDER BY location_name, si.category, si.name LIMIT ${MAX_ROWS}`,
   )
-    .bind(workspaceId)
+    .bind(workspaceId, fromUtc || "", toExclusiveUtc || "")
     .all<Row>();
 
   const canonicalSourceRows = dedupeRowsByKey(
@@ -160,6 +175,7 @@ export async function getStockOnHandReport(
     const unitCost = number(row.resolved_unit_cost);
     const qtyIn = number(row.qty_in);
     const qtyOut = number(row.qty_out);
+    const netSincePeriodStart = number(row.net_since_period_start);
     const threshold = number(row.threshold_qty);
     const par = number(row.par_level_qty);
     return [
@@ -177,6 +193,10 @@ export async function getStockOnHandReport(
         locationName: clean(row.location_name),
         currentStock,
         baseUom: clean(row.base_uom),
+        // Custom ordering/receiving UOMs (e.g. "Bottle" = 750 base units) configured on the item
+        // (stock_items.raw_json.uomConfigurations) — powers the Stock on Hand "by_uom" view, which
+        // converts currentStock into each configured custom unit using its stored ratio.
+        uomConfigurations: reportUomConfigurations(raw.uomConfigurations),
         unitCostExVat: unitCost,
         stockValue: money(currentStock * unitCost),
         lowStockThreshold: threshold,
@@ -184,7 +204,7 @@ export async function getStockOnHandReport(
         status: stockStatus(currentStock, threshold, par),
         supplierId: clean(row.supplier_id),
         supplierName: clean(row.supplier_name),
-        openingStock: quantity(currentStock - qtyIn + qtyOut),
+        openingStock: quantity(currentStock - netSincePeriodStart),
         qtyIn: quantity(qtyIn),
         qtyOut: quantity(qtyOut),
         lastMovementType: title(clean(row.last_movement_type)),
@@ -575,8 +595,34 @@ export async function getGrvLogReport(
     workspaceId,
     canonicalRows.map((row) => row.created_by),
   );
+  // GRV Log must show the line exactly as it was captured in the Draft (pack qty, pack size, the
+  // custom ordering/receiving UOM the user picked) — but grv_lines only stores the already-converted
+  // base-unit quantity and base UOM; that draft-level detail only survives inside the GRV's own
+  // raw_json.items[]. grv_lines rows carry no id back to their raw_json counterpart (each gets a
+  // fresh random id at insert time), so lines are paired by (stockItemId, locationId), consumed
+  // first-in-first-out per GRV — exact for the common case; only ambiguous when the same item was
+  // split across two lines that both ended up at the same location (rare, and low-impact even then,
+  // since both such lines describe the same item).
+  const rawLinePoolByGrv = new Map<string, Map<string, Row[]>>();
   const standardized = canonicalRows.map((row, index) => {
     const raw = parseJson(row.grv_raw_json);
+    const grvId = clean(row.grv_id);
+    if (!rawLinePoolByGrv.has(grvId))
+      rawLinePoolByGrv.set(grvId, buildGrvRawLinePool(row.grv_raw_json));
+    const rawLine = takeGrvRawLine(
+      rawLinePoolByGrv.get(grvId)!,
+      clean(row.stock_item_id),
+      clean(row.location_id),
+      number(row.received_qty),
+    );
+    const packSize = number(rawLine.packSize, 1) || 1;
+    const receivingUom = clean(
+      rawLine.selectedUom || rawLine.receivingUom || rawLine.unit,
+    ) || clean(row.base_uom);
+    const packQty = number(rawLine.receivedQty ?? rawLine.qty, number(row.received_qty) / packSize);
+    const packPriceExVat = money(
+      rawLine.packPriceEx ?? number(rawLine.unitCost, number(row.unit_price)) * packSize,
+    );
     return {
       id: clean(row.id) || `grv-line:${index}`,
       grvId: clean(row.grv_id),
@@ -617,6 +663,12 @@ export async function getGrvLogReport(
       category: clean(row.category, "General"),
       receivedQty: number(row.received_qty),
       baseUom: clean(row.base_uom),
+      // As-processed Draft detail, sourced from the GRV's own raw_json.items[] (see takeRawGrvLine
+      // above) rather than grv_lines, which only stores the post-conversion base-unit total.
+      packQty: quantity(packQty),
+      packSize: quantity(packSize),
+      receivingUom: receivingUom,
+      packPriceExVat: packPriceExVat,
       unitCostExVat: number(row.unit_price),
       lineValueExVat: money(row.line_total_ex),
       vat: money(row.line_vat),
@@ -2138,6 +2190,78 @@ function parseJson(value: any): Row {
     return {};
   }
 }
+/** One GRV's raw_json.items[], grouped by (stockItemId, locationId) in draft order. */
+/**
+ * A stock item's configured custom UOMs (e.g. "Bottle" = 750 base units), read off
+ * stock_items.raw_json.uomConfigurations — same shape StockItems.js's editor saves
+ * ({baseUom, customUom, ratio, barcode, isDefaultOrdering}). Only entries with both a name and a
+ * positive ratio are usable for conversion; capped at 3 to match the editor's own limit.
+ */
+export function reportUomConfigurations(
+  value: unknown,
+): Array<{ customUom: string; ratio: number }> {
+  const list = Array.isArray(value) ? value : [];
+  return list
+    .map((entry) => (entry && typeof entry === "object" ? (entry as Row) : {}))
+    .map((entry) => ({
+      customUom: clean(entry.customUom || entry.custom_uom),
+      ratio: number(entry.ratio),
+    }))
+    .filter((entry) => entry.customUom && entry.ratio > 0)
+    .slice(0, 3);
+}
+
+export function buildGrvRawLinePool(rawJson: unknown): Map<string, Row[]> {
+  const pool = new Map<string, Row[]>();
+  const parsed = parseJson(rawJson) as Row;
+  const items = Array.isArray(parsed.items) ? (parsed.items as Row[]) : [];
+  for (const item of items) {
+    const key = `${clean(item.stockItemId)}|${clean(item.locationId || item.targetLocation)}`;
+    if (!pool.has(key)) pool.set(key, []);
+    pool.get(key)!.push(item);
+  }
+  return pool;
+}
+
+/**
+ * Consumes the best-matching unmatched raw draft line for this item+location, or {} if none
+ * remain. `targetBaseQuantity` (grv_lines.quantity — the already-converted base-unit total EACH
+ * row was inserted with) is used to disambiguate when more than one raw line shares this
+ * item+location: the query that drives this has no reliable insertion-order column (grv_lines has
+ * no sort_order/created_at, and its own id is a random UUID, not sequential), so plain FIFO
+ * consumption pairs rows with raw lines in whatever order the DB happens to return them — silently
+ * swapping pack size/UOM/pack price between two real lines (e.g. "1 case of 24" and "6 loose
+ * units") whenever they land in a different order than they were drafted in. Matching on each raw
+ * line's own receivedQty*packSize against the row's actual stored quantity is order-independent
+ * and gets the common case (lines with different quantities) exactly right; only truly identical
+ * duplicate lines (same item, same location, same quantity) fall back to FIFO, where swapping is
+ * genuinely inconsequential since the lines describe the same thing.
+ */
+export function takeGrvRawLine(
+  pool: Map<string, Row[]>,
+  stockItemId: string,
+  locationId: string,
+  targetBaseQuantity?: number,
+): Row {
+  const bucket = pool.get(`${clean(stockItemId)}|${clean(locationId)}`);
+  if (!bucket || !bucket.length) return {};
+  if (bucket.length > 1 && Number.isFinite(targetBaseQuantity)) {
+    let bestIndex = 0;
+    let bestDelta = Infinity;
+    bucket.forEach((item, index) => {
+      const packSize = number(item.packSize, 1) || 1;
+      const baseQuantity = number(item.receivedQty ?? item.qty, 0) * packSize;
+      const delta = Math.abs(baseQuantity - (targetBaseQuantity as number));
+      if (delta < bestDelta) {
+        bestDelta = delta;
+        bestIndex = index;
+      }
+    });
+    return bucket.splice(bestIndex, 1)[0] || {};
+  }
+  return bucket.shift()! || {};
+}
+
 function title(value: any) {
   return clean(value)
     .replace(/[_-]+/g, " ")

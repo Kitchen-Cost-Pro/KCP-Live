@@ -12,6 +12,7 @@ import {
   isTransactionReference,
   type TransactionEntityType,
 } from "./transaction-references";
+import { buildGrvRawLinePool, takeGrvRawLine } from "./reporting-phase21-routes";
 
 type Row = Record<string, unknown>;
 
@@ -44,6 +45,7 @@ const ENTITY_BY_PREFIX: Record<string, TransactionEntityType> = {
   MFG: "manufacturing_batch",
   TRF: "transfer",
   STK: "stock_take",
+  ADJ: "adjustment",
 };
 
 function text(value: unknown, fallback = ""): string {
@@ -176,13 +178,23 @@ async function attachActor(
   };
 }
 
-async function loadMovements(
+export async function loadMovements(
   env: Env,
   workspaceId: string,
   entityType: TransactionEntityType,
   entityId: string,
 ): Promise<Row[]> {
-  const documentType = entityType === "stock_take" ? "stock_take" : entityType;
+  // A plain adjustment, a wastage adjustment, and a sale adjustment all write to the SAME
+  // `adjustments`/`adjustment_lines` tables (see postAdjustment/postWastageAdjustment/
+  // postSalesAdjustment in routes.ts) but stamp their stock_movements rows with different
+  // document_type values — a given entityId is always exactly one of the three, so matching all of
+  // them is safe and avoids needing to know which subtype this particular adjustment document is.
+  const documentTypes = entityType === "stock_take"
+    ? ["stock_take"]
+    : entityType === "adjustment"
+      ? ["adjustment", "wastage_adjustment", "sale_adjustment"]
+      : [entityType];
+  const documentTypePlaceholders = documentTypes.map((_, index) => `?${index + 3}`).join(", ");
   const rows = await env.DB.prepare(
     `SELECT
         sm.id,
@@ -209,11 +221,11 @@ async function loadMovements(
        LEFT JOIN locations sl ON sl.id = sm.source_location_id AND sl.workspace_id = sm.workspace_id
        LEFT JOIN locations dl ON dl.id = sm.destination_location_id AND dl.workspace_id = sm.workspace_id
       WHERE sm.workspace_id = ?1
-        AND sm.document_type = ?2
-        AND sm.document_id = ?3
+        AND sm.document_type IN (${documentTypePlaceholders})
+        AND sm.document_id = ?2
       ORDER BY datetime(sm.occurred_at), datetime(sm.created_at), sm.id`,
   )
-    .bind(workspaceId, documentType, entityId)
+    .bind(workspaceId, entityId, ...documentTypes)
     .all<Row>();
   return (rows.results || []).map((row) => ({
     id: text(row.id),
@@ -276,7 +288,7 @@ async function loadAuditTrail(
   return result;
 }
 
-async function loadGrvDetail(env: Env, workspaceId: string, entityId: string): Promise<DetailPayload | null> {
+export async function loadGrvDetail(env: Env, workspaceId: string, entityId: string): Promise<DetailPayload | null> {
   const row = await env.DB.prepare(
     `SELECT g.*, s.name AS supplier_name, po.po_number
        FROM grvs g
@@ -287,7 +299,6 @@ async function loadGrvDetail(env: Env, workspaceId: string, entityId: string): P
   ).bind(workspaceId, entityId).first<Row>();
   if (!row) return null;
   const raw = objectValue(jsonParse(row.raw_json));
-  const rawLines = arrayValue(raw.lines || raw.items).map(objectValue);
   const linesResult = await env.DB.prepare(
     `SELECT gl.id, gl.stock_item_id, si.name AS item_name, si.category, gl.location_id,
             COALESCE(l.display_name, l.name) AS location_name,
@@ -298,19 +309,33 @@ async function loadGrvDetail(env: Env, workspaceId: string, entityId: string): P
       WHERE gl.workspace_id = ?1 AND gl.grv_id = ?2
       ORDER BY gl.rowid`,
   ).bind(workspaceId, entityId).all<Row>();
+  // Pairs each flat grv_lines row back up with its original Draft-time entry in raw_json.items[]
+  // (same pool/matching used by GRV Log — see reporting-phase21-routes.ts) — grv_lines only stores
+  // the already-converted base-unit total, not the pack size / custom UOM / pack qty the user
+  // actually entered, and grv_lines carries no id back to its raw_json counterpart to join on
+  // directly. Matching by (stockItemId, locationId, baseQuantity) is exact for the common case and
+  // order-independent, unlike the plain "first stockItemId match" this used to do (which grabbed
+  // the wrong raw entry whenever a GRV split the same item across two locations, and separately
+  // always reported the converted base quantity as "Received Qty" instead of what was actually
+  // purchased).
+  const rawLinePool = buildGrvRawLinePool(row.raw_json);
   const lineItems = (linesResult.results || []).map((line) => {
-    const rawLine = rawLines.find((entry) => text(entry.id || entry.lineId) === text(line.id)
-      || text(entry.stockItemId || entry.itemId) === text(line.stock_item_id)) || {};
     const quantity = numberValue(line.quantity);
+    const rawLine = takeGrvRawLine(rawLinePool, text(line.stock_item_id), text(line.location_id), quantity);
+    const packSize = rawNumber(rawLine, ["packSize", "pack_size"], 1) || 1;
+    const receivedUomQuantity = rawNumber(rawLine, ["receivedQty", "qty"], packSize ? quantity / packSize : quantity);
+    const receivedUom = rawText(rawLine, ["selectedUom", "receivingUom", "unit"], text(line.unit));
     const totalExVat = numberValue(line.total_ex, quantity * numberValue(line.unit_price));
     const vat = numberValue(line.total_vat);
     return {
       id: text(line.id), itemId: text(line.stock_item_id), itemName: text(line.item_name),
       category: text(line.category, "General"), locationId: text(line.location_id), locationName: text(line.location_name),
-      receivedUomQuantity: quantity, receivedUom: text(line.unit),
-      baseQuantity: rawNumber(rawLine, ["baseQuantity", "baseQty", "quantityInBase"], quantity),
-      baseUom: rawText(rawLine, ["baseUom", "baseUnit"], text(line.unit)),
-      conversionFactor: rawNumber(rawLine, ["conversionFactor", "qtyInBase", "conversion"], 1),
+      // "How they bought it" — e.g. 1 Bottle — as opposed to baseQuantity/baseUom below, which is
+      // always the true converted total that actually posted to the stock ledger (e.g. 30 Tot).
+      receivedUomQuantity, receivedUom,
+      baseQuantity: quantity,
+      baseUom: text(line.unit),
+      conversionFactor: packSize,
       unitCostExVat: numberValue(line.unit_price), totalExVat, vat,
       totalInclVat: numberValue(line.total_inc, totalExVat + vat),
     };
@@ -982,7 +1007,94 @@ async function loadDetail(env: Env, workspaceId: string, entityType: Transaction
   if (entityType === "credit_note") return loadCreditNoteDetail(env, workspaceId, entityId);
   if (entityType === "manufacturing_batch") return loadManufacturingDetail(env, workspaceId, entityId);
   if (entityType === "transfer") return loadTransferDetail(env, workspaceId, entityId);
+  if (entityType === "adjustment") return loadAdjustmentDetail(env, workspaceId, entityId);
   return loadStockTakeDetail(env, workspaceId, entityId);
+}
+
+export async function loadAdjustmentDetail(env: Env, workspaceId: string, entityId: string): Promise<DetailPayload | null> {
+  const row = await env.DB.prepare(
+    `SELECT a.* FROM adjustments a WHERE a.workspace_id = ?1 AND a.id = ?2 LIMIT 1`,
+  ).bind(workspaceId, entityId).first<Row>();
+  if (!row) return null;
+
+  const raw = objectValue(jsonParse(row.raw_json));
+  const adjustmentTypeCode = text(row.adjustment_type);
+  const linesResult = await env.DB.prepare(
+    `SELECT al.id, al.stock_item_id, si.name AS item_name, si.category, si.unit AS item_unit,
+            al.location_id, COALESCE(l.display_name, l.name) AS location_name,
+            al.quantity_delta, al.unit_cost
+       FROM adjustment_lines al
+       LEFT JOIN stock_items si ON si.id = al.stock_item_id AND si.workspace_id = al.workspace_id
+       LEFT JOIN locations l ON l.id = al.location_id AND l.workspace_id = al.workspace_id
+      WHERE al.workspace_id = ?1 AND al.adjustment_id = ?2
+      ORDER BY al.rowid`,
+  ).bind(workspaceId, entityId).all<Row>();
+
+  const lineItems = (linesResult.results || []).map((line) => {
+    const quantityDelta = numberValue(line.quantity_delta);
+    const unitCost = numberValue(line.unit_cost);
+    return {
+      id: text(line.id),
+      itemId: text(line.stock_item_id),
+      itemName: text(line.item_name),
+      category: text(line.category, "General"),
+      locationId: text(line.location_id),
+      locationName: text(line.location_name),
+      quantityDelta,
+      unit: text(line.item_unit),
+      unitCostExVat: unitCost,
+      valueImpact: quantityDelta * unitCost,
+    };
+  });
+
+  const actor = await attachActor(env, workspaceId, text(row.created_by));
+  const totalQtyAdjusted = lineItems.reduce((sum, line) => sum + Math.abs(numberValue(line.quantityDelta)), 0);
+  const totalValueImpact = lineItems.reduce((sum, line) => sum + numberValue(line.valueImpact), 0);
+  const adjustmentTypeLabel = adjustmentTypeCode === "wastage"
+    ? "Wastage Adjustment"
+    : adjustmentTypeCode === "sale"
+      ? "Sale Adjustment"
+      : "Manual Adjustment";
+
+  return {
+    entityType: "adjustment",
+    entityId,
+    transactionReference: "",
+    title: `${adjustmentTypeLabel} · ${text(row.reason, entityId)}`,
+    status: "Committed",
+    occurredAt: text(row.occurred_at),
+    createdAt: text(row.created_at),
+    createdBy: actor.id,
+    createdByName: actor.name,
+    createdByEmail: actor.email,
+    committedBy: actor.name,
+    locationIds: unique(lineItems.map((line) => line.locationId)),
+    locationNames: unique(lineItems.map((line) => line.locationName)),
+    summaryCards: [
+      { key: "lineCount", label: "Items Adjusted", value: lineItems.length, type: "number" },
+      { key: "totalQtyAdjusted", label: "Total Qty Adjusted", value: totalQtyAdjusted, type: "number" },
+      { key: "totalValueImpact", label: "Total Value Impact", value: totalValueImpact, type: "money" },
+      { key: "adjustmentType", label: "Adjustment Type", value: adjustmentTypeLabel },
+    ],
+    lineItemColumns: [
+      { key: "itemName", label: "Item" },
+      { key: "category", label: "Category" },
+      { key: "locationName", label: "Location" },
+      { key: "quantityDelta", label: "Qty Adjusted", type: "number" },
+      { key: "unit", label: "UOM" },
+      { key: "unitCostExVat", label: "Unit Cost Ex VAT", type: "money" },
+      { key: "valueImpact", label: "Value Impact", type: "money" },
+    ],
+    lineItems,
+    stockMovements: [],
+    auditTrail: [],
+    metadata: {
+      adjustmentType: text(row.adjustment_type),
+      reason: text(row.reason),
+      wasteReason: rawText(raw, ["wasteReason", "waste_reason"]),
+      saleReason: rawText(raw, ["saleReason", "sale_reason"]),
+    },
+  };
 }
 
 async function assertDetailLocationAccess(env: Env, auth: AuthContext, workspaceId: string, locationIds: string[]): Promise<void> {
@@ -1017,7 +1129,7 @@ export async function getTransactionDetailReport(
   const requestedType = requestedTypeValue as TransactionEntityType;
   const requestedId = text(url.searchParams.get("entityId"));
   const inferredType = entityTypeFromReference(reference);
-  const supportedTypes = new Set<TransactionEntityType>(["grv", "credit_note", "manufacturing_batch", "transfer", "stock_take"]);
+  const supportedTypes = new Set<TransactionEntityType>(["grv", "credit_note", "manufacturing_batch", "transfer", "stock_take", "adjustment"]);
   if (requestedTypeValue && !supportedTypes.has(requestedType)) return error(request, env, 400, "Unsupported transaction type.");
   if (requestedType && inferredType && requestedType !== inferredType) return error(request, env, 409, "Transaction type does not match the Transaction ID.");
   const entityType = linked?.entityType || requestedType || inferredType;

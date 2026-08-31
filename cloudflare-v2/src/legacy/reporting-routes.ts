@@ -50,6 +50,7 @@ const BACKDATABLE_LEDGER_DOCUMENT_TYPES = new Set([
   "credit_note",
   "adjustment",
   "wastage_adjustment",
+  "sale_adjustment",
   "manufacturing_batch",
 ]);
 
@@ -59,7 +60,7 @@ const BACKDATABLE_LEDGER_DOCUMENT_TYPES = new Set([
 // the IN-list contents and in overall shape, or SQLite won't recognize it can use that index and
 // will fall back to a full scan for date-range filtering.
 const EFFECTIVE_MOVEMENT_DATE_SQL =
-  "(CASE WHEN sm.document_type IN ('grv', 'credit_note', 'adjustment', 'wastage_adjustment', 'manufacturing_batch') THEN sm.created_at ELSE sm.occurred_at END)";
+  "(CASE WHEN sm.document_type IN ('grv', 'credit_note', 'adjustment', 'wastage_adjustment', 'sale_adjustment', 'manufacturing_batch') THEN sm.created_at ELSE sm.occurred_at END)";
 
 export async function getDetailedActivityReport(
   request: Request,
@@ -195,7 +196,7 @@ export async function getDetailedActivityReport(
        LEFT JOIN suppliers s ON s.id = g.supplier_id AND s.workspace_id = g.workspace_id
        LEFT JOIN purchase_orders po ON po.workspace_id = sm.workspace_id AND (po.id = g.purchase_order_id OR (po.id = sm.document_id AND sm.document_type = 'purchase_order'))
        LEFT JOIN credit_notes cn ON cn.id = sm.document_id AND cn.workspace_id = sm.workspace_id AND sm.document_type = 'credit_note'
-       LEFT JOIN adjustments a ON a.id = sm.document_id AND a.workspace_id = sm.workspace_id AND sm.document_type IN ('adjustment', 'wastage_adjustment')
+       LEFT JOIN adjustments a ON a.id = sm.document_id AND a.workspace_id = sm.workspace_id AND sm.document_type IN ('adjustment', 'wastage_adjustment', 'sale_adjustment')
        LEFT JOIN stocktake_sessions st ON st.id = sm.document_id AND st.workspace_id = sm.workspace_id AND sm.document_type = 'stock_take'
        LEFT JOIN transfers t ON t.id = sm.document_id AND t.workspace_id = sm.workspace_id AND sm.document_type = 'transfer'
        LEFT JOIN manufacturing_batches mb ON mb.id = sm.document_id AND mb.workspace_id = sm.workspace_id AND sm.document_type = 'manufacturing_batch'
@@ -1575,6 +1576,19 @@ export async function getMenuRecipeHealthReport(
       )
     : [];
 
+  // Per-location ingredient cost overrides, so the per-location pricing breakdown (which already
+  // resolves selling price per location via product_location_prices) can resolve recipe cost the
+  // same way instead of mixing a location-scoped selling price against a workspace-global cost.
+  const locationCostRows = tableStatus.stock_item_location_prices
+    ? await safeAllRows(
+        env.DB.prepare(
+          `SELECT stock_item_id, location_id, price
+       FROM stock_item_location_prices
+      WHERE workspace_id = ?1`,
+        ).bind(workspaceId),
+      )
+    : [];
+
   const context = buildMenuHealthContext({
     workspaceId,
     vatRate,
@@ -1582,6 +1596,7 @@ export async function getMenuRecipeHealthReport(
     recipes,
     recipeLines: recipeLineRows,
     priceRows,
+    locationCostRows,
     modifierGroups,
     modifierUsageCounts,
     salesStats,
@@ -2477,6 +2492,7 @@ function buildMenuHealthContext({
   recipes,
   recipeLines,
   priceRows,
+  locationCostRows,
   modifierGroups,
   modifierUsageCounts,
   salesStats,
@@ -2485,6 +2501,7 @@ function buildMenuHealthContext({
   const recipesByOwner = new Map<string, Row>();
   const linesByRecipe = new Map<string, Row[]>();
   const priceRowsByProduct = new Map<string, Row[]>();
+  const locationCostsByStockItem = new Map<string, Map<string, number>>();
   const modifierUsageByProduct = new Map<string, number>();
   const salesByProduct = new Map<string, Row>();
   for (const recipe of recipes || []) {
@@ -2509,6 +2526,14 @@ function buildMenuHealthContext({
       priceRowsByProduct.set(productId, []);
     priceRowsByProduct.get(productId)?.push(price);
   }
+  for (const row of locationCostRows || []) {
+    const stockItemId = clean(row.stock_item_id);
+    const locationId = clean(row.location_id);
+    if (!stockItemId || !locationId) continue;
+    if (!locationCostsByStockItem.has(stockItemId))
+      locationCostsByStockItem.set(stockItemId, new Map());
+    locationCostsByStockItem.get(stockItemId)?.set(locationId, numberValue(row.price, 0));
+  }
   for (const usage of modifierUsageCounts || []) {
     modifierUsageByProduct.set(
       clean(usage.product_id),
@@ -2525,6 +2550,7 @@ function buildMenuHealthContext({
     recipesByOwner,
     linesByRecipe,
     priceRowsByProduct,
+    locationCostsByStockItem,
     modifierGroups: modifierGroups || [],
     modifierUsageByProduct,
     salesByProduct,
@@ -2563,15 +2589,25 @@ function buildMenuRecipeHealthRows(
     const foodCostPercent = sellingPriceExVat
       ? recipeCostExVat / sellingPriceExVat
       : 0;
+    // A user-set opt-out (products/raw_json.noRecipeRequired, toggled from the menu item edit
+    // form) — e.g. a resold bottled drink, gift card, or service charge that legitimately never
+    // has a recipe. Must not surface as "Missing Recipe" anywhere this report reads recipeStatus.
+    const noRecipeRequired = raw.noRecipeRequired === true;
     const recipeStatus = !recipe
-      ? "Missing Recipe"
+      ? noRecipeRequired
+        ? "No Recipe Required"
+        : "Missing Recipe"
       : exploded.rows.length
         ? "Recipe Ready"
         : "Recipe Missing Ingredients";
     const yocoMappingStatus = resolveYocoMappingStatus(product, raw);
     const modifierCostRisk = resolveModifierCostRisk(product, raw, context);
     const stockDeductionStatus =
-      recipeStatus === "Recipe Ready" ? "Ready" : "Not Ready";
+      recipeStatus === "Recipe Ready"
+        ? "Ready"
+        : recipeStatus === "No Recipe Required"
+          ? "Not Required"
+          : "Not Ready";
 
     if (!clean(product.yoco_item_id))
       itemWarnings.push(
@@ -2597,7 +2633,7 @@ function buildMenuRecipeHealthRows(
           productId,
         ),
       );
-    if (!recipe)
+    if (!recipe && !noRecipeRequired)
       itemWarnings.push(
         menuHealthWarning(
           "Critical",
@@ -2609,7 +2645,7 @@ function buildMenuRecipeHealthRows(
           productId,
         ),
       );
-    if (recipe && !exploded.rows.length)
+    if (recipe && !exploded.rows.length && !noRecipeRequired)
       itemWarnings.push(
         menuHealthWarning(
           "Critical",
@@ -2760,6 +2796,7 @@ function buildMenuRecipeHealthRows(
       basePriceInclVat,
       recipeCostExVat,
       itemWarnings,
+      recipe,
     );
     pricingRows.push(...productPricingRows);
   }
@@ -2955,12 +2992,84 @@ function explodeMenuRecipe(
   return { rows, cost: totalCost };
 }
 
+/**
+ * Pure (no warnings, no side effects) recipe-cost walk used only to re-cost a recipe at one
+ * specific location for the per-location pricing breakdown. explodeMenuRecipe already computes
+ * the workspace-level cost once per product and pushes warnings as a side effect; calling it again
+ * per location would duplicate every ingredient warning onto the shared itemWarnings/warnings
+ * arrays, so this mirrors its cost-only logic instead of reusing it directly.
+ */
+function calculateLocationRecipeCost(
+  recipe: Row | undefined,
+  context: Row,
+  locationId: string,
+  path: string[] = [],
+): number {
+  if (!recipe) return 0;
+  const recipeId = clean(recipe.id);
+  if (path.includes(recipeId)) return 0;
+  const lines = context.linesByRecipe.get(recipeId) || [];
+  if (!lines.length) return 0;
+  const yieldQty = Math.max(numberValue(recipe.yield_qty, 1), 1);
+  const nextPath = [...path, recipeId];
+  let totalCost = 0;
+  for (const line of lines) {
+    const stockItemId = clean(line.stock_item_id);
+    // Matches explodeMenuRecipe's own skip condition (a stock_item_id with no resolved
+    // stock_item_name means the linked stock item was deleted) — otherwise this per-location cost
+    // would silently include a line the workspace-level summary cost deliberately excludes (with
+    // a "Missing stock item link" warning), producing two different costs for the same recipe.
+    if (!stockItemId || !clean(line.stock_item_name)) continue;
+    const converted = convertMenuRecipeQty({
+      qty: numberValue(line.quantity, 0),
+      fromUom: clean(line.unit || line.base_uom),
+      toUom: clean(line.base_uom || line.unit),
+      stockRawJson: line.stock_raw_json,
+    });
+    const qtyRequired = converted.qty / yieldQty;
+    const stockItem = {
+      id: stockItemId,
+      item_type: line.item_type,
+      is_stocked: line.is_stocked,
+      raw_json: line.stock_raw_json,
+    };
+    const nestedRecipe = context.recipesByOwner.get(`stock_item:${stockItemId}`);
+    if (
+      isSubRecipeStockItem(stockItem) &&
+      !isStockHoldingPrepItem(stockItem) &&
+      nestedRecipe
+    ) {
+      totalCost +=
+        qtyRequired *
+        calculateLocationRecipeCost(nestedRecipe, context, locationId, nextPath);
+      continue;
+    }
+    totalCost += qtyRequired * resolveMenuRecipeIngredientCost(stockItemId, line, context, locationId);
+  }
+  return totalCost;
+}
+
+/** Location cost override if one exists for this ingredient at this location, else the workspace-global unit cost. */
+function resolveMenuRecipeIngredientCost(
+  stockItemId: string,
+  line: Row,
+  context: Row,
+  locationId: string,
+): number {
+  if (locationId) {
+    const override = context.locationCostsByStockItem?.get(stockItemId)?.get(locationId);
+    if (override !== undefined) return override;
+  }
+  return numberValue(line.unit_cost, 0);
+}
+
 function buildPricingRowsForProduct(
   product: Row,
   context: Row,
   fallbackPriceInclVat: number,
   recipeCostExVat: number,
   itemWarnings: Row[],
+  recipe?: Row,
 ) {
   const priceRows = context.priceRowsByProduct.get(clean(product.id)) || [];
   const targetPrices = priceRows.length
@@ -2974,21 +3083,27 @@ function buildPricingRowsForProduct(
         },
       ];
   return targetPrices.map((price: Row, index: number) => {
+    const locationId = clean(price.location_id);
+    // Resolved the same way the selling price already is: per-location cost when this row has a
+    // real location, else the workspace-level cost already computed for the summary row.
+    const locationRecipeCostExVat = recipe && locationId
+      ? roundMoneyNumber(calculateLocationRecipeCost(recipe, context, locationId))
+      : recipeCostExVat;
     const sellingPriceInclVat = roundMoneyNumber(
       numberValue(price.price, fallbackPriceInclVat),
     );
     const vat = calculateVatAmount(sellingPriceInclVat, context.vatRate);
     const sellingPriceExVat = roundMoneyNumber(sellingPriceInclVat - vat);
-    const grossProfit = roundMoneyNumber(sellingPriceExVat - recipeCostExVat);
+    const grossProfit = roundMoneyNumber(sellingPriceExVat - locationRecipeCostExVat);
     const gpPercent = sellingPriceExVat ? grossProfit / sellingPriceExVat : 0;
     const foodCostPercent = sellingPriceExVat
-      ? recipeCostExVat / sellingPriceExVat
+      ? locationRecipeCostExVat / sellingPriceExVat
       : 0;
     const priceStatus = resolveLocationPriceStatus(
       product,
       priceRows,
       context.locations,
-      clean(price.location_id),
+      locationId,
     );
     const rowWarnings = itemWarnings.filter((warning) =>
       [
@@ -3000,7 +3115,7 @@ function buildPricingRowsForProduct(
       ].includes(warning.issueType),
     );
     return {
-      id: `menu-recipe-pricing:${clean(product.id)}:${clean(price.location_id) || index}`,
+      id: `menu-recipe-pricing:${clean(product.id)}:${locationId || index}`,
       workspaceId: clean(product.workspace_id),
       menuItemId: clean(product.id),
       menuItemName: clean(product.name),
@@ -3015,13 +3130,13 @@ function buildPricingRowsForProduct(
           product.yoco_category_name_resolved ||
           product.yoco_category_id,
       ),
-      locationId: clean(price.location_id),
+      locationId,
       locationName: clean(price.location_name || "Default"),
       sellingPriceInclVat,
       vatRate: normalizeReportVatRate(context.vatRate),
       vat,
       sellingPriceExVat,
-      recipeCostExVat,
+      recipeCostExVat: locationRecipeCostExVat,
       grossProfit,
       gpPercent,
       foodCostPercent,
@@ -6253,6 +6368,14 @@ export const __modifierReportingInternals = {
   standardizeModifierSalesRow,
 };
 
+export const __menuHealthInternals = {
+  buildMenuHealthContext,
+  buildMenuRecipeHealthRows,
+  buildPricingRowsForProduct,
+  calculateLocationRecipeCost,
+  resolveMenuRecipeIngredientCost,
+};
+
 export async function getInventoryAuditReport(
   request: Request,
   env: Env,
@@ -7185,6 +7308,9 @@ async function enrichTransactionReferenceReportRows(
     manufacturing_batch: "manufacturing_batch",
     transfer: "transfer",
     stock_take: "stock_take",
+    adjustment: "adjustment",
+    wastage_adjustment: "adjustment",
+    sale_adjustment: "adjustment",
   };
   for (const [documentType, entityType] of Object.entries(
     entityByDocumentType,
@@ -7985,6 +8111,12 @@ function classifySourceType(row: Row, metadata: Row) {
     clean(metadata.wasteReason)
   )
     return "Wastage Adjustment";
+  // Checked BEFORE the generic `movement.includes("sale")` fallback below, which would otherwise
+  // misclassify this as "Sale Usage" (a real POS sale) — a Product Sales Adjustment is a manual
+  // correction for a sale the POS never captured, deliberately kept out of Sales Usage/GP reporting
+  // (see postSalesAdjustment in routes.ts) and must stay a distinct Adjustments-report entry.
+  if (document === "sale_adjustment" || movement === "sale_adjustment")
+    return "Sale Adjustment";
   if (
     document === "yoco_order" &&
     movementComponentType(metadata) === "modifier"
@@ -8078,11 +8210,12 @@ function resolveDocumentNumber(
 function resolveNotes(row: Row, metadata: Row, sourceType: string) {
   if (sourceType === "Credit Note")
     return clean(row.credit_note_reason || metadata.note || metadata.reason);
-  if (sourceType === "Manual Adjustment" || sourceType === "Wastage Adjustment")
+  if (sourceType === "Manual Adjustment" || sourceType === "Wastage Adjustment" || sourceType === "Sale Adjustment")
     return clean(
       row.adjustment_reason ||
         metadata.note ||
         metadata.wasteReason ||
+        metadata.saleReason ||
         metadata.refundReason ||
         metadata.refundNote ||
         metadata.reason,

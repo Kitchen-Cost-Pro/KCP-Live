@@ -143,7 +143,8 @@ export async function updateRecipe(workspaceId, item, recipe = []) {
 	      category: item.category || 'General',
 	      sellingPrice: Number(item.sellingPrice || item.price || 0) || 0,
 	      recipeSourceStockItemId: item.recipeSourceStockItemId || '',
-	      recipe: normalizeRecipeLines(recipe)
+	      recipe: normalizeRecipeLines(recipe),
+	      noRecipeRequired: item.noRecipeRequired === true
 	    }
 	  });
 }

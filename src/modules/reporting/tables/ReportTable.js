@@ -226,6 +226,15 @@ function renderCellContent(value, column = {}, row = {}, result = {}) {
       label: column.label || "Trend",
     });
   }
+  if (type === "qty_unit_text") {
+    // Value is a plain "<qty> <unit>" string (e.g. "52 Tot") built at report-row time — split
+    // purely for display so the unit reads as a muted trailing label instead of run-on plain
+    // text, without changing the underlying value used for sorting/export.
+    const raw = text(formatCell(value, column));
+    const match = raw.match(/^(-?[\d.,]+)\s+(.+)$/);
+    if (!match) return escapeHtml(raw);
+    return `<span class="reportTable__qtyUnitCell"><strong>${escapeHtml(match[1])}</strong><em>${escapeHtml(match[2])}</em></span>`;
+  }
   if (type === "transaction_id") {
     const reference = formatCell(value, column);
     if (!reference) return "";
@@ -294,7 +303,9 @@ function resolveTransactionIdentity(row = {}, result = {}, reference = "") {
             ? "transfer"
             : reportId === "stock_take_audit" || prefix === "STK"
               ? "stock_take"
-              : "";
+              : reportId === "adjustments" || prefix === "ADJ"
+                ? "adjustment"
+                : "";
   const entityId = text(
     row.grvId ||
       row.creditNoteId ||
@@ -637,6 +648,40 @@ function findRowIssue(row = {}, warnings = []) {
     )
       return false;
     if (explicitMatch) return true;
+    // createRowWarning() (rowWarningUtils.js) already tags a per-row warning with that row's own
+    // identity (isItemSpecific: true, plus its itemId/itemName etc.) — if it carries that identity
+    // and still didn't explicitMatch above, it's a warning about a DIFFERENT item, not this row, and
+    // must not fall through to the generic "does this row also look zero-cost" heuristic below. That
+    // heuristic is for truly anonymous/aggregate warnings only (no identity at all) — checked on
+    // item identity alone, not warningIds/warningNames (which also carry location fields), so a
+    // genuinely anonymous aggregate warning that merely happens to carry a locationId isn't wrongly
+    // blocked from ever reaching the aggregate check below.
+    const hasItemIdentity =
+      candidate.isItemSpecific ||
+      [
+        candidate.rowId,
+        candidate.id,
+        candidate.itemId,
+        candidate.menuItemId,
+        candidate.productId,
+        candidate.inventoryItemId,
+        candidate.stockItemId,
+        candidate.entityId,
+        candidate.sourceId,
+        candidate.saleId,
+        candidate.transferId,
+        candidate.stockTakeId,
+        candidate.sessionId,
+      ].some((value) => text(value)) ||
+      [
+        candidate.itemName,
+        candidate.menuItemName,
+        candidate.productName,
+        candidate.entityName,
+        candidate.inventoryItemName,
+        candidate.stockItemName,
+      ].some((value) => text(value));
+    if (hasItemIdentity) return false;
     return aggregateWarningAppliesToRow(candidate, row);
   });
   if (!matches.length) return "";

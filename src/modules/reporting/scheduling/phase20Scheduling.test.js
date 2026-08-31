@@ -163,7 +163,7 @@ test('Phase 20 emailed report links restore the reporting route, selected view, 
   assert.match(mainSource, /new URLSearchParams\(window\.location\.search\)\.get\('route'\)/);
   assert.match(appShellSource, /initialReportId:\s*readReportingDeepLinkReportId\(\)/);
   assert.match(appShellSource, /params\.get\('route'\) === 'reporting'/);
-  assert.match(mainSource, /nextSection === 'reporting'\) clearReportingNavigationParameters\(\)/);
+  assert.match(mainSource, /nextSection === 'reporting'\)\s*\{?\s*clearReportingNavigationParameters\(\)/);
   assert.match(reportViewerSource, /readReportLinkConfiguration/);
   assert.match(reportViewerSource, /params\.get\('view'\)/);
   assert.match(reportViewerSource, /params\.get\('from'\)/);

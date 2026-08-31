@@ -645,9 +645,12 @@ function isAdjustment(row = {}) {
   const sourceType = text(row.sourceType);
   const source = text(row.source);
   const movementType = text(row.movementType);
-  return ['adjustment', 'stockTake', 'stockTakeCorrection', 'systemCorrection', 'manufacturingCorrection', 'SystemCorrection', 'StockTakeCorrection', 'ManufacturingCorrection'].includes(sourceType)
-    || ['Manual Adjustment', 'Stock Take Variance', 'Stock Take Correction', 'System Correction', 'Manufacturing Correction'].includes(source)
-    || /manual adjustment|stock take variance|stock take correction|system correction|manufacturing correction/i.test(movementType);
+  // A Product Sales Adjustment (manual deduction for a missed/uncaptured sale, see
+  // postSalesAdjustment in routes.ts) is deliberately stock-deduction only — it must land in the
+  // generic Adjustments bucket here, never in isSalesUsage (no revenue/GP impact was recorded).
+  return ['adjustment', 'stockTake', 'stockTakeCorrection', 'systemCorrection', 'manufacturingCorrection', 'SystemCorrection', 'StockTakeCorrection', 'ManufacturingCorrection', 'saleAdjustment', 'sale_adjustment'].includes(sourceType)
+    || ['Manual Adjustment', 'Stock Take Variance', 'Stock Take Correction', 'System Correction', 'Manufacturing Correction', 'Sale Adjustment'].includes(source)
+    || /manual adjustment|stock take variance|stock take correction|system correction|manufacturing correction|sale adjustment/i.test(movementType);
 }
 
 function isTransferIn(row = {}) {
@@ -780,11 +783,32 @@ function resolveQuantitySnapshot(kind = 'opening', first = {}, rows = [], dataSe
       ? ['openingQty', 'openingStockQty', 'opening_stock_qty', 'openingStock']
       : ['actualClosingQty', 'closingQty', 'currentStock', 'stockOnHand', 'onHandQty', 'countedQty']);
     if (itemValue.available && (!locationId || toArray(dataSet.locations).length <= 1)) return itemValue;
+
+    if (kind === 'actual' && (!locationId || toArray(dataSet.locations).length <= 1)) {
+      const liveItemValue = getItemLevelLiveQuantity(stockItem);
+      if (liveItemValue.available) return liveItemValue;
+    }
   }
 
   if (kind === 'actual') {
     const stockTakeValue = getLatestStockTakeCount(rows);
     if (stockTakeValue.available) return stockTakeValue;
+  }
+
+  // No stored point-in-time opening snapshot exists for most workspaces (dataSet.stockSnapshots is
+  // typically empty, and a live stock item has no "openingQty"-style field to fall back to the way it
+  // does for "actual"/current stock above) — Opening Stock Value/Qty was silently showing R0 for
+  // everyone as a result. Derive it instead the same way Stock on Hand's backend now derives its
+  // date-bounded opening stock: actual (current) balance minus the net of every ledger movement
+  // already included for this item/location within the selected period — `rows` here is exactly that
+  // date-filtered set (see createSnapshotResolver/getTrustedLedgerRows). Only meaningful once we have
+  // a resolved actual balance to walk back from; otherwise stay unavailable rather than fabricate 0.
+  if (kind === 'opening') {
+    const actual = resolveQuantitySnapshot('actual', first, rows, dataSet, stockSnapshotLookup, filters);
+    if (actual.available) {
+      const netQtyForPeriod = sumBy(rows, 'netQty');
+      return { value: actual.value - netQtyForPeriod, available: true };
+    }
   }
 
   return { value: 0, available: false };
@@ -827,9 +851,41 @@ function getLocationStockQuantity(stockItem = {}, locationId = '', kind = 'openi
     ...toArray(stockItem?.locationStock)
   ];
   const locationStock = locationStocks.find((entry) => text(entry.locationId || entry.location_id || entry.id || entry.location) === text(locationId));
-  return getQuantityFromObject(locationStock, kind === 'opening'
+  const structuredValue = getQuantityFromObject(locationStock, kind === 'opening'
     ? ['openingQty', 'openingStockQty', 'opening_stock_qty', 'openingStock']
     : ['actualClosingQty', 'closingQty', 'currentStock', 'stockOnHand', 'onHandQty', 'countedQty']);
+  if (structuredValue.available) return structuredValue;
+
+  // The above array-of-objects shapes don't exist on a real stock item in this app's live state —
+  // per-location quantity is actually stored as a plain { [locationId]: qty } map on the item itself
+  // (state.stock.items[].balances, the same field main.js's getLocationStock()/
+  // getManufacturingLocationQuantity() read). This is always a live "right now" figure with no
+  // point-in-time concept, so it can only ever answer kind === 'actual'.
+  if (kind === 'actual' && locationId) return getBalancesMapQuantity(stockItem?.balances, locationId);
+
+  return { value: 0, available: false };
+}
+
+function getBalancesMapQuantity(balances, locationId = '') {
+  if (!balances || typeof balances !== 'object') return { value: 0, available: false };
+  const raw = balances[locationId];
+  if (raw === undefined || raw === null || text(raw) === '') return { value: 0, available: false };
+  return { value: safeNumber(raw), available: true };
+}
+
+// Item-level (all-locations) live quantity, for when there's no location to key into (or the
+// workspace only has one location, so an item-level figure is unambiguous) — mirrors the same
+// state.stock.items[].balances map, summed across every location, with the legacy scalar
+// `item.stock` field as a final fallback for very old records that predate per-location balances.
+function getItemLevelLiveQuantity(stockItem = {}) {
+  if (stockItem?.balances && typeof stockItem.balances === 'object') {
+    const values = Object.values(stockItem.balances).map((value) => safeNumber(value));
+    if (values.length) return { value: values.reduce((sum, value) => sum + value, 0), available: true };
+  }
+  if (stockItem?.stock !== undefined && stockItem?.stock !== null && text(stockItem.stock) !== '') {
+    return { value: safeNumber(stockItem.stock), available: true };
+  }
+  return { value: 0, available: false };
 }
 
 function getLatestStockTakeCount(rows = []) {

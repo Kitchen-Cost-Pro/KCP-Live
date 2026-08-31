@@ -113,7 +113,19 @@ export function normalizeComparableDate(value) {
   const loose = LOOSE_ISO_DATE_PATTERN.exec(raw);
   if (loose) return `${loose[1]}-${loose[2].padStart(2, '0')}-${loose[3].padStart(2, '0')}`;
   if (DIGITS_ONLY_PATTERN.test(raw)) return fromTimestamp(Number(raw));
-  return fromTimestamp(Date.parse(raw));
+  // A free-text date string (e.g. "July 5, 2026") is parsed by Date.parse/`new Date(...)` as LOCAL
+  // midnight per the JS spec, unlike an ISO string. Converting that through fromTimestamp's UTC
+  // toISOString() shifts the calendar day whenever the local timezone is ahead of UTC (e.g. SAST,
+  // UTC+2) — reading the parsed date back with local getters round-trips to the same day instead.
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? '' : fromLocalDateParts(parsed);
+}
+
+function fromLocalDateParts(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 export function isResolvableRowDate(value) {
