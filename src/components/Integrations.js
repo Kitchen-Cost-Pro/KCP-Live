@@ -411,16 +411,29 @@ function bindIntegrationEvents(view) {
     });
   });
 
-  view.querySelector('[data-xero-sync-invoice]')?.addEventListener('click', async () => {
-    await runXeroAction(view, 'Pushing yesterday’s sales to Xero...', async () => {
-      const result = await syncXeroNow(view.dataset.workspaceId || '', 'invoice');
+  const runXeroInvoicePush = async (kind, busyMessage) => {
+    await runXeroAction(view, busyMessage, async () => {
+      const result = await syncXeroNow(view.dataset.workspaceId || '', kind);
       const status = String(result?.result?.status || '');
       const label = status === 'applied' ? 'Invoice pushed to Xero.'
-        : status === 'duplicate' ? 'Already pushed for that day.'
+        : status === 'updated' ? "Today's Xero invoice updated with all sales so far."
+        : status === 'duplicate' ? 'Already pushed for that day — skipped.'
         : status === 'skipped_no_sales' ? 'No completed sales found for that day.'
         : result?.result?.error || 'Invoice push failed.';
       setXeroModalStatus(view, label, status === 'failed' ? 'error' : 'success');
     });
+  };
+
+  view.querySelector('[data-xero-sync-invoice]')?.addEventListener('click', () => {
+    runXeroInvoicePush('invoice', 'Pushing yesterday’s sales to Xero...');
+  });
+
+  // Unlike the yesterday push above, this re-sends the FULL set of today's sales on every click —
+  // the backend either creates today's invoice or updates the existing one in place (see
+  // upsertXeroTodayInvoice in invoice-sync.ts), so clicking it again later in the day after more
+  // sales come in sends everything not yet reflected rather than being skipped as a duplicate.
+  view.querySelector('[data-xero-sync-invoice-today]')?.addEventListener('click', () => {
+    runXeroInvoicePush('invoice-today', "Pushing today's sales to Xero...");
   });
 
   window.addEventListener('message', (event) => {
@@ -811,6 +824,10 @@ function renderXeroModal({ canManageXero = false } = {}) {
                 <button type="button" class="xeroCompactButton" data-xero-sync-items ${isConnected ? '' : 'disabled'}>
                   ${icon('boxes')}
                   <span>Push catalogue now</span>
+                </button>
+                <button type="button" class="xeroCompactButton" data-xero-sync-invoice-today ${isConnected ? '' : 'disabled'}>
+                  ${icon('link')}
+                  <span>Push today's sales</span>
                 </button>
                 <button type="button" class="xeroCompactButton" data-xero-sync-invoice ${isConnected ? '' : 'disabled'}>
                   ${icon('link')}
@@ -1213,10 +1230,10 @@ function setGmailBusy(view, busy) {
 
 function setXeroBusy(view, busy) {
   xeroDrawerState.busy = busy;
-  view.querySelectorAll('[data-xero-connect], [data-xero-disconnect], [data-xero-sync-items], [data-xero-sync-invoice], [data-xero-settings-submit]').forEach((button) => {
+  view.querySelectorAll('[data-xero-connect], [data-xero-disconnect], [data-xero-sync-items], [data-xero-sync-invoice], [data-xero-sync-invoice-today], [data-xero-settings-submit]').forEach((button) => {
     const isDisconnect = button.hasAttribute('data-xero-disconnect');
     const isConnect = button.hasAttribute('data-xero-connect');
-    const isSync = button.hasAttribute('data-xero-sync-items') || button.hasAttribute('data-xero-sync-invoice');
+    const isSync = button.hasAttribute('data-xero-sync-items') || button.hasAttribute('data-xero-sync-invoice') || button.hasAttribute('data-xero-sync-invoice-today');
     button.disabled = busy ||
       (isConnect && xeroDrawerState.status?.configured === false) ||
       (isDisconnect && xeroDrawerState.status?.connectionActive !== true) ||

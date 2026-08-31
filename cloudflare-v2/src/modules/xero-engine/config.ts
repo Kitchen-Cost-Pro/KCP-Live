@@ -41,12 +41,27 @@ export function xeroRateCaps(env: Env): { dailyCap: number; perMinuteCap: number
   return { dailyCap, perMinuteCap };
 }
 
-export const XERO_SCOPES = [
+// Xero deprecated the old blanket 'accounting.transactions' scope in favor of granular per-endpoint
+// scopes. KCP only ever creates Invoices (see invoice-sync.ts) and Items (see item-sync.ts, which
+// lives under the 'settings' scope group in Xero's API, alongside accounts/tax rates/currencies) —
+// no bank transactions, payments, or manual journals — so 'accounting.invoices' (write) is the
+// correct replacement, not the old catch-all.
+const DEFAULT_XERO_SCOPES = [
   'openid',
   'profile',
   'email',
-  'accounting.transactions',
+  'accounting.invoices',
   'accounting.contacts',
   'accounting.settings',
   'offline_access'
 ];
+
+// Overridable so a scope rejected by Xero (an "invalid_scope" error — usually because the app's
+// configuration in the Xero Developer Portal hasn't had that scope's API/product added yet) can be
+// narrowed down or adjusted via a Worker var, without a code change + redeploy for every attempt.
+// Accepts space- or comma-separated scopes.
+export function xeroScopes(env: Env): string[] {
+  const override = text(env.XERO_OAUTH_SCOPES);
+  if (!override) return DEFAULT_XERO_SCOPES;
+  return override.split(/[\s,]+/).filter(Boolean);
+}

@@ -50,3 +50,47 @@ export async function markXeroEffectFailed(env: Env, id: string, message: string
     .bind(id, message.slice(0, 500), nowIso())
     .run();
 }
+
+/** Plain lookup, no locking — used by flows that intentionally re-run every call (the "push
+ * today's sales" upsert) rather than skip-if-already-applied like claimXeroEffect. */
+export async function getXeroEffect(
+  env: Env,
+  workspaceId: string,
+  effectType: XeroEffectType,
+  effectKey: string
+): Promise<{ id: string; xeroObjectId: string } | null> {
+  const row = await env.DB.prepare(
+    `SELECT id, xero_object_id FROM xero_v2_effect_outbox WHERE workspace_id = ?1 AND effect_type = ?2 AND effect_key = ?3 LIMIT 1`
+  )
+    .bind(workspaceId, effectType, effectKey)
+    .first<{ id: string; xero_object_id: string | null }>();
+  return row ? { id: row.id, xeroObjectId: row.xero_object_id || '' } : null;
+}
+
+/**
+ * Always writes/updates 'APPLIED', regardless of the row's current status — the "re-run every
+ * call" counterpart to claimXeroEffect's "skip if already APPLIED" lock. Used by the today's-sales
+ * upsert flow, where re-processing the same effect_key on every click is the whole point (each
+ * call reflects the day's current full total, not a one-shot).
+ */
+export async function upsertXeroEffectApplied(
+  env: Env,
+  workspaceId: string,
+  effectType: XeroEffectType,
+  effectKey: string,
+  xeroObjectId: string
+): Promise<void> {
+  const id = await stableId('xero_v2_outbox', `${workspaceId}|${effectType}|${effectKey}`);
+  const now = nowIso();
+  await env.DB.prepare(
+    `INSERT INTO xero_v2_effect_outbox (id, workspace_id, effect_type, effect_key, status, xero_object_id, attempt_count, created_at, updated_at)
+     VALUES (?1, ?2, ?3, ?4, 'APPLIED', ?5, 1, ?6, ?6)
+     ON CONFLICT(workspace_id, effect_type, effect_key) DO UPDATE SET
+       status = 'APPLIED',
+       xero_object_id = excluded.xero_object_id,
+       attempt_count = xero_v2_effect_outbox.attempt_count + 1,
+       updated_at = excluded.updated_at`
+  )
+    .bind(id, workspaceId, effectType, effectKey, xeroObjectId, now)
+    .run();
+}

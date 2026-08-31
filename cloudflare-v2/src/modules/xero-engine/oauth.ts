@@ -1,6 +1,6 @@
 import type { Env } from '../../legacy/types';
 import { hmacSha256Base64 } from '../../legacy/crypto';
-import { text, objectValue, xeroStateSecret, xeroRedirectUri, XERO_SCOPES } from './config';
+import { text, objectValue, xeroStateSecret, xeroRedirectUri, xeroScopes } from './config';
 
 function base64UrlEncodeText(value: string): string {
   const bytes = new TextEncoder().encode(value);
@@ -61,7 +61,7 @@ export function buildXeroAuthorizeUrl(request: Request, env: Env, state: string)
   authUrl.searchParams.set('client_id', text(env.XERO_CLIENT_ID));
   authUrl.searchParams.set('redirect_uri', xeroRedirectUri(request, env));
   authUrl.searchParams.set('response_type', 'code');
-  authUrl.searchParams.set('scope', XERO_SCOPES.join(' '));
+  authUrl.searchParams.set('scope', xeroScopes(env).join(' '));
   authUrl.searchParams.set('state', state);
   return authUrl.toString();
 }

@@ -4,7 +4,7 @@ import { signXeroState, verifyXeroState, buildXeroAuthorizeUrl, exchangeXeroCode
 import { getXeroConnection, saveXeroConnection, disconnectXero } from './connection';
 import { canManageXero } from './admin-permissions';
 import { syncXeroItemsForWorkspace } from './item-sync';
-import { syncXeroDailyInvoice, claimDailyInvoiceSyncIfDue, releaseDailyInvoiceSyncClaim, yesterdayDateKey } from './invoice-sync';
+import { syncXeroDailyInvoice, upsertXeroTodayInvoice, claimDailyInvoiceSyncIfDue, releaseDailyInvoiceSyncClaim, yesterdayDateKey, todayDateKey } from './invoice-sync';
 
 function response(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
@@ -165,8 +165,8 @@ async function postSyncNow(env: Env, workspaceId: string, kind: string) {
     return response({ ok: true, result });
   }
   if (kind === 'invoice') {
-    // Manual "sync now" always targets yesterday's business day, same as the automatic due-check —
-    // today's day is still open and could double-count a sale rung up moments later.
+    // The real day-to-day push: always targets yesterday's closed business day, same as the
+    // automatic due-check, and is a strict once-per-day no-op if already pushed.
     const dateKey = yesterdayDateKey();
     const result = await syncXeroDailyInvoice(env, workspaceId, dateKey, {
       salesAccountCode: text(settings.sales_account_code),
@@ -174,7 +174,16 @@ async function postSyncNow(env: Env, workspaceId: string, kind: string) {
     });
     return response({ ok: true, dateKey, result });
   }
-  return response({ ok: false, error: 'Unknown sync kind. Use "items" or "invoice".' }, 400);
+  if (kind === 'invoice-today') {
+    // Unlike "invoice" above, this re-aggregates and upserts on every call — see
+    // upsertXeroTodayInvoice's comment for why that's safe/correct only for a still-open day.
+    const result = await upsertXeroTodayInvoice(env, workspaceId, {
+      salesAccountCode: text(settings.sales_account_code),
+      defaultTaxType: text(settings.default_tax_type)
+    });
+    return response({ ok: true, dateKey: todayDateKey(), result });
+  }
+  return response({ ok: false, error: 'Unknown sync kind. Use "items", "invoice", or "invoice-today".' }, 400);
 }
 
 async function postDueCheck(env: Env, workspaceId: string) {

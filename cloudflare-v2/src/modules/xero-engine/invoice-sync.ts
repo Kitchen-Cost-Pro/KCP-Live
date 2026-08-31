@@ -1,7 +1,7 @@
 import type { Env } from '../../legacy/types';
 import { text, nowIso } from './config';
 import { executeXeroApiRequest, XeroApiClientError } from './api-client';
-import { claimXeroEffect, markXeroEffectApplied, markXeroEffectFailed } from './outbox';
+import { claimXeroEffect, markXeroEffectApplied, markXeroEffectFailed, getXeroEffect, upsertXeroEffectApplied } from './outbox';
 import { recordXeroDiagnosticIfNotable } from './observability';
 
 interface AggregatedLineRow {
@@ -45,6 +45,35 @@ async function aggregateDailySalesLines(env: Env, workspaceId: string, dateKey: 
   return rows.results || [];
 }
 
+function buildDailyInvoicePayload(
+  dateKey: string,
+  lines: AggregatedLineRow[],
+  settings: { salesAccountCode: string; defaultTaxType: string },
+  existingInvoiceId?: string
+) {
+  return {
+    Invoices: [
+      {
+        ...(existingInvoiceId ? { InvoiceID: existingInvoiceId } : {}),
+        Type: 'ACCREC',
+        Contact: { Name: 'POS Daily Sales' },
+        Date: dateKey,
+        DueDate: dateKey,
+        Reference: `KCP daily sales ${dateKey}`,
+        Status: 'AUTHORISED',
+        LineAmountTypes: 'Exclusive',
+        LineItems: lines.map((line) => ({
+          Description: text(line.label) || text(line.sku) || 'POS sale',
+          Quantity: Number(line.quantity) || 1,
+          UnitAmount: (Number(line.total) || 0) / (Number(line.quantity) || 1),
+          AccountCode: settings.salesAccountCode,
+          TaxType: settings.defaultTaxType
+        }))
+      }
+    ]
+  };
+}
+
 /**
  * Pushes ONE Xero Invoice summarizing a single business day's completed POS sales for a
  * workspace — see the plan's rationale: per-transaction invoices would multiply Xero API calls
@@ -70,26 +99,7 @@ export async function syncXeroDailyInvoice(
   }
 
   try {
-    const payload = {
-      Invoices: [
-        {
-          Type: 'ACCREC',
-          Contact: { Name: 'POS Daily Sales' },
-          Date: dateKey,
-          DueDate: dateKey,
-          Reference: `KCP daily sales ${dateKey}`,
-          Status: 'AUTHORISED',
-          LineAmountTypes: 'Exclusive',
-          LineItems: lines.map((line) => ({
-            Description: text(line.label) || text(line.sku) || 'POS sale',
-            Quantity: Number(line.quantity) || 1,
-            UnitAmount: (Number(line.total) || 0) / (Number(line.quantity) || 1),
-            AccountCode: settings.salesAccountCode,
-            TaxType: settings.defaultTaxType
-          }))
-        }
-      ]
-    };
+    const payload = buildDailyInvoicePayload(dateKey, lines, settings);
     const result = await executeXeroApiRequest(env, workspaceId, { method: 'POST', path: 'Invoices', body: payload });
     const invoices = (result.Invoices as Array<{ InvoiceID?: string }> | undefined) || [];
     const xeroInvoiceId = text(invoices[0]?.InvoiceID);
@@ -103,12 +113,61 @@ export async function syncXeroDailyInvoice(
   }
 }
 
+/**
+ * "Push today's sales" manual button: unlike syncXeroDailyInvoice's strict once-per-day lock (used
+ * by the real automated push, for a day that's already closed and can't gain more sales), this
+ * always re-aggregates the FULL set of today's sales so far and either creates the day's invoice or
+ * updates the existing one in place — so clicking it again later in the day after more sales come
+ * in sends everything not yet reflected, not just what changed since the last click. Xero's
+ * Invoices endpoint treats a POST body containing an InvoiceID as an update to that invoice rather
+ * than a new one, which is what makes the "top up" behavior possible without tracking a per-sale
+ * delta ourselves.
+ */
+export async function upsertXeroTodayInvoice(
+  env: Env,
+  workspaceId: string,
+  settings: { salesAccountCode: string; defaultTaxType: string }
+): Promise<{ status: 'applied' | 'updated' | 'skipped_no_sales' | 'failed'; xeroInvoiceId?: string; error?: string }> {
+  const dateKey = todayDateKey();
+  const effectKey = `invoice:${workspaceId}:${dateKey}`;
+  const lines = await aggregateDailySalesLines(env, workspaceId, dateKey);
+  if (!lines.length) return { status: 'skipped_no_sales' };
+
+  const existing = await getXeroEffect(env, workspaceId, 'INVOICE_PUSH', effectKey);
+  try {
+    const payload = buildDailyInvoicePayload(dateKey, lines, settings, existing?.xeroObjectId || undefined);
+    const result = await executeXeroApiRequest(env, workspaceId, { method: 'POST', path: 'Invoices', body: payload });
+    const invoices = (result.Invoices as Array<{ InvoiceID?: string }> | undefined) || [];
+    const xeroInvoiceId = text(invoices[0]?.InvoiceID) || existing?.xeroObjectId || '';
+    await upsertXeroEffectApplied(env, workspaceId, 'INVOICE_PUSH', effectKey, xeroInvoiceId);
+    return { status: existing?.xeroObjectId ? 'updated' : 'applied', xeroInvoiceId };
+  } catch (cause) {
+    const message = cause instanceof XeroApiClientError ? cause.message : cause instanceof Error ? cause.message : 'Unknown error pushing invoice to Xero.';
+    await recordXeroDiagnosticIfNotable(env, workspaceId, { operation: 'xero-invoice-push-today', status: 'failed', message, details: { dateKey } });
+    return { status: 'failed', error: message };
+  }
+}
+
 /** "Yesterday" in SAST — the last fully-closed business day, safe to invoice without risking a
  * partial day (a sale still being rung up when the cron fires). */
 export function yesterdayDateKey(): string {
   const now = new Date();
   const sast = new Date(now.getTime() + 2 * 60 * 60 * 1000);
   sast.setUTCDate(sast.getUTCDate() - 1);
+  return sast.toISOString().slice(0, 10);
+}
+
+/**
+ * Today's (still-open) business day in SAST — for the manual "Push today's sales" test/preview
+ * button only. The automatic due-check always uses yesterdayDateKey(): pushing a day that's still
+ * accumulating sales means a second push later the same day is a same-day duplicate (per the
+ * effect-outbox's per-calendar-day key) and will just report 'duplicate' rather than topping up the
+ * invoice with sales rung up since the first push — acceptable for a manual preview/test action,
+ * but why this is never used for the scheduled push.
+ */
+export function todayDateKey(): string {
+  const now = new Date();
+  const sast = new Date(now.getTime() + 2 * 60 * 60 * 1000);
   return sast.toISOString().slice(0, 10);
 }
 

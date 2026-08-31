@@ -67,6 +67,7 @@ export interface Env {
   XERO_API_BASE_URL?: string;
   XERO_DAILY_CALL_CAP?: string;
   XERO_PER_MINUTE_CALL_CAP?: string;
+  XERO_OAUTH_SCOPES?: string;
 }
 
 /**

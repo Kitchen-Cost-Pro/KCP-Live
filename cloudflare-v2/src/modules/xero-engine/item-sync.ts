@@ -14,9 +14,19 @@ interface ProductRow {
 
 const XERO_CODE_MAX_LENGTH = 30; // Xero's Item.Code field hard limit.
 
+/**
+ * Xero requires Item.Code to be unique per organisation, but KCP's `sku` column is NOT unique per
+ * product row — size/variant products (e.g. "Coffee Test - SML"/"Coffee Test - LRG") deliberately
+ * share one SKU across their variants, since the SKU identifies the underlying sellable item, not
+ * each size variant of it. Using the raw SKU as the Xero Code collided two variants onto one Xero
+ * Item (the second push silently overwrote the first). Appending a short, stable suffix from the
+ * product's own row id disambiguates every variant while keeping the SKU as a readable prefix.
+ */
 function itemCodeForProduct(product: ProductRow): string {
   const sku = text(product.sku);
-  return (sku || product.id).slice(0, XERO_CODE_MAX_LENGTH);
+  if (!sku) return product.id.slice(0, XERO_CODE_MAX_LENGTH);
+  const suffix = product.id.slice(-6);
+  return `${sku}-${suffix}`.slice(0, XERO_CODE_MAX_LENGTH);
 }
 
 /**
