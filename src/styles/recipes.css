@@ -680,6 +680,11 @@
   color: var(--accent-amber);
 }
 
+.recipesModule__status--notRequired {
+  background: var(--surface-secondary);
+  color: var(--text-soft);
+}
+
 .recipesModule__row > button,
 .recipesModule__iconButton,
 .recipesModule__toast button {

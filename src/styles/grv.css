@@ -477,6 +477,10 @@
   width: 112px;
 }
 
+#view-grv .grv-tableCol--variance {
+  width: 108px;
+}
+
 #view-grv .grv-tableCol--price {
   width: 140px;
 }
@@ -899,6 +903,46 @@
 
 #view-grv .grv-tableStat--price strong {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+#view-grv .grv-costVariance {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 0.78rem;
+  font-weight: 950;
+  white-space: nowrap;
+}
+
+#view-grv .grv-costVariance strong {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-weight: 950;
+}
+
+#view-grv .grv-costVarianceArrow {
+  font-size: 0.66rem;
+  line-height: 1;
+}
+
+#view-grv .grv-costVariance--over {
+  border-color: rgba(248, 113, 113, 0.32);
+  background: rgba(248, 113, 113, 0.12);
+  color: #f87171;
+}
+
+#view-grv .grv-costVariance--under {
+  border-color: rgba(16, 185, 129, 0.32);
+  background: rgba(16, 185, 129, 0.12);
+  color: #34d399;
+}
+
+#view-grv .grv-costVariance--flat {
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.5);
 }
 
 #view-grv .grv-tableInput {

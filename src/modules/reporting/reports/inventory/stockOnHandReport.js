@@ -57,6 +57,15 @@ const byItemColumns = [
   { key: 'lastMovementDate', label: 'Last Movement Date', type: 'date', sortable: true }
 ];
 
+const byUomColumns = [
+  { key: 'itemName', label: 'Item', sortable: true },
+  { key: 'locationName', label: 'Location', sortable: true },
+  { key: 'baseUomDisplay', label: 'Base UOM Qty', sortable: true },
+  { key: 'customUom1Display', label: 'Custom UOM 1', sortable: true },
+  { key: 'customUom2Display', label: 'Custom UOM 2', sortable: true },
+  { key: 'customUom3Display', label: 'Custom UOM 3', sortable: true }
+];
+
 const lineDetailColumns = [
   ...byItemColumns.slice(0, 8),
   qtyColumn('openingStock', 'Opening Stock'),
@@ -77,12 +86,13 @@ export const stockOnHandReport = {
   emptyState: { title: 'No stock balances found', message: 'No stock-on-hand rows matched the selected filters.' },
   suppressEmptyWarning: true,
   defaultView: 'by_item',
-  availableViews: ['summary', 'by_location', 'by_category', 'by_item', 'line_detail'],
+  availableViews: ['summary', 'by_location', 'by_category', 'by_item', 'by_uom', 'line_detail'],
   filterConfig: {
     summary: ['search', 'location', 'status'],
     by_location: ['search', 'location', 'category', 'status'],
     by_category: ['search', 'location', 'category', 'supplier', 'status'],
     by_item: ['search', 'location', 'category', 'supplier', 'status'],
+    by_uom: ['search', 'location', 'category'],
     line_detail: ['search', 'location', 'category', 'supplier', 'status']
   },
   columns: {
@@ -90,6 +100,7 @@ export const stockOnHandReport = {
     by_location: byLocationColumns,
     by_category: byCategoryColumns,
     by_item: byItemColumns,
+    by_uom: byUomColumns,
     line_detail: lineDetailColumns
   },
   exportMapping: {
@@ -99,6 +110,7 @@ export const stockOnHandReport = {
     by_item: {
       itemName: 'Item', sku: 'SKU', category: 'Category', locationName: 'Location', currentStock: 'Current Stock', baseUom: 'UOM', unitCostExVat: 'Unit Cost Ex VAT', stockValue: 'Stock Value', lowStockThreshold: 'Low Stock Threshold', parLevel: 'Par Level', status: 'Status', supplierName: 'Supplier', lastMovementDate: 'Last Movement Date'
     },
+    by_uom: mapColumns(byUomColumns),
     line_detail: mapColumns(lineDetailColumns)
   },
   getRows: async ({ workspaceId, filters, services = {}, view = 'by_item' }) => {
@@ -129,6 +141,7 @@ export function buildStockOnHandViews(rows = []) {
     by_location: buildLocation(rows),
     by_category: buildCategory(rows),
     by_item: rows,
+    by_uom: buildByUom(rows),
     line_detail: rows
   };
 }
@@ -151,6 +164,7 @@ function normalizeStockRow(row = {}, index = 0) {
     locationName: text(row.locationName || row.location_name),
     currentStock,
     baseUom: text(row.baseUom || row.base_uom || row.unit),
+    uomConfigurations: normalizeUomConfigurationsForRow(row.uomConfigurations || row.uom_configurations),
     unitCostExVat,
     stockValue: roundMoney(currentStock * unitCostExVat),
     lowStockThreshold,
@@ -171,6 +185,47 @@ function normalizeStockRow(row = {}, index = 0) {
     hasLocationBalance: hasLocationBalance === undefined ? true : Boolean(hasLocationBalance),
     sourceId: text(row.sourceId || row.source_id || row.itemId || row.stockItemId)
   };
+}
+
+function normalizeUomConfigurationsForRow(value) {
+  const list = Array.isArray(value) ? value : [];
+  return list
+    .map((entry) => (entry && typeof entry === 'object' ? entry : {}))
+    .map((entry) => ({
+      customUom: text(entry.customUom || entry.custom_uom),
+      ratio: safeNumber(entry.ratio)
+    }))
+    .filter((entry) => entry.customUom && entry.ratio > 0)
+    .slice(0, 3);
+}
+
+// Rounds to a sensible display precision and drops a floating-point trailing zero (roundMoney(x, 3)
+// already returns a bare number, so a value like 1.5 never prints as "1.500" — no extra trimming
+// needed beyond the rounding itself).
+function formatUomQtyLabel(qtyInBaseUnits, unitLabel) {
+  const qty = roundMoney(qtyInBaseUnits, 3);
+  const label = text(unitLabel);
+  return label ? `${qty} ${label}` : String(qty);
+}
+
+function buildByUom(rows) {
+  return rows.map((row, index) => {
+    // Defensively re-filters even though normalizeStockRow already does this on the standard
+    // getRows() path — buildByUom is also called directly (e.g. tests, scheduled export runs
+    // feeding it their own row shape), so it must not assume its input was pre-sanitized.
+    const configs = normalizeUomConfigurationsForRow(row.uomConfigurations);
+    return {
+      id: `stock-on-hand-uom:${row.id || index}`,
+      itemId: row.itemId,
+      itemName: row.itemName,
+      locationId: row.locationId,
+      locationName: row.locationName,
+      baseUomDisplay: formatUomQtyLabel(row.currentStock, row.baseUom),
+      customUom1Display: configs[0] ? formatUomQtyLabel(row.currentStock / configs[0].ratio, configs[0].customUom) : '',
+      customUom2Display: configs[1] ? formatUomQtyLabel(row.currentStock / configs[1].ratio, configs[1].customUom) : '',
+      customUom3Display: configs[2] ? formatUomQtyLabel(row.currentStock / configs[2].ratio, configs[2].customUom) : ''
+    };
+  });
 }
 
 function resolveStatus(currentStock, threshold, parLevel, hasBalance = true) {
@@ -227,6 +282,9 @@ function buildCategory(rows) {
 function buildTotals(rows, view) {
   if (view === 'summary') return { itemsInStock: sumBy(rows, 'itemsInStock'), totalStockValue: roundMoney(sumBy(rows, 'totalStockValue')), lowStockItems: sumBy(rows, 'lowStockItems'), criticalItems: sumBy(rows, 'criticalItems'), belowParItems: sumBy(rows, 'belowParItems') };
   if (['by_location', 'by_category'].includes(view)) return { items: sumBy(rows, 'items'), currentStockValue: roundMoney(sumBy(rows, 'currentStockValue')), lowStockItems: sumBy(rows, 'lowStockItems'), criticalItems: sumBy(rows, 'criticalItems'), belowParItems: sumBy(rows, 'belowParItems') };
+  // Each by_uom cell is a "qty + unit label" string mixing different units row to row (kg, ea,
+  // Bottle, Box...), so a summed total column would add incompatible units together — no totals row.
+  if (view === 'by_uom') return {};
   return { currentStock: sumBy(rows, 'currentStock'), stockValue: roundMoney(sumBy(rows, 'stockValue')), qtyIn: sumBy(rows, 'qtyIn'), qtyOut: sumBy(rows, 'qtyOut') };
 }
 

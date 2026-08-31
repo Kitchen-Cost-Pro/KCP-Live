@@ -388,8 +388,8 @@ function collectMenuSetupIssues(row = {}) {
   const modifierRisk = text(row.modifierCostRisk);
   const rowStatus = text(row.status);
 
-  if (recipeStatus && recipeStatus !== 'Recipe Ready' && recipeStatus !== 'Ready') addIssueList(issues, recipeStatus);
-  if (deductionStatus && !['Ready', 'OK', 'Healthy'].includes(deductionStatus)) addIssueList(issues, deductionStatus);
+  if (recipeStatus && !['Recipe Ready', 'Ready', 'No Recipe Required'].includes(recipeStatus)) addIssueList(issues, recipeStatus);
+  if (deductionStatus && !['Ready', 'OK', 'Healthy', 'Not Required'].includes(deductionStatus)) addIssueList(issues, deductionStatus);
   if (mappingStatus && !['Mapped', 'OK', 'Healthy'].includes(mappingStatus)) addIssueList(issues, mappingStatus);
   if (priceStatus && /missing|warning|below|zero|invalid/i.test(priceStatus)) addIssueList(issues, priceStatus);
   if (modifierRisk && !/no .*risk|healthy|ok/i.test(modifierRisk)) addIssueList(issues, modifierRisk);
@@ -398,7 +398,7 @@ function collectMenuSetupIssues(row = {}) {
   if (safeNumber(row.sellingPriceExVat) <= 0 && safeNumber(row.recipeCostExVat) > 0) {
     addIssueList(issues, 'Selling price is zero or missing while recipe cost exists');
   }
-  if (safeNumber(row.recipeCostExVat) <= 0 && recipeStatus && recipeStatus !== 'Missing Recipe') {
+  if (safeNumber(row.recipeCostExVat) <= 0 && recipeStatus && recipeStatus !== 'Missing Recipe' && recipeStatus !== 'No Recipe Required') {
     addIssueList(issues, 'Recipe cost is zero or missing');
   }
   if (safeNumber(row.grossProfit) < 0) {

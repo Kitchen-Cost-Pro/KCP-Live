@@ -263,11 +263,15 @@ function viewCount(report = {}) {
   return Array.isArray(report.availableViews) ? report.availableViews.length : (report.defaultView ? 1 : 0);
 }
 
+const REPORT_VIEW_LABEL_ACRONYMS = new Set(['uom', 'vat', 'sku', 'grv', 'po']);
+
 function formatViewLabel(view = '') {
   return String(view || '')
     .split('_')
     .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .map((part) => (REPORT_VIEW_LABEL_ACRONYMS.has(part.toLowerCase())
+      ? part.toUpperCase()
+      : part.charAt(0).toUpperCase() + part.slice(1)))
     .join(' ');
 }
 

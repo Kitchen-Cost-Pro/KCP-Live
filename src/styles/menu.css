@@ -549,6 +549,11 @@
   color: var(--accent-amber);
 }
 
+.menuCatalogue__status--notRequired {
+  background: var(--surface-secondary);
+  color: var(--text-soft);
+}
+
 .menuCatalogue__statusLink {
   cursor: pointer;
   transition: background 140ms ease, color 140ms ease, transform 140ms ease;
@@ -1089,6 +1094,24 @@
   font-size: 0.68rem;
   font-weight: 950;
   text-transform: uppercase;
+}
+
+.menuCatalogue__toggleField {
+  display: flex !important;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.menuCatalogue__toggleField input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.menuCatalogue__toggleField span {
+  color: var(--text-main) !important;
 }
 
 .menuCatalogue__modal input,

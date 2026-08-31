@@ -4585,6 +4585,7 @@ async function saveMenuItem(itemId, updates) {
       sellingPrice: priceLocationId ? Number(item.__globalSellingPrice ?? item.sellingPrice ?? 0) || 0 : Number(updates.sellingPrice || 0),
       locationPrices,
       barcodes: parseBarcodeInput(updates.barcodes),
+      noRecipeRequired: updates.noRecipeRequired === true,
       workspaceId: appState.workspace?.id
     }, {
       workspaceId: appState.workspace?.id,
@@ -6673,8 +6674,12 @@ async function saveStockLocationCosts(itemId) {
   try {
     const { saveStockItemLocationCosts } = await import('./services/stockService.js');
     await saveStockItemLocationCosts(workspaceId, id, updates);
+    // The user may have switched to editing a different item while this request was in flight —
+    // the toast/refresh below are session-wide (not tied to which modal is open), but still skip
+    // them if the workspace itself changed underneath this save.
+    if (appState.workspace?.id !== workspaceId) return;
     showStockToast('Location costs updated.', 'success');
-    await loadStockLocationCostEditor(id);
+    if (appState.stock.locationCostEditor?.itemId === id) await loadStockLocationCostEditor(id);
     refreshStockAfterOwnMutation(workspaceId);
   } catch (error) {
     if (appState.stock.locationCostEditor?.itemId !== id) return;

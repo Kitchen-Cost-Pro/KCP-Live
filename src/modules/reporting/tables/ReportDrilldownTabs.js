@@ -25,10 +25,14 @@ export function renderReportViewTabs(report = {}, activeView = '') {
   return nav;
 }
 
+const REPORT_VIEW_LABEL_ACRONYMS = new Set(['uom', 'vat', 'sku', 'grv', 'po']);
+
 export function formatViewLabel(view = '') {
   return String(view || '')
     .split('_')
     .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .map((part) => (REPORT_VIEW_LABEL_ACRONYMS.has(part.toLowerCase())
+      ? part.toUpperCase()
+      : part.charAt(0).toUpperCase() + part.slice(1)))
     .join(' ');
 }

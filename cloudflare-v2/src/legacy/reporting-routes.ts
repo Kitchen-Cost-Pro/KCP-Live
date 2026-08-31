@@ -2588,15 +2588,25 @@ function buildMenuRecipeHealthRows(
     const foodCostPercent = sellingPriceExVat
       ? recipeCostExVat / sellingPriceExVat
       : 0;
+    // A user-set opt-out (products/raw_json.noRecipeRequired, toggled from the menu item edit
+    // form) — e.g. a resold bottled drink, gift card, or service charge that legitimately never
+    // has a recipe. Must not surface as "Missing Recipe" anywhere this report reads recipeStatus.
+    const noRecipeRequired = raw.noRecipeRequired === true;
     const recipeStatus = !recipe
-      ? "Missing Recipe"
+      ? noRecipeRequired
+        ? "No Recipe Required"
+        : "Missing Recipe"
       : exploded.rows.length
         ? "Recipe Ready"
         : "Recipe Missing Ingredients";
     const yocoMappingStatus = resolveYocoMappingStatus(product, raw);
     const modifierCostRisk = resolveModifierCostRisk(product, raw, context);
     const stockDeductionStatus =
-      recipeStatus === "Recipe Ready" ? "Ready" : "Not Ready";
+      recipeStatus === "Recipe Ready"
+        ? "Ready"
+        : recipeStatus === "No Recipe Required"
+          ? "Not Required"
+          : "Not Ready";
 
     if (!clean(product.yoco_item_id))
       itemWarnings.push(
@@ -2622,7 +2632,7 @@ function buildMenuRecipeHealthRows(
           productId,
         ),
       );
-    if (!recipe)
+    if (!recipe && !noRecipeRequired)
       itemWarnings.push(
         menuHealthWarning(
           "Critical",
@@ -3004,7 +3014,11 @@ function calculateLocationRecipeCost(
   let totalCost = 0;
   for (const line of lines) {
     const stockItemId = clean(line.stock_item_id);
-    if (!stockItemId) continue;
+    // Matches explodeMenuRecipe's own skip condition (a stock_item_id with no resolved
+    // stock_item_name means the linked stock item was deleted) — otherwise this per-location cost
+    // would silently include a line the workspace-level summary cost deliberately excludes (with
+    // a "Missing stock item link" warning), producing two different costs for the same recipe.
+    if (!stockItemId || !clean(line.stock_item_name)) continue;
     const converted = convertMenuRecipeQty({
       qty: numberValue(line.quantity, 0),
       fromUom: clean(line.unit || line.base_uom),

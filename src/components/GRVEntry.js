@@ -4,6 +4,7 @@ import { bindCustomCalendarEvents, renderCustomCalendarOverlay } from './CustomC
 import { bindFieldHelpTooltips, renderFieldHelpLabel } from './fieldHelp.js';
 import { renderLoadingPanel } from './LoadingPanel.js';
 import { formatDisplayDate, shiftMonthKey, startOfMonthKey, todayLocal } from '../utils/date.js';
+import { resolveLocationUnitCost } from '../utils/stockCostResolver.js';
 
 export function renderGRVEntry({ state, onGrvFilterChange, onGrvAction = {} } = {}) {
   const grv = state.grv || {};
@@ -166,7 +167,7 @@ export function renderGRVEntry({ state, onGrvFilterChange, onGrvAction = {} } = 
       </div>
     </div>
 
-    ${filters.overlay === 'draft' ? renderDraftDrawer(statusLabel, totals, draft, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes, headerReady, grv.actionStatus, grv.actionError || '', grv.locations || [], filters.openDropdown || '') : ''}
+    ${filters.overlay === 'draft' ? renderDraftDrawer(statusLabel, totals, draft, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes, headerReady, grv.actionStatus, grv.actionError || '', grv.locations || [], filters.openDropdown || '', grv.stockItems || []) : ''}
     ${filters.overlay === 'po' ? renderPurchaseOrderOverlay(convertibleOrders, filters.poQuery || '') : ''}
     ${filters.overlay === 'stock' ? renderStockOverlay(stockMatches, filters.lineQuery || '', headerReady, selectedStockIds) : ''}
     ${filters.overlay === 'calendar' ? renderCustomCalendarOverlay({
@@ -594,7 +595,7 @@ function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, 
   });
 }
 
-function renderDraftTable(draft, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes = new Set(), locations = [], openDropdown = '') {
+function renderDraftTable(draft, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes = new Set(), locations = [], openDropdown = '', stockItems = []) {
   const splitByLocation = draft.splitByLocation === true;
   return `
     <table class="grv-table">
@@ -605,6 +606,7 @@ function renderDraftTable(draft, vatRate, vatRegistered, supplierVatRate, select
         <col class="grv-tableCol grv-tableCol--qty" />
         <col class="grv-tableCol grv-tableCol--pack" />
         <col class="grv-tableCol grv-tableCol--unit-price" />
+        <col class="grv-tableCol grv-tableCol--variance" />
         <col class="grv-tableCol grv-tableCol--price" />
         <col class="grv-tableCol grv-tableCol--vat" />
         <col class="grv-tableCol grv-tableCol--total" />
@@ -618,6 +620,7 @@ function renderDraftTable(draft, vatRate, vatRegistered, supplierVatRate, select
           <th>Qty</th>
           <th>Pack</th>
           <th>Unit Price</th>
+          <th>${renderFieldHelpLabel('Cost Variance', 'Compares this line\'s ex-VAT unit cost to the item\'s current cost at the receiving location. Red means more expensive than before, green means cheaper.')}</th>
           <th>${draft.pricesIncludeVat ? 'Pack Price (Incl)' : 'Pack Price (Ex)'}</th>
           <th>VAT</th>
           <th>Total</th>
@@ -625,7 +628,7 @@ function renderDraftTable(draft, vatRate, vatRegistered, supplierVatRate, select
         </tr>
       </thead>
       <tbody>
-        ${(draft.items || []).map((line, index) => renderDraftRow(line, index, draft.pricesIncludeVat, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes, splitByLocation, locations, openDropdown)).join('')}
+        ${(draft.items || []).map((line, index) => renderDraftRow(line, index, draft.pricesIncludeVat, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes, splitByLocation, locations, openDropdown, stockItems, draft.locationId)).join('')}
       </tbody>
     </table>
   `;
@@ -661,20 +664,20 @@ function renderDraftLauncher(statusLabel, totals, draft, headerReady) {
   `;
 }
 
-function renderDraftDrawer(statusLabel, totals, draft, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes, headerReady, actionStatus, actionError = '', locations = [], openDropdown = '') {
+function renderDraftDrawer(statusLabel, totals, draft, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes, headerReady, actionStatus, actionError = '', locations = [], openDropdown = '', stockItems = []) {
   return `
     <div class="grv-overlay grv-overlay--drawer" data-grv-overlay>
       <section class="grv-overlayCard grv-overlayCard--draft grv-draft-panel" role="dialog" aria-modal="true">
         <button type="button" class="grv-removeBtn grv-draftDrawerClose" data-grv-overlay-close aria-label="Close draft table">
           ${icon('x')}
         </button>
-        ${renderDraftPanelContent(statusLabel, totals, draft, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes, headerReady, actionStatus, actionError, locations, openDropdown)}
+        ${renderDraftPanelContent(statusLabel, totals, draft, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes, headerReady, actionStatus, actionError, locations, openDropdown, stockItems)}
       </section>
     </div>
   `;
 }
 
-function renderDraftPanelContent(statusLabel, totals, draft, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes, headerReady, actionStatus, actionError = '', locations = [], openDropdown = '') {
+function renderDraftPanelContent(statusLabel, totals, draft, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes, headerReady, actionStatus, actionError = '', locations = [], openDropdown = '', stockItems = []) {
   return `
     <div class="grv-topbar">
       <div class="grv-topbarTitle">
@@ -700,7 +703,7 @@ function renderDraftPanelContent(statusLabel, totals, draft, vatRate, vatRegiste
     ${actionError ? `<div class="grv-drawerNotice">${renderNotice(actionError, 'error')}</div>` : ''}
 
     <div class="grv-draft-scroll">
-      ${(draft.items || []).length ? renderDraftTable(draft, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes, locations, openDropdown) : `
+      ${(draft.items || []).length ? renderDraftTable(draft, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes, locations, openDropdown, stockItems) : `
         <div class="grv-empty">
           <span>INVOICE EMPTY.</span>
         </div>
@@ -736,7 +739,7 @@ function renderDraftPanelContent(statusLabel, totals, draft, vatRate, vatRegiste
   `;
 }
 
-function renderDraftRow(line, index, pricesIncludeVat, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes = new Set(), splitByLocation = false, locations = [], openDropdown = '') {
+function renderDraftRow(line, index, pricesIncludeVat, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes = new Set(), splitByLocation = false, locations = [], openDropdown = '', stockItems = [], draftLocationId = '') {
   const variance = Number(line.receivedQty || 0) - Number(line.orderedQty || 0);
   const unitCostEx = Number(line.unitCost || 0);
   const packSize = getPositivePackSize(line.packSize);
@@ -767,6 +770,21 @@ function renderDraftRow(line, index, pricesIncludeVat, vatRate, vatRegistered, s
     : (costAlreadyIncludesVat ? packPriceEx / (1 + supplierVatRate) : packPriceEx);
   const rawDisplayedPackPrice = String(line.packPriceDisplay ?? '').trim();
   const varianceLabel = variance === 0 ? 'matched' : `${formatSignedNumber(variance)} var`;
+  // Compares this line's received ex-VAT unit cost to the item's CURRENT ex-VAT cost at the
+  // receiving location (stock_item_location_prices, falling back to the item's workspace cost) —
+  // both sides must be ex-VAT for the comparison to be meaningful, since unitCostEx here is always
+  // ex-VAT (finalizeReceivedCost) regardless of whether the price fields are displayed incl VAT.
+  const costLineLocationId = String(line.locationId || line.targetLocation || draftLocationId || '');
+  const costStockItem = (stockItems || []).find((item) => String(item.id) === String(line.stockItemId));
+  const currentUnitCost = costStockItem ? resolveLocationUnitCost(costStockItem, costLineLocationId) : 0;
+  const hasCostBaseline = currentUnitCost > 0;
+  const costVariancePercent = hasCostBaseline ? ((unitCostEx - currentUnitCost) / currentUnitCost) * 100 : 0;
+  const costVarianceTone = !hasCostBaseline || Math.abs(costVariancePercent) < 0.05
+    ? 'flat'
+    : costVariancePercent > 0 ? 'over' : 'under';
+  const costVarianceLabel = !hasCostBaseline
+    ? 'New'
+    : `${costVariancePercent > 0 ? '+' : ''}${costVariancePercent.toFixed(1)}%`;
   const splitMeta = line.splitGroupId && Number(line.splitExpectedQty || 0) > 0
     ? ` · SPLIT TOTAL ${formatNumber(line.splitExpectedQty)}`
     : '';
@@ -828,6 +846,12 @@ function renderDraftRow(line, index, pricesIncludeVat, vatRate, vatRegistered, s
         <div class="grv-tableStat grv-tableStat--price">
           <strong>${formatCurrency(displayedUnitCost)}</strong>
           <span>${showUnitInclVat ? 'unit incl VAT' : 'unit ex VAT'}</span>
+        </div>
+      </td>
+      <td>
+        <div class="grv-costVariance grv-costVariance--${costVarianceTone}" title="${hasCostBaseline ? `Current cost ${escapeAttribute(formatCurrency(currentUnitCost))} · received ${escapeAttribute(formatCurrency(unitCostEx))}` : 'No prior cost recorded for this item at this location.'}">
+          ${costVarianceTone !== 'flat' ? `<span class="grv-costVarianceArrow">${costVarianceTone === 'over' ? '▲' : '▼'}</span>` : ''}
+          <strong>${escapeHtml(costVarianceLabel)}</strong>
         </div>
       </td>
       <td>

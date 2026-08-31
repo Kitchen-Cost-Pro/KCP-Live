@@ -800,7 +800,9 @@ function renderRecipeRow(item, ingredients, isSelected, showLinkedProduct = fals
   const linkedProduct = getModifierLinkedProductDisplay(item);
   const isModifierLinked = isModifier && isModifierProductLinked(item);
   const statusLabel = getRecipeStatusLabel(item);
-  const statusClass = item.status === 'complete' ? 'complete' : 'missing';
+  const statusClass = (item.noRecipeRequired === true || item.recipeStatus === 'NOT_REQUIRED')
+    ? 'notRequired'
+    : item.status === 'complete' ? 'complete' : 'missing';
   const linkedStockItemName = String(item.recipeSourceStockItemName || item.recipeSourceStockItem?.name || '').trim();
   const sourceDetail = linkedStockItemName && !isModifier
     ? `${recipeSourceDetail(item)} · ${linkedStockItemName}`
@@ -1192,6 +1194,7 @@ function getRecipeStatusLabel(item = {}) {
   if (item.recipeStatus === 'COMPLETE_VIA_LINKED_STOCK_ITEM' || item.recipeSource === 'linked_stock_item') {
     return 'Complete via linked stock item';
   }
+  if (item.noRecipeRequired === true || item.recipeStatus === 'NOT_REQUIRED') return 'No recipe required';
   if (item.recipeStatus === 'COMPLETE' || item.status === 'complete') return 'Recipe Assigned';
   return 'Missing recipe';
 }

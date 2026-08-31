@@ -59,6 +59,7 @@ import {
   resolveTransactionReferences,
 } from "./transaction-references";
 import { resolveLocationDisplayName } from "./location-display";
+import { removeStockItemFromRecipeLines } from "./recipe-line-cleanup";
 // @ts-ignore Shared unit-aware Yoco Money conversion. Money objects are minor units; normalized scalars are major units.
 import { yocoMoneyToMajor } from "../../../src/modules/reporting/engine/yocoFinancials.js";
 import { KCP_WORKER_RELEASE, KCP_REFUND_PIPELINE_VERSION } from "../release";
@@ -5495,11 +5496,17 @@ export async function getProducts(
     const effectiveRecipeLines = recipeLines.length
       ? recipeLines
       : recipeSourceRecipeLines;
+    // A user-set opt-out (e.g. a resold bottled drink, gift card, or service charge) — these
+    // items legitimately never have a recipe, so a genuinely missing one must not be reported as
+    // a problem here or anywhere downstream (Menu & Recipe Health, onboarding readiness).
+    const noRecipeRequired = raw.noRecipeRequired === true;
     const recipeStatus = recipeLines.length
       ? "COMPLETE"
       : recipeSourceRecipeLines.length
         ? "COMPLETE_VIA_LINKED_STOCK_ITEM"
-        : "MISSING_RECIPE";
+        : noRecipeRequired
+          ? "NOT_REQUIRED"
+          : "MISSING_RECIPE";
     const normalizedRecipeSourceStockItem = recipeSourceStockItem
       ? {
           id: text(recipeSourceStockItem.id),
@@ -5569,7 +5576,9 @@ export async function getProducts(
           ? "linked_stock_item"
           : recipeLines.length
             ? "direct"
-            : "missing",
+            : noRecipeRequired
+              ? "not_required"
+              : "missing",
       recipeSourceStockItemId,
       recipeSourceStockItem: normalizedRecipeSourceStockItem,
       recipeSourceStockItemName: normalizedRecipeSourceStockItem?.name || "",
@@ -5581,8 +5590,9 @@ export async function getProducts(
       combinedGpMin: modifierSummary.gpMin,
       combinedGpMax: modifierSummary.gpMax,
       combinedGpDisplay: modifierSummary.gpDisplay,
-      status: effectiveRecipeLines.length ? "complete" : "missing",
-      missingRecipe: effectiveRecipeLines.length === 0,
+      status: noRecipeRequired || effectiveRecipeLines.length ? "complete" : "missing",
+      missingRecipe: !noRecipeRequired && effectiveRecipeLines.length === 0,
+      noRecipeRequired,
       active: row.active !== 0,
       archived: false,
       deleted: false,
@@ -6356,6 +6366,14 @@ export async function deleteStockItemRoute(
   if (!target) return error(request, env, 404, "Stock item was not found.");
   const before = stockAuditSnapshot(target);
   const after = { ...before, active: false, deletedAt: now };
+  const recipeLineStatements = await removeStockItemFromRecipeLines(
+    env,
+    workspaceId,
+    auth.uid,
+    stockItemId,
+    text(target.name),
+    now,
+  );
   await env.DB.batch([
     env.DB.prepare(
       `UPDATE stock_items
@@ -6376,6 +6394,7 @@ export async function deleteStockItemRoute(
       JSON.stringify(after),
       now,
     ),
+    ...recipeLineStatements,
   ]);
   return json(request, env, { ok: true, id: stockItemId });
 }
@@ -6416,6 +6435,27 @@ export async function postStockBulkDelete(
         active: false,
       })),
     );
+
+    const recipeLineStatements: DbStatementLike[] = [];
+    for (const row of rows.results || []) {
+      recipeLineStatements.push(
+        ...(await removeStockItemFromRecipeLines(
+          env,
+          workspaceId,
+          auth.uid,
+          text(row.id),
+          text(row.name),
+          now,
+        )),
+      );
+    }
+    // A single widely-used base ingredient can appear in hundreds of recipe lines across
+    // products/sub-recipes — each removed line is 2 statements (DELETE + audit insert), so this
+    // must stay chunked the same way the id-list SELECT/UPDATE above are, rather than handing D1
+    // one unbounded batch that can exceed its statement-count limit and fail the whole request.
+    for (const statementChunk of chunkValues(recipeLineStatements, chunkSize * 2)) {
+      await env.DB.batch(statementChunk);
+    }
 
     const result = await env.DB.prepare(
       `UPDATE stock_items
