@@ -370,7 +370,12 @@ function bindIntegrationEvents(view) {
     await runXeroAction(view, 'Opening Xero consent...', async () => {
       const result = await startXeroConnection(view.dataset.workspaceId || '');
       if (!result.authUrl) throw new Error('Xero did not return a connection link.');
-      const popup = window.open(result.authUrl, 'kcp-xero-oauth', 'width=520,height=720,noopener,noreferrer');
+      // Deliberately no noopener/noreferrer: the callback page (getOauthCallback in
+      // admin-routes.ts) posts back via window.opener.postMessage, which noopener would sever —
+      // and window.open() itself returns null when noopener is set even though the popup DID
+      // open, which previously made the `!popup` fallback below wrongly fire and navigate this
+      // tab to the Xero consent URL too, on top of the popup.
+      const popup = window.open(result.authUrl, 'kcp-xero-oauth', 'width=520,height=720');
       if (!popup) window.location.href = result.authUrl;
       setXeroModalStatus(view, 'Finish the Xero consent screen, then this tile will update.', 'busy');
     }, { keepMessage: true });
