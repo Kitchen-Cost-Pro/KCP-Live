@@ -4427,12 +4427,27 @@ async function fetchSaleDetail(sourceOrderId) {
     return callAdminApi('GET', `/api/admin/workspaces/${encodeURIComponent(wsId)}/yoco-v2/sales/${encodeURIComponent(sourceOrderId)}`);
 }
 
+function showYocoReceiptModal(paymentId) {
+    const url = `https://receipts.yoco.co.za/receipts/${encodeURIComponent(paymentId)}?linkSource=kcp-admin-portal`;
+    openModal(`
+        <div class="space-y-3">
+            <div class="flex items-center justify-between">
+                <h3 class="text-sm font-black uppercase tracking-widest text-white">Yoco Receipt</h3>
+                <a href="${adminEscapeHtml(url)}" target="_blank" rel="noopener" class="text-[10px] font-bold text-slate-400 hover:text-white"><i class="fa-solid fa-arrow-up-right-from-square mr-1"></i>Open in new tab</a>
+            </div>
+            <div class="rounded-2xl overflow-hidden bg-white" style="height:70vh;">
+                <iframe src="${adminEscapeHtml(url)}" class="w-full h-full border-0" title="Yoco receipt" referrerpolicy="no-referrer"></iframe>
+            </div>
+        </div>
+    `, false, true);
+}
+
 async function openYocoReceipt(sourceOrderId) {
     try {
         const detail = await fetchSaleDetail(sourceOrderId);
         const paymentId = detail?.domainEvent?.payload?.source_payment_id;
         if (!paymentId) { showToast('No Yoco payment reference captured for this order yet.', 'info'); return; }
-        window.open(`https://receipts.yoco.co.za/receipts/${encodeURIComponent(paymentId)}?linkSource=kcp-admin-portal`, '_blank', 'noopener');
+        showYocoReceiptModal(paymentId);
     } catch (e) {
         showToast(`Could not look up the Yoco receipt: ${e.message}`, 'error');
     }
@@ -4453,12 +4468,10 @@ async function viewSaleReceipt(sourceOrderId) {
         if (!canonical) { body.innerHTML = '<p class="text-slate-500">No canonical sale data available for this order yet.</p>'; return; }
         const meta = saleBucketMeta(detail.domainEvent.resolution_status);
         const lines = canonical.lines || [];
-        const yocoReceiptUrl = canonical.source_payment_id
-            ? `https://receipts.yoco.co.za/receipts/${encodeURIComponent(canonical.source_payment_id)}?linkSource=kcp-admin-portal`
-            : '';
+        const yocoPaymentId = canonical.source_payment_id || '';
         body.innerHTML = `
-            ${yocoReceiptUrl
-                ? `<a href="${adminEscapeHtml(yocoReceiptUrl)}" target="_blank" rel="noopener" class="flex items-center justify-center gap-2 w-full py-2.5 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 text-xs font-bold text-white transition-all"><i class="fa-solid fa-arrow-up-right-from-square"></i>Open Official Yoco Receipt</a>`
+            ${yocoPaymentId
+                ? `<button onclick="showYocoReceiptModal(${adminInlineString(yocoPaymentId)})" class="flex items-center justify-center gap-2 w-full py-2.5 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 text-xs font-bold text-white transition-all"><i class="fa-solid fa-arrow-up-right-from-square"></i>Open Official Yoco Receipt</button>`
                 : `<p class="text-[10px] text-slate-500 text-center py-2">No Yoco payment reference captured for this order yet — the official receipt link isn't available.</p>`}
             <div class="border border-dashed border-white/15 rounded-2xl p-5 bg-black/20 font-mono">
                 <div class="flex items-center justify-between mb-1">

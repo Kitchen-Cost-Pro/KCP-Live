@@ -1939,6 +1939,7 @@ function navigateTo(sectionId) {
 
   if (nextSection === 'reporting') {
     clearReportingNavigationParameters();
+    ensureStockItemsAvailableForReporting(appState.workspace?.id);
   } else {
     // clearReportingNavigationParameters() stamps `?route=reporting` into the URL on every visit
     // to Reporting, but nothing ever removed it again on navigating elsewhere — so once a user
@@ -2362,6 +2363,9 @@ function bootstrapActiveRouteForWorkspace(workspaceId) {
   if (isSettingsRoute(nextSection)) {
     loadSettings(workspaceId);
     return;
+  }
+  if (nextSection === 'reporting') {
+    ensureStockItemsAvailableForReporting(workspaceId);
   }
   renderApp();
 }
@@ -2833,6 +2837,47 @@ async function startRecipeSubscription(workspaceId) {
     };
     renderApp();
   }
+}
+
+let stockLoadForReportingInFlight = false;
+
+// Operations Dashboard's client-side model (buildOperationsDashboardModel in
+// operationsDashboardReport.js) falls back to dataSet.stockItems (== appState.stock.items) for its
+// "live current balance" — the only source it has for Opening/Actual Stock Value when no dedicated
+// point-in-time snapshot exists. But appState.stock.items is normally only ever populated by
+// startStockSubscription(), which is hard-gated to the 'ingredients' route (see its
+// appState.route.active !== 'ingredients' guards) — so a user who opens Reporting without having
+// visited Ingredients first (or after 'dashboard'/'products'/'recipes' navigation cleared it via
+// cleanupStockSubscription()) sees Opening/Actual Stock Value stuck at R0 with no way to populate it.
+// This is a plain one-shot fetch (not the guarded live subscription — that stays 'ingredients'-only
+// by design) that only runs when stock isn't already loaded, so it never fights the Ingredients
+// screen's own subscription for control of appState.stock.
+function ensureStockItemsAvailableForReporting(workspaceId) {
+  if (!workspaceId || stockLoadForReportingInFlight) return;
+  if ((appState.stock.items || []).length > 0) return;
+  if (appState.stock.status === 'loading') return;
+  stockLoadForReportingInFlight = true;
+  (async () => {
+    try {
+      const { fetchStock } = await import('./services/stockService.js');
+      const snapshot = await fetchStock(workspaceId);
+      if (appState.workspace?.id !== workspaceId || (appState.stock.items || []).length > 0) return;
+      appState.stock = {
+        ...appState.stock,
+        items: snapshot.items || [],
+        locations: appState.stock.locations?.length ? appState.stock.locations : (snapshot.locations || []),
+        categories: appState.stock.categories?.length ? appState.stock.categories : (snapshot.categories || []),
+        uoms: appState.stock.uoms?.length ? appState.stock.uoms : (snapshot.uoms || []),
+        loaded: { ...appState.stock.loaded, items: true },
+        updatedAt: new Date().toISOString()
+      };
+      renderApp();
+    } catch (error) {
+      console.warn('[Reporting] Could not background-load stock items for Operations Dashboard:', error);
+    } finally {
+      stockLoadForReportingInFlight = false;
+    }
+  })();
 }
 
 async function startStockSubscription(workspaceId) {
