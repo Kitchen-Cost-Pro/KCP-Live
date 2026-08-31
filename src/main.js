@@ -2855,7 +2855,12 @@ let stockLoadForReportingInFlight = false;
 function ensureStockItemsAvailableForReporting(workspaceId) {
   if (!workspaceId || stockLoadForReportingInFlight) return;
   if ((appState.stock.items || []).length > 0) return;
-  if (appState.stock.status === 'loading') return;
+  // Deliberately NOT gated on appState.stock.status === 'loading' -- that field is owned by
+  // startStockSubscription()'s 'ingredients'-only subscription, which can leave status stuck at
+  // 'loading' forever if the user navigates away from Ingredients before its async import resolves
+  // (its own route guard just no-ops without ever resetting status). Guarding on that stale flag
+  // here would permanently and silently disable this background load for the rest of the session.
+  // stockLoadForReportingInFlight above is this function's own dedicated re-entrancy guard.
   stockLoadForReportingInFlight = true;
   (async () => {
     try {

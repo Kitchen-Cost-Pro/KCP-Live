@@ -4373,8 +4373,7 @@ function renderWebhookLogRow(row) {
             <td class="py-2 pr-2 text-red-300">${adminEscapeHtml(row.lastErrorMessage || '')}</td>
             <td class="py-2 text-right">
                 <div class="flex items-center justify-end gap-1.5">
-                    ${hasCanonicalSale ? `<button onclick="viewSaleReceipt(${adminInlineString(row.sourceOrderId)})" class="btn-ghost text-[9px] px-2 py-1"><i class="fa-solid fa-receipt mr-1"></i>Receipt</button>` : ''}
-                    ${hasCanonicalSale ? `<button onclick="openYocoReceipt(${adminInlineString(row.sourceOrderId)})" title="Open the official Yoco receipt" class="btn-ghost text-[9px] px-2 py-1"><i class="fa-solid fa-arrow-up-right-from-square mr-1"></i>Yoco</button>` : ''}
+                    ${hasCanonicalSale ? `<button onclick="viewSaleReceipt(${adminInlineString(row.sourceOrderId)})" title="Open the official Yoco receipt" class="btn-ghost text-[9px] px-2 py-1"><i class="fa-solid fa-receipt mr-1"></i>Receipt</button>` : ''}
                     ${row.canReprocess
                         ? `<button onclick="reprocessWebhookLogOrder(${adminInlineString(row.reprocessRawEventId)}, ${adminInlineString(row.reprocessAction)}, ${adminInlineString(row.sourceOrderId)})" class="btn-ghost text-[9px] px-2 py-1"><i class="fa-solid fa-rotate-right mr-1"></i>Reprocess</button>`
                         : ''}
@@ -4453,63 +4452,10 @@ async function openYocoReceipt(sourceOrderId) {
     }
 }
 
-function formatMoney(amount, currency) {
-    const n = Number(amount || 0);
-    return `${adminEscapeHtml(currency || 'ZAR')} ${n.toFixed(2)}`;
-}
-
 async function viewSaleReceipt(sourceOrderId) {
-    openModal(`<div class="space-y-4"><h3 class="text-sm font-black uppercase tracking-widest text-white">Receipt</h3><div id="sale-receipt-body" class="text-xs text-slate-400">Loading...</div></div>`, false, true);
-    const body = document.getElementById('sale-receipt-body');
-    try {
-        const detail = await fetchSaleDetail(sourceOrderId);
-        const canonical = detail?.domainEvent?.payload;
-        if (!body) return;
-        if (!canonical) { body.innerHTML = '<p class="text-slate-500">No canonical sale data available for this order yet.</p>'; return; }
-        const meta = saleBucketMeta(detail.domainEvent.resolution_status);
-        const lines = canonical.lines || [];
-        const yocoPaymentId = canonical.source_payment_id || '';
-        body.innerHTML = `
-            ${yocoPaymentId
-                ? `<button onclick="showYocoReceiptModal(${adminInlineString(yocoPaymentId)})" class="flex items-center justify-center gap-2 w-full py-2.5 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 text-xs font-bold text-white transition-all"><i class="fa-solid fa-arrow-up-right-from-square"></i>Open Official Yoco Receipt</button>`
-                : `<p class="text-[10px] text-slate-500 text-center py-2">No Yoco payment reference captured for this order yet — the official receipt link isn't available.</p>`}
-            <div class="border border-dashed border-white/15 rounded-2xl p-5 bg-black/20 font-mono">
-                <div class="flex items-center justify-between mb-1">
-                    <p class="text-sm font-black text-white">Order ${adminEscapeHtml(canonical.source_order_id)}</p>
-                    <span class="px-2 py-0.5 rounded text-[9px] font-bold" style="background:${meta.color}22;color:${meta.color}">${adminEscapeHtml(meta.label)}</span>
-                </div>
-                <p class="text-[10px] text-slate-500 mb-4">${adminEscapeHtml(formatAdminDateTime(canonical.occurred_at))} · ${adminEscapeHtml(canonical.payment_method || 'unknown payment method')}</p>
-                <div class="border-t border-b border-dashed border-white/15 py-3 space-y-2">
-                    ${lines.length ? lines.map(line => `
-                        <div>
-                            <div class="flex justify-between text-[11px] text-slate-200">
-                                <span>${line.quantity} × ${adminEscapeHtml(line.source_name)}</span>
-                                <span>${formatMoney(line.gross_amount, canonical.currency)}</span>
-                            </div>
-                            ${(line.modifiers || []).map(mod => `
-                                <div class="flex justify-between text-[10px] text-slate-500 pl-4">
-                                    <span>+ ${adminEscapeHtml(mod.source_name)}${mod.quantity > 1 ? ` ×${mod.quantity}` : ''}</span>
-                                    <span>${mod.gross_amount ? formatMoney(mod.gross_amount, canonical.currency) : ''}</span>
-                                </div>
-                            `).join('')}
-                        </div>
-                    `).join('') : '<p class="text-slate-500 text-[11px]">No line items resolved for this order.</p>'}
-                </div>
-                <div class="pt-3 space-y-1 text-[11px]">
-                    <div class="flex justify-between text-slate-400"><span>Subtotal</span><span>${formatMoney(canonical.net_amount, canonical.currency)}</span></div>
-                    ${canonical.discount_amount ? `<div class="flex justify-between text-slate-400"><span>Discount</span><span>-${formatMoney(canonical.discount_amount, canonical.currency)}</span></div>` : ''}
-                    <div class="flex justify-between text-slate-400"><span>Tax</span><span>${formatMoney(canonical.tax_amount, canonical.currency)}</span></div>
-                    ${canonical.tip_amount ? `<div class="flex justify-between text-slate-400"><span>Tip</span><span>${formatMoney(canonical.tip_amount, canonical.currency)}</span></div>` : ''}
-                    <div class="flex justify-between text-white font-black text-sm pt-1 border-t border-dashed border-white/15 mt-1"><span>Total</span><span>${formatMoney(canonical.gross_amount, canonical.currency)}</span></div>
-                </div>
-            </div>
-            <div class="flex justify-end">
-                <button onclick="viewSaleOrderDetail(${adminInlineString(sourceOrderId)})" class="btn-ghost text-[10px]"><i class="fa-solid fa-code mr-2"></i>View Technical Detail</button>
-            </div>
-        `;
-    } catch (e) {
-        if (body) body.innerHTML = `<p class="text-red-400">Failed to load receipt: ${adminEscapeHtml(e.message)}</p>`;
-    }
+    // Goes straight to the real Yoco receipt (iframe) — deliberately not our own rendered
+    // breakdown. Reachable via viewSaleOrderDetail's "View Receipt" link too.
+    await openYocoReceipt(sourceOrderId);
 }
 
 async function viewSaleOrderDetail(sourceOrderId) {
