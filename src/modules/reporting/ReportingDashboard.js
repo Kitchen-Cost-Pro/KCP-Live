@@ -1,4 +1,3 @@
-import { createReportingDataSet } from './engine/reportDataMapper.js';
 import { listReports, resolveReportRoute, normalizeSectionId } from './reports/index.js';
 import { renderReportViewer } from './ReportViewer.js';
 import { escapeHtml } from './engine/formatters.js';
@@ -46,7 +45,6 @@ export function renderReportingDashboard({
   root.className = 'reportingDashboard reportingDashboard--home reportingDashboard--miniBentoHome';
   const reports = listReports();
   const sourceState = state || sourceData || {};
-  const dataSet = createReportingDataSet(sourceState);
   // appState.settings is a state WRAPPER ({ status, values, draft, ... }), not the settings fields
   // themselves — those live one level deeper, at .values/.draft (see createSettingsState in
   // main.js). Reading sourceState.settings directly here meant every date-range preset ("Today",
@@ -103,7 +101,13 @@ export function renderReportingDashboard({
     const viewerSlot = root.querySelector('[data-report-viewer-slot]');
     viewerSlot?.append(renderReportViewer({
       reportId: activeReportState.reportId,
-      sourceData: dataSet,
+      // Pass the raw live app state (sourceState), not a pre-derived dataSet snapshot -- ReportViewer.js's
+      // own draw() recomputes createReportingDataSet(state) on every reload so client-state-dependent
+      // report logic (e.g. Operations Dashboard's live stock balance fallback) can pick up data that
+      // arrived after this dashboard first mounted. Passing an already-derived dataSet as sourceData
+      // instead would defeat that: it would itself be a frozen snapshot from a single computation, so
+      // "recomputing" from it downstream would just re-read the same stale snapshot every time.
+      state: sourceState,
       services,
       workspaceId,
       initialActiveReportId: activeReportState.initialActiveReportId,
