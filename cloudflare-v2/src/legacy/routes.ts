@@ -62,6 +62,7 @@ import { resolveLocationDisplayName } from "./location-display";
 import { removeStockItemFromRecipeLines } from "./recipe-line-cleanup";
 // @ts-ignore Shared unit-aware Yoco Money conversion. Money objects are minor units; normalized scalars are major units.
 import { yocoMoneyToMajor } from "../../../src/modules/reporting/engine/yocoFinancials.js";
+import { resolveStockTakeCountedAt } from "./stock-take-counted-at";
 import { KCP_WORKER_RELEASE, KCP_REFUND_PIPELINE_VERSION } from "../release";
 import {
   ModifierRuleValidationError,
@@ -10190,9 +10191,13 @@ export async function postStockTake(
     return error(request, env, 400, "Enter at least one shelf count first.");
 
   const sessionId = requestedSessionId || id("st");
-  const countedAt = text(draft.date)
-    ? new Date(`${text(draft.date)}T00:00:00.000Z`).toISOString()
-    : nowIso();
+  // A user-picked date must be anchored to the WORKSPACE's local trading-day start, not raw UTC
+  // midnight — Stock Take Audit's date-range filters (Today, Yesterday, ...) compute their bounds
+  // from the workspace's timezone AND its configured trading-day-start hour (Settings > trading
+  // day), so a naive UTC-midnight timestamp can land on the wrong side of that boundary and make a
+  // stock take counted "today" invisible to the "Today"/"Yesterday" filters (see
+  // getStockTakeAuditReport/addZonedDateRange, which the report actually queries against).
+  const countedAt = text(draft.date) ? await resolveStockTakeCountedAt(env, workspaceId, text(draft.date)) : nowIso();
   const transactionReference = await ensureTransactionReference(
     env,
     workspaceId,

@@ -2644,7 +2644,7 @@ function buildMenuRecipeHealthRows(
           productId,
         ),
       );
-    if (recipe && !exploded.rows.length)
+    if (recipe && !exploded.rows.length && !noRecipeRequired)
       itemWarnings.push(
         menuHealthWarning(
           "Critical",

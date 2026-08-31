@@ -63,15 +63,15 @@ test('a product opted out via noRecipeRequired reports NOT_REQUIRED status and r
   assert.ok(!built.warningRows.some((w: any) => w.issueType === 'Missing recipe'));
 });
 
-test('noRecipeRequired never suppresses the warning when the item actually has a broken recipe', () => {
-  // Opting a product out only matters while it truly has no recipe at all — if a recipe DOES exist
-  // for it (owner:product), that recipe's own problems (e.g. no ingredient lines) must still surface.
+test('noRecipeRequired suppresses the "no ingredients" warning even when a stub recipe record exists', () => {
+  // A product opted out of recipe tracking can still carry a leftover/empty recipe record (e.g. one
+  // created before the toggle existed, or via the Recipe Blueprint screen without adding lines) —
+  // that must not surface as a problem once the item has been explicitly marked as not needing one.
   const recipe = { id: 'recipe-1', owner_type: 'product', owner_id: 'product-1', linked_product_id: 'product-1', yield_qty: 1, active: 1 };
   const context = emptyContext({ recipes: [recipe] });
   const warnings: Array<{ code: string; level: string; message: string }> = [];
   const product = buildProduct({ raw_json: JSON.stringify({ noRecipeRequired: true }) });
   const built = buildMenuRecipeHealthRows([product], context, warnings);
 
-  assert.equal(built.rows[0].recipeStatus, 'Recipe Missing Ingredients');
-  assert.ok(built.warningRows.some((w: any) => w.issueType === 'Recipe has no ingredients'));
+  assert.ok(!built.warningRows.some((w: any) => w.issueType === 'Recipe has no ingredients'));
 });

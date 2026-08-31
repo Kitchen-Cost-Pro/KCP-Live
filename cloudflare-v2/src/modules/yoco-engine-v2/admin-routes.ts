@@ -540,6 +540,14 @@ export async function handleYocoV2AdminRoute(
     const event = await loadEvent(env, workspaceId, rawEventId);
     if (!event) return response({ ok: false, error: 'V2 raw event not found.' }, 404);
     if (Number(event.signature_valid || 0) !== 1) return response({ ok: false, error: 'Invalid-signature events cannot enter V2 processing.' }, 409);
+    // Explicit opt-in only — buildAdminReplayMessage defaults live_effects to false (a safe "shadow"
+    // reprocess: it corrects the stored resolution_status but writes no reporting/stock effect at
+    // all), which is the right default for routine replay/debugging. Controlled historical backfills
+    // (e.g. reprocessing orders that were stuck UNSUPPORTED_ORDER_STATE so they actually post to
+    // payment reporting) need the real effects applied, so this lets an administrator ask for that
+    // explicitly per call rather than changing the default for every other use of this action.
+    const actionBody = await request.json<{ apply_live_effects?: boolean }>().catch(() => ({} as { apply_live_effects?: boolean }));
+    const applyLiveEffects = Boolean(actionBody.apply_live_effects);
 
     // Cleans up a stock effect that was proposed but never actually applied to the stock ledger
     // (e.g. a test order stuck by a since-fixed race condition) — deletes the unapplied proposal
@@ -606,16 +614,17 @@ export async function handleYocoV2AdminRoute(
     try {
       const replayMessage = buildAdminReplayMessage(event, action, {
         force_refresh: action === 'refetch',
-        rerun_stage: rerunStage
+        rerun_stage: rerunStage,
+        live_effects: applyLiveEffects
       });
       await publishAdminReplay(env, replayMessage);
       await markRawEventQueued(env.DB, rawEventId);
       await appendTimeline(env.DB, {
         rawEventId,
-        step: action === 'requeue-dead-letter' ? 'DEAD_LETTER_REQUEUED' : 'ADMIN_SHADOW_REPROCESS_QUEUED',
+        step: action === 'requeue-dead-letter' ? 'DEAD_LETTER_REQUEUED' : applyLiveEffects ? 'ADMIN_LIVE_REPROCESS_QUEUED' : 'ADMIN_SHADOW_REPROCESS_QUEUED',
         status: 'QUEUED',
-        message: `Administrator queued V2 shadow action ${action}.`,
-        metadata: { actor_uid: auth.uid, actor_email: auth.email, action, rerun_stage: rerunStage, force_refresh: action === 'refetch', action_id: newId('yoco_v2_admin_action') }
+        message: `Administrator queued V2 ${applyLiveEffects ? 'LIVE-EFFECTS' : 'shadow'} action ${action}.`,
+        metadata: { actor_uid: auth.uid, actor_email: auth.email, action, rerun_stage: rerunStage, force_refresh: action === 'refetch', live_effects: applyLiveEffects, action_id: newId('yoco_v2_admin_action') }
       });
       // The durable Cloudflare Queue message above is the fallback of record, but its delivery
       // latency has been observed in production to run well past its configured 5s batch window
