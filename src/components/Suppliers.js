@@ -165,11 +165,14 @@ function bindSupplierEvents(view, visibleItems, filters, suppliers, onSupplierFi
         onSupplierAction.onDraftChangeSilent?.({ [field.name]: field.value });
       });
     } else {
-      // Selects, checkboxes: change is safe to re-render (no cursor to disrupt)
+      // Selects, checkboxes: change is safe to re-render (no cursor to disrupt). A checkbox's
+      // `.value` is a fixed static string ("on") regardless of checked state, so it must read
+      // `.checked` instead — same footgun already fixed for the final submit read above.
+      const isCheckbox = field.tagName === 'INPUT' && field.type === 'checkbox';
       field.addEventListener('change', () => {
         if (!field.name) return;
         onSupplierAction.onPreserveFocus?.(field);
-        onSupplierAction.onDraftChange?.({ [field.name]: field.value });
+        onSupplierAction.onDraftChange?.({ [field.name]: isCheckbox ? field.checked : field.value });
       });
     }
   });
