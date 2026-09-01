@@ -84,6 +84,54 @@ test('Bill fields: Type is ACCPAY, Status is DRAFT, Contact is the resolved Cont
   assert.deepEqual(bill.Contact, { ContactID: 'contact_42' });
 });
 
+// Regression: Xero rejects a Bill outright with "The document DueDate field must be specified" —
+// this was a live production failure (every GRV push failing) until DueDate was added.
+
+test('DueDate is always present on the pushed Bill — Xero rejects a Bill with none at all', () => {
+  const settings = { purchaseAccountCode: '310', purchaseTaxType: 'INPUT2', purchaseExemptTaxType: '' };
+  const payload = buildGrvBillPayload(grv(), [], 'contact_1', settings);
+  assert.ok(payload.Invoices[0].DueDate, 'DueDate must be a non-empty value');
+});
+
+test('a COD/unset-terms supplier is due the same day as the GRV date', () => {
+  const settings = { purchaseAccountCode: '310', purchaseTaxType: 'INPUT2', purchaseExemptTaxType: '' };
+  const payload = buildGrvBillPayload(grv({ received_at: '2026-08-05T00:00:00.000Z', supplier_raw_json: null }), [], 'contact_1', settings);
+  assert.equal(payload.Invoices[0].DueDate, '2026-08-05');
+});
+
+test('a supplier on "30 Days" terms is due 30 days after the GRV date', () => {
+  const settings = { purchaseAccountCode: '310', purchaseTaxType: 'INPUT2', purchaseExemptTaxType: '' };
+  const payload = buildGrvBillPayload(
+    grv({ received_at: '2026-08-05T00:00:00.000Z', supplier_raw_json: JSON.stringify({ paymentTerms: '30 Days' }) }),
+    [],
+    'contact_1',
+    settings
+  );
+  assert.equal(payload.Invoices[0].DueDate, '2026-09-04');
+});
+
+test('a supplier on "EOM" terms is due the last day of the GRV\'s month', () => {
+  const settings = { purchaseAccountCode: '310', purchaseTaxType: 'INPUT2', purchaseExemptTaxType: '' };
+  const payload = buildGrvBillPayload(
+    grv({ received_at: '2026-08-05T00:00:00.000Z', supplier_raw_json: JSON.stringify({ paymentTerms: 'EOM' }) }),
+    [],
+    'contact_1',
+    settings
+  );
+  assert.equal(payload.Invoices[0].DueDate, '2026-08-31');
+});
+
+test('a supplier on "30 Days EOM" terms is due 30 days after the end of the GRV\'s month', () => {
+  const settings = { purchaseAccountCode: '310', purchaseTaxType: 'INPUT2', purchaseExemptTaxType: '' };
+  const payload = buildGrvBillPayload(
+    grv({ received_at: '2026-08-05T00:00:00.000Z', supplier_raw_json: JSON.stringify({ paymentTerms: '30 Days EOM' }) }),
+    [],
+    'contact_1',
+    settings
+  );
+  assert.equal(payload.Invoices[0].DueDate, '2026-09-30');
+});
+
 test('a GRV with a transport cost pushes it as its own taxable line item', () => {
   const settings = { purchaseAccountCode: '310', purchaseTaxType: 'INPUT2', purchaseExemptTaxType: 'EXEMPTINPUT' };
   const lines = [{ stock_item_id: 'si_1', stock_item_name: 'Flour', quantity: 10, unit_price: 10, total_ex: 100, total_vat: 15 }];

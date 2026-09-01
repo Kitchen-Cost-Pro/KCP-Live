@@ -18,6 +18,7 @@ import {
   subscribeYocoIntegration,
   syncXeroNow,
   resolveXeroSupplierMatch,
+  fetchXeroTaxRates,
   syncYocoCatalogue
 } from '../services/integrationService.js';
 import { canManagePermissionSets } from '../services/roleService.js';
@@ -148,8 +149,75 @@ const xeroDrawerState = {
   message: 'Connect Xero, then set your account codes and tax types before turning sync on. KCP pushes one summarized invoice per day for completed sales, your product catalogue as Xero Items, and each GRV as a Draft Bill with its PDF attached (also once daily, alongside sales).',
   tone: '',
   status: null,
-  activeTab: 'sales'
+  activeTab: 'sales',
+  // null = not yet fetched, [] = fetched but empty/failed. Loaded lazily (see
+  // loadXeroTaxRatesIfNeeded) rather than on every status poll — it's a real Xero API call, not a
+  // free local read, so it should happen once per modal session, not repeatedly.
+  taxRates: null,
+  taxRatesLoading: false
 };
+
+// Xero's TaxType codes (e.g. "INPUT2") are never shown in the Chart of Accounts UI, only the
+// friendly Name — so a person configuring these fields had no way to see which literal code was
+// valid, or whether it was Active in their specific organisation, without leaving KCP. This is
+// exactly what caused a real outage: "INPUT2" looked right (it's a standard default) but was
+// Archived for this org, and nothing surfaced that until every GRV push failed in production.
+// Renders a live dropdown once tax rates are loaded; falls back to the original free-text input
+// before they're loaded (or if Xero isn't connected/the fetch failed) so the field never breaks.
+function renderXeroTaxTypeControl({ dataAttr, currentValue, placeholder, taxRates }) {
+  if (!Array.isArray(taxRates) || !taxRates.length) {
+    return `<input type="text" placeholder="${escapeAttribute(placeholder)}" value="${escapeAttribute(currentValue || '')}" ${dataAttr} />`;
+  }
+  const sorted = [...taxRates].sort((a, b) => {
+    if (a.status === b.status) return a.name.localeCompare(b.name);
+    return a.status === 'ACTIVE' ? -1 : 1;
+  });
+  const knownValue = sorted.some((rate) => rate.taxType === currentValue);
+  const options = [
+    '<option value="">— Select a tax rate —</option>',
+    !knownValue && currentValue
+      ? `<option value="${escapeAttribute(currentValue)}" selected>${escapeHtml(currentValue)} (currently set — not found in Xero)</option>`
+      : '',
+    ...sorted.map((rate) => `<option value="${escapeAttribute(rate.taxType)}" ${rate.taxType === currentValue ? 'selected' : ''}>${escapeHtml(rate.name)} (${escapeHtml(rate.taxType)})${rate.status !== 'ACTIVE' ? ` — ${escapeHtml(rate.status)}` : ''}</option>`)
+  ].join('');
+  return `<select ${dataAttr}>${options}</select>`;
+}
+
+async function loadXeroTaxRatesIfNeeded(view) {
+  if (xeroDrawerState.taxRates !== null || xeroDrawerState.taxRatesLoading) return;
+  if (xeroDrawerState.status?.connectionActive !== true) return;
+  xeroDrawerState.taxRatesLoading = true;
+  try {
+    xeroDrawerState.taxRates = await fetchXeroTaxRates(view.dataset.workspaceId || '');
+  } catch {
+    xeroDrawerState.taxRates = [];
+  } finally {
+    xeroDrawerState.taxRatesLoading = false;
+  }
+  if (xeroDrawerState.taxRates.length) refreshXeroTaxTypeControls(view);
+}
+
+// Runs once, right after the fetch resolves — swaps the three plain text inputs for the live
+// dropdown in place, without a full modal re-render that would lose any in-progress edits
+// elsewhere in the form.
+function refreshXeroTaxTypeControls(view) {
+  const settings = xeroDrawerState.status?.settings || {};
+  const fields = [
+    { wrapper: 'defaultTaxType', dataAttr: 'data-xero-tax-type', currentValue: settings.defaultTaxType, placeholder: 'e.g. OUTPUT2' },
+    { wrapper: 'purchaseTaxType', dataAttr: 'data-xero-purchase-tax-type', currentValue: settings.purchaseTaxType, placeholder: 'e.g. INPUT2' },
+    { wrapper: 'purchaseExemptTaxType', dataAttr: 'data-xero-purchase-exempt-tax-type', currentValue: settings.purchaseExemptTaxType, placeholder: 'e.g. EXEMPTINPUT' }
+  ];
+  fields.forEach((field) => {
+    const wrapper = view.querySelector(`[data-xero-tax-control="${field.wrapper}"]`);
+    if (!wrapper) return;
+    wrapper.innerHTML = renderXeroTaxTypeControl({
+      dataAttr: field.dataAttr,
+      currentValue: wrapper.querySelector('input,select')?.value || field.currentValue,
+      placeholder: field.placeholder,
+      taxRates: xeroDrawerState.taxRates
+    });
+  });
+}
 
 export function renderIntegrations({ state } = {}) {
   const workspaceName = state?.workspace?.siteName || 'Workspace';
@@ -322,8 +390,15 @@ function bindIntegrationEvents(view) {
   });
 
   view.querySelectorAll('[data-xero-tab]').forEach((button) => {
-    button.addEventListener('click', () => setActiveXeroTab(view, button.dataset.xeroTab || 'sales'));
+    button.addEventListener('click', () => {
+      const tabId = button.dataset.xeroTab || 'sales';
+      setActiveXeroTab(view, tabId);
+      if (tabId === 'sales' || tabId === 'purchases') loadXeroTaxRatesIfNeeded(view);
+    });
   });
+  if (xeroDrawerState.activeTab === 'sales' || xeroDrawerState.activeTab === 'purchases') {
+    loadXeroTaxRatesIfNeeded(view);
+  }
 
   view.querySelector('[data-yoco-connect-form]')?.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -966,7 +1041,7 @@ function renderXeroModal({ canManageXero = false } = {}) {
                 </label>
                 <label>
                   <span>Tax type</span>
-                  <input type="text" placeholder="e.g. OUTPUT2" value="${escapeAttribute(settings.defaultTaxType || '')}" data-xero-tax-type />
+                  <span data-xero-tax-control="defaultTaxType">${renderXeroTaxTypeControl({ dataAttr: 'data-xero-tax-type', currentValue: settings.defaultTaxType, placeholder: 'e.g. OUTPUT2', taxRates: xeroDrawerState.taxRates })}</span>
                 </label>
                 <label class="xeroFieldGrid--span2">
                   <span>Item account <em>optional, defaults to sales account</em></span>
@@ -994,11 +1069,11 @@ function renderXeroModal({ canManageXero = false } = {}) {
                 </label>
                 <label>
                   <span>Purchases tax type</span>
-                  <input type="text" placeholder="e.g. INPUT2" value="${escapeAttribute(settings.purchaseTaxType || '')}" data-xero-purchase-tax-type />
+                  <span data-xero-tax-control="purchaseTaxType">${renderXeroTaxTypeControl({ dataAttr: 'data-xero-purchase-tax-type', currentValue: settings.purchaseTaxType, placeholder: 'e.g. INPUT2', taxRates: xeroDrawerState.taxRates })}</span>
                 </label>
                 <label class="xeroFieldGrid--span2">
                   <span>Exempt/zero-rated tax type <em>optional</em></span>
-                  <input type="text" placeholder="e.g. EXEMPTINPUT" value="${escapeAttribute(settings.purchaseExemptTaxType || '')}" data-xero-purchase-exempt-tax-type />
+                  <span data-xero-tax-control="purchaseExemptTaxType">${renderXeroTaxTypeControl({ dataAttr: 'data-xero-purchase-exempt-tax-type', currentValue: settings.purchaseExemptTaxType, placeholder: 'e.g. EXEMPTINPUT', taxRates: xeroDrawerState.taxRates })}</span>
                   <small class="xeroFieldHint">Used for GRV lines on zero-rated stock items instead of the tax type above.</small>
                 </label>
                 <label class="xeroFieldGrid--span2">
@@ -1172,6 +1247,9 @@ function updateGmailStatus(view, status = {}, options = {}) {
 function updateXeroStatus(view, status = {}, options = {}) {
   xeroDrawerState.status = status;
   if (!options.skipCache) cacheXeroStatus(view.dataset.workspaceId || '', status);
+  if (status.connectionActive === true && (xeroDrawerState.activeTab === 'sales' || xeroDrawerState.activeTab === 'purchases')) {
+    loadXeroTaxRatesIfNeeded(view);
+  }
   const settings = status.settings || {};
   const nextStatus = status.configured === false
     ? 'Setup Required'

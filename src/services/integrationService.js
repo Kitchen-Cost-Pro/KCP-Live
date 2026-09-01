@@ -129,6 +129,15 @@ export async function syncXeroNow(workspaceId, kind) {
   return callCloudflareWorkspaceRoute(workspaceId, `xero/sync-now?kind=${encodeURIComponent(kind)}`, { method: 'POST' });
 }
 
+/** Real tax rate codes from the connected Xero organisation (name, code, Active/Archived status) —
+ * lets the settings form offer a picker instead of a free-text field a person has to guess a raw
+ * code into, which is exactly how a live GRV push outage happened (a plausible-looking code that
+ * was actually Archived for this org, with no way to see that from inside KCP). */
+export async function fetchXeroTaxRates(workspaceId) {
+  const result = await callCloudflareWorkspaceRoute(workspaceId, 'xero/tax-rates', { method: 'GET' });
+  return Array.isArray(result?.taxRates) ? result.taxRates : [];
+}
+
 /** Resolves one pending "needs a supplier match" entry: pass either { xeroContactId } to map to a
  * Xero contact the user already picked, or { createNew: true } to create a new one — the daily
  * background sync never creates a Xero contact on its own, only this explicit user action does. */

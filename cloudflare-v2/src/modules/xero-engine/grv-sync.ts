@@ -51,6 +51,38 @@ export function isCodSupplier(rawJson: string | null): boolean {
   return resolveSupplierPaymentTerms(rawJson).trim().toUpperCase() === 'COD';
 }
 
+/**
+ * Xero rejects a Bill with "The document DueDate field must be specified" — it has no concept of
+ * "due whenever," so this derives one from the same payment-terms options Suppliers.js already
+ * offers (PAYMENT_TERM_OPTIONS: COD, Due on receipt, 7/14/30/45/60 Days, EOM, 30 Days EOM), applied
+ * against the GRV's own received date rather than "today" (a backfilled GRV pushed weeks late
+ * should still get the due date it actually had, not one measured from the push date).
+ */
+function computeGrvDueDate(receivedAt: string, paymentTerms: string): string {
+  const baseDateStr = text(receivedAt).slice(0, 10);
+  const base = new Date(`${baseDateStr}T00:00:00Z`);
+  if (Number.isNaN(base.getTime())) return baseDateStr || new Date().toISOString().slice(0, 10);
+
+  const terms = text(paymentTerms).trim();
+  const eomPlusDaysMatch = terms.match(/^(\d+)\s*Days?\s*EOM$/i);
+  if (eomPlusDaysMatch) {
+    const eom = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth() + 1, 0));
+    eom.setUTCDate(eom.getUTCDate() + Number(eomPlusDaysMatch[1]));
+    return eom.toISOString().slice(0, 10);
+  }
+  if (/^EOM$/i.test(terms)) {
+    const eom = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth() + 1, 0));
+    return eom.toISOString().slice(0, 10);
+  }
+  const daysMatch = terms.match(/^(\d+)\s*Days?$/i);
+  if (daysMatch) {
+    base.setUTCDate(base.getUTCDate() + Number(daysMatch[1]));
+    return base.toISOString().slice(0, 10);
+  }
+  // 'COD', 'Due on receipt', or anything unrecognised: due the same day as the invoice date.
+  return baseDateStr;
+}
+
 interface GrvLineItem {
   stockItemName?: string;
   stockItemId?: string;
@@ -242,6 +274,9 @@ export function buildGrvBillPayload(
         Type: 'ACCPAY',
         Contact: { ContactID: contactId },
         Date: text(grv.received_at).slice(0, 10),
+        // Required by Xero — "The document DueDate field must be specified" otherwise — derived
+        // from the supplier's own payment terms (see computeGrvDueDate's comment).
+        DueDate: computeGrvDueDate(grv.received_at, resolveSupplierPaymentTerms(grv.supplier_raw_json)),
         Reference: text(grv.invoice_number) || `GRV-${grv.id.slice(-6).toUpperCase()}`,
         // A COD supplier is paid at the point of delivery — there's nothing left to approve, so it
         // goes out AUTHORISED (with a matching Payment applied separately, see applyCodPayment)
@@ -433,10 +468,11 @@ async function pushOneGrv(
     return { status: 'needs_supplier_match' };
   }
 
+  let payload: ReturnType<typeof buildGrvBillPayload> | undefined;
   try {
     const lines = await loadGrvLines(env, workspaceId, grv.id);
     const isCod = isCodSupplier(grv.supplier_raw_json);
-    const payload = buildGrvBillPayload(grv, lines, contactId, settings, undefined, isCod);
+    payload = buildGrvBillPayload(grv, lines, contactId, settings, undefined, isCod);
     const result = await executeXeroApiRequest(env, workspaceId, { method: 'POST', path: 'Invoices', body: payload });
     const invoices = (result.Invoices as Array<{ InvoiceID?: string }> | undefined) || [];
     const billId = text(invoices[0]?.InvoiceID);
@@ -447,7 +483,16 @@ async function pushOneGrv(
     }
     return { status: 'applied' };
   } catch (cause) {
-    const message = cause instanceof XeroApiClientError ? cause.message : cause instanceof Error ? cause.message : 'Unknown error pushing GRV to Xero.';
+    const apiMessage = cause instanceof XeroApiClientError ? cause.message : cause instanceof Error ? cause.message : 'Unknown error pushing GRV to Xero.';
+    // Xero's error message alone ("Tax rate must be Active") doesn't say WHICH code was rejected —
+    // append what KCP actually sent for each line so a settings mismatch (an AccountCode/TaxType
+    // that's archived, wrong, or doesn't exist in this Xero org) is visible without needing to
+    // inspect the Xero org's Chart of Accounts/Tax Rates to cross-reference it by hand.
+    const sentLines = payload?.Invoices?.[0]?.LineItems as Array<{ Description?: string; AccountCode?: string; TaxType?: string }> | undefined;
+    const lineSummary = sentLines?.length
+      ? ` Sent: ${sentLines.map((line) => `${line.Description || '?'} [account=${line.AccountCode || '?'}, tax=${line.TaxType || '?'}]`).join(', ')}`
+      : '';
+    const message = `${apiMessage}${lineSummary}`;
     await markXeroEffectFailed(env, claim.id, message);
     await recordXeroDiagnosticIfNotable(env, workspaceId, { operation: 'xero-grv-push', status: 'failed', message, details: { grvId: grv.id } });
     return { status: 'failed', message };

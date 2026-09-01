@@ -2,6 +2,7 @@ import type { AuthContext, Env } from '../../legacy/types';
 import { text, nowIso, xeroConfigured, xeroRedirectUri } from './config';
 import { signXeroState, verifyXeroState, buildXeroAuthorizeUrl, exchangeXeroCode, fetchXeroConnections } from './oauth';
 import { getXeroConnection, saveXeroConnection, disconnectXero } from './connection';
+import { fetchXeroTaxRates, XeroApiClientError } from './api-client';
 import { canManageXero } from './admin-permissions';
 import { syncXeroItemsForWorkspace } from './item-sync';
 import { syncXeroDailyInvoice, upsertXeroTodayInvoice, claimDailyInvoiceSyncIfDue, releaseDailyInvoiceSyncClaim, yesterdayDateKey, todayDateKey } from './invoice-sync';
@@ -348,6 +349,14 @@ export async function handleXeroAdminRoute(
   }
   if (request.method === 'GET' && resource === 'xero/pending-supplier-matches') {
     return response({ ok: true, pendingSupplierMatches: await listPendingSupplierMatches(env, workspaceId) });
+  }
+  if (request.method === 'GET' && resource === 'xero/tax-rates') {
+    try {
+      return response({ ok: true, taxRates: await fetchXeroTaxRates(env, workspaceId) });
+    } catch (cause) {
+      const message = cause instanceof XeroApiClientError ? cause.message : cause instanceof Error ? cause.message : 'Could not load Xero tax rates.';
+      return response({ ok: false, error: message }, 400);
+    }
   }
 
   // Connecting/disconnecting Xero and changing the account-code mapping is a workspace-owner-level
