@@ -28,6 +28,10 @@ import {
   YOCO_V2_VAT_SNAPSHOT_SCHEMA_REPAIR,
   YOCO_V2_VAT_SNAPSHOT_SCHEMA_REPAIR_ID,
 } from './modules/yoco-engine-v2/schema-repair';
+import {
+  XERO_V2_SETTINGS_SCHEMA_REPAIR,
+  XERO_V2_SETTINGS_SCHEMA_REPAIR_ID,
+} from './modules/xero-engine/schema-repair';
 import type { Env as LegacyEnv, AuthContext as LegacyAuth } from './legacy/types';
 
 // Backfill for stock_items.name_key (see migration 38's own comment in tenant-migrations.ts for
@@ -455,6 +459,24 @@ export class WorkspaceDO extends DurableObject<Env> {
         });
       }
 
+      // Same drift problem again, for the xero_sync_settings/suppliers columns added by Xero
+      // migrations 46 and 49 (2026-09-01) — see XERO_V2_SETTINGS_SCHEMA_REPAIR's own comment for
+      // the live "no such column" 500 on POST xero/settings this fixes.
+      const xeroSettingsRepairApplied = sql.exec(
+        `SELECT repair_id FROM _kcp_runtime_repairs WHERE repair_id = ?1`,
+        XERO_V2_SETTINGS_SCHEMA_REPAIR_ID,
+      ).toArray()[0];
+      if (!xeroSettingsRepairApplied) {
+        markInProgress();
+        storage.transactionSync(() => {
+          this.db.execScript(XERO_V2_SETTINGS_SCHEMA_REPAIR);
+          sql.exec(
+            `INSERT OR REPLACE INTO _kcp_runtime_repairs (repair_id, applied_at) VALUES (?1, datetime('now'))`,
+            XERO_V2_SETTINGS_SCHEMA_REPAIR_ID,
+          );
+        });
+      }
+
       // Bounded, resumable backfill for stock_items.name_key — see its own constants' comment
       // above for the 2026-08-28 incident this replaced. Guarded by a persisted repair marker
       // (cheap primary-key lookup) so a tenant that has already finished never pays even the
@@ -747,9 +769,21 @@ export class WorkspaceDO extends DurableObject<Env> {
     if (v2Response) return v2Response;
 
     // Xero routes (connection/OAuth, settings, item/invoice push) are likewise isolated from the
-    // legacy dispatcher — see modules/xero-engine/route-dispatch.ts.
-    const xeroResponse = await dispatchXeroWorkspaceRoute(request, tenantEnv, auth, workspaceId, resource);
-    if (xeroResponse) return xeroResponse;
+    // legacy dispatcher — see modules/xero-engine/route-dispatch.ts. Wrapped in its own try/catch
+    // (unlike the V2/legacy dispatchers above/below) because a tenant whose migrations have
+    // drifted can still throw a raw "no such column" SQLite error here even after
+    // XERO_V2_SETTINGS_SCHEMA_REPAIR — e.g. a table this repair doesn't cover, or a repair that
+    // hasn't run yet on this exact request. Surface it as a real JSON error instead of a bare,
+    // bodyless 500 that the frontend can't explain to the user.
+    try {
+      const xeroResponse = await dispatchXeroWorkspaceRoute(request, tenantEnv, auth, workspaceId, resource);
+      if (xeroResponse) return xeroResponse;
+    } catch (err) {
+      return new Response(
+        JSON.stringify({ ok: false, error: 'Xero request failed. If this persists, contact support.', detail: String((err as Error)?.message || err) }),
+        { status: 500, headers: { 'content-type': 'application/json' } },
+      );
+    }
 
     // Non-Yoco/Xero workspace routes still use the shared tenant dispatcher. Yoco webhook, queue,
     // reconciliation, sale, and refund effects are handled exclusively by the V2 dispatcher above.
