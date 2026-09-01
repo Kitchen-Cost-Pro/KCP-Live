@@ -206,10 +206,29 @@
 }
 
 .integrationsGrid {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  margin-top: 22px;
+}
+
+.integrationsCategoryGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.integrationsCategoryTitle {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.integrationsCategoryCards {
   display: grid;
   grid-template-columns: repeat(3, minmax(260px, 1fr));
   gap: 16px;
-  margin-top: 22px;
 }
 
 .integrationCard {
@@ -951,7 +970,7 @@
 }
 
 @media (max-width: 1180px) {
-  .integrationsGrid {
+  .integrationsCategoryCards {
     grid-template-columns: repeat(2, minmax(260px, 1fr));
   }
 }
@@ -970,7 +989,7 @@
     justify-self: start;
   }
 
-  .integrationsGrid,
+  .integrationsCategoryCards,
   .integrationsFilters {
     grid-template-columns: 1fr;
   }

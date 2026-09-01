@@ -161,6 +161,7 @@ function normalizeXeroStatus(value = {}) {
       itemAccountCode: settings.itemAccountCode || '',
       purchaseAccountCode: settings.purchaseAccountCode || '',
       purchaseTaxType: settings.purchaseTaxType || '',
+      purchaseExemptTaxType: settings.purchaseExemptTaxType || '',
       enabled: settings.enabled === true,
       grvSyncEnabled: settings.grvSyncEnabled === true,
       lastItemSyncAt: settings.lastItemSyncAt || '',

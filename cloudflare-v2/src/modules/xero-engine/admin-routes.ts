@@ -52,6 +52,7 @@ interface SyncSettingsRow {
   item_account_code: string | null;
   purchase_account_code: string | null;
   purchase_tax_type: string | null;
+  purchase_exempt_tax_type: string | null;
   enabled: number;
   grv_sync_enabled: number;
   last_item_sync_at: string | null;
@@ -82,6 +83,7 @@ async function getStatus(env: Env, workspaceId: string) {
           itemAccountCode: text(settings.item_account_code),
           purchaseAccountCode: text(settings.purchase_account_code),
           purchaseTaxType: text(settings.purchase_tax_type),
+          purchaseExemptTaxType: text(settings.purchase_exempt_tax_type),
           enabled: Boolean(settings.enabled),
           grvSyncEnabled: Boolean(settings.grv_sync_enabled),
           lastItemSyncAt: text(settings.last_item_sync_at),
@@ -157,6 +159,7 @@ async function postSettings(request: Request, env: Env, workspaceId: string) {
   const enabled = Boolean(body.enabled);
   const purchaseAccountCode = text(body.purchaseAccountCode);
   const purchaseTaxType = text(body.purchaseTaxType);
+  const purchaseExemptTaxType = text(body.purchaseExemptTaxType);
   const grvSyncEnabled = Boolean(body.grvSyncEnabled);
   if (enabled && (!salesAccountCode || !defaultTaxType)) {
     return response({ ok: false, error: 'A sales account code and tax type are required before enabling sync.' }, 400);
@@ -165,8 +168,8 @@ async function postSettings(request: Request, env: Env, workspaceId: string) {
     return response({ ok: false, error: 'A purchases account code and tax type are required before enabling GRV sync.' }, 400);
   }
   await env.DB.prepare(
-    `INSERT INTO xero_sync_settings (workspace_id, sales_account_code, default_tax_type, item_account_code, enabled, purchase_account_code, purchase_tax_type, grv_sync_enabled, created_at, updated_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+    `INSERT INTO xero_sync_settings (workspace_id, sales_account_code, default_tax_type, item_account_code, enabled, purchase_account_code, purchase_tax_type, purchase_exempt_tax_type, grv_sync_enabled, created_at, updated_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
      ON CONFLICT(workspace_id) DO UPDATE SET
        sales_account_code = excluded.sales_account_code,
        default_tax_type = excluded.default_tax_type,
@@ -174,10 +177,11 @@ async function postSettings(request: Request, env: Env, workspaceId: string) {
        enabled = excluded.enabled,
        purchase_account_code = excluded.purchase_account_code,
        purchase_tax_type = excluded.purchase_tax_type,
+       purchase_exempt_tax_type = excluded.purchase_exempt_tax_type,
        grv_sync_enabled = excluded.grv_sync_enabled,
        updated_at = excluded.updated_at`
   )
-    .bind(workspaceId, salesAccountCode, defaultTaxType, itemAccountCode, enabled ? 1 : 0, purchaseAccountCode, purchaseTaxType, grvSyncEnabled ? 1 : 0, nowIso())
+    .bind(workspaceId, salesAccountCode, defaultTaxType, itemAccountCode, enabled ? 1 : 0, purchaseAccountCode, purchaseTaxType, purchaseExemptTaxType, grvSyncEnabled ? 1 : 0, nowIso())
     .run();
   return response({ ok: true });
 }
@@ -239,7 +243,8 @@ async function postSyncNow(env: Env, workspaceId: string, kind: string) {
     // it immediately instead of waiting for the once-a-day claim to become due.
     const result = await syncPendingXeroGrvs(env, workspaceId, {
       purchaseAccountCode: text(settings.purchase_account_code),
-      purchaseTaxType: text(settings.purchase_tax_type)
+      purchaseTaxType: text(settings.purchase_tax_type),
+      purchaseExemptTaxType: text(settings.purchase_exempt_tax_type)
     });
     return response({ ok: true, result });
   }
@@ -280,7 +285,8 @@ async function runDueGrvSync(env: Env, workspaceId: string) {
   }
   const result = await syncPendingXeroGrvs(env, workspaceId, {
     purchaseAccountCode: text(settings.purchase_account_code),
-    purchaseTaxType: text(settings.purchase_tax_type)
+    purchaseTaxType: text(settings.purchase_tax_type),
+    purchaseExemptTaxType: text(settings.purchase_exempt_tax_type)
   });
   // A failed or needs-supplier-match GRV isn't lost — it stays retryable in its own outbox row and
   // syncPendingXeroGrvs re-scans ALL such rows (not just today's) on every call, including

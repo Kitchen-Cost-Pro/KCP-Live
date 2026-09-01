@@ -656,7 +656,7 @@ function renderStockChoice(item, pendingItems = [], disabled = false) {
 
 function renderQuantityInputModal({ state, draft, filters, sites, locations, actionStatus, error }) {
   const subtotal = totalOrderValue(draft);
-  const vat = subtotal * getVatRate(state);
+  const vat = orderVatTotal(draft, getVatRate(state));
   const total = subtotal + vat;
   return `
     <div class="purchaseOrdersModule__modalBackdrop">
@@ -758,7 +758,7 @@ function renderSupplierPickerOverlay(draft, filters, supplierMatches) {
   `;
 }
 
-function renderOrderModal(purchaseOrders, filters) {
+function renderOrderModal(purchaseOrders, filters, state) {
   const draft = purchaseOrders.draftOrder;
   if (!draft) return '';
 
@@ -777,7 +777,7 @@ function renderOrderModal(purchaseOrders, filters) {
 	    .filter((item) => !lineQuery || String(item.name || '').toLowerCase().includes(lineQuery) || String(item.category || '').toLowerCase().includes(lineQuery) || stockItemHasBarcode(item, lineQuery))
 	    .slice(0, 10);
   const subtotal = totalOrderValue(draft);
-  const vat = subtotal * getVatRate(state);
+  const vat = orderVatTotal(draft, getVatRate(state));
   const total = subtotal + vat;
 
   return `
@@ -1310,13 +1310,31 @@ function totalOrderValue(order) {
   return (order.items || []).reduce((sum, line) => sum + Number(line.qty || 0) * getPositivePackSize(line.packSize) * Number(line.unitCost || 0), 0);
 }
 
+function lineOrderValue(line = {}) {
+  return Number(line.qty || 0) * getPositivePackSize(line.packSize) * Number(line.unitCost || 0);
+}
+
+// VAT per line, matching the backend (postPurchaseOrder/sumVatAwareLineTotals) and
+// CreditNotes.js's calculateTotals: a non-VATable item (e.g. bread) never carries VAT even
+// alongside a VATable one (e.g. beer) on the same order — not one flat rate applied to the whole
+// subtotal. addPurchaseOrderLine stamps vatEnabled onto each line when it's added (mirrors
+// buildGrvDraftLine); a line missing it (e.g. an order saved before that fix) defaults to VATable,
+// matching stock_items.vat_enabled's own DB default.
+function orderVatTotal(order, vatRate) {
+  return (order.items || []).reduce((sum, line) => (
+    line.vatEnabled === false ? sum : sum + lineOrderValue(line) * vatRate
+  ), 0);
+}
+
 // This preview previously used a hardcoded 15% with no settings lookup at all, so it always
-// showed the wrong VAT for any workspace on a different rate, and would keep showing VAT even
-// for a business that is not VAT registered. Reads the same live settings location used
-// elsewhere in the app and returns 0 when the workspace is not VAT registered.
+// showed the wrong VAT for any workspace on a different rate. Reads the same live settings
+// location used elsewhere in the app.
+//
+// Deliberately independent of vatRegistered: a non-registered business still pays real VAT to a
+// VAT-registered supplier, it just can't reclaim it. Whether a line carries VAT at all is decided
+// per line by vatEnabled (see orderVatTotal), not by zeroing this for the whole order at once.
 function getVatRate(state) {
   const settings = state?.settings?.draft || state?.settings?.values || {};
-  if (settings.vatRegistered === false) return 0;
   return (Number(settings.vatRate ?? settings.vatPercentage ?? 15) || 15) / 100;
 }
 

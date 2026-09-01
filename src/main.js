@@ -8990,6 +8990,7 @@ function addPurchaseOrderLine(stockItemId) {
 	      unit: stockItem.unit || 'ea',
 	      selectedUom: uomSelection.selectedUom,
 	      uomConfigurations: normalizeLineUomConfigurations(stockItem.uomConfigurations || stockItem.uomConfig || stockItem.uomConversions),
+	      vatEnabled: stockItem.vatEnabled !== false,
 	      locationId,
 	      targetLocation: locationId,
 	      locationName,
@@ -12743,9 +12744,14 @@ async function requestVatRegisteredToggle(nextValue) {
   if (currentlyRegistered === nextValue) return;
 
   const vatRate = Number(draft.vatRate ?? 15) || 15;
+  // GRV/PO/Credit Note VAT always follows each stock item's own VAT-enabled flag (e.g. bread never
+  // carries VAT, beer always does) regardless of this toggle — a non-registered business still
+  // pays real VAT to a VAT-registered supplier, it just can't reclaim it. Only sales (output VAT
+  // charged to customers) genuinely goes to R0 when not registered, since charging VAT without
+  // being registered isn't legal.
   const message = nextValue
-    ? `Switching to VAT Registered will recalculate recipe costs and stock item costs to be ex-VAT (removing ${vatRate}% VAT from currently VAT-inclusive costs). Reports will start showing real VAT values instead of R0.`
-    : `Switching to Not VAT Registered will recalculate recipe costs and stock item costs to be VAT-inclusive (adding ${vatRate}% VAT back into currently ex-VAT costs, since it can no longer be reclaimed). Reports will show R0 VAT going forward.`;
+    ? `Switching to VAT Registered will recalculate recipe costs and stock item costs to be ex-VAT (removing ${vatRate}% VAT from currently VAT-inclusive costs).`
+    : `Switching to Not VAT Registered will recalculate recipe costs and stock item costs to be VAT-inclusive (adding ${vatRate}% VAT back into currently ex-VAT costs, since it can no longer be reclaimed). GRVs, purchase orders, and credit notes will keep showing real VAT on VAT-enabled stock items — only sales VAT (charged to customers) will show R0, since a non-registered business cannot charge VAT.`;
 
   const confirmed = await showBrandConfirmDialog({
     eyebrow: 'VAT Registration',
@@ -22080,10 +22086,15 @@ function getVatRate() {
   // NOTE: this previously read appState.source?.settings, but appState.source is never assigned
   // anywhere (it stays null for the app's entire lifetime) — so this was silently, permanently
   // hardcoded to 15% regardless of the workspace's actual configured VAT rate. Read the real,
-  // live settings instead, and respect VAT-registration status: a non-registered workspace never
-  // shows VAT on any live entry-form preview.
+  // live settings instead.
+  //
+  // Deliberately independent of vatRegistered: this rate feeds GRV/PO/Credit Note stock costing
+  // previews (GRVEntry.js, CreditNotes.js, StockItems.js), where VAT is about what's actually paid
+  // to a VAT-registered supplier on a VATable item (e.g. beer) — real money paid regardless of
+  // whether THIS business can reclaim it. Per-item taxability (e.g. bread never carries VAT) is
+  // handled separately via each line's own vatEnabled flag, not by zeroing the rate here for every
+  // item at once. vat_registered legitimately still gates OUTPUT VAT on sales elsewhere in the app.
   const settings = appState.settings?.draft || appState.settings?.values || {};
-  if (settings.vatRegistered === false) return 0;
   return Number(settings.vatRate ?? settings.vatPercentage ?? 15) || 15;
 }
 

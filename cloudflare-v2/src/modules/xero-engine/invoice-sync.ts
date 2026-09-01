@@ -63,7 +63,7 @@ async function aggregateDailySalesLines(env: Env, workspaceId: string, dateKey: 
   return rows.results || [];
 }
 
-function buildDailyInvoicePayload(
+export function buildDailyInvoicePayload(
   dateKey: string,
   lines: AggregatedLineRow[],
   settings: { salesAccountCode: string; defaultTaxType: string },
@@ -79,7 +79,11 @@ function buildDailyInvoicePayload(
         DueDate: dateKey,
         Reference: `KCP daily sales ${dateKey}`,
         Status: 'AUTHORISED',
-        LineAmountTypes: 'Exclusive',
+        // ol.total (aggregated into line.total below) is gross_amount — VAT-INCLUSIVE — per
+        // sale-resolver.ts's lineAmounts (net = gross - tax). 'Exclusive' here previously told Xero
+        // "this is the ex-VAT amount, add tax on top", double-counting VAT on every sales line.
+        // 'Inclusive' tells Xero the UnitAmount already includes tax, which is what it actually is.
+        LineAmountTypes: 'Inclusive',
         LineItems: lines.map((line) => ({
           Description: text(line.label) || text(line.sku) || 'POS sale',
           Quantity: Number(line.quantity) || 1,

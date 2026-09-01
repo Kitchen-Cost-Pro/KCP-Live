@@ -51,21 +51,120 @@ export async function getWorkspaceInventoryCostingMethod(env: Env, workspaceId: 
 }
 
 /**
- * Effective VAT rate (as a fraction, e.g. 0.15) to use for GRV/PO ex-VAT extraction and other
- * costing math. Returns exactly 0 when the workspace is not VAT registered, regardless of the
- * configured percentage — a non-registered business never adds/reclaims VAT on its costs.
+ * Effective VAT rate (as a fraction, e.g. 0.15) to use for GRV/PO/Credit Note ex-VAT extraction and
+ * other stock-costing math. Deliberately independent of vat_registered: VAT paid to a supplier on a
+ * VATable stock item (e.g. beer) is real money paid regardless of whether THIS business can reclaim
+ * it — a non-registered business still pays the VAT, it just can't deduct it on a return. Whether a
+ * given line carries VAT at all is instead decided per line by stock_items.vat_enabled (e.g. bread
+ * never carries VAT) — see sumVatAwareLineTotals/loadVatEnabledByStockItemId below, which callers
+ * combine with this rate. vat_registered still legitimately gates OUTPUT VAT on sales (a
+ * non-registered business cannot charge VAT) — that's handled separately in the Yoco sale/refund
+ * resolvers and is NOT this function's concern.
  */
 export async function getWorkspaceEffectiveVatRate(env: Env, workspaceId: string): Promise<number> {
   const row = await env.DB.prepare(
-    `SELECT vat_rate, vat_registered
+    `SELECT vat_rate
        FROM workspace_settings
       WHERE workspace_id = ?1
       LIMIT 1`
-  ).bind(workspaceId).first<{ vat_rate?: number; vat_registered?: number }>();
+  ).bind(workspaceId).first<{ vat_rate?: number }>();
   if (!row) return 0.15;
-  if (Number(row.vat_registered ?? 1) === 0) return 0;
   const percent = numberValue(row.vat_rate, 15);
   return (percent > 0 ? percent : 15) / 100;
+}
+
+/**
+ * Whether the workspace is currently VAT registered. NOT used to decide whether stock costing
+ * charges VAT (that's vat_enabled's job, always) — only to know which convention an already-
+ * submitted GRV line total is in: GRVEntry.js's finalizeReceivedCost folds VAT straight into the
+ * stored unit cost for a VATable line when the business can't reclaim it (not registered), so
+ * that figure is already VAT-inclusive by the time it reaches the backend; for a registered
+ * business it stays ex-VAT. See sumVatAwareLineTotals's `linesAreAlreadyVatInclusive` option.
+ */
+export async function isWorkspaceVatRegistered(env: Env, workspaceId: string): Promise<boolean> {
+  const row = await env.DB.prepare(
+    `SELECT vat_registered
+       FROM workspace_settings
+      WHERE workspace_id = ?1
+      LIMIT 1`
+  ).bind(workspaceId).first<{ vat_registered?: number }>();
+  return Number(row?.vat_registered ?? 1) !== 0;
+}
+
+export interface VatAwareLineInput {
+  stockItemId?: unknown;
+  lineTotalEx?: unknown;
+}
+
+export interface VatAwareLineTotals {
+  totalEx: number;
+  totalVat: number;
+  totalInc: number;
+}
+
+/**
+ * Sums line totals into VAT-aware header totals for a GRV/PO/Credit Note: VAT is computed PER LINE
+ * from each stock item's own vat_enabled flag, then summed — never one flat rate applied to the
+ * order/GRV total as a whole (that previously wiped out the bread-vs-beer distinction). A stock
+ * item missing from vatEnabledByStockItemId is treated as VATable, matching stock_items.vat_enabled's
+ * DB default of 1.
+ *
+ * `linesAreAlreadyVatInclusive` (default false — the normal case) controls which direction a
+ * VATable line's submitted amount gets split: false ADDS vatRate on top (the amount submitted is
+ * genuine ex-VAT — true for Purchase Orders always, and for GRVs on a VAT-registered workspace).
+ * true instead BACKS the true ex-VAT/VAT split OUT of an already-inclusive submitted amount — only
+ * correct for a GRV on a non-VAT-registered workspace, where GRVEntry.js's finalizeReceivedCost has
+ * already folded VAT into the line's cost before it reached this function. Getting this backwards
+ * either silently drops real VAT or double-counts it — see the caller for why each is set the way
+ * it is.
+ */
+export function sumVatAwareLineTotals(
+  items: VatAwareLineInput[],
+  vatRate: number,
+  vatEnabledByStockItemId: Map<string, boolean>,
+  linesAreAlreadyVatInclusive = false
+): VatAwareLineTotals {
+  let totalEx = 0;
+  let totalVat = 0;
+  for (const line of items) {
+    const submitted = numberValue(line.lineTotalEx, 0);
+    const stockItemId = text(line.stockItemId);
+    const isVatable = vatEnabledByStockItemId.get(stockItemId) !== false;
+    if (!isVatable) {
+      totalEx += submitted;
+      continue;
+    }
+    if (linesAreAlreadyVatInclusive) {
+      const ex = submitted / (1 + vatRate);
+      totalEx += ex;
+      totalVat += submitted - ex;
+    } else {
+      totalEx += submitted;
+      totalVat += submitted * vatRate;
+    }
+  }
+  return { totalEx, totalVat, totalInc: totalEx + totalVat };
+}
+
+/** Batched vat_enabled lookup for a set of stock items — one query regardless of line count. */
+export async function loadVatEnabledByStockItemId(
+  env: Env,
+  workspaceId: string,
+  stockItemIds: Array<string | undefined | null>
+): Promise<Map<string, boolean>> {
+  const uniqueIds = Array.from(new Set(stockItemIds.map((value) => text(value)).filter(Boolean)));
+  const map = new Map<string, boolean>();
+  if (!uniqueIds.length) return map;
+  const placeholders = uniqueIds.map((_, index) => `?${index + 2}`).join(', ');
+  const rows = await env.DB.prepare(
+    `SELECT id, vat_enabled FROM stock_items WHERE workspace_id = ?1 AND id IN (${placeholders})`
+  )
+    .bind(workspaceId, ...uniqueIds)
+    .all<{ id: string; vat_enabled: number }>();
+  for (const row of rows.results || []) {
+    map.set(text(row.id), Number(row.vat_enabled ?? 1) !== 0);
+  }
+  return map;
 }
 
 /** Master-item fallback used only when no location-specific price row exists. */

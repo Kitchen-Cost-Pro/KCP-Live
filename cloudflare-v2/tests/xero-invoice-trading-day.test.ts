@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { TENANT_SCHEMA_SQL } from '../src/tenant-schema.generated';
 import type { DbLike, DbResult, DbStatementLike } from '../src/legacy/types';
-import { businessDayUtcBounds, yesterdayDateKey, todayDateKey, claimDailyInvoiceSyncIfDue } from '../src/modules/xero-engine/invoice-sync';
+import { businessDayUtcBounds, yesterdayDateKey, todayDateKey, claimDailyInvoiceSyncIfDue, buildDailyInvoicePayload } from '../src/modules/xero-engine/invoice-sync';
 import { XERO_V2_FOUNDATION_MIGRATION } from '../src/modules/xero-engine/migrations';
 
 // Regression: the Xero daily-sales push used to bucket every venue into a hardcoded
@@ -156,4 +156,17 @@ test('claimDailyInvoiceSyncIfDue respects the once-per-day dedup independently o
   const env = createEnv({ enabled: 0 });
   const claim = await claimDailyInvoiceSyncIfDue(env, 'ws_1', 5);
   assert.equal(claim.due, false);
+});
+
+// Regression: yoco_order_lines.total is VAT-INCLUSIVE (gross_amount, per sale-resolver.ts's
+// lineAmounts: net = gross - tax), but buildDailyInvoicePayload previously sent
+// LineAmountTypes: 'Exclusive' — telling Xero to add tax ON TOP of an already-taxed amount, double-
+// counting VAT on every sales invoice line.
+test('buildDailyInvoicePayload sends LineAmountTypes: Inclusive, matching that line.total is VAT-inclusive gross', () => {
+  const payload = buildDailyInvoicePayload('2026-08-31', [{ label: 'Burger', product_id: 'p1', sku: 'BRG', quantity: 2, total: 115 }], {
+    salesAccountCode: '200',
+    defaultTaxType: 'OUTPUT2'
+  });
+  assert.equal(payload.Invoices[0].LineAmountTypes, 'Inclusive');
+  assert.equal(payload.Invoices[0].LineItems[0].UnitAmount, 57.5);
 });

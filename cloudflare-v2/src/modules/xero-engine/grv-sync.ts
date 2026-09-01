@@ -49,6 +49,37 @@ function parseGrvRawJson(raw: string | null): { items: GrvLineItem[] } {
   }
 }
 
+interface GrvLineRow {
+  stock_item_id: string | null;
+  stock_item_name: string | null;
+  quantity: number | null;
+  unit_price: number | null;
+  total_vat: number | null;
+}
+
+/**
+ * grv_lines (not raw_json) is the source of truth for what actually goes to Xero: unit_price/
+ * total_ex there are always the ex-VAT figures the GRV was costed and posted to stock at — see
+ * legacy/routes.ts's GRV save path (~9249-9298), where unitCost/totalEx are computed BEFORE any
+ * VAT is added, and GRVEntry.js's "prices include VAT" toggle only changes what price the user
+ * TYPES on screen (it back-calculates the ex-VAT value before submitting either way) — it never
+ * changes what's stored. total_vat is real per-line VAT (0 for a zero-rated/exempt stock item, per
+ * stock_items.vat_enabled — see routes.ts:9258-9262), which is what lets a Bill's exempt lines use
+ * a different Xero tax type than its taxable lines.
+ */
+async function loadGrvLines(env: Env, workspaceId: string, grvId: string): Promise<GrvLineRow[]> {
+  const rows = await env.DB.prepare(
+    `SELECT gl.stock_item_id, si.name AS stock_item_name, gl.quantity, gl.unit_price, gl.total_vat
+     FROM grv_lines gl
+     LEFT JOIN stock_items si ON si.id = gl.stock_item_id AND si.workspace_id = gl.workspace_id
+     WHERE gl.grv_id = ?1 AND gl.workspace_id = ?2
+     ORDER BY gl.id ASC`
+  )
+    .bind(grvId, workspaceId)
+    .all<GrvLineRow>();
+  return rows.results || [];
+}
+
 /**
  * Every GRV that's never successfully pushed, regardless of which business day it fell on — used
  * by both the automatic daily due-check and the manual "Sync GRVs now" button. Deliberately NOT
@@ -56,8 +87,15 @@ function parseGrvRawJson(raw: string | null): { items: GrvLineItem[] } {
  * retried on a LATER day's due-check once the user resolves that match (see resolveSupplierMatch),
  * and a date-bounded scan would only ever look at the one day it was first seen. The per-GRV outbox
  * (GRV_PUSH effect) is what keeps this idempotent, not the date bound.
+ *
+ * Ordered NEWEST-first (received_at DESC), not oldest-first: with a capped LIMIT, oldest-first
+ * means a backlog of older never-pushed GRVs (e.g. everything captured before Xero sync was turned
+ * on) permanently fills the cap and today's brand-new GRVs never get reached — they always sort to
+ * the back of an ever-growing queue. Newest-first guarantees today's GRVs are never starved by a
+ * stale backlog; the backlog still drains over repeated runs, just from the front of the queue
+ * inward instead of the back.
  */
-async function loadPendingGrvs(env: Env, workspaceId: string, limit = 500): Promise<GrvRow[]> {
+export async function loadPendingGrvs(env: Env, workspaceId: string, limit = 500): Promise<GrvRow[]> {
   const rows = await env.DB.prepare(
     `SELECT
        grv.id, grv.supplier_id, s.name AS supplier_name, s.xero_contact_id AS supplier_xero_contact_id,
@@ -70,7 +108,7 @@ async function loadPendingGrvs(env: Env, workspaceId: string, limit = 500): Prom
           WHERE o.workspace_id = grv.workspace_id AND o.effect_type = 'GRV_PUSH'
             AND o.effect_key = 'grv:' || grv.workspace_id || ':' || grv.id AND o.status = 'APPLIED'
        )
-     ORDER BY grv.received_at ASC
+     ORDER BY grv.received_at DESC
      LIMIT ?2`
   )
     .bind(workspaceId, limit)
@@ -107,11 +145,11 @@ export async function resolveXeroContactForSupplier(
   return contactId;
 }
 
-function buildGrvBillPayload(
+export function buildGrvBillPayload(
   grv: GrvRow,
-  items: GrvLineItem[],
+  lines: GrvLineRow[],
   contactId: string,
-  settings: { purchaseAccountCode: string; purchaseTaxType: string },
+  settings: { purchaseAccountCode: string; purchaseTaxType: string; purchaseExemptTaxType: string },
   existingBillId?: string
 ) {
   return {
@@ -123,17 +161,27 @@ function buildGrvBillPayload(
         Date: text(grv.received_at).slice(0, 10),
         Reference: text(grv.invoice_number) || `GRV-${grv.id.slice(-6).toUpperCase()}`,
         Status: 'DRAFT',
-        LineAmountTypes: grv.prices_include_vat ? 'Inclusive' : 'Exclusive',
-        LineItems: (items.length
-          ? items
-          : [{ stockItemName: 'Goods received', receivedQty: 1, unitCost: grv.total_ex || 0 }]
-        ).map((line) => ({
-          Description: text(line.stockItemName) || text(line.stockItemId) || 'Goods received',
-          Quantity: Number(line.receivedQty ?? line.qty) || 1,
-          UnitAmount: Number(line.unitCost) || 0,
-          AccountCode: settings.purchaseAccountCode,
-          TaxType: settings.purchaseTaxType
-        }))
+        // grv_lines.unit_price is always ex-VAT (see loadGrvLines) regardless of how the GRV's
+        // "prices include VAT" toggle was set at entry — that only affects what price the user
+        // typed on screen, never what's stored — so this is always Exclusive, never conditional.
+        LineAmountTypes: 'Exclusive',
+        LineItems: (lines.length
+          ? lines
+          : [{ stock_item_id: null, stock_item_name: 'Goods received', quantity: 1, unit_price: grv.total_ex || 0, total_vat: grv.total_vat }]
+        ).map((line) => {
+          // A zero-rated/VAT-exempt stock item (total_vat = 0, driven by stock_items.vat_enabled —
+          // see loadGrvLines) uses the exempt tax type if one's configured, instead of blanket-
+          // applying the normal purchases tax type to every line regardless of its real taxability.
+          const isTaxable = Number(line.total_vat) > 0;
+          const taxType = !isTaxable && settings.purchaseExemptTaxType ? settings.purchaseExemptTaxType : settings.purchaseTaxType;
+          return {
+            Description: text(line.stock_item_name) || text(line.stock_item_id) || 'Goods received',
+            Quantity: Number(line.quantity) || 1,
+            UnitAmount: Number(line.unit_price) || 0,
+            AccountCode: settings.purchaseAccountCode,
+            TaxType: taxType
+          };
+        })
       }
     ]
   };
@@ -170,7 +218,7 @@ async function pushOneGrv(
   env: Env,
   workspaceId: string,
   grv: GrvRow,
-  settings: { purchaseAccountCode: string; purchaseTaxType: string }
+  settings: { purchaseAccountCode: string; purchaseTaxType: string; purchaseExemptTaxType: string }
 ): Promise<'applied' | 'duplicate' | 'needs_supplier_match' | 'failed'> {
   const effectKey = `grv:${workspaceId}:${grv.id}`;
   const claim = await claimXeroEffect(env, workspaceId, 'GRV_PUSH', effectKey);
@@ -198,8 +246,8 @@ async function pushOneGrv(
   }
 
   try {
-    const { items } = parseGrvRawJson(grv.raw_json);
-    const payload = buildGrvBillPayload(grv, items, contactId, settings);
+    const lines = await loadGrvLines(env, workspaceId, grv.id);
+    const payload = buildGrvBillPayload(grv, lines, contactId, settings);
     const result = await executeXeroApiRequest(env, workspaceId, { method: 'POST', path: 'Invoices', body: payload });
     const invoices = (result.Invoices as Array<{ InvoiceID?: string }> | undefined) || [];
     const billId = text(invoices[0]?.InvoiceID);
@@ -219,7 +267,7 @@ async function pushOneGrv(
 export async function syncPendingXeroGrvs(
   env: Env,
   workspaceId: string,
-  settings: { purchaseAccountCode: string; purchaseTaxType: string }
+  settings: { purchaseAccountCode: string; purchaseTaxType: string; purchaseExemptTaxType: string }
 ): Promise<{ applied: number; duplicate: number; needsSupplierMatch: number; failed: number }> {
   const grvs = await loadPendingGrvs(env, workspaceId);
   const counts = { applied: 0, duplicate: 0, needsSupplierMatch: 0, failed: 0 };

@@ -2,6 +2,9 @@ import '../styles/integrations.css';
 import gmailLogo from '../assets/integrations/gmail.svg';
 import yocoLogo from '../assets/integrations/yoco.svg';
 import xeroLogo from '../assets/integrations/xero.png';
+import googleDriveLogo from '../assets/integrations/google-drive.svg';
+import squareLogo from '../assets/integrations/square.svg';
+import quickbooksLogo from '../assets/integrations/quickbooks.svg';
 import {
   connectYocoIntegration,
   disconnectGmailIntegration,
@@ -52,7 +55,7 @@ const INTEGRATIONS = [
     stage: 'Planned',
     popular: false,
     description: 'Back up exports, recipes, and reports straight to a connected Google Drive folder.',
-    icon: 'drive',
+    logo: googleDriveLogo,
     tone: 'amber',
     action: 'Coming Soon'
   },
@@ -69,6 +72,18 @@ const INTEGRATIONS = [
     action: 'Connect Xero'
   },
   {
+    id: 'quickbooks',
+    name: 'QuickBooks',
+    category: 'Accounting',
+    status: 'Coming Soon',
+    stage: 'Planned',
+    popular: false,
+    description: 'Push daily sales summaries, GRVs, and your product catalogue into your QuickBooks ledger.',
+    logo: quickbooksLogo,
+    tone: 'amber',
+    action: 'Coming Soon'
+  },
+  {
     id: 'square',
     name: 'Square',
     category: 'POS & Payments',
@@ -76,19 +91,7 @@ const INTEGRATIONS = [
     stage: 'Planned',
     popular: false,
     description: 'Bring Square sales, payments, and catalogue data into Kitchen Cost Pro.',
-    icon: 'square',
-    tone: 'amber',
-    action: 'Coming Soon'
-  },
-  {
-    id: 'digitot',
-    name: 'Digitot',
-    category: 'POS & Payments',
-    status: 'Coming Soon',
-    stage: 'Planned',
-    popular: false,
-    description: 'Connect Digitot sales and till data for automatic cost and stock reconciliation.',
-    icon: 'boxes',
+    logo: squareLogo,
     tone: 'amber',
     action: 'Coming Soon'
   },
@@ -197,7 +200,7 @@ export function renderIntegrations({ state } = {}) {
       </section>
 
       <section class="integrationsGrid" data-integrations-grid>
-        ${integrations.map(renderIntegrationCard).join('')}
+        ${renderIntegrationGroups(integrations)}
       </section>
 
       <footer class="integrationsFooter">
@@ -398,6 +401,7 @@ function bindIntegrationEvents(view) {
     const enabled = view.querySelector('[data-xero-enabled]')?.checked === true;
     const purchaseAccountCode = String(view.querySelector('[data-xero-purchase-account]')?.value || '').trim();
     const purchaseTaxType = String(view.querySelector('[data-xero-purchase-tax-type]')?.value || '').trim();
+    const purchaseExemptTaxType = String(view.querySelector('[data-xero-purchase-exempt-tax-type]')?.value || '').trim();
     const grvSyncEnabled = view.querySelector('[data-xero-grv-enabled]')?.checked === true;
     await runXeroAction(view, 'Saving Xero settings...', async () => {
       await saveXeroSettings(view.dataset.workspaceId || '', {
@@ -407,6 +411,7 @@ function bindIntegrationEvents(view) {
         enabled,
         purchaseAccountCode,
         purchaseTaxType,
+        purchaseExemptTaxType,
         grvSyncEnabled
       });
       setXeroModalStatus(view, 'Xero settings saved.', 'success');
@@ -525,6 +530,11 @@ function applyIntegrationFilters(view) {
     if (visible) visibleCount += 1;
   });
 
+  view.querySelectorAll('[data-integrations-category-group]').forEach((group) => {
+    const hasVisibleCard = group.querySelector('[data-integration-card]:not([hidden])');
+    group.hidden = !hasVisibleCard;
+  });
+
   const count = view.querySelector('[data-integrations-count]');
   if (count) count.textContent = `Showing ${visibleCount} of ${INTEGRATIONS.length} integrations`;
   const empty = view.querySelector('[data-integrations-empty]');
@@ -575,6 +585,26 @@ function renderDropdown(field, options, selectedValue) {
       </div>
     </div>
   `;
+}
+
+function renderIntegrationGroups(integrations) {
+  const orderedCategories = CATEGORY_OPTIONS
+    .map((option) => option.value)
+    .filter((value) => value !== 'all');
+  return orderedCategories
+    .map((category) => {
+      const items = integrations.filter((item) => item.category === category);
+      if (!items.length) return '';
+      return `
+        <div class="integrationsCategoryGroup" data-integrations-category-group="${escapeAttribute(category)}">
+          <h3 class="integrationsCategoryTitle">${escapeHtml(category)}</h3>
+          <div class="integrationsCategoryCards">
+            ${items.map(renderIntegrationCard).join('')}
+          </div>
+        </div>
+      `;
+    })
+    .join('');
 }
 
 function renderIntegrationCard(item) {
@@ -890,6 +920,10 @@ function renderXeroModal({ canManageXero = false } = {}) {
                 <label>
                   <span>Purchases tax type</span>
                   <input type="text" placeholder="e.g. INPUT2" value="${escapeAttribute(settings.purchaseTaxType || '')}" data-xero-purchase-tax-type />
+                </label>
+                <label>
+                  <span>Purchases exempt/zero-rated tax type (optional)</span>
+                  <input type="text" placeholder="e.g. EXEMPTINPUT" value="${escapeAttribute(settings.purchaseExemptTaxType || '')}" data-xero-purchase-exempt-tax-type />
                 </label>
                 <label class="xeroCheckboxRow">
                   <input type="checkbox" data-xero-grv-enabled ${grvSyncEnabled ? 'checked' : ''} />

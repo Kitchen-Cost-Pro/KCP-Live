@@ -49,7 +49,10 @@ import {
   calculateIncomingLocationCost,
   getWorkspaceEffectiveVatRate,
   getWorkspaceInventoryCostingMethod,
+  isWorkspaceVatRegistered,
+  loadVatEnabledByStockItemId,
   resolveLocationUnitCost,
+  sumVatAwareLineTotals,
   upsertLocationCostStatement,
 } from "./inventory-costing";
 import {
@@ -8490,6 +8493,28 @@ export async function postPurchaseOrder(
       );
     }
   }
+  // VAT must follow each line's own stock item, not one flat rate applied to the whole order —
+  // a non-VATable item (e.g. bread) never carries VAT even alongside a VATable one (e.g. beer) on
+  // the same PO. normalizePurchaseOrderPayload can't do this itself (it has no DB access), so the
+  // header totals it computed are recomputed here per line, matching the GRV receive route's
+  // per-line vat_enabled check.
+  const vatEnabledByStockItemId = await loadVatEnabledByStockItemId(
+    env,
+    workspaceId,
+    payload.normalized.items.map((line) => text(line.stockItemId)),
+  );
+  const vatAwareTotals = sumVatAwareLineTotals(
+    payload.normalized.items,
+    workspaceVatRate,
+    vatEnabledByStockItemId,
+  );
+  payload.totalEx = vatAwareTotals.totalEx;
+  payload.totalVat = vatAwareTotals.totalVat;
+  payload.totalInc = vatAwareTotals.totalInc;
+  payload.normalized.totalEx = vatAwareTotals.totalEx;
+  payload.normalized.totalVat = vatAwareTotals.totalVat;
+  payload.normalized.totalInc = vatAwareTotals.totalInc;
+  payload.rawJson = JSON.stringify(payload.normalized);
   // workspace_members is a CENTRAL table — read via env.CENTRAL_DB, not the tenant DO's env.DB
   // (mirrors postCreditNote / postStockTake). env.DB here throws "no such table" → 500 on PO save.
   const actor = await env.CENTRAL_DB.prepare(
@@ -8551,7 +8576,10 @@ export async function postPurchaseOrder(
     const qty = numberValue(line.qty ?? line.quantity, 0);
     const unitPrice = numberValue(line.unitCost, 0);
     const totalEx = qty * numberValue(line.packSize, 1) * unitPrice;
-    const totalVat = totalEx * workspaceVatRate;
+    // A zero-rated/VAT-exempt item (e.g. bread) must never carry VAT, regardless of the workspace
+    // rate — matches the GRV receive route's per-line lineIsVatable check.
+    const lineIsVatable = vatEnabledByStockItemId.get(text(line.stockItemId)) !== false;
+    const totalVat = lineIsVatable ? totalEx * workspaceVatRate : 0;
     const lineKey =
       text(line.id || line.stockItemId || `line_${index}`)
         .replace(/[^a-zA-Z0-9_-]+/g, "_")
@@ -9114,6 +9142,36 @@ export async function postGoodsReceipt(
     });
   }
 
+  // The grvs row's header totals must match the per-line vat_enabled-aware totals the loop below
+  // computes for grv_lines (a non-VATable item like bread never carries VAT) — normalizeGoodsReceiptPayload
+  // can't do this itself (it has no DB access), so it's recomputed here, mirroring the PO fix above.
+  // The grvs INSERT has to be built with the correct totals up front (it must run before the
+  // grv_lines inserts below, which reference it via a foreign key), so this is a small separate
+  // lookup rather than folded into that per-line loop.
+  const grvVatEnabledByStockItemId = await loadVatEnabledByStockItemId(
+    env,
+    workspaceId,
+    payload.normalized.items.map((line) => text(line.stockItemId)),
+  );
+  // GRVEntry.js's finalizeReceivedCost already folds VAT into a VATable line's submitted cost when
+  // the workspace can't reclaim it (not VAT registered) — so on a non-registered workspace the
+  // ex-VAT/VAT split must be backed OUT of that already-inclusive figure, not added on top of it
+  // again (that would double the real VAT paid). See sumVatAwareLineTotals's doc comment.
+  const grvWorkspaceIsVatRegistered = await isWorkspaceVatRegistered(env, workspaceId);
+  const grvVatAwareTotals = sumVatAwareLineTotals(
+    payload.normalized.items,
+    workspaceVatRate,
+    grvVatEnabledByStockItemId,
+    !grvWorkspaceIsVatRegistered,
+  );
+  payload.totalEx = grvVatAwareTotals.totalEx;
+  payload.totalVat = grvVatAwareTotals.totalVat;
+  payload.totalInc = grvVatAwareTotals.totalInc;
+  payload.normalized.totalEx = grvVatAwareTotals.totalEx;
+  payload.normalized.totalVat = grvVatAwareTotals.totalVat;
+  payload.normalized.totalInc = grvVatAwareTotals.totalInc;
+  payload.rawJson = JSON.stringify(payload.normalized);
+
   const transactionReference = await ensureTransactionReference(
     env,
     workspaceId,
@@ -9254,12 +9312,24 @@ export async function postGoodsReceipt(
       incomingQuantity: quantity,
       incomingUnitCost: unitCost,
     });
-    const totalEx = numberValue(line.lineTotalEx, quantity * unitCost);
+    const submittedTotalEx = numberValue(line.lineTotalEx, quantity * unitCost);
     // A zero-rated/VAT-exempt item must never carry VAT, regardless of the workspace rate —
     // this previously applied workspaceVatRate to every line unconditionally, adding 15% to a
     // non-VATable item's GRV total.
     const lineIsVatable = numberValue(stockItem.vat_enabled, 1) !== 0;
-    const totalVat = lineIsVatable ? totalEx * workspaceVatRate : 0;
+    let totalEx = submittedTotalEx;
+    let totalVat = 0;
+    if (lineIsVatable) {
+      if (grvWorkspaceIsVatRegistered) {
+        totalVat = submittedTotalEx * workspaceVatRate;
+      } else {
+        // finalizeReceivedCost (GRVEntry.js) already folded VAT into this line's cost since the
+        // workspace can't reclaim it — back the true ex-VAT/VAT split OUT of that already-
+        // inclusive figure instead of adding VAT again on top of it.
+        totalEx = submittedTotalEx / (1 + workspaceVatRate);
+        totalVat = submittedTotalEx - totalEx;
+      }
+    }
     const metadata = JSON.stringify({
       before,
       after: before + quantity,

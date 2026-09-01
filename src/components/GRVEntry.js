@@ -1775,10 +1775,14 @@ function getVatRate(state) {
   // NOTE: this previously read state.source?.settings, but appState.source is never assigned
   // anywhere in the app (it stays null permanently) — so this was silently, permanently hardcoded
   // to 15% regardless of the workspace's actual configured VAT rate. Read the real, live settings
-  // instead, and respect VAT-registration status: a non-registered workspace never shows VAT on
-  // any live entry-form preview (GRV pack prices, line VAT, totals).
+  // instead.
+  //
+  // Deliberately independent of vatRegistered now — same rationale as getSupplierVatRate just
+  // below: this feeds calculateDisplayedLinePrice/calculateDisplayedPackPrice's "prices include
+  // VAT" preview math, which must keep showing the real VAT-inclusive pack price for a VATable
+  // item even on a non-registered workspace (they still pay that VAT to the supplier). Whether a
+  // line carries VAT at all is decided per line by vatEnabled, not by zeroing this for everyone.
   const settings = state.settings?.draft || state.settings?.values || {};
-  if (settings.vatRegistered === false) return 0;
   return (Number(settings.vatRate ?? settings.vatPercentage ?? 15) || 15) / 100;
 }
 

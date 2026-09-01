@@ -1058,9 +1058,9 @@ function renderStockModal(stock, categories = [], uoms = [], locations = [], sto
                 </div>
               </label>
               <div class="stockModule__quickSettings stockModule__span2">
-                <label class="stockModule__toggle" title="${vatRegistered ? 'This item carries VAT on the workspace\'s configured rate.' : 'The workspace is not VAT registered, so no VAT is applied regardless of this setting.'}">
+                <label class="stockModule__toggle" title="${vatRegistered ? 'This item carries VAT on the workspace\'s configured rate.' : 'This item still carries VAT on GRVs/POs/credit notes (you pay it to your VAT-registered supplier), even though the workspace can\'t reclaim it as not VAT registered.'}">
                   <input name="vatEnabled" type="checkbox" ${item.vatEnabled === false ? '' : 'checked'} data-stock-draft-field="vatEnabled" />
-                  <span>VAT Enabled${vatRegistered ? '' : ' (workspace not VAT registered — no VAT applied)'}</span>
+                  <span>VAT Enabled${vatRegistered ? '' : ' (workspace not VAT registered — cannot reclaim, but still applied)'}</span>
                 </label>
                 <div class="stockModule__typeControl" aria-label="Item type">
                   <span>Item Type</span>

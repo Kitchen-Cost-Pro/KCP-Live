@@ -93,6 +93,11 @@ CREATE INDEX IF NOT EXISTS idx_xero_v2_effect_outbox_workspace_status
 
 ALTER TABLE xero_sync_settings ADD COLUMN purchase_account_code TEXT;
 ALTER TABLE xero_sync_settings ADD COLUMN purchase_tax_type TEXT;
+-- Optional: a GRV line whose stock item is zero-rated/VAT-exempt (grv_lines.total_vat = 0, driven
+-- by stock_items.vat_enabled) uses this tax type instead of purchase_tax_type. Left blank, every
+-- line keeps using purchase_tax_type exactly as before — this is opt-in, not a behavior change
+-- until the workspace fills in their Xero org's actual exempt/zero-rated tax type code.
+ALTER TABLE xero_sync_settings ADD COLUMN purchase_exempt_tax_type TEXT;
 ALTER TABLE xero_sync_settings ADD COLUMN grv_sync_enabled INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE xero_sync_settings ADD COLUMN last_grv_sync_date TEXT;
 ALTER TABLE xero_sync_settings ADD COLUMN grv_sync_claimed_at TEXT;
