@@ -19,6 +19,7 @@ import {
   syncXeroNow,
   resolveXeroSupplierMatch,
   fetchXeroTaxRates,
+  fetchXeroTrackingCategories,
   syncYocoCatalogue
 } from '../services/integrationService.js';
 import { canManagePermissionSets } from '../services/roleService.js';
@@ -154,7 +155,11 @@ const xeroDrawerState = {
   // loadXeroTaxRatesIfNeeded) rather than on every status poll — it's a real Xero API call, not a
   // free local read, so it should happen once per modal session, not repeatedly.
   taxRates: null,
-  taxRatesLoading: false
+  taxRatesLoading: false,
+  // Same lazy-load-once-per-modal-session contract as taxRates above, for the Tracking Categories
+  // picker (Location tracking category, purchases tab).
+  trackingCategories: null,
+  trackingCategoriesLoading: false
 };
 
 // Xero's TaxType codes (e.g. "INPUT2") are never shown in the Chart of Accounts UI, only the
@@ -183,6 +188,49 @@ function renderXeroTaxTypeControl({ dataAttr, currentValue, placeholder, taxRate
   return `<select ${dataAttr}>${options}</select>`;
 }
 
+// Xero organisations have at most 2 Tracking Categories, each with a fixed set of Options — a
+// KCP location is matched to an Option by name (see tracking.ts), so this settings field only
+// needs to pick WHICH category represents "location", not any individual option. Same live-picker
+// contract as renderXeroTaxTypeControl: falls back to plain text before the fetch completes.
+function renderXeroTrackingCategoryControl({ currentValue, trackingCategories }) {
+  if (!Array.isArray(trackingCategories) || !trackingCategories.length) {
+    return `<input type="text" placeholder="Loaded once Xero is connected" value="${escapeAttribute(currentValue || '')}" data-xero-location-tracking-category readonly />`;
+  }
+  const knownValue = trackingCategories.some((category) => category.id === currentValue);
+  const options = [
+    '<option value="">— None (don\'t tag with location) —</option>',
+    !knownValue && currentValue
+      ? `<option value="${escapeAttribute(currentValue)}" selected>${escapeHtml(currentValue)} (currently set — not found in Xero)</option>`
+      : '',
+    ...trackingCategories.map((category) => `<option value="${escapeAttribute(category.id)}" ${category.id === currentValue ? 'selected' : ''}>${escapeHtml(category.name)}${category.status !== 'ACTIVE' ? ` — ${escapeHtml(category.status)}` : ''}</option>`)
+  ].join('');
+  return `<select data-xero-location-tracking-category>${options}</select>`;
+}
+
+async function loadXeroTrackingCategoriesIfNeeded(view) {
+  if (xeroDrawerState.trackingCategories !== null || xeroDrawerState.trackingCategoriesLoading) return;
+  if (xeroDrawerState.status?.connectionActive !== true) return;
+  xeroDrawerState.trackingCategoriesLoading = true;
+  try {
+    xeroDrawerState.trackingCategories = await fetchXeroTrackingCategories(view.dataset.workspaceId || '');
+  } catch {
+    xeroDrawerState.trackingCategories = [];
+  } finally {
+    xeroDrawerState.trackingCategoriesLoading = false;
+  }
+  if (xeroDrawerState.trackingCategories.length) refreshXeroTrackingCategoryControl(view);
+}
+
+function refreshXeroTrackingCategoryControl(view) {
+  const wrapper = view.querySelector('[data-xero-tax-control="locationTrackingCategoryId"]');
+  if (!wrapper) return;
+  const settings = xeroDrawerState.status?.settings || {};
+  wrapper.innerHTML = renderXeroTrackingCategoryControl({
+    currentValue: wrapper.querySelector('input,select')?.value || settings.locationTrackingCategoryId,
+    trackingCategories: xeroDrawerState.trackingCategories
+  });
+}
+
 async function loadXeroTaxRatesIfNeeded(view) {
   if (xeroDrawerState.taxRates !== null || xeroDrawerState.taxRatesLoading) return;
   if (xeroDrawerState.status?.connectionActive !== true) return;
@@ -204,6 +252,7 @@ function refreshXeroTaxTypeControls(view) {
   const settings = xeroDrawerState.status?.settings || {};
   const fields = [
     { wrapper: 'defaultTaxType', dataAttr: 'data-xero-tax-type', currentValue: settings.defaultTaxType, placeholder: 'e.g. OUTPUT2' },
+    { wrapper: 'salesExemptTaxType', dataAttr: 'data-xero-sales-exempt-tax-type', currentValue: settings.salesExemptTaxType, placeholder: 'e.g. EXEMPTOUTPUT' },
     { wrapper: 'purchaseTaxType', dataAttr: 'data-xero-purchase-tax-type', currentValue: settings.purchaseTaxType, placeholder: 'e.g. INPUT2' },
     { wrapper: 'purchaseExemptTaxType', dataAttr: 'data-xero-purchase-exempt-tax-type', currentValue: settings.purchaseExemptTaxType, placeholder: 'e.g. EXEMPTINPUT' }
   ];
@@ -394,10 +443,14 @@ function bindIntegrationEvents(view) {
       const tabId = button.dataset.xeroTab || 'sales';
       setActiveXeroTab(view, tabId);
       if (tabId === 'sales' || tabId === 'purchases') loadXeroTaxRatesIfNeeded(view);
+      if (tabId === 'purchases') loadXeroTrackingCategoriesIfNeeded(view);
     });
   });
   if (xeroDrawerState.activeTab === 'sales' || xeroDrawerState.activeTab === 'purchases') {
     loadXeroTaxRatesIfNeeded(view);
+  }
+  if (xeroDrawerState.activeTab === 'purchases') {
+    loadXeroTrackingCategoriesIfNeeded(view);
   }
 
   view.querySelector('[data-yoco-connect-form]')?.addEventListener('submit', async (event) => {
@@ -477,24 +530,30 @@ function bindIntegrationEvents(view) {
     event.preventDefault();
     const salesAccountCode = String(view.querySelector('[data-xero-sales-account]')?.value || '').trim();
     const defaultTaxType = String(view.querySelector('[data-xero-tax-type]')?.value || '').trim();
+    const salesExemptTaxType = String(view.querySelector('[data-xero-sales-exempt-tax-type]')?.value || '').trim();
     const itemAccountCode = String(view.querySelector('[data-xero-item-account]')?.value || '').trim();
     const enabled = view.querySelector('[data-xero-enabled]')?.checked === true;
     const purchaseAccountCode = String(view.querySelector('[data-xero-purchase-account]')?.value || '').trim();
     const purchaseTaxType = String(view.querySelector('[data-xero-purchase-tax-type]')?.value || '').trim();
     const purchaseExemptTaxType = String(view.querySelector('[data-xero-purchase-exempt-tax-type]')?.value || '').trim();
     const codPaymentAccountCode = String(view.querySelector('[data-xero-cod-payment-account]')?.value || '').trim();
+    const locationTrackingCategoryId = String(view.querySelector('[data-xero-location-tracking-category]')?.value || '').trim();
     const grvSyncEnabled = view.querySelector('[data-xero-grv-enabled]')?.checked === true;
+    const creditNoteSyncEnabled = view.querySelector('[data-xero-credit-note-enabled]')?.checked === true;
     await runXeroAction(view, 'Saving Xero settings...', async () => {
       await saveXeroSettings(view.dataset.workspaceId || '', {
         salesAccountCode,
         defaultTaxType,
+        salesExemptTaxType,
         itemAccountCode,
         enabled,
         purchaseAccountCode,
         purchaseTaxType,
         purchaseExemptTaxType,
         codPaymentAccountCode,
-        grvSyncEnabled
+        locationTrackingCategoryId,
+        grvSyncEnabled,
+        creditNoteSyncEnabled
       });
       setXeroModalStatus(view, 'Xero settings saved.', 'success');
       bindXeroStatus(view, view.dataset.workspaceId || '', { once: true });
@@ -551,6 +610,30 @@ function bindIntegrationEvents(view) {
         const summary = failedDetails
           .slice(0, 3)
           .map((item) => `${item.invoiceNumber || item.supplierName || item.grvId}: ${item.error}`)
+          .join(' · ');
+        message += ` ${summary}`;
+      }
+      setXeroModalStatus(view, message, failed ? 'error' : 'success');
+      bindXeroStatus(view, view.dataset.workspaceId || '', { once: true });
+    });
+  });
+
+  view.querySelector('[data-xero-sync-credit-notes]')?.addEventListener('click', async () => {
+    await runXeroAction(view, 'Pushing Credit Notes to Xero...', async () => {
+      const result = await syncXeroNow(view.dataset.workspaceId || '', 'credit-notes');
+      const counts = result?.result || {};
+      const applied = Number(counts.applied || 0);
+      const needsMatch = Number(counts.needsSupplierMatch || 0);
+      const failed = Number(counts.failed || 0);
+      const parts = [`${applied} Credit Note${applied === 1 ? '' : 's'} pushed`];
+      if (needsMatch) parts.push(`${needsMatch} waiting on a supplier match`);
+      if (failed) parts.push(`${failed} failed`);
+      let message = parts.join(', ') + '.';
+      const failedDetails = Array.isArray(counts.failedDetails) ? counts.failedDetails : [];
+      if (failedDetails.length) {
+        const summary = failedDetails
+          .slice(0, 3)
+          .map((item) => `${item.creditNoteNumber || item.supplierName || item.creditNoteId}: ${item.error}`)
           .join(' · ');
         message += ` ${summary}`;
       }
@@ -937,7 +1020,7 @@ function renderPendingSupplierMatchesList(matches = [], canManageXero = false) {
         <li data-supplier-id="${escapeAttribute(match.supplierId)}">
           <div class="xeroPendingMatchInfo">
             <strong>${escapeHtml(match.supplierName)}</strong>
-            <span>${match.reason === 'grv_blocked' ? `${match.grvCount} GRV${match.grvCount === 1 ? '' : 's'} waiting to push` : 'No Xero contact match found'}</span>
+            <span>${match.reason === 'grv_blocked' ? `${match.grvCount} document${match.grvCount === 1 ? '' : 's'} (GRV/Credit Note) waiting to push` : 'No Xero contact match found'}</span>
           </div>
           <div class="xeroPendingMatchActions">
             <input type="text" placeholder="Existing Xero Contact ID" data-xero-match-contact-id />
@@ -965,6 +1048,7 @@ function renderXeroModal({ canManageXero = false } = {}) {
   const settings = status.settings || {};
   const syncEnabled = settings.enabled === true;
   const grvSyncEnabled = settings.grvSyncEnabled === true;
+  const creditNoteSyncEnabled = settings.creditNoteSyncEnabled === true;
   const pendingSupplierMatches = status.pendingSupplierMatches || [];
   const pendingCount = pendingSupplierMatches.length;
   const noticeTone = xeroDrawerState.tone ? ` data-tone="${escapeAttribute(xeroDrawerState.tone)}"` : '';
@@ -1010,6 +1094,10 @@ function renderXeroModal({ canManageXero = false } = {}) {
               <span>Last GRVs pushed</span>
               <strong data-xero-grv-sync>${escapeHtml(settings.lastGrvSyncDate || 'None yet')}</strong>
             </article>
+            <article>
+              <span>Last Credit Notes pushed</span>
+              <strong data-xero-credit-note-sync>${escapeHtml(settings.lastCreditNoteSyncDate || 'None yet')}</strong>
+            </article>
             <article class="${pendingCount ? 'xeroStatRail--warning' : ''}">
               <span>Needs attention</span>
               <strong data-xero-pending-count>${pendingCount ? `${pendingCount} supplier${pendingCount === 1 ? '' : 's'}` : 'None'}</strong>
@@ -1042,6 +1130,11 @@ function renderXeroModal({ canManageXero = false } = {}) {
                 <label>
                   <span>Tax type</span>
                   <span data-xero-tax-control="defaultTaxType">${renderXeroTaxTypeControl({ dataAttr: 'data-xero-tax-type', currentValue: settings.defaultTaxType, placeholder: 'e.g. OUTPUT2', taxRates: xeroDrawerState.taxRates })}</span>
+                </label>
+                <label class="xeroFieldGrid--span2">
+                  <span>Exempt/zero-rated tax type <em>optional</em></span>
+                  <span data-xero-tax-control="salesExemptTaxType">${renderXeroTaxTypeControl({ dataAttr: 'data-xero-sales-exempt-tax-type', currentValue: settings.salesExemptTaxType, placeholder: 'e.g. EXEMPTOUTPUT', taxRates: xeroDrawerState.taxRates })}</span>
+                  <small class="xeroFieldHint">Used for products marked zero-rated/VAT-exempt in Yoco, instead of the tax type above.</small>
                 </label>
                 <label class="xeroFieldGrid--span2">
                   <span>Item account <em>optional, defaults to sales account</em></span>
@@ -1081,10 +1174,19 @@ function renderXeroModal({ canManageXero = false } = {}) {
                   <input type="text" placeholder="e.g. 090" value="${escapeAttribute(settings.codPaymentAccountCode || '')}" data-xero-cod-payment-account />
                   <small class="xeroFieldHint">Bank account COD supplier GRVs are marked paid from. Leave blank to push them Authorised without a payment.</small>
                 </label>
+                <label class="xeroFieldGrid--span2">
+                  <span>Location tracking category <em>optional</em></span>
+                  <span data-xero-tax-control="locationTrackingCategoryId">${renderXeroTrackingCategoryControl({ currentValue: settings.locationTrackingCategoryId, trackingCategories: xeroDrawerState.trackingCategories })}</span>
+                  <small class="xeroFieldHint">Tags GRVs, Credit Notes, and daily sales lines with a Xero Tracking Option matching the KCP location — lets Xero report P&amp;L per location. Matched by name; a location with no matching option is pushed without tracking.</small>
+                </label>
               </div>
               <label class="xeroToggleRow">
                 <span class="xeroToggleCopy"><strong>Push GRVs to Xero daily</strong><small>Sent as Bills alongside sales — COD suppliers push Authorised, every other payment method pushes Draft.</small></span>
                 <input type="checkbox" data-xero-grv-enabled ${grvSyncEnabled ? 'checked' : ''} />
+              </label>
+              <label class="xeroToggleRow">
+                <span class="xeroToggleCopy"><strong>Push Credit Notes to Xero daily</strong><small>Sent as Draft Credit Notes against the same supplier — reduces what's owed once a bookkeeper approves it.</small></span>
+                <input type="checkbox" data-xero-credit-note-enabled ${creditNoteSyncEnabled ? 'checked' : ''} />
               </label>
               <div class="xeroFormActions">
                 <button type="submit" class="xeroCompactButton xeroCompactButton--primary" data-xero-settings-submit>
@@ -1116,6 +1218,10 @@ function renderXeroModal({ canManageXero = false } = {}) {
               <button type="button" class="xeroCompactButton" data-xero-sync-grv ${isConnected ? '' : 'disabled'}>
                 ${icon('link')}
                 <span>Sync GRVs now</span>
+              </button>
+              <button type="button" class="xeroCompactButton" data-xero-sync-credit-notes ${isConnected ? '' : 'disabled'}>
+                ${icon('link')}
+                <span>Sync Credit Notes now</span>
               </button>
               <button type="button" class="xeroCompactButton" data-xero-sync-suppliers ${isConnected ? '' : 'disabled'}>
                 ${icon('link')}
@@ -1250,6 +1356,9 @@ function updateXeroStatus(view, status = {}, options = {}) {
   if (status.connectionActive === true && (xeroDrawerState.activeTab === 'sales' || xeroDrawerState.activeTab === 'purchases')) {
     loadXeroTaxRatesIfNeeded(view);
   }
+  if (status.connectionActive === true && xeroDrawerState.activeTab === 'purchases') {
+    loadXeroTrackingCategoriesIfNeeded(view);
+  }
   const settings = status.settings || {};
   const nextStatus = status.configured === false
     ? 'Setup Required'
@@ -1262,6 +1371,7 @@ function updateXeroStatus(view, status = {}, options = {}) {
   setText(view, '[data-xero-item-sync]', formatDateTime(settings.lastItemSyncAt) || 'Not synced yet');
   setText(view, '[data-xero-invoice-sync]', settings.lastInvoiceSyncDate || 'None yet');
   setText(view, '[data-xero-grv-sync]', settings.lastGrvSyncDate || 'None yet');
+  setText(view, '[data-xero-credit-note-sync]', settings.lastCreditNoteSyncDate || 'None yet');
   const dot = view.querySelector('[data-xero-connection-dot]');
   if (dot) dot.classList.toggle('is-connected', status.connectionActive === true);
   const pendingCount = (status.pendingSupplierMatches || []).length;
@@ -1564,10 +1674,10 @@ function setGmailBusy(view, busy) {
 
 function setXeroBusy(view, busy) {
   xeroDrawerState.busy = busy;
-  view.querySelectorAll('[data-xero-connect], [data-xero-disconnect], [data-xero-sync-items], [data-xero-sync-invoice], [data-xero-sync-invoice-today], [data-xero-sync-grv], [data-xero-sync-suppliers], [data-xero-settings-submit]').forEach((button) => {
+  view.querySelectorAll('[data-xero-connect], [data-xero-disconnect], [data-xero-sync-items], [data-xero-sync-invoice], [data-xero-sync-invoice-today], [data-xero-sync-grv], [data-xero-sync-credit-notes], [data-xero-sync-suppliers], [data-xero-settings-submit]').forEach((button) => {
     const isDisconnect = button.hasAttribute('data-xero-disconnect');
     const isConnect = button.hasAttribute('data-xero-connect');
-    const isSync = button.hasAttribute('data-xero-sync-items') || button.hasAttribute('data-xero-sync-invoice') || button.hasAttribute('data-xero-sync-invoice-today') || button.hasAttribute('data-xero-sync-grv') || button.hasAttribute('data-xero-sync-suppliers');
+    const isSync = button.hasAttribute('data-xero-sync-items') || button.hasAttribute('data-xero-sync-invoice') || button.hasAttribute('data-xero-sync-invoice-today') || button.hasAttribute('data-xero-sync-grv') || button.hasAttribute('data-xero-sync-credit-notes') || button.hasAttribute('data-xero-sync-suppliers');
     button.disabled = busy ||
       (isConnect && xeroDrawerState.status?.configured === false) ||
       (isDisconnect && xeroDrawerState.status?.connectionActive !== true) ||

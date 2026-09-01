@@ -46,8 +46,8 @@ import { sendEmail } from "./email";
 import { TENANT_MIGRATIONS } from "../tenant-migrations";
 import { checkRateLimit } from "./rate-limit";
 import {
-  applyProRataDiscount,
   calculateIncomingLocationCost,
+  computeGrvTotals,
   getWorkspaceEffectiveVatRate,
   getWorkspaceInventoryCostingMethod,
   isSupplierVatRegistered,
@@ -9194,26 +9194,23 @@ export async function postGoodsReceipt(
   // uniformly to stock lines AND the synthetic transport line below (transport charged by a
   // non-VAT-registered supplier isn't VATable either).
   const grvSupplierIsVatRegistered = await isSupplierVatRegistered(env, workspaceId, text(payload.supplierId));
-  // Transport is folded in as a synthetic VATable "line" (no matching entry in
-  // grvVatEnabledByStockItemId, so sumVatAwareLineTotals treats it as VATable by default, same as
-  // any other line) so it shares the exact same VAT-rate/inclusive-vs-exclusive handling as stock
-  // lines. It must NOT be pushed into payload.normalized.items — that array also drives the
-  // grv_lines insert loop below, and grv_lines.stock_item_id is a NOT NULL FK to a real stock item.
+  // Transport and Discount ("Transport (Ex)"/"Discount (Ex)" on screen) are ALWAYS genuine ex-VAT
+  // figures regardless of workspace registration — unlike a stock item's unitCost, which switches
+  // to VAT-inclusive when the workspace can't reclaim VAT. VAT on transport is always added on
+  // top (see computeGrvTotals's own doc comment for the regression this fixes: transport used to
+  // be folded through the SAME inclusive-vs-exclusive flag as stock lines, silently dropping its
+  // own VAT amount for a non-registered workspace).
   const transportEx = numberValue(payload.transportEx, 0);
-  const preDiscountTotals = sumVatAwareLineTotals(
-    transportEx
-      ? [...payload.normalized.items, { stockItemId: "__transport__", lineTotalEx: transportEx }]
-      : payload.normalized.items,
-    workspaceVatRate,
-    grvVatEnabledByStockItemId,
-    !grvWorkspaceIsVatRegistered,
-    grvSupplierIsVatRegistered,
-  );
-  // A discount is NOT its own VATable/non-VATable line — it's pro-rated across the taxable vs
-  // non-taxable share of the pre-discount subtotal, matching GRVEntry.js's calculateDraftTotals
-  // exactly (discountTaxableShare) so the saved total matches what the user saw on screen.
   const discountEx = numberValue(payload.discountEx, 0);
-  const grvVatAwareTotals = applyProRataDiscount(preDiscountTotals, discountEx, workspaceVatRate);
+  const grvVatAwareTotals = computeGrvTotals({
+    items: payload.normalized.items,
+    vatRate: workspaceVatRate,
+    vatEnabledByStockItemId: grvVatEnabledByStockItemId,
+    linesAreAlreadyVatInclusive: !grvWorkspaceIsVatRegistered,
+    supplierIsVatRegistered: grvSupplierIsVatRegistered,
+    transportEx,
+    discountEx,
+  });
   payload.totalEx = grvVatAwareTotals.totalEx;
   payload.totalVat = grvVatAwareTotals.totalVat;
   payload.totalInc = grvVatAwareTotals.totalInc;

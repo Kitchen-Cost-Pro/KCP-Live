@@ -157,6 +157,44 @@ export async function fetchXeroTaxRates(env: Env, workspaceId: string): Promise<
     .filter((rate) => rate.taxType);
 }
 
+export interface XeroTrackingOptionSummary {
+  id: string;
+  name: string;
+  status: string;
+}
+
+export interface XeroTrackingCategorySummary {
+  id: string;
+  name: string;
+  status: string;
+  options: XeroTrackingOptionSummary[];
+}
+
+/**
+ * Xero organisations have AT MOST 2 Tracking Categories (a hard platform limit, not
+ * KCP-configurable), and their Options must already exist in Xero — the API has no "create an
+ * option on the fly while pushing a document" path; an unrecognised Name/Option pair on a
+ * LineItem is silently DROPPED, not rejected, so guessing at option IDs is worse than useless.
+ * This mirrors `fetchXeroTaxRates`'s reasoning exactly: surface the REAL categories/options so KCP
+ * can pick one via a dropdown and match by real ID, never a typed string.
+ */
+export async function fetchXeroTrackingCategories(env: Env, workspaceId: string): Promise<XeroTrackingCategorySummary[]> {
+  const result = await executeXeroApiRequest(env, workspaceId, { method: 'GET', path: 'TrackingCategories' });
+  const categories = (result.TrackingCategories as
+    | Array<{ TrackingCategoryID?: string; Name?: string; Status?: string; Options?: Array<{ TrackingOptionID?: string; Name?: string; Status?: string }> }>
+    | undefined) || [];
+  return categories
+    .map((category) => ({
+      id: text(category.TrackingCategoryID),
+      name: text(category.Name),
+      status: text(category.Status) || 'UNKNOWN',
+      options: (category.Options || [])
+        .map((option) => ({ id: text(option.TrackingOptionID), name: text(option.Name), status: text(option.Status) || 'UNKNOWN' }))
+        .filter((option) => option.id)
+    }))
+    .filter((category) => category.id);
+}
+
 /**
  * Attachment upload — Xero's `PUT /Invoices/{InvoiceID}/Attachments/{FileName}` (used for Bills
  * too, since a Bill is just an Invoice with Type ACCPAY) takes the raw file bytes as the body with

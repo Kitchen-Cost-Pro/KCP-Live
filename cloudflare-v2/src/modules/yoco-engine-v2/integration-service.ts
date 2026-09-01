@@ -1689,6 +1689,11 @@ export async function syncYocoCatalogue(env: Env, workspaceId: string, options: 
       currentYocoProductKeys.add(productKey);
 
       const nextActive = item.active === false || item.archived === true ? 0 : 1;
+      // Yoco's own Items API already carries a per-item VAT setting (`is_taxable`, defaulting to
+      // true when a merchant hasn't explicitly marked an item tax-free) — mirrors
+      // stock_items.vat_enabled's own DEFAULT 1 convention, so an item Yoco is silent about stays
+      // VATable rather than silently becoming exempt.
+      const nextVatEnabled = item.is_taxable === false ? 0 : 1;
       const nextRawJson = jsonString({
         item,
         variant,
@@ -1710,15 +1715,16 @@ export async function syncYocoCatalogue(env: Env, workspaceId: string, options: 
 
       statements.push(env.DB.prepare(
         `INSERT INTO products
-          (id, workspace_id, name, sku, category, price, active, external_provider,
+          (id, workspace_id, name, sku, category, price, active, vat_enabled, external_provider,
            yoco_item_id, yoco_variant_id, yoco_category_id, yoco_category_name, raw_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'yoco', ?8, ?9, ?10, ?11, ?12)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'yoco', ?9, ?10, ?11, ?12, ?13)
          ON CONFLICT(workspace_id, external_provider, yoco_item_id, yoco_variant_id) DO UPDATE SET
           name = excluded.name,
           sku = excluded.sku,
           category = excluded.category,
           price = excluded.price,
           active = excluded.active,
+          vat_enabled = excluded.vat_enabled,
           yoco_category_id = excluded.yoco_category_id,
           yoco_category_name = excluded.yoco_category_name,
           raw_json = excluded.raw_json,
@@ -1728,6 +1734,7 @@ export async function syncYocoCatalogue(env: Env, workspaceId: string, options: 
             OR products.category IS NOT excluded.category
             OR products.price IS NOT excluded.price
             OR products.active IS NOT excluded.active
+            OR products.vat_enabled IS NOT excluded.vat_enabled
             OR products.yoco_category_id IS NOT excluded.yoco_category_id
             OR products.yoco_category_name IS NOT excluded.yoco_category_name
             OR products.raw_json IS NOT excluded.raw_json`
@@ -1739,6 +1746,7 @@ export async function syncYocoCatalogue(env: Env, workspaceId: string, options: 
         category.name || 'General',
         moneyToMajor(variant.price || item.price || item.default_price || item.amount),
         nextActive,
+        nextVatEnabled,
         itemId || null,
         variantId || null,
         category.id || null,

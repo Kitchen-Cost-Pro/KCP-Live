@@ -1,8 +1,10 @@
 import type { Env } from '../../legacy/types';
+import { isWorkspaceVatRegistered, isSupplierVatRegistered, getWorkspaceEffectiveVatRate, applyGrvTransportAndDiscount } from '../../legacy/inventory-costing';
 import { text, objectValue, nowIso } from './config';
 import { executeXeroApiRequest, executeXeroBinaryPutRequest, XeroApiClientError } from './api-client';
 import { claimXeroEffect, markXeroEffectApplied, markXeroEffectFailed } from './outbox';
 import { recordXeroDiagnosticIfNotable } from './observability';
+import { loadLocationTrackingContext, resolveLocationTracking } from './tracking';
 import { yesterdayDateKey } from './invoice-sync';
 import { grvToPdfBytes } from '../../../../src/modules/reporting/exports/exportPdf.js';
 
@@ -112,23 +114,32 @@ interface GrvLineRow {
   unit_price: number | null;
   total_ex: number | null;
   total_vat: number | null;
+  location_id?: string | null;
+  location_name?: string | null;
+  // Pre-resolved by pushOneGrv (via tracking.ts) BEFORE buildGrvBillPayload is called — kept off
+  // this loader/interface's own concerns so buildGrvBillPayload can stay a synchronous, easily
+  // unit-tested pure function; resolving a Xero Tracking Option is an async API call this loader
+  // has no business making.
+  tracking?: Array<{ TrackingCategoryID: string; TrackingOptionID: string }>;
 }
 
 /**
- * grv_lines (not raw_json) is the source of truth for what actually goes to Xero: unit_price/
- * total_ex there are always the ex-VAT figures the GRV was costed and posted to stock at — see
- * legacy/routes.ts's GRV save path (~9249-9298), where unitCost/totalEx are computed BEFORE any
- * VAT is added, and GRVEntry.js's "prices include VAT" toggle only changes what price the user
- * TYPES on screen (it back-calculates the ex-VAT value before submitting either way) — it never
- * changes what's stored. total_vat is real per-line VAT (0 for a zero-rated/exempt stock item, per
- * stock_items.vat_enabled — see routes.ts:9258-9262), which is what lets a Bill's exempt lines use
- * a different Xero tax type than its taxable lines.
+ * grv_lines (not raw_json) is the source of truth for what actually goes to Xero: total_ex/
+ * total_vat there are the real, already VAT-gated (item/workspace/supplier) figures GRV lines are
+ * costed and posted to stock at (see legacy/routes.ts's GRV save path calling computeGrvTotals,
+ * and postGoodsReceipt's per-line insert loop for the identical gate applied per row). `unit_price`
+ * is NOT always ex-VAT the way this comment used to claim — for a non-VAT-registered workspace
+ * it's VAT-INCLUSIVE (finalizeReceivedCost in GRVEntry.js folds the non-reclaimable VAT into it
+ * before it's ever submitted) — buildGrvBillPayload accounts for this via its own
+ * `workspaceIsVatRegistered` parameter, never by re-deriving direction from this row alone.
  */
 async function loadGrvLines(env: Env, workspaceId: string, grvId: string): Promise<GrvLineRow[]> {
   const rows = await env.DB.prepare(
-    `SELECT gl.stock_item_id, si.name AS stock_item_name, gl.quantity, gl.unit_price, gl.total_ex, gl.total_vat
+    `SELECT gl.stock_item_id, si.name AS stock_item_name, gl.quantity, gl.unit_price, gl.total_ex, gl.total_vat,
+            gl.location_id, COALESCE(l.display_name, l.name) AS location_name
      FROM grv_lines gl
      LEFT JOIN stock_items si ON si.id = gl.stock_item_id AND si.workspace_id = gl.workspace_id
+     LEFT JOIN locations l ON l.id = gl.location_id AND l.workspace_id = gl.workspace_id
      WHERE gl.grv_id = ?1 AND gl.workspace_id = ?2
      ORDER BY gl.id ASC`
   )
@@ -243,9 +254,15 @@ export async function resolveXeroContactForSupplier(
  * DiscountRate field at all; that's ACCREC/sales-invoice only), and an explicit TaxType on a
  * negative line is meant to compute correctly.
  */
-function proRataDiscountShares(lines: GrvLineRow[], transportEx: number, discountEx: number): { taxableShare: number; nonTaxableShare: number } {
+function proRataDiscountShares(lines: GrvLineRow[], transportEx: number, discountEx: number, supplierIsVatRegistered: boolean): { taxableShare: number; nonTaxableShare: number } {
   if (!discountEx) return { taxableShare: 0, nonTaxableShare: 0 };
-  let taxableExBeforeDiscount = transportEx > 0 ? transportEx : 0; // transport is always taxable
+  // Transport is taxable exactly when the supplier can charge VAT at all — same gate
+  // applyGrvTransportAndDiscount (inventory-costing.ts) uses; a non-VAT-registered supplier never
+  // charges VAT on anything they sell, transport included. Regression: this used to hardcode
+  // transport as unconditionally taxable, disagreeing with that shared source of truth whenever
+  // the workspace was registered but the supplier wasn't.
+  const transportIsTaxable = supplierIsVatRegistered && transportEx > 0;
+  let taxableExBeforeDiscount = transportIsTaxable ? transportEx : 0;
   let subtotalBeforeDiscount = transportEx > 0 ? transportEx : 0;
   for (const line of lines) {
     const lineEx = Number(line.total_ex) || 0;
@@ -256,17 +273,73 @@ function proRataDiscountShares(lines: GrvLineRow[], transportEx: number, discoun
   return { taxableShare, nonTaxableShare: discountEx - taxableShare };
 }
 
+// Xero's own built-in "no tax at all" code — unlike every other TaxType this module sends, it is
+// NOT an organisation-configurable rate (no Chart of Accounts/Tax Rates lookup needed, never
+// Archived, always valid) — the correct code for a line that genuinely carries zero VAT
+// information at all, as opposed to purchaseExemptTaxType (a real, org-specific zero-rated/exempt
+// VAT category that a VAT-REGISTERED business still reports on its VAT return).
+const NO_VAT_TAX_TYPE = 'NONE';
+
 export function buildGrvBillPayload(
   grv: GrvRow,
   lines: GrvLineRow[],
   contactId: string,
   settings: { purchaseAccountCode: string; purchaseTaxType: string; purchaseExemptTaxType: string },
+  // A non-VAT-registered business still genuinely PAYS whatever VAT a registered supplier charges
+  // — it just can never reclaim it as input VAT credit, so the true, permanent cost already
+  // includes that VAT (see GRVEntry.js's finalizeReceivedCost, and inventory-costing.ts's
+  // `linesAreAlreadyVatInclusive` for the matching stock-costing side of this same duality).
+  // grv_lines.unit_price carries that same duality itself: for a VAT-registered workspace it's
+  // ex-VAT, submitted as typed; for a non-registered workspace it's VAT-INCLUSIVE, since that
+  // inclusive figure IS the real, final, non-reclaimable cost. Before this parameter existed,
+  // every GRV pushed to Xero used the reclaimable `purchaseTaxType` regardless of registration
+  // status — for a non-registered workspace this both wrongly claimed input VAT credit the
+  // business isn't entitled to AND, because the already-inclusive `unit_price` was declared
+  // `LineAmountTypes: 'Exclusive'`, caused Xero to add VAT a SECOND time on top of an amount that
+  // already contained it, inflating the Bill total beyond what was actually paid.
+  workspaceIsVatRegistered: boolean,
+  // Transport ("Transport (Ex)") and Discount ("Discount (Ex)") are, unlike unit costs, ALWAYS
+  // genuine ex-VAT figures regardless of registration — confirmed with David 2026-09-01 — so VAT
+  // must always be added on top for them, never backed out. For a non-registered workspace that
+  // added VAT is real but non-reclaimable, so the TRUE cash amount to push (still under
+  // `NO_VAT_TAX_TYPE`, since none of it is reclaimable) is the VAT-INCLUSIVE figure, not the raw
+  // ex-VAT amount typed on screen — see `applyGrvTransportAndDiscount` in inventory-costing.ts for
+  // the shared math this must match exactly (an earlier version of this function pushed the raw
+  // ex-VAT `transport_ex`/`discount_ex` values even for a non-registered workspace, silently
+  // understating the Bill by the VAT the transporter/discount's taxable share would have carried).
+  vatRate: number,
+  supplierIsVatRegistered: boolean,
   existingBillId?: string,
   isCod = false
 ) {
   const transportEx = Number(grv.transport_ex) || 0;
   const discountEx = Number(grv.discount_ex) || 0;
-  const discountShares = proRataDiscountShares(lines, transportEx, discountEx);
+  const itemTotals = lines.reduce(
+    (sum, line) => ({
+      totalEx: sum.totalEx + (Number(line.total_ex) || 0),
+      totalVat: sum.totalVat + (Number(line.total_vat) || 0),
+      taxableEx: sum.taxableEx + (Number(line.total_vat) > 0 ? Number(line.total_ex) || 0 : 0),
+      totalInc: sum.totalInc + (Number(line.total_ex) || 0) + (Number(line.total_vat) || 0)
+    }),
+    { totalEx: 0, totalVat: 0, taxableEx: 0, totalInc: 0 }
+  );
+  const combined = applyGrvTransportAndDiscount(itemTotals, { vatRate, supplierIsVatRegistered, transportEx, discountEx });
+  // A non-registered workspace has nothing to pro-rate between taxable/non-taxable shares — none
+  // of it is reclaimable VAT, so the whole discount (its true VAT-inclusive impact) goes under the
+  // single no-VAT line below.
+  const discountShares = workspaceIsVatRegistered
+    ? proRataDiscountShares(lines, transportEx, discountEx, supplierIsVatRegistered)
+    : { taxableShare: 0, nonTaxableShare: Math.abs(combined.discountIncImpact) };
+  const transportPushAmount = workspaceIsVatRegistered ? transportEx : combined.transportInc;
+  // Mirrors the stock-line taxType decision exactly (based on the ALREADY-correct combined.transportVat,
+  // which already accounts for supplierIsVatRegistered) — a non-VAT-registered supplier never
+  // charges VAT on transport either, so it must fall to the exempt/no-VAT type just like any other
+  // non-taxable line, not the reclaimable purchaseTaxType.
+  const transportTaxType = !workspaceIsVatRegistered
+    ? NO_VAT_TAX_TYPE
+    : combined.transportVat > 0 || !settings.purchaseExemptTaxType
+      ? settings.purchaseTaxType
+      : settings.purchaseExemptTaxType;
   return {
     Invoices: [
       {
@@ -283,44 +356,64 @@ export function buildGrvBillPayload(
         // instead of sitting in Draft forever. Every other payment method still needs a human
         // review/approval step before it's a real liability, so it stays DRAFT as before.
         Status: isCod ? 'AUTHORISED' : 'DRAFT',
-        // grv_lines.unit_price is always ex-VAT (see loadGrvLines) regardless of how the GRV's
-        // "prices include VAT" toggle was set at entry — that only affects what price the user
-        // typed on screen, never what's stored — so this is always Exclusive, never conditional.
+        // Every UnitAmount below is either a genuine ex-VAT figure (registered workspace) or a
+        // genuine VAT-inclusive figure carrying TaxType 'NONE' (non-registered workspace) — in
+        // BOTH cases 'Exclusive' is the correct declaration, since Xero adds zero tax on top of a
+        // 'NONE'-taxed line regardless of this setting. Never conditional on the GRV's own
+        // "prices include VAT" entry-screen toggle, which only affects what price was TYPED, never
+        // what ends up stored.
         LineAmountTypes: 'Exclusive',
         LineItems: [
           ...(lines.length
             ? lines
-            : [{ stock_item_id: null, stock_item_name: 'Goods received', quantity: 1, unit_price: grv.total_ex || 0, total_ex: grv.total_ex, total_vat: grv.total_vat }]
+            : [{
+              stock_item_id: null,
+              stock_item_name: 'Goods received',
+              quantity: 1,
+              unit_price: (workspaceIsVatRegistered ? grv.total_ex : grv.total_inc) || 0,
+              total_ex: grv.total_ex,
+              total_vat: grv.total_vat
+            }]
           ).map((line) => {
-            // A zero-rated/VAT-exempt stock item (total_vat = 0, driven by stock_items.vat_enabled —
-            // see loadGrvLines) uses the exempt tax type if one's configured, instead of blanket-
-            // applying the normal purchases tax type to every line regardless of its real taxability.
-            const isTaxable = Number(line.total_vat) > 0;
-            const taxType = !isTaxable && settings.purchaseExemptTaxType ? settings.purchaseExemptTaxType : settings.purchaseTaxType;
+            const taxType = !workspaceIsVatRegistered
+              ? NO_VAT_TAX_TYPE
+              // A zero-rated/VAT-exempt stock item (total_vat = 0, driven by stock_items.vat_enabled
+              // or a non-VAT-registered supplier — see loadGrvLines) uses the exempt tax type if
+              // one's configured, instead of blanket-applying the normal purchases tax type.
+              : Number(line.total_vat) > 0 || !settings.purchaseExemptTaxType
+                ? settings.purchaseTaxType
+                : settings.purchaseExemptTaxType;
             return {
               Description: text(line.stock_item_name) || text(line.stock_item_id) || 'Goods received',
               Quantity: Number(line.quantity) || 1,
               UnitAmount: Number(line.unit_price) || 0,
               AccountCode: settings.purchaseAccountCode,
-              TaxType: taxType
+              TaxType: taxType,
+              // Pre-resolved by pushOneGrv (tracking.ts) — omitted entirely (not a guessed/empty
+              // value) when location tracking isn't configured or this line's location has no
+              // matching Xero option, since Xero silently drops an unrecognised Tracking entry
+              // anyway rather than erroring on it.
+              ...(line.tracking ? { Tracking: line.tracking } : {})
             };
           }),
-          // Transport is always taxable at the standard purchases tax type (same VAT treatment as
-          // any other GRV line) — never the exempt type, regardless of which stock items it shipped.
+          // Transport uses the standard purchases tax type for a VAT-registered workspace UNLESS
+          // the supplier itself isn't VAT-registered (falls to the exempt type, same as any other
+          // non-taxable line) — see transportTaxType above. Carries zero reclaimable VAT at all,
+          // like everything else on this Bill, once the workspace itself isn't registered.
           ...(transportEx > 0
             ? [{
               Description: 'Transport',
               Quantity: 1,
-              UnitAmount: transportEx,
+              UnitAmount: transportPushAmount,
               AccountCode: settings.purchaseAccountCode,
-              TaxType: settings.purchaseTaxType
+              TaxType: transportTaxType
             }]
             : []),
           // A negative-UnitAmount line, same account code — Xero's own documented way to model a
           // discount on a Bill (ACCPAY doesn't support the native DiscountRate field at all). Split
           // into up to two lines (taxable / non-taxable share) so Xero computes the same VAT
           // reduction our own totals already reflect, instead of over- or under-taxing the discount
-          // at one flat rate.
+          // at one flat rate — but only for a VAT-registered workspace; see discountShares above.
           ...(discountShares.taxableShare > 0
             ? [{
               Description: 'Discount',
@@ -332,11 +425,14 @@ export function buildGrvBillPayload(
             : []),
           ...(discountShares.nonTaxableShare > 0
             ? [{
-              Description: 'Discount (zero-rated/exempt items)',
+              // For a non-registered workspace this is the WHOLE discount (nothing is taxable at
+              // all), not just the zero-rated/exempt-item share — label it plainly rather than
+              // implying only part of the discount landed here.
+              Description: workspaceIsVatRegistered ? 'Discount (zero-rated/exempt items)' : 'Discount',
               Quantity: 1,
               UnitAmount: -discountShares.nonTaxableShare,
               AccountCode: settings.purchaseAccountCode,
-              TaxType: settings.purchaseExemptTaxType || settings.purchaseTaxType
+              TaxType: !workspaceIsVatRegistered ? NO_VAT_TAX_TYPE : settings.purchaseExemptTaxType || settings.purchaseTaxType
             }]
             : [])
         ]
@@ -441,7 +537,7 @@ async function pushOneGrv(
   env: Env,
   workspaceId: string,
   grv: GrvRow,
-  settings: { purchaseAccountCode: string; purchaseTaxType: string; purchaseExemptTaxType: string; codPaymentAccountCode?: string }
+  settings: { purchaseAccountCode: string; purchaseTaxType: string; purchaseExemptTaxType: string; codPaymentAccountCode?: string; locationTrackingCategoryId?: string }
 ): Promise<PushOneGrvOutcome> {
   const effectKey = `grv:${workspaceId}:${grv.id}`;
   const claim = await claimXeroEffect(env, workspaceId, 'GRV_PUSH', effectKey);
@@ -472,7 +568,16 @@ async function pushOneGrv(
   try {
     const lines = await loadGrvLines(env, workspaceId, grv.id);
     const isCod = isCodSupplier(grv.supplier_raw_json);
-    payload = buildGrvBillPayload(grv, lines, contactId, settings, undefined, isCod);
+    const [workspaceIsVatRegistered, supplierIsVatRegistered, vatRate, trackingContext] = await Promise.all([
+      isWorkspaceVatRegistered(env, workspaceId),
+      isSupplierVatRegistered(env, workspaceId, text(grv.supplier_id)),
+      getWorkspaceEffectiveVatRate(env, workspaceId),
+      loadLocationTrackingContext(env, workspaceId, text(settings.locationTrackingCategoryId))
+    ]);
+    const linesWithTracking = await Promise.all(
+      lines.map(async (line) => ({ ...line, tracking: await resolveLocationTracking(env, workspaceId, trackingContext, line.location_name) }))
+    );
+    payload = buildGrvBillPayload(grv, linesWithTracking, contactId, settings, workspaceIsVatRegistered, vatRate, supplierIsVatRegistered, undefined, isCod);
     const result = await executeXeroApiRequest(env, workspaceId, { method: 'POST', path: 'Invoices', body: payload });
     const invoices = (result.Invoices as Array<{ InvoiceID?: string }> | undefined) || [];
     const billId = text(invoices[0]?.InvoiceID);
@@ -504,7 +609,7 @@ async function pushOneGrv(
 export async function syncPendingXeroGrvs(
   env: Env,
   workspaceId: string,
-  settings: { purchaseAccountCode: string; purchaseTaxType: string; purchaseExemptTaxType: string; codPaymentAccountCode?: string }
+  settings: { purchaseAccountCode: string; purchaseTaxType: string; purchaseExemptTaxType: string; codPaymentAccountCode?: string; locationTrackingCategoryId?: string }
 ): Promise<{ applied: number; duplicate: number; needsSupplierMatch: number; failed: number; failedDetails?: FailedGrvPush[] }> {
   const grvs = await loadPendingGrvs(env, workspaceId);
   const counts = { applied: 0, duplicate: 0, needsSupplierMatch: 0, failed: 0 };
@@ -561,17 +666,23 @@ export async function releaseDailyGrvSyncClaim(env: Env, workspaceId: string, da
 export interface PendingSupplierMatch {
   supplierId: string;
   supplierName: string;
+  // Count of blocked pushes across BOTH GRV Bills and Credit Notes for this supplier — kept as one
+  // combined field name (`grvCount`) for frontend/API compatibility rather than renaming it, since
+  // it's already just "how many documents are stuck," not something GRV-specific to display.
   grvCount: number;
-  // 'grv_blocked': a real GRV push failed because this supplier has no linked Contact.
-  // 'manual_sync': surfaced by the standalone "Sync Suppliers" button, no GRV involved at all.
+  // 'grv_blocked': a real GRV_PUSH or CREDIT_NOTE_PUSH failed because this supplier has no linked
+  // Contact (kept the original name rather than introducing a third reason value — the UI label
+  // for this case is now generic, "N pushes waiting," not GRV-specific).
+  // 'manual_sync': surfaced by the standalone "Sync Suppliers" button, no document push involved.
   reason: 'grv_blocked' | 'manual_sync';
 }
 
-/** Backing query for the "needs attention" UI list. Unions two independent sources: real GRV_PUSH
- * failures coded as a pending supplier match (not a real API error), and suppliers flagged by
- * syncAllSuppliersToXero below that couldn't be auto-matched even though no GRV has tried them
- * yet. A supplier present in both is deduped, GRV-blocked taking priority since it's the more
- * urgent of the two (something is actually stuck, not just "not yet linked"). */
+/** Backing query for the "needs attention" UI list. Unions two independent sources: real
+ * GRV_PUSH/CREDIT_NOTE_PUSH failures coded as a pending supplier match (not a real API error), and
+ * suppliers flagged by syncAllSuppliersToXero below that couldn't be auto-matched even though no
+ * document push has tried them yet. A supplier present in both is deduped, blocked-push taking
+ * priority since it's the more urgent of the two (something is actually stuck, not just "not yet
+ * linked"). */
 export async function listPendingSupplierMatches(env: Env, workspaceId: string): Promise<PendingSupplierMatch[]> {
   const rows = await env.DB.prepare(
     `SELECT
@@ -580,7 +691,7 @@ export async function listPendingSupplierMatches(env: Env, workspaceId: string):
        COUNT(*) AS grv_count
      FROM xero_v2_effect_outbox o
      LEFT JOIN suppliers s ON s.id = substr(o.last_error, ${NEEDS_SUPPLIER_MATCH_PREFIX.length + 1}) AND s.workspace_id = o.workspace_id
-     WHERE o.workspace_id = ?1 AND o.effect_type = 'GRV_PUSH' AND o.status = 'FAILED'
+     WHERE o.workspace_id = ?1 AND o.effect_type IN ('GRV_PUSH', 'CREDIT_NOTE_PUSH') AND o.status = 'FAILED'
        AND o.last_error LIKE '${NEEDS_SUPPLIER_MATCH_PREFIX}%'
      GROUP BY supplier_id, supplier_name`
   )
@@ -669,18 +780,64 @@ export async function syncAllSuppliersToXero(env: Env, workspaceId: string): Pro
 }
 
 /**
- * Re-claims every GRV_PUSH outbox row that failed against this supplier for the coded
- * "needs a match" reason, so the next due-check (or the caller, immediately) retries them now that
- * the supplier has a Xero contact linked.
+ * Re-claims every GRV_PUSH or CREDIT_NOTE_PUSH outbox row that failed against this supplier for
+ * the coded "needs a match" reason, so the next due-check (or the caller, immediately) retries
+ * them now that the supplier has a Xero contact linked.
  */
 async function requeueGrvPushesForSupplier(env: Env, workspaceId: string, supplierId: string): Promise<void> {
   await env.DB.prepare(
     `UPDATE xero_v2_effect_outbox SET status = 'PROCESSING', updated_at = ?3
-      WHERE workspace_id = ?1 AND effect_type = 'GRV_PUSH' AND status = 'FAILED'
+      WHERE workspace_id = ?1 AND effect_type IN ('GRV_PUSH', 'CREDIT_NOTE_PUSH') AND status = 'FAILED'
         AND last_error = ?2`
   )
     .bind(workspaceId, `${NEEDS_SUPPLIER_MATCH_PREFIX}${supplierId}`, nowIso())
     .run();
+}
+
+/**
+ * Enriches a NEW Xero Contact with whatever email/phone/address KCP already has for this supplier
+ * (`suppliers.raw_json` — same fields `supplierService.js`/`normalizeSupplierPayload` in
+ * legacy/routes.ts already read/write) instead of creating a bare, name-only Contact. Only used on
+ * the explicit CREATE path — never applied to an existing matched Contact, since matching is a
+ * read+link, not a write, and shouldn't silently overwrite details someone may have already edited
+ * directly in Xero.
+ */
+function buildXeroContactFieldsForSupplier(rawJson: string | null): Record<string, unknown> {
+  if (!rawJson) return {};
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = objectValue(JSON.parse(rawJson));
+  } catch {
+    return {};
+  }
+  const email = text(parsed.email);
+  const phone = text(parsed.phone);
+  const addressLine1 = text(parsed.addressLine1);
+  const addressLine2 = text(parsed.addressLine2);
+  const city = text(parsed.city);
+  const province = text(parsed.province);
+  const postalCode = text(parsed.postalCode);
+  const country = text(parsed.country);
+  const hasAddress = Boolean(addressLine1 || city || postalCode);
+  return {
+    ...(email ? { EmailAddress: email } : {}),
+    ...(phone ? { Phones: [{ PhoneType: 'DEFAULT', PhoneNumber: phone }] } : {}),
+    ...(hasAddress
+      ? {
+        Addresses: [
+          {
+            AddressType: 'STREET',
+            AddressLine1: addressLine1,
+            AddressLine2: addressLine2,
+            City: city,
+            Region: province,
+            PostalCode: postalCode,
+            Country: country
+          }
+        ]
+      }
+      : {})
+  };
 }
 
 /** POST xero/resolve-supplier-match — either maps to an existing Xero Contact the user picked, or
@@ -702,7 +859,7 @@ export async function resolveSupplierMatch(
       const result = await executeXeroApiRequest(env, workspaceId, {
         method: 'POST',
         path: 'Contacts',
-        body: { Contacts: [{ Name: text(supplier.name) }] }
+        body: { Contacts: [{ Name: text(supplier.name), ...buildXeroContactFieldsForSupplier(supplier.raw_json) }] }
       });
       const contacts = (result.Contacts as Array<{ ContactID?: string }> | undefined) || [];
       contactId = text(contacts[0]?.ContactID);

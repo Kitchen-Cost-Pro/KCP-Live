@@ -139,3 +139,74 @@ CREATE INDEX IF NOT EXISTS idx_xero_v2_effect_outbox_workspace_status
 
 ALTER TABLE xero_sync_settings ADD COLUMN cod_payment_account_code TEXT;
 `;
+
+/**
+ * Sales-side mirror of the purchases-side vat_enabled/exempt-tax-type gate. The daily Xero sales
+ * invoice previously applied ONE FLAT `default_tax_type` to every product line regardless of
+ * whether that specific product is actually VATable — confirmed with David this is a live gap
+ * (some menu items genuinely are zero-rated/exempt).
+ *
+ * `products.vat_enabled` mirrors `stock_items.vat_enabled` exactly (1=VATable, 0=exempt,
+ * DEFAULT 1) — populated from Yoco's own Items API `is_taxable` field at catalogue-sync time (see
+ * integration-service.ts), which Yoco already exposes as a genuine per-item merchant setting, not
+ * something KCP needs its own new UI to capture.
+ *
+ * `sales_exempt_tax_type` is the sales-side analogue of `purchase_exempt_tax_type`: left blank,
+ * every sales line keeps using `default_tax_type` exactly as before — opt-in, not a behavior
+ * change until the workspace fills in their Xero org's actual zero-rated sales tax type code.
+ */
+export const XERO_V2_SALES_VAT_MIGRATION = `
+ALTER TABLE products ADD COLUMN vat_enabled INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE xero_sync_settings ADD COLUMN sales_exempt_tax_type TEXT;
+`;
+
+/**
+ * Credit Note -> Xero Credit Note (ACCPAYCREDIT) push, mirroring the GRV -> Bill push. Needs the
+ * same _next-table CHECK-constraint rebuild as XERO_V2_GRV_PUSH_MIGRATION/
+ * XERO_V2_GRV_COD_PAYMENT_MIGRATION to add the CREDIT_NOTE_PUSH effect type.
+ *
+ * Reuses the SAME purchase_account_code/purchase_tax_type/purchase_exempt_tax_type settings the
+ * GRV push already has — a credit note is still a purchases-side document, no new account/tax
+ * mapping needed. Only the sync toggle/claim state is new (own independent daily claim, same
+ * pattern as grv_sync_enabled/last_grv_sync_date/grv_sync_claimed_at, so a credit note sync
+ * failure never blocks or is blocked by the GRV sync).
+ */
+export const XERO_V2_CREDIT_NOTE_PUSH_MIGRATION = `
+DROP TABLE IF EXISTS xero_v2_effect_outbox_next;
+CREATE TABLE xero_v2_effect_outbox_next (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  effect_type TEXT NOT NULL CHECK (effect_type IN ('ITEM_PUSH', 'INVOICE_PUSH', 'GRV_PUSH', 'GRV_ATTACHMENT', 'GRV_PAYMENT', 'CREDIT_NOTE_PUSH')),
+  effect_key TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'PROCESSING' CHECK (status IN ('PROCESSING', 'APPLIED', 'FAILED')),
+  xero_object_id TEXT,
+  attempt_count INTEGER NOT NULL DEFAULT 1,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (workspace_id, effect_type, effect_key)
+);
+INSERT INTO xero_v2_effect_outbox_next (id, workspace_id, effect_type, effect_key, status, xero_object_id, attempt_count, last_error, created_at, updated_at)
+  SELECT id, workspace_id, effect_type, effect_key, status, xero_object_id, attempt_count, last_error, created_at, updated_at
+  FROM xero_v2_effect_outbox;
+DROP TABLE xero_v2_effect_outbox;
+ALTER TABLE xero_v2_effect_outbox_next RENAME TO xero_v2_effect_outbox;
+CREATE INDEX IF NOT EXISTS idx_xero_v2_effect_outbox_workspace_status
+  ON xero_v2_effect_outbox(workspace_id, effect_type, status);
+
+ALTER TABLE xero_sync_settings ADD COLUMN credit_note_sync_enabled INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE xero_sync_settings ADD COLUMN last_credit_note_sync_date TEXT;
+ALTER TABLE xero_sync_settings ADD COLUMN credit_note_sync_claimed_at TEXT;
+`;
+
+/**
+ * Location Tracking Categories: tags each GRV/Credit Note/Sales Invoice LineItem with a Xero
+ * Tracking Option matching the KCP location it belongs to, so Xero's own P&L reporting can be
+ * filtered/grouped per location without leaving Xero. Just one settings column — left blank
+ * (default), no line carries a Tracking array and every push behaves exactly as before; see
+ * tracking.ts for the resolution logic (match-by-name, skip-and-log on no match, since Xero has no
+ * create-on-the-fly API for tracking options and silently drops an unmatched Name/Option pair).
+ */
+export const XERO_V2_LOCATION_TRACKING_MIGRATION = `
+ALTER TABLE xero_sync_settings ADD COLUMN location_tracking_category_id TEXT;
+`;

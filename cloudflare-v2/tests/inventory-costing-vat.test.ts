@@ -6,6 +6,7 @@ import { TENANT_SCHEMA_SQL } from '../src/tenant-schema.generated';
 import type { DbLike, DbResult, DbStatementLike } from '../src/legacy/types';
 import {
   applyProRataDiscount,
+  computeGrvTotals,
   getWorkspaceEffectiveVatRate,
   isSupplierVatRegistered,
   isWorkspaceVatRegistered,
@@ -228,6 +229,99 @@ test('applyProRataDiscount is a no-op when the discount is 0', () => {
   const vatEnabled = new Map([['beer', true]]);
   const preDiscount = sumVatAwareLineTotals([{ stockItemId: 'beer', lineTotalEx: 100 }], 0.15, vatEnabled);
   assert.deepEqual(applyProRataDiscount(preDiscount, 0, 0.15), preDiscount);
+});
+
+// computeGrvTotals — the shared item + transport + discount total, used by postGoodsReceipt,
+// loadGrvDetail, and the Xero GRV push so this math can't diverge across call sites again.
+//
+// Regression this covers: `transport_ex` was previously fed through `sumVatAwareLineTotals`
+// alongside stock items using the workspace-registration-dependent `linesAreAlreadyVatInclusive`
+// flag — i.e. for a non-registered workspace, transport's ex-VAT/VAT split was backed OUT of it
+// like a folded stock-item cost. But "Transport (Ex)" (confirmed with David 2026-09-01, same as
+// "Discount (Ex)") is ALWAYS a genuine ex-VAT figure regardless of registration — VAT is always
+// added on top, and only becomes non-reclaimable (folded into the final total) once the workspace
+// itself isn't registered. Backing it out instead silently dropped the transport line's own VAT
+// from the total.
+
+test('computeGrvTotals: VAT-registered workspace — transport and discount behave exactly as before this fix (unchanged)', () => {
+  const vatEnabled = new Map([['water', true], ['bread', false]]);
+  const result = computeGrvTotals({
+    items: [
+      { stockItemId: 'bread', lineTotalEx: 100 },
+      { stockItemId: 'water', lineTotalEx: 100 }
+    ],
+    vatRate: 0.15,
+    vatEnabledByStockItemId: vatEnabled,
+    linesAreAlreadyVatInclusive: false,
+    supplierIsVatRegistered: true,
+    transportEx: 100,
+    discountEx: 50
+  });
+  // Pre-discount: bread 100/0, water 100/15, transport 100/15 -> totalEx 300, totalVat 30, taxableEx 200.
+  // Discount 50 pro-rated: taxableShare = 50*(200/300) = 33.333; totalEx = 300-50 = 250; totalVat = (200-33.333)*0.15 = 25.
+  assert.ok(Math.abs(result.totalEx - 250) < 1e-6, `expected totalEx ~250, got ${result.totalEx}`);
+  assert.ok(Math.abs(result.totalVat - 25) < 1e-6, `expected totalVat ~25, got ${result.totalVat}`);
+  assert.ok(Math.abs(result.totalInc - 275) < 1e-6, `expected totalInc ~275, got ${result.totalInc}`);
+  assert.ok(Math.abs(result.transportVat - 15) < 1e-9);
+});
+
+test('computeGrvTotals: the exact live regression — non-registered workspace, mixed item, transport, and discount', () => {
+  const vatEnabled = new Map([['water', true], ['bread', false]]);
+  const result = computeGrvTotals({
+    items: [
+      { stockItemId: 'bread', lineTotalEx: 100 }, // not VATable, passes through untouched
+      { stockItemId: 'water', lineTotalEx: 115 }  // VAT-inclusive item, folds to 100 ex / 15 VAT
+    ],
+    vatRate: 0.15,
+    vatEnabledByStockItemId: vatEnabled,
+    linesAreAlreadyVatInclusive: true, // non-registered workspace: ITEM lines are inclusive-typed
+    supplierIsVatRegistered: true,
+    transportEx: 100, // always ex-VAT, regardless of registration
+    discountEx: 50    // always ex-VAT, regardless of registration
+  });
+  // Correct answer, confirmed against real supplier math: transport adds R15 VAT (non-reclaimable
+  // but real) -> true pre-discount total R330; a R50 ex-VAT discount pro-rated over the R200
+  // taxable/R300 total base removes R55 of real value -> true final total R275.00. NOT R265
+  // (transport's VAT dropped) or R260.11 (both bugs at once) — both were live production bugs.
+  assert.ok(Math.abs(result.totalEx - 250) < 1e-6, `expected totalEx ~250, got ${result.totalEx}`);
+  assert.ok(Math.abs(result.totalVat - 25) < 1e-6, `expected totalVat ~25, got ${result.totalVat}`);
+  assert.ok(Math.abs(result.totalInc - 275) < 1e-6, `expected the true cash total ~275, got ${result.totalInc}`);
+  assert.ok(Math.abs(result.transportEx - 100) < 1e-9);
+  assert.ok(Math.abs(result.transportVat - 15) < 1e-9, `transport must still carry its own VAT even though the workspace can't reclaim it`);
+  assert.ok(Math.abs(result.transportInc - 115) < 1e-9);
+  assert.ok(Math.abs(result.discountIncImpact - -55) < 1e-6, `the discount's true cash impact must include its own VAT share, expected ~-55, got ${result.discountIncImpact}`);
+});
+
+test('computeGrvTotals: transport carries no VAT at all when the supplier itself is not VAT-registered', () => {
+  const vatEnabled = new Map([['water', true]]);
+  const result = computeGrvTotals({
+    items: [{ stockItemId: 'water', lineTotalEx: 100 }],
+    vatRate: 0.15,
+    vatEnabledByStockItemId: vatEnabled,
+    linesAreAlreadyVatInclusive: false,
+    supplierIsVatRegistered: false,
+    transportEx: 50,
+    discountEx: 0
+  });
+  assert.equal(result.transportVat, 0);
+  assert.equal(result.transportInc, 50);
+  assert.ok(Math.abs(result.totalInc - 150) < 1e-9);
+});
+
+test('computeGrvTotals: zero transport and zero discount is a pure pass-through of the item totals', () => {
+  const vatEnabled = new Map([['beer', true]]);
+  const result = computeGrvTotals({
+    items: [{ stockItemId: 'beer', lineTotalEx: 100 }],
+    vatRate: 0.15,
+    vatEnabledByStockItemId: vatEnabled,
+    linesAreAlreadyVatInclusive: false,
+    supplierIsVatRegistered: true,
+    transportEx: 0,
+    discountEx: 0
+  });
+  assert.equal(result.transportVat, 0);
+  assert.equal(result.discountIncImpact, 0);
+  assert.ok(Math.abs(result.totalInc - 115) < 1e-9);
 });
 
 // isSupplierVatRegistered / the supplierIsVatRegistered gate on sumVatAwareLineTotals — a

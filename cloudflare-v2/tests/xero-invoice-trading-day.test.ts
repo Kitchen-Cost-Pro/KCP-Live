@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { TENANT_SCHEMA_SQL } from '../src/tenant-schema.generated';
 import type { DbLike, DbResult, DbStatementLike } from '../src/legacy/types';
-import { businessDayUtcBounds, yesterdayDateKey, todayDateKey, claimDailyInvoiceSyncIfDue, buildDailyInvoicePayload } from '../src/modules/xero-engine/invoice-sync';
+import { businessDayUtcBounds, yesterdayDateKey, todayDateKey, claimDailyInvoiceSyncIfDue, buildDailyInvoicePayload, aggregateDailySalesLines } from '../src/modules/xero-engine/invoice-sync';
 import { XERO_V2_FOUNDATION_MIGRATION } from '../src/modules/xero-engine/migrations';
 
 // Regression: the Xero daily-sales push used to bucket every venue into a hardcoded
@@ -64,10 +64,16 @@ class SqliteDb implements DbLike {
   }
 }
 
-function createEnv(xeroSyncSettings: { enabled?: number; last_invoice_sync_date?: string; invoice_sync_claimed_at?: string } = {}) {
+function createEnv(xeroSyncSettings: { enabled?: number; last_invoice_sync_date?: string; invoice_sync_claimed_at?: string; vatRegistered?: number } = {}) {
   const DB = new SqliteDb();
   DB.database.exec(TENANT_SCHEMA_SQL);
   DB.database.exec(XERO_V2_FOUNDATION_MIGRATION);
+  // vat_registered/products.vat_enabled are added by later tenant migrations, not the baseline
+  // schema — same pattern as inventory-costing-vat.test.ts's createEnv.
+  DB.database.exec(`ALTER TABLE workspace_settings ADD COLUMN vat_registered INTEGER NOT NULL DEFAULT 1;`);
+  DB.database.exec(`ALTER TABLE products ADD COLUMN vat_enabled INTEGER NOT NULL DEFAULT 1;`);
+  DB.database.prepare(`INSERT INTO workspace_settings (workspace_id, vat_registered) VALUES ('ws_1', ?1)`)
+    .run(xeroSyncSettings.vatRegistered ?? 1);
   DB.database.prepare(
     `INSERT INTO xero_sync_settings (workspace_id, enabled, last_invoice_sync_date, invoice_sync_claimed_at, created_at, updated_at)
      VALUES ('ws_1', ?1, ?2, ?3, datetime('now'), datetime('now'))`
@@ -77,6 +83,23 @@ function createEnv(xeroSyncSettings: { enabled?: number; last_invoice_sync_date?
     xeroSyncSettings.invoice_sync_claimed_at ?? null
   );
   return { DB } as any;
+}
+
+// Seeds one yoco_orders row + its yoco_order_lines, matching how live-sale.ts/live-refund.ts
+// actually write them (refund rows use NEGATIVE quantity/total — see live-refund.ts:186-207 — this
+// helper mirrors that convention rather than re-deriving it).
+function seedOrder(
+  env: any,
+  { id, orderType = 'sale', occurredAt, productId, name, quantity, total }: { id: string; orderType?: string; occurredAt: string; productId: string | null; name: string; quantity: number; total: number }
+) {
+  env.DB.database.prepare(
+    `INSERT INTO yoco_orders (id, workspace_id, yoco_order_id, order_type, status, total, occurred_at)
+     VALUES (?1, 'ws_1', ?1, ?2, ?3, ?4, ?5)`
+  ).run(id, orderType, orderType === 'refund' ? 'refunded' : 'completed', total, occurredAt);
+  env.DB.database.prepare(
+    `INSERT INTO yoco_order_lines (id, workspace_id, yoco_order_id, product_id, name, quantity, total)
+     VALUES (?1, 'ws_1', ?2, ?3, ?4, ?5, ?6)`
+  ).run(`${id}_line`, id, productId, name, quantity, total);
 }
 
 test('businessDayUtcBounds defaults to a plain midnight-to-midnight SAST day (existing venues unaffected)', () => {
@@ -169,4 +192,213 @@ test('buildDailyInvoicePayload sends LineAmountTypes: Inclusive, matching that l
   });
   assert.equal(payload.Invoices[0].LineAmountTypes, 'Inclusive');
   assert.equal(payload.Invoices[0].LineItems[0].UnitAmount, 57.5);
+});
+
+// Regression: a non-VAT-registered workspace cannot charge real output VAT on anything it sells —
+// the daily invoice previously always used settings.defaultTaxType regardless of registration,
+// which would misreport phantom output VAT on a Xero VAT return.
+test('buildDailyInvoicePayload uses the configured defaultTaxType for a VAT-registered workspace (default/unchanged)', () => {
+  const payload = buildDailyInvoicePayload('2026-08-31', [{ label: 'Burger', product_id: 'p1', sku: 'BRG', quantity: 2, total: 115 }], {
+    salesAccountCode: '200',
+    defaultTaxType: 'OUTPUT2'
+  });
+  assert.equal(payload.Invoices[0].LineItems[0].TaxType, 'OUTPUT2');
+});
+
+test('buildDailyInvoicePayload uses TaxType NONE for every line when the workspace is not VAT-registered', () => {
+  const payload = buildDailyInvoicePayload(
+    '2026-08-31',
+    [{ label: 'Burger', product_id: 'p1', sku: 'BRG', quantity: 2, total: 115 }],
+    { salesAccountCode: '200', defaultTaxType: 'OUTPUT2' },
+    false
+  );
+  assert.equal(payload.Invoices[0].LineItems[0].TaxType, 'NONE');
+  // The amount itself must be untouched — only the tax type selection changes.
+  assert.equal(payload.Invoices[0].LineItems[0].UnitAmount, 57.5);
+});
+
+// Regression: the daily sales invoice applied ONE FLAT defaultTaxType to every product regardless
+// of that specific product's own VAT-ability — the sales-side mirror of the Purchase Order bug
+// fixed earlier this session. products.vat_enabled is synced from Yoco's own per-item `is_taxable`
+// setting (see integration-service.ts) — Yoco already exposes this as a genuine merchant setting.
+
+test('buildDailyInvoicePayload: a VATable product (vat_enabled=1) uses the standard defaultTaxType', () => {
+  const payload = buildDailyInvoicePayload(
+    '2026-08-31',
+    [{ label: 'Beer', product_id: 'p1', sku: null, quantity: 1, total: 20, vat_enabled: 1 }],
+    { salesAccountCode: '200', defaultTaxType: 'OUTPUT2', salesExemptTaxType: 'EXEMPTOUTPUT' },
+    true
+  );
+  assert.equal(payload.Invoices[0].LineItems[0].TaxType, 'OUTPUT2');
+});
+
+test('buildDailyInvoicePayload: a zero-rated product (vat_enabled=0) uses the configured exempt tax type instead', () => {
+  const payload = buildDailyInvoicePayload(
+    '2026-08-31',
+    [{ label: 'Bread', product_id: 'p2', sku: null, quantity: 1, total: 20, vat_enabled: 0 }],
+    { salesAccountCode: '200', defaultTaxType: 'OUTPUT2', salesExemptTaxType: 'EXEMPTOUTPUT' },
+    true
+  );
+  assert.equal(payload.Invoices[0].LineItems[0].TaxType, 'EXEMPTOUTPUT');
+});
+
+test('buildDailyInvoicePayload: a zero-rated product falls back to defaultTaxType when no exempt tax type is configured (opt-in, no behavior change until set)', () => {
+  const payload = buildDailyInvoicePayload(
+    '2026-08-31',
+    [{ label: 'Bread', product_id: 'p2', sku: null, quantity: 1, total: 20, vat_enabled: 0 }],
+    { salesAccountCode: '200', defaultTaxType: 'OUTPUT2' },
+    true
+  );
+  assert.equal(payload.Invoices[0].LineItems[0].TaxType, 'OUTPUT2');
+});
+
+test('buildDailyInvoicePayload: a mixed invoice applies the correct tax type per line, not one blanket type', () => {
+  const payload = buildDailyInvoicePayload(
+    '2026-08-31',
+    [
+      { label: 'Beer', product_id: 'p1', sku: null, quantity: 1, total: 20, vat_enabled: 1 },
+      { label: 'Bread', product_id: 'p2', sku: null, quantity: 1, total: 20, vat_enabled: 0 }
+    ],
+    { salesAccountCode: '200', defaultTaxType: 'OUTPUT2', salesExemptTaxType: 'EXEMPTOUTPUT' },
+    true
+  );
+  assert.equal(payload.Invoices[0].LineItems[0].TaxType, 'OUTPUT2');
+  assert.equal(payload.Invoices[0].LineItems[1].TaxType, 'EXEMPTOUTPUT');
+});
+
+test('buildDailyInvoicePayload: TaxType NONE for a non-registered workspace wins even over an exempt tax type', () => {
+  const payload = buildDailyInvoicePayload(
+    '2026-08-31',
+    [{ label: 'Bread', product_id: 'p2', sku: null, quantity: 1, total: 20, vat_enabled: 0 }],
+    { salesAccountCode: '200', defaultTaxType: 'OUTPUT2', salesExemptTaxType: 'EXEMPTOUTPUT' },
+    false
+  );
+  assert.equal(payload.Invoices[0].LineItems[0].TaxType, 'NONE');
+});
+
+test('aggregateDailySalesLines carries each product\'s own vat_enabled flag through to the aggregated row', async () => {
+  const env = createEnv();
+  env.DB.database.prepare(
+    `INSERT INTO products (id, workspace_id, name, vat_enabled) VALUES ('p1', 'ws_1', 'Beer', 1)`
+  ).run();
+  env.DB.database.prepare(
+    `INSERT INTO products (id, workspace_id, name, vat_enabled) VALUES ('p2', 'ws_1', 'Bread', 0)`
+  ).run();
+  seedOrder(env, { id: 'order_1', occurredAt: '2026-08-31T10:00:00+02:00', productId: 'p1', name: 'Beer', quantity: 1, total: 20 });
+  seedOrder(env, { id: 'order_2', occurredAt: '2026-08-31T11:00:00+02:00', productId: 'p2', name: 'Bread', quantity: 1, total: 20 });
+
+  const lines = await aggregateDailySalesLines(env, 'ws_1', '2026-08-31', 0);
+  assert.equal(lines.length, 2);
+  const beer = lines.find((line) => line.label === 'Beer');
+  const bread = lines.find((line) => line.label === 'Bread');
+  assert.equal(Number(beer.vat_enabled), 1);
+  assert.equal(Number(bread.vat_enabled), 0);
+});
+
+test('aggregateDailySalesLines defaults vat_enabled to 1 (VATable) for a name-only fallback line with no linked product', async () => {
+  const env = createEnv();
+  seedOrder(env, { id: 'order_1', occurredAt: '2026-08-31T10:00:00+02:00', productId: null, name: 'Unmapped item', quantity: 1, total: 20 });
+
+  const lines = await aggregateDailySalesLines(env, 'ws_1', '2026-08-31', 0);
+  assert.equal(lines.length, 1);
+  assert.equal(Number(lines[0].vat_enabled), 1);
+});
+
+// Regression: aggregateDailySalesLines used to filter `order_type = 'sale'` only, so a refund never
+// reduced the day's invoice — a refunded sale still showed as full revenue in Xero, permanently
+// overstating that day's income. live-refund.ts writes refund rows with NEGATIVE quantity/total,
+// keyed to the same product_id as the original sale, dated by when the refund itself happened.
+
+test('aggregateDailySalesLines nets a same-day refund against its matching sale, by product', async () => {
+  const env = createEnv();
+  seedOrder(env, { id: 'order_1', occurredAt: '2026-08-31T10:00:00+02:00', productId: null, name: 'Burger', quantity: 2, total: 100 });
+  seedOrder(env, { id: 'refund_1', orderType: 'refund', occurredAt: '2026-08-31T14:00:00+02:00', productId: null, name: 'Burger', quantity: -1, total: -50 });
+
+  const lines = await aggregateDailySalesLines(env, 'ws_1', '2026-08-31', 0);
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].quantity, 1);
+  assert.equal(lines[0].total, 50);
+});
+
+test('aggregateDailySalesLines excludes a product that nets to exactly zero that day (fully refunded) rather than dividing by zero', async () => {
+  const env = createEnv();
+  seedOrder(env, { id: 'order_1', occurredAt: '2026-08-31T10:00:00+02:00', productId: null, name: 'Burger', quantity: 1, total: 50 });
+  seedOrder(env, { id: 'refund_1', orderType: 'refund', occurredAt: '2026-08-31T14:00:00+02:00', productId: null, name: 'Burger', quantity: -1, total: -50 });
+  // A second, unaffected product must still show up.
+  seedOrder(env, { id: 'order_2', occurredAt: '2026-08-31T11:00:00+02:00', productId: null, name: 'Fries', quantity: 3, total: 60 });
+
+  const lines = await aggregateDailySalesLines(env, 'ws_1', '2026-08-31', 0);
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].label, 'Fries');
+});
+
+test('aggregateDailySalesLines includes a pure refund (no sale that day for that product) as its own negative line', async () => {
+  const env = createEnv();
+  seedOrder(env, { id: 'refund_1', orderType: 'refund', occurredAt: '2026-08-31T14:00:00+02:00', productId: null, name: 'Burger', quantity: -1, total: -50 });
+
+  const lines = await aggregateDailySalesLines(env, 'ws_1', '2026-08-31', 0);
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].quantity, -1);
+  assert.equal(lines[0].total, -50);
+});
+
+test('aggregateDailySalesLines attributes a refund to the day the REFUND happened, not the original sale day', async () => {
+  const env = createEnv();
+  seedOrder(env, { id: 'order_1', occurredAt: '2026-08-30T10:00:00+02:00', productId: null, name: 'Burger', quantity: 1, total: 50 });
+  seedOrder(env, { id: 'refund_1', orderType: 'refund', occurredAt: '2026-08-31T14:00:00+02:00', productId: null, name: 'Burger', quantity: -1, total: -50 });
+
+  const day1 = await aggregateDailySalesLines(env, 'ws_1', '2026-08-30', 0);
+  assert.equal(day1.length, 1);
+  assert.equal(day1[0].quantity, 1, 'the original sale day must NOT be retroactively changed by a later refund');
+
+  const day2 = await aggregateDailySalesLines(env, 'ws_1', '2026-08-31', 0);
+  assert.equal(day2.length, 1);
+  assert.equal(day2[0].quantity, -1, 'the refund day carries the negative adjustment instead');
+});
+
+// Location Tracking Categories — buildDailyInvoicePayload is a pure function that just spreads
+// whatever `tracking` field is already on each aggregated line, same contract as
+// buildGrvBillPayload/buildCreditNoteXeroPayload's own tracking tests.
+test('buildDailyInvoicePayload: a line with a pre-resolved tracking array gets a Tracking field', () => {
+  const payload = buildDailyInvoicePayload(
+    '2026-08-31',
+    [{ label: 'Burger', product_id: 'p1', sku: 'BRG', quantity: 2, total: 115, tracking: [{ TrackingCategoryID: 'cat_1', TrackingOptionID: 'opt_1' }] }],
+    { salesAccountCode: '200', defaultTaxType: 'OUTPUT2' }
+  );
+  assert.deepEqual(payload.Invoices[0].LineItems[0].Tracking, [{ TrackingCategoryID: 'cat_1', TrackingOptionID: 'opt_1' }]);
+});
+
+test('buildDailyInvoicePayload: a line with no tracking resolved omits the Tracking field entirely', () => {
+  const payload = buildDailyInvoicePayload('2026-08-31', [{ label: 'Burger', product_id: 'p1', sku: 'BRG', quantity: 2, total: 115 }], {
+    salesAccountCode: '200',
+    defaultTaxType: 'OUTPUT2'
+  });
+  assert.equal('Tracking' in payload.Invoices[0].LineItems[0], false);
+});
+
+test('aggregateDailySalesLines splits the same product into separate lines per location, each carrying its own location_name', async () => {
+  const env = createEnv();
+  env.DB.database.prepare(`INSERT INTO locations (id, workspace_id, name, display_name) VALUES ('loc_a', 'ws_1', 'down-bar', 'Down Bar')`).run();
+  env.DB.database.prepare(`INSERT INTO locations (id, workspace_id, name, display_name) VALUES ('loc_b', 'ws_1', 'up-bar', 'Up Bar')`).run();
+  env.DB.database.prepare(
+    `INSERT INTO yoco_orders (id, workspace_id, yoco_order_id, order_type, status, total, occurred_at, location_id)
+     VALUES ('order_a', 'ws_1', 'order_a', 'sale', 'completed', 20, '2026-08-31T10:00:00+02:00', 'loc_a')`
+  ).run();
+  env.DB.database.prepare(
+    `INSERT INTO yoco_order_lines (id, workspace_id, yoco_order_id, product_id, name, quantity, total)
+     VALUES ('order_a_line', 'ws_1', 'order_a', null, 'Beer', 1, 20)`
+  ).run();
+  env.DB.database.prepare(
+    `INSERT INTO yoco_orders (id, workspace_id, yoco_order_id, order_type, status, total, occurred_at, location_id)
+     VALUES ('order_b', 'ws_1', 'order_b', 'sale', 'completed', 20, '2026-08-31T11:00:00+02:00', 'loc_b')`
+  ).run();
+  env.DB.database.prepare(
+    `INSERT INTO yoco_order_lines (id, workspace_id, yoco_order_id, product_id, name, quantity, total)
+     VALUES ('order_b_line', 'ws_1', 'order_b', null, 'Beer', 1, 20)`
+  ).run();
+
+  const lines = await aggregateDailySalesLines(env, 'ws_1', '2026-08-31', 0);
+  assert.equal(lines.length, 2, 'the same product sold at two locations must not collapse into one line');
+  const names = lines.map((line) => line.location_name).sort();
+  assert.deepEqual(names, ['Down Bar', 'Up Bar']);
 });

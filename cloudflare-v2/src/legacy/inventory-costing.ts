@@ -189,6 +189,16 @@ export function sumVatAwareLineTotals(
  * its own line with its own VAT rate — a discount on a mixed bread+beer GRV reduces both the
  * taxable and non-taxable spend in proportion to their share of the pre-discount subtotal, not
  * at a single flat rate applied to the whole discount amount.
+ *
+ * Unlike item unit costs, the "Discount (Ex)" (and "Transport (Ex)", see computeGrvTotals below)
+ * field is ALWAYS a genuine ex-VAT figure — confirmed with David 2026-09-01 — regardless of
+ * whether the workspace is VAT-registered: VAT is always calculated by adding the rate on top,
+ * same as this function has always done, and it's only the RESULT that becomes non-reclaimable
+ * (folded into a final inclusive figure) for a non-registered workspace, not the discount's own
+ * input direction. So this function needs no registration awareness at all — an earlier attempt to
+ * add a `discountIsAlreadyVatInclusive` parameter was based on a wrong assumption and has been
+ * reverted; the actual registration-aware bug was in how the Transport line was computed (see
+ * computeGrvTotals's own comment for the real root cause and the correct combined total).
  */
 export function applyProRataDiscount(preDiscount: VatAwareLineTotals, discountEx: number, vatRate: number): VatAwareLineTotals {
   const discount = Math.max(0, numberValue(discountEx, 0));
@@ -199,6 +209,102 @@ export function applyProRataDiscount(preDiscount: VatAwareLineTotals, discountEx
   const totalEx = Math.max(0, subtotal - discount);
   const totalVat = taxableEx * vatRate;
   return { totalEx, totalVat, totalInc: totalEx + totalVat, taxableEx };
+}
+
+export interface GrvTotals extends VatAwareLineTotals {
+  transportEx: number;
+  transportVat: number;
+  transportInc: number;
+  // The discount's OWN net impact (always <= 0) on each figure — i.e. postDiscount minus
+  // preDiscount — handy for callers (the transaction-detail drawer, the Xero push) that need to
+  // show/push the discount as its own line rather than only the combined final totals.
+  discountExImpact: number;
+  discountVatImpact: number;
+  discountIncImpact: number;
+}
+
+/**
+ * Single source of truth for a GRV's combined item + transport + discount totals — used by
+ * postGoodsReceipt (what gets saved), loadGrvDetail (the transaction-detail drawer), and the Xero
+ * GRV push, so this math can't silently diverge across call sites the way it did before this fix.
+ *
+ * Root cause this replaces: `transport_ex` was previously fed through `sumVatAwareLineTotals`
+ * ALONGSIDE stock items using the SAME `linesAreAlreadyVatInclusive` flag — i.e. for a
+ * non-registered workspace, transport was treated as an already-VAT-inclusive figure and its
+ * ex-VAT/VAT split was backed OUT of it, exactly like a stock item's folded cost. But confirmed
+ * with David: the "Transport (Ex)" field (like "Discount (Ex)") is ALWAYS a genuine ex-VAT amount
+ * regardless of registration — VAT is always calculated by adding the rate on top (matching
+ * GRVEntry.js's renderTransportRow, which has always done exactly this, unconditionally). For a
+ * non-registered workspace that added VAT is simply non-reclaimable, so it must still be added
+ * before being folded into the final total — backing it out instead (the old bug) silently
+ * understated a GRV's true total by the transport line's own VAT amount.
+ *
+ * Concrete regression this fixes: R100 bread (not VATable) + R115 water (VAT-inclusive, an item,
+ * folds correctly to R100 ex/R15 VAT) + R100 transport (Ex, VAT-registered supplier) + R50
+ * discount (Ex), non-registered workspace. Transport's own VAT is R15 (100 * 15%), giving a true
+ * pre-discount total of R330 — the R50 discount (always ex-VAT, pro-rated over the R200 taxable
+ * base out of R300 ex-VAT) removes R55 of real value (R50 ex + its own R5 VAT share), landing on
+ * the correct final total of R275.00 — not R265 (transport's VAT dropped) or R260.11 (transport's
+ * VAT AND part of the discount's own VAT reduction both dropped), both of which were live bugs.
+ */
+export function computeGrvTotals(input: {
+  items: VatAwareLineInput[];
+  vatRate: number;
+  vatEnabledByStockItemId: Map<string, boolean>;
+  linesAreAlreadyVatInclusive: boolean;
+  supplierIsVatRegistered: boolean;
+  transportEx: number;
+  discountEx: number;
+}): GrvTotals {
+  const itemTotals = sumVatAwareLineTotals(
+    input.items,
+    input.vatRate,
+    input.vatEnabledByStockItemId,
+    input.linesAreAlreadyVatInclusive,
+    input.supplierIsVatRegistered
+  );
+  return applyGrvTransportAndDiscount(itemTotals, {
+    vatRate: input.vatRate,
+    supplierIsVatRegistered: input.supplierIsVatRegistered,
+    transportEx: input.transportEx,
+    discountEx: input.discountEx
+  });
+}
+
+/**
+ * The transport/discount half of computeGrvTotals, split out so a caller that already has
+ * TRUSTED, already-computed item totals (e.g. loadGrvDetail's transaction-detail drawer, reading
+ * back already-saved `grv_lines` rows) can reuse the exact same transport/discount math without
+ * having to reconstruct the original raw per-item inputs just to feed them back through
+ * `sumVatAwareLineTotals` a second time.
+ */
+export function applyGrvTransportAndDiscount(
+  itemTotals: VatAwareLineTotals,
+  input: { vatRate: number; supplierIsVatRegistered: boolean; transportEx: number; discountEx: number }
+): GrvTotals {
+  const transportEx = Math.max(0, numberValue(input.transportEx, 0));
+  // Transport is taxable exactly when the supplier can charge VAT at all — it isn't tied to any
+  // one stock item's vat_enabled, and (unlike stock lines) never depends on workspace
+  // registration for its OWN input direction.
+  const transportIsVatable = input.supplierIsVatRegistered && transportEx > 0;
+  const transportVat = transportIsVatable ? transportEx * input.vatRate : 0;
+  const transportInc = transportEx + transportVat;
+  const preDiscount: VatAwareLineTotals = {
+    totalEx: itemTotals.totalEx + transportEx,
+    totalVat: itemTotals.totalVat + transportVat,
+    taxableEx: itemTotals.taxableEx + (transportIsVatable ? transportEx : 0),
+    totalInc: itemTotals.totalInc + transportInc
+  };
+  const postDiscount = applyProRataDiscount(preDiscount, input.discountEx, input.vatRate);
+  return {
+    ...postDiscount,
+    transportEx,
+    transportVat,
+    transportInc,
+    discountExImpact: postDiscount.totalEx - preDiscount.totalEx,
+    discountVatImpact: postDiscount.totalVat - preDiscount.totalVat,
+    discountIncImpact: postDiscount.totalInc - preDiscount.totalInc
+  };
 }
 
 /** Batched vat_enabled lookup for a set of stock items — one query regardless of line count. */

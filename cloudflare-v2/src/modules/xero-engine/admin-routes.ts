@@ -2,7 +2,7 @@ import type { AuthContext, Env } from '../../legacy/types';
 import { text, nowIso, xeroConfigured, xeroRedirectUri } from './config';
 import { signXeroState, verifyXeroState, buildXeroAuthorizeUrl, exchangeXeroCode, fetchXeroConnections } from './oauth';
 import { getXeroConnection, saveXeroConnection, disconnectXero } from './connection';
-import { fetchXeroTaxRates, XeroApiClientError } from './api-client';
+import { fetchXeroTaxRates, fetchXeroTrackingCategories, XeroApiClientError } from './api-client';
 import { canManageXero } from './admin-permissions';
 import { syncXeroItemsForWorkspace } from './item-sync';
 import { syncXeroDailyInvoice, upsertXeroTodayInvoice, claimDailyInvoiceSyncIfDue, releaseDailyInvoiceSyncClaim, yesterdayDateKey, todayDateKey } from './invoice-sync';
@@ -15,6 +15,11 @@ import {
   resolveSupplierMatch,
   syncAllSuppliersToXero
 } from './grv-sync';
+import {
+  syncPendingXeroCreditNotes,
+  claimDailyCreditNoteSyncIfDue,
+  releaseDailyCreditNoteSyncClaim
+} from './credit-note-sync';
 
 function response(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
@@ -51,16 +56,20 @@ function callbackHtml(message: string, ok: boolean): Response {
 interface SyncSettingsRow {
   sales_account_code: string | null;
   default_tax_type: string | null;
+  sales_exempt_tax_type: string | null;
   item_account_code: string | null;
   purchase_account_code: string | null;
   purchase_tax_type: string | null;
   purchase_exempt_tax_type: string | null;
   cod_payment_account_code: string | null;
+  location_tracking_category_id: string | null;
   enabled: number;
   grv_sync_enabled: number;
+  credit_note_sync_enabled: number;
   last_item_sync_at: string | null;
   last_invoice_sync_date: string | null;
   last_grv_sync_date: string | null;
+  last_credit_note_sync_date: string | null;
 }
 
 async function getSyncSettings(env: Env, workspaceId: string): Promise<SyncSettingsRow | null> {
@@ -83,16 +92,20 @@ async function getStatus(env: Env, workspaceId: string) {
       ? {
           salesAccountCode: text(settings.sales_account_code),
           defaultTaxType: text(settings.default_tax_type),
+          salesExemptTaxType: text(settings.sales_exempt_tax_type),
           itemAccountCode: text(settings.item_account_code),
           purchaseAccountCode: text(settings.purchase_account_code),
           purchaseTaxType: text(settings.purchase_tax_type),
           purchaseExemptTaxType: text(settings.purchase_exempt_tax_type),
           codPaymentAccountCode: text(settings.cod_payment_account_code),
+          locationTrackingCategoryId: text(settings.location_tracking_category_id),
           enabled: Boolean(settings.enabled),
           grvSyncEnabled: Boolean(settings.grv_sync_enabled),
+          creditNoteSyncEnabled: Boolean(settings.credit_note_sync_enabled),
           lastItemSyncAt: text(settings.last_item_sync_at),
           lastInvoiceSyncDate: text(settings.last_invoice_sync_date),
-          lastGrvSyncDate: text(settings.last_grv_sync_date)
+          lastGrvSyncDate: text(settings.last_grv_sync_date),
+          lastCreditNoteSyncDate: text(settings.last_credit_note_sync_date)
         }
       : null,
     pendingSupplierMatches
@@ -159,35 +172,53 @@ async function postSettings(request: Request, env: Env, workspaceId: string) {
   const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
   const salesAccountCode = text(body.salesAccountCode);
   const defaultTaxType = text(body.defaultTaxType);
+  const salesExemptTaxType = text(body.salesExemptTaxType);
   const itemAccountCode = text(body.itemAccountCode) || salesAccountCode;
   const enabled = Boolean(body.enabled);
   const purchaseAccountCode = text(body.purchaseAccountCode);
   const purchaseTaxType = text(body.purchaseTaxType);
   const purchaseExemptTaxType = text(body.purchaseExemptTaxType);
   const codPaymentAccountCode = text(body.codPaymentAccountCode);
+  const locationTrackingCategoryId = text(body.locationTrackingCategoryId);
   const grvSyncEnabled = Boolean(body.grvSyncEnabled);
+  const creditNoteSyncEnabled = Boolean(body.creditNoteSyncEnabled);
   if (enabled && (!salesAccountCode || !defaultTaxType)) {
     return response({ ok: false, error: 'A sales account code and tax type are required before enabling sync.' }, 400);
   }
   if (grvSyncEnabled && (!purchaseAccountCode || !purchaseTaxType)) {
     return response({ ok: false, error: 'A purchases account code and tax type are required before enabling GRV sync.' }, 400);
   }
+  // A COD GRV pushes AUTHORISED (not Draft) precisely because it's already paid at delivery — no
+  // bookkeeper review needed (see buildGrvBillPayload's doc comment). But "already paid" is only
+  // actually true in Xero once applyCodPayment records a matching Payment against that Bill, which
+  // silently no-ops without this account code — leaving a COD Bill sitting AUTHORISED but UNPAID,
+  // i.e. an open liability for a purchase that was, in reality, already settled. Requiring this
+  // up front closes that gap instead of leaving it as a silent, easy-to-miss misconfiguration.
+  if (grvSyncEnabled && !codPaymentAccountCode) {
+    return response({ ok: false, error: 'A COD payment account is required before enabling GRV sync — COD GRVs push as paid/final, and Xero needs an account to record that payment against.' }, 400);
+  }
+  if (creditNoteSyncEnabled && (!purchaseAccountCode || !purchaseTaxType)) {
+    return response({ ok: false, error: 'A purchases account code and tax type are required before enabling Credit Note sync.' }, 400);
+  }
   await env.DB.prepare(
-    `INSERT INTO xero_sync_settings (workspace_id, sales_account_code, default_tax_type, item_account_code, enabled, purchase_account_code, purchase_tax_type, purchase_exempt_tax_type, cod_payment_account_code, grv_sync_enabled, created_at, updated_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)
+    `INSERT INTO xero_sync_settings (workspace_id, sales_account_code, default_tax_type, sales_exempt_tax_type, item_account_code, enabled, purchase_account_code, purchase_tax_type, purchase_exempt_tax_type, cod_payment_account_code, location_tracking_category_id, grv_sync_enabled, credit_note_sync_enabled, created_at, updated_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)
      ON CONFLICT(workspace_id) DO UPDATE SET
        sales_account_code = excluded.sales_account_code,
        default_tax_type = excluded.default_tax_type,
+       sales_exempt_tax_type = excluded.sales_exempt_tax_type,
        item_account_code = excluded.item_account_code,
        enabled = excluded.enabled,
        purchase_account_code = excluded.purchase_account_code,
        purchase_tax_type = excluded.purchase_tax_type,
        purchase_exempt_tax_type = excluded.purchase_exempt_tax_type,
        cod_payment_account_code = excluded.cod_payment_account_code,
+       location_tracking_category_id = excluded.location_tracking_category_id,
        grv_sync_enabled = excluded.grv_sync_enabled,
+       credit_note_sync_enabled = excluded.credit_note_sync_enabled,
        updated_at = excluded.updated_at`
   )
-    .bind(workspaceId, salesAccountCode, defaultTaxType, itemAccountCode, enabled ? 1 : 0, purchaseAccountCode, purchaseTaxType, purchaseExemptTaxType, codPaymentAccountCode, grvSyncEnabled ? 1 : 0, nowIso())
+    .bind(workspaceId, salesAccountCode, defaultTaxType, salesExemptTaxType, itemAccountCode, enabled ? 1 : 0, purchaseAccountCode, purchaseTaxType, purchaseExemptTaxType, codPaymentAccountCode, locationTrackingCategoryId, grvSyncEnabled ? 1 : 0, creditNoteSyncEnabled ? 1 : 0, nowIso())
     .run();
   return response({ ok: true });
 }
@@ -208,10 +239,11 @@ async function postResolveSupplierMatch(request: Request, env: Env, workspaceId:
 async function postSyncNow(env: Env, workspaceId: string, kind: string) {
   const settings = await getSyncSettings(env, workspaceId);
   if (!settings) return response({ ok: false, error: 'Connect Xero and set up sync settings first.' }, 400);
-  // GRV sync has its own independent account-code/tax settings (checked in its own branch below) —
-  // it doesn't need sales_account_code/default_tax_type, which only gate the sales-side kinds.
-  // Supplier matching needs no account-code/tax setup at all — it only reads/matches Contacts.
-  if (kind !== 'grv' && kind !== 'suppliers' && (!settings.sales_account_code || !settings.default_tax_type)) {
+  // GRV/Credit Note sync each have their own independent account-code/tax settings (checked in
+  // their own branches below) — neither needs sales_account_code/default_tax_type, which only
+  // gate the sales-side kinds. Supplier matching needs no account-code/tax setup at all — it only
+  // reads/matches Contacts.
+  if (kind !== 'grv' && kind !== 'credit-notes' && kind !== 'suppliers' && (!settings.sales_account_code || !settings.default_tax_type)) {
     return response({ ok: false, error: 'Set a sales account code and tax type in Xero settings first.' }, 400);
   }
   if (kind === 'suppliers') {
@@ -232,7 +264,9 @@ async function postSyncNow(env: Env, workspaceId: string, kind: string) {
     const dateKey = yesterdayDateKey(startHour);
     const result = await syncXeroDailyInvoice(env, workspaceId, dateKey, {
       salesAccountCode: text(settings.sales_account_code),
-      defaultTaxType: text(settings.default_tax_type)
+      defaultTaxType: text(settings.default_tax_type),
+      salesExemptTaxType: text(settings.sales_exempt_tax_type),
+      locationTrackingCategoryId: text(settings.location_tracking_category_id)
     }, startHour);
     return response({ ok: true, dateKey, result });
   }
@@ -242,7 +276,9 @@ async function postSyncNow(env: Env, workspaceId: string, kind: string) {
     const startHour = await getWorkspaceTradingDayStartHour(env, workspaceId);
     const result = await upsertXeroTodayInvoice(env, workspaceId, {
       salesAccountCode: text(settings.sales_account_code),
-      defaultTaxType: text(settings.default_tax_type)
+      defaultTaxType: text(settings.default_tax_type),
+      salesExemptTaxType: text(settings.sales_exempt_tax_type),
+      locationTrackingCategoryId: text(settings.location_tracking_category_id)
     }, startHour);
     return response({ ok: true, dateKey: todayDateKey(startHour), result });
   }
@@ -256,11 +292,26 @@ async function postSyncNow(env: Env, workspaceId: string, kind: string) {
       purchaseAccountCode: text(settings.purchase_account_code),
       purchaseTaxType: text(settings.purchase_tax_type),
       purchaseExemptTaxType: text(settings.purchase_exempt_tax_type),
-      codPaymentAccountCode: text(settings.cod_payment_account_code)
+      codPaymentAccountCode: text(settings.cod_payment_account_code),
+      locationTrackingCategoryId: text(settings.location_tracking_category_id)
     });
     return response({ ok: true, result });
   }
-  return response({ ok: false, error: 'Unknown sync kind. Use "items", "invoice", "invoice-today", "grv", or "suppliers".' }, 400);
+  if (kind === 'credit-notes') {
+    if (!settings.purchase_account_code || !settings.purchase_tax_type) {
+      return response({ ok: false, error: 'Set a purchases account code and tax type in Xero settings first.' }, 400);
+    }
+    // Same underlying scan as the automatic due-check (see runDueCreditNoteSync below) — this just
+    // runs it immediately instead of waiting for the once-a-day claim to become due.
+    const result = await syncPendingXeroCreditNotes(env, workspaceId, {
+      purchaseAccountCode: text(settings.purchase_account_code),
+      purchaseTaxType: text(settings.purchase_tax_type),
+      purchaseExemptTaxType: text(settings.purchase_exempt_tax_type),
+      locationTrackingCategoryId: text(settings.location_tracking_category_id)
+    });
+    return response({ ok: true, result });
+  }
+  return response({ ok: false, error: 'Unknown sync kind. Use "items", "invoice", "invoice-today", "grv", "credit-notes", or "suppliers".' }, 400);
 }
 
 async function runDueInvoiceSync(env: Env, workspaceId: string) {
@@ -277,7 +328,9 @@ async function runDueInvoiceSync(env: Env, workspaceId: string) {
   }
   const result = await syncXeroDailyInvoice(env, workspaceId, claim.dateKey, {
     salesAccountCode: text(settings.sales_account_code),
-    defaultTaxType: text(settings.default_tax_type)
+    defaultTaxType: text(settings.default_tax_type),
+    salesExemptTaxType: text(settings.sales_exempt_tax_type),
+    locationTrackingCategoryId: text(settings.location_tracking_category_id)
   }, startHour);
   const success = result.status === 'applied' || result.status === 'duplicate' || result.status === 'skipped_no_sales';
   await releaseDailyInvoiceSyncClaim(env, workspaceId, claim.dateKey, success);
@@ -299,7 +352,8 @@ async function runDueGrvSync(env: Env, workspaceId: string) {
     purchaseAccountCode: text(settings.purchase_account_code),
     purchaseTaxType: text(settings.purchase_tax_type),
     purchaseExemptTaxType: text(settings.purchase_exempt_tax_type),
-    codPaymentAccountCode: text(settings.cod_payment_account_code)
+    codPaymentAccountCode: text(settings.cod_payment_account_code),
+    locationTrackingCategoryId: text(settings.location_tracking_category_id)
   });
   // A failed or needs-supplier-match GRV isn't lost — it stays retryable in its own outbox row and
   // syncPendingXeroGrvs re-scans ALL such rows (not just today's) on every call, including
@@ -309,9 +363,36 @@ async function runDueGrvSync(env: Env, workspaceId: string) {
   return { dateKey: claim.dateKey, result } as const;
 }
 
+// Credit Notes are claimed/released independently of the sales invoice and GRV sync above — a
+// workspace can run any combination without one blocking the others, same reasoning as
+// runDueGrvSync. Runs from the same due-check tick so credit notes go out alongside sales/GRVs.
+async function runDueCreditNoteSync(env: Env, workspaceId: string) {
+  const claim = await claimDailyCreditNoteSyncIfDue(env, workspaceId);
+  if (!claim.due || !claim.dateKey) return { skipped: true } as const;
+  const settings = await getSyncSettings(env, workspaceId);
+  if (!settings || !settings.purchase_account_code || !settings.purchase_tax_type) {
+    await releaseDailyCreditNoteSyncClaim(env, workspaceId, claim.dateKey, false);
+    return { skipped: true, reason: 'Xero Credit Note sync settings incomplete.' } as const;
+  }
+  const result = await syncPendingXeroCreditNotes(env, workspaceId, {
+    purchaseAccountCode: text(settings.purchase_account_code),
+    purchaseTaxType: text(settings.purchase_tax_type),
+    purchaseExemptTaxType: text(settings.purchase_exempt_tax_type),
+    locationTrackingCategoryId: text(settings.location_tracking_category_id)
+  });
+  // Same reasoning as runDueGrvSync: a failed/needs-match credit note stays retryable in its own
+  // outbox row and is re-scanned on every call, so this claim only gates run frequency.
+  await releaseDailyCreditNoteSyncClaim(env, workspaceId, claim.dateKey, true);
+  return { dateKey: claim.dateKey, result } as const;
+}
+
 async function postDueCheck(env: Env, workspaceId: string) {
-  const [invoice, grv] = await Promise.all([runDueInvoiceSync(env, workspaceId), runDueGrvSync(env, workspaceId)]);
-  return response({ ok: true, invoice, grv });
+  const [invoice, grv, creditNotes] = await Promise.all([
+    runDueInvoiceSync(env, workspaceId),
+    runDueGrvSync(env, workspaceId),
+    runDueCreditNoteSync(env, workspaceId)
+  ]);
+  return response({ ok: true, invoice, grv, creditNotes });
 }
 
 export async function handleXeroAdminRoute(
@@ -355,6 +436,14 @@ export async function handleXeroAdminRoute(
       return response({ ok: true, taxRates: await fetchXeroTaxRates(env, workspaceId) });
     } catch (cause) {
       const message = cause instanceof XeroApiClientError ? cause.message : cause instanceof Error ? cause.message : 'Could not load Xero tax rates.';
+      return response({ ok: false, error: message }, 400);
+    }
+  }
+  if (request.method === 'GET' && resource === 'xero/tracking-categories') {
+    try {
+      return response({ ok: true, trackingCategories: await fetchXeroTrackingCategories(env, workspaceId) });
+    } catch (cause) {
+      const message = cause instanceof XeroApiClientError ? cause.message : cause instanceof Error ? cause.message : 'Could not load Xero tracking categories.';
       return response({ ok: false, error: message }, 400);
     }
   }

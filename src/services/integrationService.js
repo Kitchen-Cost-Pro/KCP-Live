@@ -138,6 +138,14 @@ export async function fetchXeroTaxRates(workspaceId) {
   return Array.isArray(result?.taxRates) ? result.taxRates : [];
 }
 
+/** Real Tracking Categories/Options from the connected Xero organisation — same "never guess, show
+ * the real thing" reasoning as fetchXeroTaxRates: Xero silently drops an unmatched tracking option
+ * on a document rather than rejecting it, so a free-text field would fail invisibly. */
+export async function fetchXeroTrackingCategories(workspaceId) {
+  const result = await callCloudflareWorkspaceRoute(workspaceId, 'xero/tracking-categories', { method: 'GET' });
+  return Array.isArray(result?.trackingCategories) ? result.trackingCategories : [];
+}
+
 /** Resolves one pending "needs a supplier match" entry: pass either { xeroContactId } to map to a
  * Xero contact the user already picked, or { createNew: true } to create a new one — the daily
  * background sync never creates a Xero contact on its own, only this explicit user action does. */
@@ -167,15 +175,24 @@ function normalizeXeroStatus(value = {}) {
     settings: {
       salesAccountCode: settings.salesAccountCode || '',
       defaultTaxType: settings.defaultTaxType || '',
+      // salesExemptTaxType/codPaymentAccountCode/creditNoteSyncEnabled/lastCreditNoteSyncDate were
+      // missing here even though admin-routes.ts's getStatus already returned them — every reopen
+      // of the settings drawer silently showed these as blank/off regardless of what was actually
+      // saved. locationTrackingCategoryId is new, added alongside this fix.
+      salesExemptTaxType: settings.salesExemptTaxType || '',
       itemAccountCode: settings.itemAccountCode || '',
       purchaseAccountCode: settings.purchaseAccountCode || '',
       purchaseTaxType: settings.purchaseTaxType || '',
       purchaseExemptTaxType: settings.purchaseExemptTaxType || '',
+      codPaymentAccountCode: settings.codPaymentAccountCode || '',
+      locationTrackingCategoryId: settings.locationTrackingCategoryId || '',
       enabled: settings.enabled === true,
       grvSyncEnabled: settings.grvSyncEnabled === true,
+      creditNoteSyncEnabled: settings.creditNoteSyncEnabled === true,
       lastItemSyncAt: settings.lastItemSyncAt || '',
       lastInvoiceSyncDate: settings.lastInvoiceSyncDate || '',
-      lastGrvSyncDate: settings.lastGrvSyncDate || ''
+      lastGrvSyncDate: settings.lastGrvSyncDate || '',
+      lastCreditNoteSyncDate: settings.lastCreditNoteSyncDate || ''
     },
     pendingSupplierMatches: pendingSupplierMatches.map((match) => ({
       supplierId: match.supplierId || '',

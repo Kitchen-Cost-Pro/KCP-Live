@@ -3,6 +3,13 @@ import { text, nowIso } from './config';
 import { executeXeroApiRequest, XeroApiClientError } from './api-client';
 import { claimXeroEffect, markXeroEffectApplied, markXeroEffectFailed, getXeroEffect, upsertXeroEffectApplied } from './outbox';
 import { recordXeroDiagnosticIfNotable } from './observability';
+import { isWorkspaceVatRegistered } from '../../legacy/inventory-costing';
+import { loadLocationTrackingContext, resolveLocationTracking, type LocationTrackingContext } from './tracking';
+
+// Xero's own built-in "no tax at all" code — see grv-sync.ts's identical constant/reasoning. A
+// non-VAT-registered business cannot charge real output VAT on anything it sells, so every sales
+// line must use this instead of the org-configurable `defaultTaxType` once that's true.
+const NO_VAT_TAX_TYPE = 'NONE';
 
 interface AggregatedLineRow {
   label: string;
@@ -10,6 +17,12 @@ interface AggregatedLineRow {
   sku: string | null;
   quantity: number;
   total: number;
+  vat_enabled: number;
+  location_id: string | null;
+  location_name: string | null;
+  // Pre-resolved by syncXeroDailyInvoice/upsertXeroTodayInvoice (via tracking.ts) before
+  // buildDailyInvoicePayload is called — same reasoning as grv-sync.ts's GrvLineRow.tracking.
+  tracking?: Array<{ TrackingCategoryID: string; TrackingOptionID: string }>;
 }
 
 function clampStartHour(startHour: number): number {
@@ -29,7 +42,7 @@ export function businessDayUtcBounds(dateKey: string, startHour = 0): { startIso
   return { startIso: start.toISOString(), endIso: end.toISOString() };
 }
 
-async function aggregateDailySalesLines(env: Env, workspaceId: string, dateKey: string, startHour: number): Promise<AggregatedLineRow[]> {
+export async function aggregateDailySalesLines(env: Env, workspaceId: string, dateKey: string, startHour: number): Promise<AggregatedLineRow[]> {
   const { startIso, endIso } = businessDayUtcBounds(dateKey, startHour);
   // No status filter, matching the Sales Financial report's own query (reporting-routes.ts's
   // buildSalesWhere only adds a status predicate if the user explicitly picks one) — a row only
@@ -42,20 +55,46 @@ async function aggregateDailySalesLines(env: Env, workspaceId: string, dateKey: 
   // johannesburgIso in live-sale.ts) — raw string comparison against 'Z'-suffixed bounds doesn't
   // reliably match, so both sides are wrapped in datetime() here, same as
   // addZonedDateRange in reporting-routes.ts does for exactly this reason.
+  //
+  // Regression: this used to filter `order_type = 'sale'` only, so a refund never reduced the
+  // day's invoice at all — every refunded sale still showed as full revenue in Xero, permanently
+  // overstating that day's income until someone manually corrected it. live-refund.ts already
+  // writes refund rows with NEGATIVE quantity/total (`-Math.abs(...)`), keyed to the same
+  // `product_id` the original sale used (via mapped_menu_item_id, see refund-resolver.ts) and
+  // dated by when the REFUND happened, not the original sale — so simply including 'refund' rows
+  // here nets them straight into whichever day the refund actually occurred on (never retroactively
+  // rewriting an already-pushed prior day's invoice). HAVING excludes a product that net to exactly
+  // zero that day (fully refunded) — SUM(quantity)=0 would otherwise divide-by-zero into a NaN
+  // UnitAmount below and corrupt the whole day's payload.
+  // vat_enabled: a product with no linked `products` row (a name-only fallback — never happened
+  // via Yoco sync, but possible for legacy/unmapped lines) defaults to VATable (1), matching
+  // stock_items.vat_enabled's own "unknown = VATable" convention (loadVatEnabledByStockItemId in
+  // inventory-costing.ts). Wrapped in MAX() only to satisfy SQLite's aggregate-query grouping
+  // rules — it's a single constant value per group, since it's a property of the (one) product
+  // each group represents, not something that varies across the rows being summed.
+  // Grouped by location too (in addition to product) so each aggregated line can carry a single
+  // Xero Tracking Option — same "order-level location, not the line's own selling_location_id"
+  // convention reporting-routes.ts already uses for sales (e.g. its yo.location_id joins), kept
+  // here so this and the existing Sales Financial report attribute a sale to the same location.
   const rows = await env.DB.prepare(
     `SELECT
        COALESCE(p.name, ol.name) AS label,
        ol.product_id AS product_id,
        p.sku AS sku,
        SUM(ol.quantity) AS quantity,
-       SUM(ol.total) AS total
+       SUM(ol.total) AS total,
+       MAX(COALESCE(p.vat_enabled, 1)) AS vat_enabled,
+       o.location_id AS location_id,
+       COALESCE(l.display_name, l.name) AS location_name
      FROM yoco_order_lines ol
      JOIN yoco_orders o ON o.id = ol.yoco_order_id AND o.workspace_id = ol.workspace_id
      LEFT JOIN products p ON p.id = ol.product_id AND p.workspace_id = ol.workspace_id
+     LEFT JOIN locations l ON l.id = o.location_id AND l.workspace_id = o.workspace_id
      WHERE ol.workspace_id = ?1
-       AND o.order_type = 'sale'
+       AND o.order_type IN ('sale', 'refund')
        AND datetime(o.occurred_at) >= datetime(?2) AND datetime(o.occurred_at) < datetime(?3)
-     GROUP BY COALESCE(ol.product_id, ol.name)
+     GROUP BY COALESCE(ol.product_id, ol.name), o.location_id
+     HAVING SUM(ol.quantity) != 0
      ORDER BY label ASC`
   )
     .bind(workspaceId, startIso, endIso)
@@ -63,10 +102,31 @@ async function aggregateDailySalesLines(env: Env, workspaceId: string, dateKey: 
   return rows.results || [];
 }
 
+// Shared by syncXeroDailyInvoice/upsertXeroTodayInvoice — attaches a resolved Tracking array to
+// each already-aggregated line, mirroring pushOneGrv's/pushOneCreditNote's identical pattern.
+async function attachLocationTracking(
+  env: Env,
+  workspaceId: string,
+  lines: AggregatedLineRow[],
+  trackingContext: LocationTrackingContext | null
+): Promise<AggregatedLineRow[]> {
+  return Promise.all(
+    lines.map(async (line) => ({ ...line, tracking: await resolveLocationTracking(env, workspaceId, trackingContext, line.location_name) }))
+  );
+}
+
 export function buildDailyInvoicePayload(
   dateKey: string,
   lines: AggregatedLineRow[],
-  settings: { salesAccountCode: string; defaultTaxType: string },
+  settings: { salesAccountCode: string; defaultTaxType: string; salesExemptTaxType?: string; locationTrackingCategoryId?: string },
+  // A non-VAT-registered business cannot charge real output VAT on anything it sells — the daily
+  // invoice previously always used `settings.defaultTaxType` regardless of registration, which
+  // would misreport phantom output VAT on a Xero VAT return for a business that legally has none.
+  // `yoco_order_lines.total` already reflects the correct real amount charged either way (the
+  // per-sale VAT snapshot in live-sale.ts/live-refund.ts already zeroes the rate for a
+  // non-registered workspace), so only the TaxType selection needs to change here — never the
+  // amount itself.
+  workspaceIsVatRegistered = true,
   existingInvoiceId?: string
 ) {
   return {
@@ -83,14 +143,29 @@ export function buildDailyInvoicePayload(
         // sale-resolver.ts's lineAmounts (net = gross - tax). 'Exclusive' here previously told Xero
         // "this is the ex-VAT amount, add tax on top", double-counting VAT on every sales line.
         // 'Inclusive' tells Xero the UnitAmount already includes tax, which is what it actually is.
+        // Still correct with TaxType 'NONE' below — Xero adds zero tax on top of a 'NONE' line
+        // regardless of this setting, so the already-correct gross amount passes through unchanged.
         LineAmountTypes: 'Inclusive',
-        LineItems: lines.map((line) => ({
-          Description: text(line.label) || text(line.sku) || 'POS sale',
-          Quantity: Number(line.quantity) || 1,
-          UnitAmount: (Number(line.total) || 0) / (Number(line.quantity) || 1),
-          AccountCode: settings.salesAccountCode,
-          TaxType: settings.defaultTaxType
-        }))
+        LineItems: lines.map((line) => {
+          // A zero-rated/VAT-exempt product (vat_enabled = 0, synced from Yoco's own per-item
+          // `is_taxable` setting — see integration-service.ts) uses the exempt tax type if one's
+          // configured, instead of blanket-applying the standard sales tax type to every product
+          // regardless of its own real taxability — same pattern as purchaseExemptTaxType on the
+          // GRV side (grv-sync.ts).
+          const taxType = !workspaceIsVatRegistered
+            ? NO_VAT_TAX_TYPE
+            : Number(line.vat_enabled) === 0 && settings.salesExemptTaxType
+              ? settings.salesExemptTaxType
+              : settings.defaultTaxType;
+          return {
+            Description: text(line.label) || text(line.sku) || 'POS sale',
+            Quantity: Number(line.quantity) || 1,
+            UnitAmount: (Number(line.total) || 0) / (Number(line.quantity) || 1),
+            AccountCode: settings.salesAccountCode,
+            TaxType: taxType,
+            ...(line.tracking ? { Tracking: line.tracking } : {})
+          };
+        })
       }
     ]
   };
@@ -106,7 +181,7 @@ export async function syncXeroDailyInvoice(
   env: Env,
   workspaceId: string,
   dateKey: string,
-  settings: { salesAccountCode: string; defaultTaxType: string },
+  settings: { salesAccountCode: string; defaultTaxType: string; salesExemptTaxType?: string; locationTrackingCategoryId?: string },
   startHour = 0
 ): Promise<{ status: 'applied' | 'duplicate' | 'skipped_no_sales' | 'failed'; xeroInvoiceId?: string; error?: string }> {
   const effectKey = `invoice:${workspaceId}:${dateKey}`;
@@ -122,7 +197,10 @@ export async function syncXeroDailyInvoice(
   }
 
   try {
-    const payload = buildDailyInvoicePayload(dateKey, lines, settings);
+    const workspaceIsVatRegistered = await isWorkspaceVatRegistered(env, workspaceId);
+    const trackingContext = await loadLocationTrackingContext(env, workspaceId, text(settings.locationTrackingCategoryId));
+    const linesWithTracking = await attachLocationTracking(env, workspaceId, lines, trackingContext);
+    const payload = buildDailyInvoicePayload(dateKey, linesWithTracking, settings, workspaceIsVatRegistered);
     const result = await executeXeroApiRequest(env, workspaceId, { method: 'POST', path: 'Invoices', body: payload });
     const invoices = (result.Invoices as Array<{ InvoiceID?: string }> | undefined) || [];
     const xeroInvoiceId = text(invoices[0]?.InvoiceID);
@@ -149,7 +227,7 @@ export async function syncXeroDailyInvoice(
 export async function upsertXeroTodayInvoice(
   env: Env,
   workspaceId: string,
-  settings: { salesAccountCode: string; defaultTaxType: string },
+  settings: { salesAccountCode: string; defaultTaxType: string; salesExemptTaxType?: string; locationTrackingCategoryId?: string },
   startHour = 0
 ): Promise<{ status: 'applied' | 'updated' | 'skipped_no_sales' | 'failed'; xeroInvoiceId?: string; error?: string }> {
   const dateKey = todayDateKey(startHour);
@@ -159,7 +237,10 @@ export async function upsertXeroTodayInvoice(
 
   const existing = await getXeroEffect(env, workspaceId, 'INVOICE_PUSH', effectKey);
   try {
-    const payload = buildDailyInvoicePayload(dateKey, lines, settings, existing?.xeroObjectId || undefined);
+    const workspaceIsVatRegistered = await isWorkspaceVatRegistered(env, workspaceId);
+    const trackingContext = await loadLocationTrackingContext(env, workspaceId, text(settings.locationTrackingCategoryId));
+    const linesWithTracking = await attachLocationTracking(env, workspaceId, lines, trackingContext);
+    const payload = buildDailyInvoicePayload(dateKey, linesWithTracking, settings, workspaceIsVatRegistered, existing?.xeroObjectId || undefined);
     const result = await executeXeroApiRequest(env, workspaceId, { method: 'POST', path: 'Invoices', body: payload });
     const invoices = (result.Invoices as Array<{ InvoiceID?: string }> | undefined) || [];
     const xeroInvoiceId = text(invoices[0]?.InvoiceID) || existing?.xeroObjectId || '';
