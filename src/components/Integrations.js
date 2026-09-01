@@ -470,7 +470,16 @@ function bindIntegrationEvents(view) {
       const parts = [`${applied} GRV${applied === 1 ? '' : 's'} pushed`];
       if (needsMatch) parts.push(`${needsMatch} waiting on a supplier match`);
       if (failed) parts.push(`${failed} failed`);
-      setXeroModalStatus(view, parts.join(', ') + '.', failed ? 'error' : 'success');
+      let message = parts.join(', ') + '.';
+      const failedDetails = Array.isArray(counts.failedDetails) ? counts.failedDetails : [];
+      if (failedDetails.length) {
+        const summary = failedDetails
+          .slice(0, 3)
+          .map((item) => `${item.invoiceNumber || item.supplierName || item.grvId}: ${item.error}`)
+          .join(' · ');
+        message += ` ${summary}`;
+      }
+      setXeroModalStatus(view, message, failed ? 'error' : 'success');
       bindXeroStatus(view, view.dataset.workspaceId || '', { once: true });
     });
   });

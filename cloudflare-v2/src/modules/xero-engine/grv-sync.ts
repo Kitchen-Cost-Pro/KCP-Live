@@ -385,15 +385,32 @@ async function applyCodPayment(
   }
 }
 
+export interface FailedGrvPush {
+  grvId: string;
+  invoiceNumber: string;
+  supplierName: string;
+  error: string;
+}
+
+type PushOneGrvOutcome =
+  | { status: 'applied' | 'duplicate' | 'needs_supplier_match' }
+  | { status: 'failed'; message: string };
+
+/**
+ * Returns the failure message directly rather than requiring a separate read-back query against
+ * `xero_v2_effect_outbox` afterward — a prior version of this diagnostic tried exactly that
+ * (matching effect_key by string-slicing) and it's an unnecessary extra place for a bug to hide;
+ * the message is right here in the catch block, so just hand it back.
+ */
 async function pushOneGrv(
   env: Env,
   workspaceId: string,
   grv: GrvRow,
   settings: { purchaseAccountCode: string; purchaseTaxType: string; purchaseExemptTaxType: string; codPaymentAccountCode?: string }
-): Promise<'applied' | 'duplicate' | 'needs_supplier_match' | 'failed'> {
+): Promise<PushOneGrvOutcome> {
   const effectKey = `grv:${workspaceId}:${grv.id}`;
   const claim = await claimXeroEffect(env, workspaceId, 'GRV_PUSH', effectKey);
-  if (claim.alreadyApplied) return 'duplicate';
+  if (claim.alreadyApplied) return { status: 'duplicate' };
 
   let contactId: string | null = null;
   try {
@@ -406,14 +423,14 @@ async function pushOneGrv(
     const message = cause instanceof XeroApiClientError ? cause.message : cause instanceof Error ? cause.message : 'Unknown error resolving Xero contact.';
     await markXeroEffectFailed(env, claim.id, message);
     await recordXeroDiagnosticIfNotable(env, workspaceId, { operation: 'xero-grv-push', status: 'failed', message, details: { grvId: grv.id } });
-    return 'failed';
+    return { status: 'failed', message };
   }
 
   if (!contactId) {
     // Not a real failure — surfaced in the "needs attention" list instead of the diagnostic log,
     // and picked up automatically once the user matches/creates the supplier's Xero contact.
     await markXeroEffectFailed(env, claim.id, `${NEEDS_SUPPLIER_MATCH_PREFIX}${text(grv.supplier_id)}`);
-    return 'needs_supplier_match';
+    return { status: 'needs_supplier_match' };
   }
 
   try {
@@ -428,12 +445,12 @@ async function pushOneGrv(
       await pushGrvAttachment(env, workspaceId, grv, billId);
       if (isCod) await applyCodPayment(env, workspaceId, grv, billId, text(settings.codPaymentAccountCode));
     }
-    return 'applied';
+    return { status: 'applied' };
   } catch (cause) {
     const message = cause instanceof XeroApiClientError ? cause.message : cause instanceof Error ? cause.message : 'Unknown error pushing GRV to Xero.';
     await markXeroEffectFailed(env, claim.id, message);
     await recordXeroDiagnosticIfNotable(env, workspaceId, { operation: 'xero-grv-push', status: 'failed', message, details: { grvId: grv.id } });
-    return 'failed';
+    return { status: 'failed', message };
   }
 }
 
@@ -443,17 +460,26 @@ export async function syncPendingXeroGrvs(
   env: Env,
   workspaceId: string,
   settings: { purchaseAccountCode: string; purchaseTaxType: string; purchaseExemptTaxType: string; codPaymentAccountCode?: string }
-): Promise<{ applied: number; duplicate: number; needsSupplierMatch: number; failed: number }> {
+): Promise<{ applied: number; duplicate: number; needsSupplierMatch: number; failed: number; failedDetails?: FailedGrvPush[] }> {
   const grvs = await loadPendingGrvs(env, workspaceId);
   const counts = { applied: 0, duplicate: 0, needsSupplierMatch: 0, failed: 0 };
+  const failedDetails: FailedGrvPush[] = [];
   for (const grv of grvs) {
     const outcome = await pushOneGrv(env, workspaceId, grv, settings);
-    if (outcome === 'applied') counts.applied += 1;
-    else if (outcome === 'duplicate') counts.duplicate += 1;
-    else if (outcome === 'needs_supplier_match') counts.needsSupplierMatch += 1;
-    else counts.failed += 1;
+    if (outcome.status === 'applied') counts.applied += 1;
+    else if (outcome.status === 'duplicate') counts.duplicate += 1;
+    else if (outcome.status === 'needs_supplier_match') counts.needsSupplierMatch += 1;
+    else if (outcome.status === 'failed') {
+      counts.failed += 1;
+      failedDetails.push({
+        grvId: grv.id,
+        invoiceNumber: text(grv.invoice_number),
+        supplierName: text(grv.supplier_name) || 'Unknown supplier',
+        error: outcome.message
+      });
+    }
   }
-  return counts;
+  return failedDetails.length ? { ...counts, failedDetails } : counts;
 }
 
 export async function claimDailyGrvSyncIfDue(env: Env, workspaceId: string): Promise<{ due: boolean; dateKey?: string }> {
