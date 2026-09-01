@@ -559,60 +559,6 @@
   width: min(1080px, 96vw);
 }
 
-.xeroPanelsGrid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 14px;
-  align-items: start;
-}
-
-.xeroSettingsForm {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px 14px;
-}
-
-/* Checkboxes and the submit button always take the full form width, so short text fields
-   (account codes, tax types) can sit two-per-row above/below them instead of every field
-   stacking in one long single column — this was the main source of the modal needing so much
-   vertical scrolling. */
-.xeroSettingsForm .xeroCheckboxRow,
-.xeroSettingsForm button[type="submit"] {
-  grid-column: 1 / -1;
-}
-
-.xeroSettingsForm label {
-  display: grid;
-  gap: 6px;
-  font-size: 0.78rem;
-  color: var(--text-muted);
-  font-weight: 700;
-}
-
-.xeroSettingsForm input[type="text"] {
-  min-height: 38px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-  background: var(--surface-primary);
-  color: var(--text-main);
-  padding: 0 12px;
-  font: inherit;
-  font-weight: 400;
-}
-
-.xeroCheckboxRow {
-  display: flex !important;
-  flex-direction: row;
-  align-items: center;
-  gap: 8px;
-  font-weight: 700;
-}
-
-.xeroActionStack {
-  display: grid;
-  gap: 8px;
-}
-
 /* Compact button variant used only inside the Xero modal — the shared .yocoActionButton (used by
    Yoco/Gmail) is a large two-line tile (icon block + title + subtitle); Xero's side-by-side layout
    has half the width to work with, so this is a plain single-line button instead. */
@@ -728,13 +674,225 @@
   font-size: 0.8rem;
 }
 
+/* Tabbed Xero settings layout — replaces the old side-by-side account-mapping/connection panels
+   with a single-column-per-tab layout, so only the fields relevant to the current task (Sales,
+   Purchases & COD, Sync, Danger Zone) are on screen at once instead of every account code and
+   every action button at the same time. */
+.xeroOrgChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 8px;
+  color: var(--text-muted);
+  font-size: 0.86rem;
+}
+
+.xeroOrgDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent-amber);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-amber) 20%, transparent);
+  flex: 0 0 auto;
+}
+
+.xeroOrgDot.is-connected {
+  background: var(--accent-emerald);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-emerald) 20%, transparent);
+}
+
+.xeroStatRail article.xeroStatRail--warning {
+  border-color: color-mix(in srgb, var(--accent-amber) 45%, var(--border-subtle));
+}
+
+.xeroStatRail article.xeroStatRail--warning strong {
+  color: var(--accent-amber);
+}
+
+.xeroTabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border-subtle);
+  overflow-x: auto;
+}
+
+.xeroTabs button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-weight: 700;
+  font-size: 0.84rem;
+  padding: 10px 4px 11px;
+  margin-right: 20px;
+  white-space: nowrap;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.xeroTabs button.is-active {
+  color: var(--accent-blue);
+  border-bottom-color: var(--accent-blue);
+}
+
+.xeroTabBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--warning-bg);
+  color: var(--accent-amber);
+  font-size: 0.66rem;
+  font-weight: 800;
+}
+
+.xeroTabPane {
+  display: none;
+  padding-top: 16px;
+}
+
+.xeroTabPane.is-active {
+  display: block;
+}
+
+.xeroFieldGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 14px;
+}
+
+.xeroFieldGrid--span2 {
+  grid-column: 1 / -1;
+}
+
+.xeroFieldGrid label,
+.xeroFieldGrid--span2 {
+  display: grid;
+  gap: 6px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  font-weight: 700;
+}
+
+.xeroFieldGrid label em,
+.xeroFieldGrid--span2 em {
+  color: var(--text-soft);
+  font-style: normal;
+  font-weight: 500;
+}
+
+.xeroFieldGrid input[type="text"] {
+  min-height: 38px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-primary);
+  color: var(--text-main);
+  padding: 0 12px;
+  font: inherit;
+  font-weight: 400;
+}
+
+.xeroFieldHint {
+  color: var(--text-soft);
+  font-size: 0.74rem;
+  font-weight: 400;
+  line-height: 1.45;
+}
+
+.xeroToggleRow {
+  display: flex !important;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 14px;
+  padding: 11px 13px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: var(--surface-primary);
+  cursor: pointer;
+}
+
+.xeroToggleCopy {
+  display: grid;
+  gap: 2px;
+}
+
+.xeroToggleCopy strong {
+  font-size: 0.84rem;
+  color: var(--text-main);
+  font-weight: 700;
+}
+
+.xeroToggleCopy small {
+  font-size: 0.75rem;
+  color: var(--text-soft);
+  font-weight: 400;
+}
+
+.xeroToggleRow input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+}
+
+.xeroFormActions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+.xeroActionGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.xeroNeedsAttentionPanel {
+  margin-top: 16px;
+}
+
+.xeroDangerCard {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  border: 1px solid var(--danger-border);
+  background: var(--danger-bg);
+  border-radius: 12px;
+  padding: 16px 18px;
+}
+
+.xeroDangerCard strong {
+  display: block;
+  color: var(--text-main);
+  font-size: 0.9rem;
+  margin-bottom: 4px;
+}
+
+.xeroDangerCard span {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+  max-width: 52ch;
+}
+
 @media (max-width: 720px) {
-  .xeroPanelsGrid {
+  .xeroFieldGrid,
+  .xeroActionGrid {
     grid-template-columns: 1fr;
   }
 
-  .xeroSettingsForm {
-    grid-template-columns: 1fr;
+  .xeroDangerCard {
+    flex-direction: column;
+    align-items: flex-start;
   }
 }
 

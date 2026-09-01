@@ -7,6 +7,7 @@ import type { DbLike, DbResult, DbStatementLike } from '../src/legacy/types';
 import {
   applyProRataDiscount,
   getWorkspaceEffectiveVatRate,
+  isSupplierVatRegistered,
   isWorkspaceVatRegistered,
   loadVatEnabledByStockItemId,
   sumVatAwareLineTotals,
@@ -81,6 +82,15 @@ function createEnv({ vatRate = 15, vatRegistered = 1 }: { vatRate?: number; vatR
   ).run();
   DB.database.prepare(
     `INSERT INTO stock_items (id, workspace_id, name, vat_enabled) VALUES ('beer', 'ws_1', 'Beer', 1)`,
+  ).run();
+  DB.database.prepare(
+    `INSERT INTO suppliers (id, workspace_id, name, raw_json) VALUES ('sup_registered', 'ws_1', 'Registered Supplier', '{"vatRegistered":true}')`,
+  ).run();
+  DB.database.prepare(
+    `INSERT INTO suppliers (id, workspace_id, name, raw_json) VALUES ('sup_not_registered', 'ws_1', 'Cash Supplier', '{"vatRegistered":false}')`,
+  ).run();
+  DB.database.prepare(
+    `INSERT INTO suppliers (id, workspace_id, name, raw_json) VALUES ('sup_no_flag', 'ws_1', 'Legacy Supplier', '{}')`,
   ).run();
   return { DB } as any;
 }
@@ -218,4 +228,39 @@ test('applyProRataDiscount is a no-op when the discount is 0', () => {
   const vatEnabled = new Map([['beer', true]]);
   const preDiscount = sumVatAwareLineTotals([{ stockItemId: 'beer', lineTotalEx: 100 }], 0.15, vatEnabled);
   assert.deepEqual(applyProRataDiscount(preDiscount, 0, 0.15), preDiscount);
+});
+
+// isSupplierVatRegistered / the supplierIsVatRegistered gate on sumVatAwareLineTotals — a
+// non-VAT-registered supplier never charges VAT on anything they sell, regardless of the item.
+
+test('isSupplierVatRegistered reflects the supplier\'s own raw_json flag', async () => {
+  const env = createEnv();
+  assert.equal(await isSupplierVatRegistered(env, 'ws_1', 'sup_registered'), true);
+  assert.equal(await isSupplierVatRegistered(env, 'ws_1', 'sup_not_registered'), false);
+});
+
+test('isSupplierVatRegistered defaults to true when the flag is unset or there is no supplier', async () => {
+  const env = createEnv();
+  assert.equal(await isSupplierVatRegistered(env, 'ws_1', 'sup_no_flag'), true);
+  assert.equal(await isSupplierVatRegistered(env, 'ws_1', 'unknown_supplier'), true);
+  assert.equal(await isSupplierVatRegistered(env, 'ws_1', ''), true);
+});
+
+test('a non-VAT-registered supplier zeroes VAT on a beer line, even though beer is normally VATable', () => {
+  const vatEnabled = new Map([['beer', true]]);
+  const registered = sumVatAwareLineTotals([{ stockItemId: 'beer', lineTotalEx: 100 }], 0.15, vatEnabled, false, true);
+  const notRegistered = sumVatAwareLineTotals([{ stockItemId: 'beer', lineTotalEx: 100 }], 0.15, vatEnabled, false, false);
+  assert.equal(registered.totalVat, 15);
+  assert.equal(notRegistered.totalVat, 0);
+  assert.equal(notRegistered.totalEx, 100); // the ex-VAT cost itself is unaffected, only the tax
+  assert.equal(notRegistered.totalInc, 100);
+});
+
+test('a non-VAT-registered supplier gate applies to every line uniformly, bread and beer alike', () => {
+  const vatEnabled = new Map([['beer', true], ['bread', false]]);
+  const items = [{ stockItemId: 'beer', lineTotalEx: 60 }, { stockItemId: 'bread', lineTotalEx: 40 }];
+  const notRegistered = sumVatAwareLineTotals(items, 0.15, vatEnabled, false, false);
+  assert.equal(notRegistered.totalVat, 0);
+  assert.equal(notRegistered.taxableEx, 0);
+  assert.equal(notRegistered.totalEx, 100);
 });

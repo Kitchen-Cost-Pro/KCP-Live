@@ -26,7 +26,29 @@ interface GrvRow {
   total_inc: number | null;
   transport_ex: number | null;
   discount_ex: number | null;
+  supplier_raw_json: string | null;
   raw_json: string | null;
+}
+
+/**
+ * Mirrors Suppliers.js/supplierService.js's own paymentTerms default: it's stored only inside the
+ * supplier's raw_json blob (not a queryable column), defaults to 'COD' when unset, and accepts the
+ * same handful of key spellings the import/normalize paths already tolerate (PaymentTerms /
+ * "Payment Terms" / Payment_Terms).
+ */
+function resolveSupplierPaymentTerms(rawJson: string | null): string {
+  if (!rawJson) return 'COD';
+  try {
+    const parsed = objectValue(JSON.parse(rawJson));
+    const value = parsed.paymentTerms ?? parsed.PaymentTerms ?? parsed['Payment Terms'] ?? parsed['Payment_Terms'];
+    return text(value) || 'COD';
+  } catch {
+    return 'COD';
+  }
+}
+
+export function isCodSupplier(rawJson: string | null): boolean {
+  return resolveSupplierPaymentTerms(rawJson).trim().toUpperCase() === 'COD';
 }
 
 interface GrvLineItem {
@@ -101,7 +123,7 @@ async function loadGrvLines(env: Env, workspaceId: string, grvId: string): Promi
 export async function loadPendingGrvs(env: Env, workspaceId: string, limit = 500): Promise<GrvRow[]> {
   const rows = await env.DB.prepare(
     `SELECT
-       grv.id, grv.supplier_id, s.name AS supplier_name, s.xero_contact_id AS supplier_xero_contact_id,
+       grv.id, grv.supplier_id, s.name AS supplier_name, s.xero_contact_id AS supplier_xero_contact_id, s.raw_json AS supplier_raw_json,
        grv.invoice_number, grv.received_at, grv.prices_include_vat, grv.total_ex, grv.total_vat, grv.total_inc, grv.transport_ex, grv.discount_ex, grv.raw_json
      FROM grvs grv
      LEFT JOIN suppliers s ON s.id = grv.supplier_id AND s.workspace_id = grv.workspace_id
@@ -120,6 +142,24 @@ export async function loadPendingGrvs(env: Env, workspaceId: string, limit = 500
 }
 
 /**
+ * True only if this Xero Contact still genuinely exists and is usable — a Bill can't be posted
+ * against a Contact that's been deleted, or archived (Xero often archives rather than hard-deletes
+ * a contact that has any transaction history, e.g. after a bulk "reset my Contacts" cleanup), even
+ * though the GET can still succeed and return a row for an archived one.
+ */
+async function xeroContactIsUsable(env: Env, workspaceId: string, contactId: string): Promise<boolean> {
+  try {
+    const result = await executeXeroApiRequest(env, workspaceId, { method: 'GET', path: `Contacts/${encodeURIComponent(contactId)}` });
+    const contact = (result.Contacts as Array<{ ContactStatus?: string }> | undefined)?.[0];
+    return Boolean(contact) && text(contact?.ContactStatus).toUpperCase() !== 'ARCHIVED';
+  } catch {
+    // Most commonly a 404 (the contact was permanently deleted) — either way, can't confirm it's
+    // still good, so treat it as gone rather than risk repeatedly pushing against a dead reference.
+    return false;
+  }
+}
+
+/**
  * Resolves a supplier's Xero Contact by exact name match (a read + link, not a write — so it
  * doesn't need the "ask before creating" confirmation). Returns null if the supplier has no name,
  * or Xero has zero/multiple matches — the caller records that as a pending supplier match instead
@@ -130,7 +170,16 @@ export async function resolveXeroContactForSupplier(
   workspaceId: string,
   supplier: { id: string; name: string | null; xeroContactId: string | null }
 ): Promise<string | null> {
-  if (supplier.xeroContactId) return supplier.xeroContactId;
+  if (supplier.xeroContactId) {
+    if (await xeroContactIsUsable(env, workspaceId, supplier.xeroContactId)) return supplier.xeroContactId;
+    // Stale — the linked Contact was deleted/archived on Xero's own side (e.g. a full-Contacts
+    // reset there), and blindly trusting the cached id forever would silently fail every future
+    // GRV push for this supplier. Clear it so this falls through to a fresh name-based
+    // match/create below, same as a supplier that was never linked at all.
+    await env.DB.prepare(`UPDATE suppliers SET xero_contact_id = NULL, xero_contact_synced_at = NULL WHERE id = ?1 AND workspace_id = ?2`)
+      .bind(supplier.id, workspaceId)
+      .run();
+  }
   const name = text(supplier.name);
   if (!name) return null;
   const escaped = name.replace(/"/g, '\\"');
@@ -180,7 +229,8 @@ export function buildGrvBillPayload(
   lines: GrvLineRow[],
   contactId: string,
   settings: { purchaseAccountCode: string; purchaseTaxType: string; purchaseExemptTaxType: string },
-  existingBillId?: string
+  existingBillId?: string,
+  isCod = false
 ) {
   const transportEx = Number(grv.transport_ex) || 0;
   const discountEx = Number(grv.discount_ex) || 0;
@@ -193,7 +243,11 @@ export function buildGrvBillPayload(
         Contact: { ContactID: contactId },
         Date: text(grv.received_at).slice(0, 10),
         Reference: text(grv.invoice_number) || `GRV-${grv.id.slice(-6).toUpperCase()}`,
-        Status: 'DRAFT',
+        // A COD supplier is paid at the point of delivery — there's nothing left to approve, so it
+        // goes out AUTHORISED (with a matching Payment applied separately, see applyCodPayment)
+        // instead of sitting in Draft forever. Every other payment method still needs a human
+        // review/approval step before it's a real liability, so it stays DRAFT as before.
+        Status: isCod ? 'AUTHORISED' : 'DRAFT',
         // grv_lines.unit_price is always ex-VAT (see loadGrvLines) regardless of how the GRV's
         // "prices include VAT" toggle was set at entry — that only affects what price the user
         // typed on screen, never what's stored — so this is always Exclusive, never conditional.
@@ -285,11 +339,57 @@ async function pushGrvAttachment(env: Env, workspaceId: string, grv: GrvRow, bil
   }
 }
 
+/**
+ * Records a full Payment against a COD GRV's Bill, from the configured bank account — the second
+ * half of "AUTHORISED, not DRAFT" (see buildGrvBillPayload): an AUTHORISED Bill with no Payment is
+ * still an outstanding liability in Xero, not what "COD = already paid" means. Left as its own
+ * best-effort step (own outbox effect, own try/catch) rather than folded into pushOneGrv's Bill
+ * creation: the Bill itself is the record that matters most and must not be rolled back or retried
+ * from scratch just because the payment side failed (e.g. no bank account configured yet) — same
+ * reasoning as pushGrvAttachment being separate from the Bill push above it.
+ *
+ * No-ops (does not fail, does not claim the effect) when codPaymentAccountCode isn't configured —
+ * the Bill still goes out AUTHORISED; it just stays unpaid in Xero until the account code is set or
+ * someone reconciles it manually there.
+ */
+async function applyCodPayment(
+  env: Env,
+  workspaceId: string,
+  grv: GrvRow,
+  billId: string,
+  codPaymentAccountCode: string
+): Promise<void> {
+  if (!codPaymentAccountCode) return;
+  const effectKey = `grv-payment:${workspaceId}:${grv.id}`;
+  const claim = await claimXeroEffect(env, workspaceId, 'GRV_PAYMENT', effectKey);
+  if (claim.alreadyApplied) return;
+  try {
+    const payload = {
+      Payments: [
+        {
+          Invoice: { InvoiceID: billId },
+          Account: { Code: codPaymentAccountCode },
+          Date: text(grv.received_at).slice(0, 10),
+          Amount: Number(grv.total_inc) || 0
+        }
+      ]
+    };
+    const result = await executeXeroApiRequest(env, workspaceId, { method: 'PUT', path: 'Payments', body: payload });
+    const payments = (result.Payments as Array<{ PaymentID?: string }> | undefined) || [];
+    const paymentId = text(payments[0]?.PaymentID);
+    await markXeroEffectApplied(env, claim.id, paymentId);
+  } catch (cause) {
+    const message = cause instanceof XeroApiClientError ? cause.message : cause instanceof Error ? cause.message : 'Unknown error applying COD payment to Xero bill.';
+    await markXeroEffectFailed(env, claim.id, message);
+    await recordXeroDiagnosticIfNotable(env, workspaceId, { operation: 'xero-grv-cod-payment', status: 'failed', message, details: { grvId: grv.id, billId } });
+  }
+}
+
 async function pushOneGrv(
   env: Env,
   workspaceId: string,
   grv: GrvRow,
-  settings: { purchaseAccountCode: string; purchaseTaxType: string; purchaseExemptTaxType: string }
+  settings: { purchaseAccountCode: string; purchaseTaxType: string; purchaseExemptTaxType: string; codPaymentAccountCode?: string }
 ): Promise<'applied' | 'duplicate' | 'needs_supplier_match' | 'failed'> {
   const effectKey = `grv:${workspaceId}:${grv.id}`;
   const claim = await claimXeroEffect(env, workspaceId, 'GRV_PUSH', effectKey);
@@ -318,12 +418,16 @@ async function pushOneGrv(
 
   try {
     const lines = await loadGrvLines(env, workspaceId, grv.id);
-    const payload = buildGrvBillPayload(grv, lines, contactId, settings);
+    const isCod = isCodSupplier(grv.supplier_raw_json);
+    const payload = buildGrvBillPayload(grv, lines, contactId, settings, undefined, isCod);
     const result = await executeXeroApiRequest(env, workspaceId, { method: 'POST', path: 'Invoices', body: payload });
     const invoices = (result.Invoices as Array<{ InvoiceID?: string }> | undefined) || [];
     const billId = text(invoices[0]?.InvoiceID);
     await markXeroEffectApplied(env, claim.id, billId);
-    if (billId) await pushGrvAttachment(env, workspaceId, grv, billId);
+    if (billId) {
+      await pushGrvAttachment(env, workspaceId, grv, billId);
+      if (isCod) await applyCodPayment(env, workspaceId, grv, billId, text(settings.codPaymentAccountCode));
+    }
     return 'applied';
   } catch (cause) {
     const message = cause instanceof XeroApiClientError ? cause.message : cause instanceof Error ? cause.message : 'Unknown error pushing GRV to Xero.';
@@ -338,7 +442,7 @@ async function pushOneGrv(
 export async function syncPendingXeroGrvs(
   env: Env,
   workspaceId: string,
-  settings: { purchaseAccountCode: string; purchaseTaxType: string; purchaseExemptTaxType: string }
+  settings: { purchaseAccountCode: string; purchaseTaxType: string; purchaseExemptTaxType: string; codPaymentAccountCode?: string }
 ): Promise<{ applied: number; duplicate: number; needsSupplierMatch: number; failed: number }> {
   const grvs = await loadPendingGrvs(env, workspaceId);
   const counts = { applied: 0, duplicate: 0, needsSupplierMatch: 0, failed: 0 };

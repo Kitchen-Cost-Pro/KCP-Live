@@ -10,7 +10,7 @@ export async function stableId(prefix: string, value: string): Promise<string> {
   return `${prefix}_${(await sha256Hex(value)).slice(0, 32)}`;
 }
 
-export type XeroEffectType = 'ITEM_PUSH' | 'INVOICE_PUSH' | 'GRV_PUSH' | 'GRV_ATTACHMENT';
+export type XeroEffectType = 'ITEM_PUSH' | 'INVOICE_PUSH' | 'GRV_PUSH' | 'GRV_ATTACHMENT' | 'GRV_PAYMENT';
 
 /**
  * Idempotent write-tracking, mirroring modules/yoco-engine-v2/live-sale.ts's effect-outbox

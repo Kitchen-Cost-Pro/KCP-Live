@@ -1,7 +1,7 @@
 import { TENANT_SCHEMA_SQL } from './tenant-schema.generated';
 import { YOCO_V2_FOUNDATION_MIGRATION, YOCO_V2_SALE_SHADOW_MIGRATION, YOCO_V2_REFUND_RECONCILIATION_MIGRATION, YOCO_V2_CONTROLLED_CUTOVER_MIGRATION, YOCO_V2_REFUND_CONTROLLED_CUTOVER_MIGRATION, YOCO_V2_LEGACY_SHUTDOWN_MIGRATION, YOCO_V2_ADMIN_CONTROL_CENTRE_MIGRATION, YOCO_V2_RECONCILIATION_BACKOFF_MIGRATION, YOCO_V2_EFFECT_GATE_MIGRATION } from './modules/yoco-engine-v2/migrations';
 import { MODIFIER_ENGINE_CORE_ACTIONS_MIGRATION, MODIFIER_ENGINE_REFUNDS_RELIABILITY_NOTES_MIGRATION } from './modules/modifier-engine/migrations';
-import { XERO_V2_FOUNDATION_MIGRATION, XERO_V2_GRV_PUSH_MIGRATION } from './modules/xero-engine/migrations';
+import { XERO_V2_FOUNDATION_MIGRATION, XERO_V2_GRV_PUSH_MIGRATION, XERO_V2_GRV_COD_PAYMENT_MIGRATION } from './modules/xero-engine/migrations';
 
 // 47 — persist the GRV Transport cost. It previously only lived in the frontend draft/preview
 // total (GRVEntry.js's transportEx) and was silently dropped before saving — never reached the
@@ -763,5 +763,7 @@ CREATE INDEX IF NOT EXISTS idx_stock_movements_workspace_effective_date
   // 47 — see GRV_TRANSPORT_EX_MIGRATION's doc comment above.
   GRV_TRANSPORT_EX_MIGRATION,
   // 48 — see GRV_DISCOUNT_EX_MIGRATION's doc comment above.
-  GRV_DISCOUNT_EX_MIGRATION
+  GRV_DISCOUNT_EX_MIGRATION,
+  // 49 — see XERO_V2_GRV_COD_PAYMENT_MIGRATION's doc comment (modules/xero-engine/migrations.ts).
+  XERO_V2_GRV_COD_PAYMENT_MIGRATION
 ];

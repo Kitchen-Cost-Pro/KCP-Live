@@ -23,7 +23,7 @@ export function renderCreditNotes({ state, onCreditNoteFilterChange, onCreditNot
   const supplierMatches = getSupplierMatches(creditNotes.suppliers || [], draft.supplierName || '');
   const stockMatches = getStockMatches(creditNotes.stockItems || [], filters.stockSearch || '', filters.stockCategory || '', draft.items || []);
   const grvMatches = getProcessedGrvMatches(creditNotes.processedGrvs || [], filters.grvQuery || '');
-  const totals = calculateTotals(draft, getVatRate(state));
+  const totals = calculateTotals(draft, getSupplierVatRate(state, draft.supplierId));
   const selectedStockIds = new Set((filters.selectedStockIds || []).map(String));
   const selectedLineIndexes = new Set((filters.selectedLineIndexes || []).map(String));
   const headerReady = Boolean(String(draft.supplierName || '').trim() && String(draft.cnNumber || '').trim() && String(draft.date || '').trim() && String(draft.locationId || '').trim());
@@ -127,7 +127,7 @@ export function renderCreditNotes({ state, onCreditNoteFilterChange, onCreditNot
           </div>
 
           <div class="cn-draft-scroll">
-            ${(draft.items || []).length ? renderDraftTable(draft, getVatRate(state), selectedLineIndexes, creditNotes.locations || [], filters.openDropdown || '') : `
+            ${(draft.items || []).length ? renderDraftTable(draft, getSupplierVatRate(state, draft.supplierId), selectedLineIndexes, creditNotes.locations || [], filters.openDropdown || '') : `
               <div class="cn-empty"><span>No returns drafted.</span></div>
             `}
           </div>
@@ -988,6 +988,29 @@ function getVatRate(state) {
   // (e.g. beer) — it just can't reclaim it — so the rate itself must not be zeroed for everyone.
   const settings = state.settings?.draft || state.settings?.values || {};
   return Number(settings.vatRate ?? settings.vatPercentage ?? 15) || 15;
+}
+
+function findCnSupplierById(state, supplierId) {
+  if (!supplierId) return null;
+  const id = String(supplierId);
+  return (state?.creditNotes?.suppliers || []).find((supplier) => String(supplier.id) === id) || null;
+}
+
+// A non-VAT-registered supplier never charges VAT on anything they sell, regardless of the item —
+// defaults to true (registered) when the supplier isn't found/selected yet, mirroring
+// GRVEntry.js's isGrvSupplierVatRegistered / PurchaseOrders.js's isPoSupplierVatRegistered.
+function isCnSupplierVatRegistered(state, supplierId) {
+  const supplier = findCnSupplierById(state, supplierId);
+  return supplier ? supplier.vatRegistered !== false : true;
+}
+
+// The rate actually used for this credit note's live preview: the workspace's real VAT rate,
+// unless the selected supplier isn't VAT-registered, in which case they never charged VAT in the
+// first place and this returns 0 — cascading through calculateTotals/renderDraftTable exactly like
+// "no VAT on this credit note at all", matching the GRV/PO equivalents.
+function getSupplierVatRate(state, supplierId) {
+  if (!isCnSupplierVatRegistered(state, supplierId)) return 0;
+  return getVatRate(state);
 }
 
 function getCreditNoteLineUomLabel(line = {}) {

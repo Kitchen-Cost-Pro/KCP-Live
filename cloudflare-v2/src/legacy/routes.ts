@@ -50,6 +50,7 @@ import {
   calculateIncomingLocationCost,
   getWorkspaceEffectiveVatRate,
   getWorkspaceInventoryCostingMethod,
+  isSupplierVatRegistered,
   isWorkspaceVatRegistered,
   loadVatEnabledByStockItemId,
   resolveLocationUnitCost,
@@ -1787,6 +1788,23 @@ function normalizeSupplierPayload(raw: Record<string, unknown>) {
     [addressLine1, addressLine2, city, province, postalCode, country]
       .filter(Boolean)
       .join(", ");
+  // Whether this SUPPLIER is VAT registered — a non-registered supplier never charges VAT on
+  // anything they sell, regardless of the item. Defaults to true (registered) when unset, matching
+  // stock_items.vat_enabled's own "assume VATable" default, so existing suppliers see no behavior
+  // change until this is explicitly turned off.
+  const vatRegisteredRaw = readImportField(payload, [
+    "vatRegistered",
+    "VatRegistered",
+    "VAT Registered",
+    "VAT_Registered",
+    "vat_registered",
+  ]);
+  const vatRegistered = !(
+    vatRegisteredRaw === false ||
+    vatRegisteredRaw === 0 ||
+    text(vatRegisteredRaw).toLowerCase() === "false" ||
+    text(vatRegisteredRaw) === "0"
+  );
 
   return {
     id:
@@ -1854,6 +1872,7 @@ function normalizeSupplierPayload(raw: Record<string, unknown>) {
     province,
     postalCode,
     country,
+    vatRegistered,
     notes: text(
       readImportField(payload, [
         "notes",
@@ -1928,6 +1947,7 @@ function normalizeSupplierPayload(raw: Record<string, unknown>) {
       province,
       postalCode,
       country,
+      vatRegistered,
       notes: text(
         readImportField(payload, [
           "notes",
@@ -6164,6 +6184,7 @@ export async function getSuppliers(
       province: text(raw.province || raw.Province || raw.state),
       postalCode: text(raw.postalCode || raw.Postal_Code || raw.postal_code),
       country: text(raw.country || raw.Country),
+      vatRegistered: raw.vatRegistered !== false,
       notes: text(raw.notes || raw.Notes || raw.note),
       updatedAt: text(record.updated_at || raw.updatedAt),
       source: "cloudflare-d1:suppliers",
@@ -8504,10 +8525,15 @@ export async function postPurchaseOrder(
     workspaceId,
     payload.normalized.items.map((line) => text(line.stockItemId)),
   );
+  // A non-VAT-registered supplier never charges VAT on anything, regardless of the item — this is
+  // a second, independent gate on top of vat_enabled, not a substitute for it.
+  const poSupplierIsVatRegistered = await isSupplierVatRegistered(env, workspaceId, text(payload.supplierId));
   const vatAwareTotals = sumVatAwareLineTotals(
     payload.normalized.items,
     workspaceVatRate,
     vatEnabledByStockItemId,
+    false,
+    poSupplierIsVatRegistered,
   );
   payload.totalEx = vatAwareTotals.totalEx;
   payload.totalVat = vatAwareTotals.totalVat;
@@ -8578,8 +8604,9 @@ export async function postPurchaseOrder(
     const unitPrice = numberValue(line.unitCost, 0);
     const totalEx = qty * numberValue(line.packSize, 1) * unitPrice;
     // A zero-rated/VAT-exempt item (e.g. bread) must never carry VAT, regardless of the workspace
-    // rate — matches the GRV receive route's per-line lineIsVatable check.
-    const lineIsVatable = vatEnabledByStockItemId.get(text(line.stockItemId)) !== false;
+    // rate — matches the GRV receive route's per-line lineIsVatable check. A non-VAT-registered
+    // supplier (poSupplierIsVatRegistered) never charges VAT on anything, on top of that.
+    const lineIsVatable = poSupplierIsVatRegistered && vatEnabledByStockItemId.get(text(line.stockItemId)) !== false;
     const totalVat = lineIsVatable ? totalEx * workspaceVatRate : 0;
     const lineKey =
       text(line.id || line.stockItemId || `line_${index}`)
@@ -9163,6 +9190,10 @@ export async function postGoodsReceipt(
   // ex-VAT/VAT split must be backed OUT of that already-inclusive figure, not added on top of it
   // again (that would double the real VAT paid). See sumVatAwareLineTotals's doc comment.
   const grvWorkspaceIsVatRegistered = await isWorkspaceVatRegistered(env, workspaceId);
+  // A non-VAT-registered supplier never charges VAT on anything, on top of vat_enabled — applies
+  // uniformly to stock lines AND the synthetic transport line below (transport charged by a
+  // non-VAT-registered supplier isn't VATable either).
+  const grvSupplierIsVatRegistered = await isSupplierVatRegistered(env, workspaceId, text(payload.supplierId));
   // Transport is folded in as a synthetic VATable "line" (no matching entry in
   // grvVatEnabledByStockItemId, so sumVatAwareLineTotals treats it as VATable by default, same as
   // any other line) so it shares the exact same VAT-rate/inclusive-vs-exclusive handling as stock
@@ -9176,6 +9207,7 @@ export async function postGoodsReceipt(
     workspaceVatRate,
     grvVatEnabledByStockItemId,
     !grvWorkspaceIsVatRegistered,
+    grvSupplierIsVatRegistered,
   );
   // A discount is NOT its own VATable/non-VATable line — it's pro-rated across the taxable vs
   // non-taxable share of the pre-discount subtotal, matching GRVEntry.js's calculateDraftTotals
@@ -9335,8 +9367,9 @@ export async function postGoodsReceipt(
     const submittedTotalEx = numberValue(line.lineTotalEx, quantity * unitCost);
     // A zero-rated/VAT-exempt item must never carry VAT, regardless of the workspace rate —
     // this previously applied workspaceVatRate to every line unconditionally, adding 15% to a
-    // non-VATable item's GRV total.
-    const lineIsVatable = numberValue(stockItem.vat_enabled, 1) !== 0;
+    // non-VATable item's GRV total. A non-VAT-registered supplier (grvSupplierIsVatRegistered)
+    // never charges VAT on anything, on top of that.
+    const lineIsVatable = grvSupplierIsVatRegistered && numberValue(stockItem.vat_enabled, 1) !== 0;
     let totalEx = submittedTotalEx;
     let totalVat = 0;
     if (lineIsVatable) {

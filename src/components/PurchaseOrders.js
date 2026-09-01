@@ -656,7 +656,7 @@ function renderStockChoice(item, pendingItems = [], disabled = false) {
 
 function renderQuantityInputModal({ state, draft, filters, sites, locations, actionStatus, error }) {
   const subtotal = totalOrderValue(draft);
-  const vat = orderVatTotal(draft, getVatRate(state));
+  const vat = orderVatTotal(draft, getSupplierVatRate(state, draft.supplierId));
   const total = subtotal + vat;
   return `
     <div class="purchaseOrdersModule__modalBackdrop">
@@ -777,7 +777,7 @@ function renderOrderModal(purchaseOrders, filters, state) {
 	    .filter((item) => !lineQuery || String(item.name || '').toLowerCase().includes(lineQuery) || String(item.category || '').toLowerCase().includes(lineQuery) || stockItemHasBarcode(item, lineQuery))
 	    .slice(0, 10);
   const subtotal = totalOrderValue(draft);
-  const vat = orderVatTotal(draft, getVatRate(state));
+  const vat = orderVatTotal(draft, getSupplierVatRate(state, draft.supplierId));
   const total = subtotal + vat;
 
   return `
@@ -1319,7 +1319,8 @@ function lineOrderValue(line = {}) {
 // alongside a VATable one (e.g. beer) on the same order — not one flat rate applied to the whole
 // subtotal. addPurchaseOrderLine stamps vatEnabled onto each line when it's added (mirrors
 // buildGrvDraftLine); a line missing it (e.g. an order saved before that fix) defaults to VATable,
-// matching stock_items.vat_enabled's own DB default.
+// matching stock_items.vat_enabled's own DB default. The supplier-registration gate is folded into
+// the vatRate passed in (see getSupplierVatRate) rather than checked here, same as GRVEntry.js.
 function orderVatTotal(order, vatRate) {
   return (order.items || []).reduce((sum, line) => (
     line.vatEnabled === false ? sum : sum + lineOrderValue(line) * vatRate
@@ -1336,6 +1337,29 @@ function orderVatTotal(order, vatRate) {
 function getVatRate(state) {
   const settings = state?.settings?.draft || state?.settings?.values || {};
   return (Number(settings.vatRate ?? settings.vatPercentage ?? 15) || 15) / 100;
+}
+
+function findPoSupplierById(state, supplierId) {
+  if (!supplierId) return null;
+  const id = String(supplierId);
+  return (state?.purchaseOrders?.suppliers || []).find((supplier) => String(supplier.id) === id) || null;
+}
+
+// A non-VAT-registered supplier never charges VAT on anything they sell, regardless of the item —
+// defaults to true (registered) when the supplier isn't found/selected yet, mirroring
+// GRVEntry.js's isGrvSupplierVatRegistered.
+function isPoSupplierVatRegistered(state, supplierId) {
+  const supplier = findPoSupplierById(state, supplierId);
+  return supplier ? supplier.vatRegistered !== false : true;
+}
+
+// The rate actually used for this order's live preview: the workspace's real VAT rate, unless the
+// selected supplier isn't VAT-registered, in which case they never charged VAT in the first place
+// and this returns 0 — cascading through orderVatTotal exactly like "no VAT on this order at all",
+// matching GRVEntry.js's getSupplierVatRate.
+function getSupplierVatRate(state, supplierId) {
+  if (!isPoSupplierVatRegistered(state, supplierId)) return 0;
+  return getVatRate(state);
 }
 
 function getPositivePackSize(value) {

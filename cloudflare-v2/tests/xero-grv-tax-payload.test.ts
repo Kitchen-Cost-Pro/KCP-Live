@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { buildGrvBillPayload } from '../src/modules/xero-engine/grv-sync';
+import { buildGrvBillPayload, isCodSupplier } from '../src/modules/xero-engine/grv-sync';
 
 // Regression: the GRV -> Xero Bill payload used to (a) toggle LineAmountTypes based on the GRV's
 // "prices include VAT" flag, even though grv_lines.unit_price/total_ex are ALWAYS ex-VAT
@@ -165,4 +165,54 @@ test('regular stock/transport line UnitAmounts are NOT scaled by the discount �
   const transportLine = payload.Invoices[0].LineItems.find((item) => item.Description === 'Transport');
   assert.equal(beerLine.UnitAmount, 10);
   assert.equal(transportLine.UnitAmount, 25);
+});
+
+// Regression: COD suppliers are paid at the point of delivery, so their Bill should never sit
+// around as an unapproved Draft — see grv-sync.ts's isCodSupplier/applyCodPayment.
+test('a COD GRV pushes as an AUTHORISED Bill, not DRAFT', () => {
+  const settings = { purchaseAccountCode: '310', purchaseTaxType: 'INPUT2', purchaseExemptTaxType: '' };
+  const payload = buildGrvBillPayload(grv(), [], 'contact_1', settings, undefined, true);
+  assert.equal(payload.Invoices[0].Status, 'AUTHORISED');
+});
+
+test('a non-COD (e.g. 30 Days) GRV still pushes as DRAFT, unaffected', () => {
+  const settings = { purchaseAccountCode: '310', purchaseTaxType: 'INPUT2', purchaseExemptTaxType: '' };
+  const payload = buildGrvBillPayload(grv(), [], 'contact_1', settings, undefined, false);
+  assert.equal(payload.Invoices[0].Status, 'DRAFT');
+});
+
+test('isCod defaults to false when omitted, matching pre-COD-feature behavior', () => {
+  const settings = { purchaseAccountCode: '310', purchaseTaxType: 'INPUT2', purchaseExemptTaxType: '' };
+  const payload = buildGrvBillPayload(grv(), [], 'contact_1', settings);
+  assert.equal(payload.Invoices[0].Status, 'DRAFT');
+});
+
+// isCodSupplier reads a supplier's paymentTerms straight out of raw_json (it's not a queryable
+// column — see Suppliers.js/supplierService.js, which store/default it the same way).
+test('isCodSupplier: an explicit COD supplier is COD', () => {
+  assert.equal(isCodSupplier(JSON.stringify({ paymentTerms: 'COD' })), true);
+});
+
+test('isCodSupplier: a supplier on 30 Days terms is not COD', () => {
+  assert.equal(isCodSupplier(JSON.stringify({ paymentTerms: '30 Days' })), false);
+});
+
+test('isCodSupplier: no raw_json at all defaults to COD, matching the Suppliers form\'s own default', () => {
+  assert.equal(isCodSupplier(null), true);
+});
+
+test('isCodSupplier: raw_json present but paymentTerms unset defaults to COD', () => {
+  assert.equal(isCodSupplier(JSON.stringify({ name: 'Test Supplier' })), true);
+});
+
+test('isCodSupplier: matching is case-insensitive and trims whitespace', () => {
+  assert.equal(isCodSupplier(JSON.stringify({ paymentTerms: ' cod ' })), true);
+});
+
+test('isCodSupplier: tolerates the alternate "Payment Terms" key spelling used by imports', () => {
+  assert.equal(isCodSupplier(JSON.stringify({ 'Payment Terms': '30 Days' })), false);
+});
+
+test('isCodSupplier: malformed raw_json degrades to the COD default rather than throwing', () => {
+  assert.equal(isCodSupplier('{not valid json'), true);
 });

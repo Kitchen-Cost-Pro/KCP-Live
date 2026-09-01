@@ -105,3 +105,37 @@ ALTER TABLE xero_sync_settings ADD COLUMN grv_sync_claimed_at TEXT;
 ALTER TABLE suppliers ADD COLUMN xero_contact_id TEXT;
 ALTER TABLE suppliers ADD COLUMN xero_contact_synced_at TEXT;
 `;
+
+/**
+ * COD supplier GRVs push as an AUTHORISED (not DRAFT) Bill with a matching Payment applied, instead
+ * of sitting as a draft forever — see grv-sync.ts's isCodSupplier/applyCodPayment. Needs the same
+ * _next-table CHECK-constraint rebuild as XERO_V2_GRV_PUSH_MIGRATION above, to add the GRV_PAYMENT
+ * effect type. cod_payment_account_code is the Xero bank account a COD payment is recorded against;
+ * left blank, the Bill still goes out as AUTHORISED but no Payment is created (see
+ * applyCodPayment's doc comment) — opt-in, not a behavior change until set.
+ */
+export const XERO_V2_GRV_COD_PAYMENT_MIGRATION = `
+DROP TABLE IF EXISTS xero_v2_effect_outbox_next;
+CREATE TABLE xero_v2_effect_outbox_next (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  effect_type TEXT NOT NULL CHECK (effect_type IN ('ITEM_PUSH', 'INVOICE_PUSH', 'GRV_PUSH', 'GRV_ATTACHMENT', 'GRV_PAYMENT')),
+  effect_key TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'PROCESSING' CHECK (status IN ('PROCESSING', 'APPLIED', 'FAILED')),
+  xero_object_id TEXT,
+  attempt_count INTEGER NOT NULL DEFAULT 1,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (workspace_id, effect_type, effect_key)
+);
+INSERT INTO xero_v2_effect_outbox_next (id, workspace_id, effect_type, effect_key, status, xero_object_id, attempt_count, last_error, created_at, updated_at)
+  SELECT id, workspace_id, effect_type, effect_key, status, xero_object_id, attempt_count, last_error, created_at, updated_at
+  FROM xero_v2_effect_outbox;
+DROP TABLE xero_v2_effect_outbox;
+ALTER TABLE xero_v2_effect_outbox_next RENAME TO xero_v2_effect_outbox;
+CREATE INDEX IF NOT EXISTS idx_xero_v2_effect_outbox_workspace_status
+  ON xero_v2_effect_outbox(workspace_id, effect_type, status);
+
+ALTER TABLE xero_sync_settings ADD COLUMN cod_payment_account_code TEXT;
+`;

@@ -13,6 +13,7 @@ import {
   type TransactionEntityType,
 } from "./transaction-references";
 import { buildGrvRawLinePool, takeGrvRawLine } from "./reporting-phase21-routes";
+import { getWorkspaceEffectiveVatRate, isSupplierVatRegistered } from "./inventory-costing";
 
 type Row = Record<string, unknown>;
 
@@ -382,10 +383,16 @@ async function loadCreditNoteDetail(env: Env, workspaceId: string, entityId: str
   if (!row) return null;
   const raw = objectValue(jsonParse(row.raw_json));
   const rawLines = arrayValue(raw.lines || raw.items).map(objectValue);
-  const vatRate = rawNumber(raw, ["vatRate", "vat_rate"], 15);
+  // Must match getCreditNotesReport's VAT gate exactly (reporting-phase21-routes.ts): the
+  // credit_notes/credit_note_lines tables never store a VAT amount, so the old
+  // rawLine.vat ?? totalExVat*vatRate/100 fallback was ALWAYS taken (never actually a fallback),
+  // applying a flat 15% to every line regardless of the item's vat_enabled or the supplier's
+  // VAT-registration status. Recompute the same way the report does instead of trusting raw_json.
+  const vatRate = await getWorkspaceEffectiveVatRate(env, workspaceId);
+  const supplierIsVatRegistered = await isSupplierVatRegistered(env, workspaceId, text(row.supplier_id));
   const financialOnly = raw.financialOnly === true || raw.financial_only === true;
   const linesResult = await env.DB.prepare(
-    `SELECT cnl.id, cnl.stock_item_id, si.name AS item_name, si.category, cnl.location_id,
+    `SELECT cnl.id, cnl.stock_item_id, si.name AS item_name, si.category, si.vat_enabled, cnl.location_id,
             COALESCE(l.display_name, l.name) AS location_name,
             cnl.quantity, cnl.unit, cnl.unit_cost, cnl.total_ex
        FROM credit_note_lines cnl
@@ -397,7 +404,8 @@ async function loadCreditNoteDetail(env: Env, workspaceId: string, entityId: str
     const rawLine = rawLines.find((entry) => text(entry.id || entry.lineId) === text(line.id)
       || text(entry.stockItemId || entry.itemId) === text(line.stock_item_id)) || {};
     const totalExVat = numberValue(line.total_ex, numberValue(line.quantity) * numberValue(line.unit_cost));
-    const vat = rawNumber(rawLine, ["vat", "totalVat", "total_vat"], totalExVat * vatRate / 100);
+    const lineIsVatable = supplierIsVatRegistered && numberValue(line.vat_enabled, 1) !== 0;
+    const vat = lineIsVatable ? totalExVat * vatRate : 0;
     const explicitImpact = rawText(rawLine, ["stockImpact", "stock_impact"]);
     const stockImpact = financialOnly ? "Financial Only"
       : explicitImpact.toLowerCase().includes("remove") ? "Stock Removed"

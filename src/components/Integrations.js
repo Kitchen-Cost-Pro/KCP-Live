@@ -147,7 +147,8 @@ const xeroDrawerState = {
   busy: false,
   message: 'Connect Xero, then set your account codes and tax types before turning sync on. KCP pushes one summarized invoice per day for completed sales, your product catalogue as Xero Items, and each GRV as a Draft Bill with its PDF attached (also once daily, alongside sales).',
   tone: '',
-  status: null
+  status: null,
+  activeTab: 'sales'
 };
 
 export function renderIntegrations({ state } = {}) {
@@ -320,6 +321,10 @@ function bindIntegrationEvents(view) {
     button.addEventListener('click', () => closeXeroModal(view));
   });
 
+  view.querySelectorAll('[data-xero-tab]').forEach((button) => {
+    button.addEventListener('click', () => setActiveXeroTab(view, button.dataset.xeroTab || 'sales'));
+  });
+
   view.querySelector('[data-yoco-connect-form]')?.addEventListener('submit', async (event) => {
     event.preventDefault();
     const workspaceId = view.dataset.workspaceId || '';
@@ -402,6 +407,7 @@ function bindIntegrationEvents(view) {
     const purchaseAccountCode = String(view.querySelector('[data-xero-purchase-account]')?.value || '').trim();
     const purchaseTaxType = String(view.querySelector('[data-xero-purchase-tax-type]')?.value || '').trim();
     const purchaseExemptTaxType = String(view.querySelector('[data-xero-purchase-exempt-tax-type]')?.value || '').trim();
+    const codPaymentAccountCode = String(view.querySelector('[data-xero-cod-payment-account]')?.value || '').trim();
     const grvSyncEnabled = view.querySelector('[data-xero-grv-enabled]')?.checked === true;
     await runXeroAction(view, 'Saving Xero settings...', async () => {
       await saveXeroSettings(view.dataset.workspaceId || '', {
@@ -412,6 +418,7 @@ function bindIntegrationEvents(view) {
         purchaseAccountCode,
         purchaseTaxType,
         purchaseExemptTaxType,
+        codPaymentAccountCode,
         grvSyncEnabled
       });
       setXeroModalStatus(view, 'Xero settings saved.', 'success');
@@ -842,6 +849,13 @@ function renderPendingSupplierMatchesList(matches = [], canManageXero = false) {
   `;
 }
 
+const XERO_TABS = [
+  { id: 'sales', label: 'Sales' },
+  { id: 'purchases', label: 'Purchases & COD' },
+  { id: 'sync', label: 'Sync & Connection' },
+  { id: 'danger', label: 'Danger Zone', managerOnly: true }
+];
+
 function renderXeroModal({ canManageXero = false } = {}) {
   xeroDrawerState.canManageXero = canManageXero;
   const status = xeroDrawerState.status || {};
@@ -851,7 +865,18 @@ function renderXeroModal({ canManageXero = false } = {}) {
   const syncEnabled = settings.enabled === true;
   const grvSyncEnabled = settings.grvSyncEnabled === true;
   const pendingSupplierMatches = status.pendingSupplierMatches || [];
+  const pendingCount = pendingSupplierMatches.length;
   const noticeTone = xeroDrawerState.tone ? ` data-tone="${escapeAttribute(xeroDrawerState.tone)}"` : '';
+  const activeTab = XERO_TABS.some((tab) => tab.id === xeroDrawerState.activeTab && (!tab.managerOnly || canManageXero))
+    ? xeroDrawerState.activeTab
+    : 'sales';
+
+  const lockedNotice = `
+    <div class="yocoActionLock" title="Only a KCP super user can configure Xero account mapping.">
+      <span class="yocoActionIcon">${icon('shieldCheck')}</span>
+      <span><strong>Configuration locked</strong><small>Contact a KCP super user to map accounts or enable sync.</small></span>
+    </div>
+  `;
 
   return `
     <div class="yocoModalBackdrop" data-xero-modal ${xeroDrawerState.open ? '' : 'hidden'}>
@@ -860,21 +885,18 @@ function renderXeroModal({ canManageXero = false } = {}) {
           <div>
             <p>Accounting</p>
             <h2 id="xero-modal-title">Connect Xero</h2>
-            <span data-xero-live-status>${isConnected ? `Connected to ${escapeHtml(status.tenantName || 'Xero')}` : isConfigured ? 'Disconnected' : 'Setup required'}</span>
+            <span class="xeroOrgChip">
+              <span class="xeroOrgDot ${isConnected ? 'is-connected' : ''}" data-xero-connection-dot></span>
+              <span data-xero-live-status>${isConnected ? `Connected to ${escapeHtml(status.tenantName || 'Xero')}` : isConfigured ? 'Disconnected' : 'Setup required'}</span>
+            </span>
+            <span data-xero-status hidden>${isConnected ? 'Connected' : isConfigured ? 'Ready' : 'Not configured'}</span>
+            <span data-xero-tenant hidden>${escapeHtml(status.tenantName || 'No organisation')}</span>
           </div>
           <button type="button" class="integrationIconAction" data-xero-close aria-label="Close Xero setup">${icon('x')}</button>
         </header>
 
         <div class="yocoDrawerBody">
-          <div class="yocoStatusGrid">
-            <article>
-              <span>Status</span>
-              <strong data-xero-status>${isConnected ? 'Connected' : isConfigured ? 'Ready' : 'Not configured'}</strong>
-            </article>
-            <article>
-              <span>Organisation</span>
-              <strong data-xero-tenant>${escapeHtml(status.tenantName || 'No organisation')}</strong>
-            </article>
+          <div class="yocoStatusGrid xeroStatRail">
             <article>
               <span>Last item sync</span>
               <strong data-xero-item-sync>${formatDateTime(settings.lastItemSyncAt) || 'Not synced yet'}</strong>
@@ -887,16 +909,31 @@ function renderXeroModal({ canManageXero = false } = {}) {
               <span>Last GRVs pushed</span>
               <strong data-xero-grv-sync>${escapeHtml(settings.lastGrvSyncDate || 'None yet')}</strong>
             </article>
+            <article class="${pendingCount ? 'xeroStatRail--warning' : ''}">
+              <span>Needs attention</span>
+              <strong data-xero-pending-count>${pendingCount ? `${pendingCount} supplier${pendingCount === 1 ? '' : 's'}` : 'None'}</strong>
+            </article>
           </div>
 
-          <div class="xeroPanelsGrid">
-            <section class="yocoActionPanel" aria-label="Xero account mapping">
-              <div class="yocoActionPanelHead">
-                <span>Account mapping</span>
-                <strong>Required before sync can be turned on.</strong>
-              </div>
+          <div class="xeroTabs" role="tablist" aria-label="Xero settings sections">
+            ${XERO_TABS.filter((tab) => !tab.managerOnly || canManageXero).map((tab) => `
+              <button
+                type="button"
+                class="${tab.id === activeTab ? 'is-active' : ''}"
+                data-xero-tab="${escapeAttribute(tab.id)}"
+                role="tab"
+                aria-selected="${tab.id === activeTab}"
+              >
+                ${escapeHtml(tab.label)}
+                ${tab.id === 'sync' && pendingCount ? `<span class="xeroTabBadge">${pendingCount}</span>` : ''}
+              </button>
+            `).join('')}
+          </div>
+
+          <form data-xero-settings-form>
+            <div class="xeroTabPane ${activeTab === 'sales' ? 'is-active' : ''}" data-xero-pane="sales">
               ${canManageXero ? `
-              <form class="xeroSettingsForm" data-xero-settings-form>
+              <div class="xeroFieldGrid">
                 <label>
                   <span>Sales account code</span>
                   <input type="text" placeholder="e.g. 200" value="${escapeAttribute(settings.salesAccountCode || '')}" data-xero-sales-account />
@@ -905,14 +942,26 @@ function renderXeroModal({ canManageXero = false } = {}) {
                   <span>Tax type</span>
                   <input type="text" placeholder="e.g. OUTPUT2" value="${escapeAttribute(settings.defaultTaxType || '')}" data-xero-tax-type />
                 </label>
-                <label>
-                  <span>Item account (optional)</span>
+                <label class="xeroFieldGrid--span2">
+                  <span>Item account <em>optional, defaults to sales account</em></span>
                   <input type="text" placeholder="Defaults to sales account" value="${escapeAttribute(settings.itemAccountCode || '')}" data-xero-item-account />
                 </label>
-                <label class="xeroCheckboxRow">
-                  <input type="checkbox" data-xero-enabled ${syncEnabled ? 'checked' : ''} />
-                  <span>Enable daily sales sync</span>
-                </label>
+              </div>
+              <label class="xeroToggleRow">
+                <span class="xeroToggleCopy"><strong>Enable daily sales sync</strong><small>Pushes one summarised invoice per day for completed sales.</small></span>
+                <input type="checkbox" data-xero-enabled ${syncEnabled ? 'checked' : ''} />
+              </label>
+              <div class="xeroFormActions">
+                <button type="submit" class="xeroCompactButton xeroCompactButton--primary" data-xero-settings-submit>
+                  ${icon('shieldCheck')}
+                  <span>Save settings</span>
+                </button>
+              </div>` : lockedNotice}
+            </div>
+
+            <div class="xeroTabPane ${activeTab === 'purchases' ? 'is-active' : ''}" data-xero-pane="purchases">
+              ${canManageXero ? `
+              <div class="xeroFieldGrid">
                 <label>
                   <span>Purchases account code</span>
                   <input type="text" placeholder="e.g. 300" value="${escapeAttribute(settings.purchaseAccountCode || '')}" data-xero-purchase-account />
@@ -921,67 +970,76 @@ function renderXeroModal({ canManageXero = false } = {}) {
                   <span>Purchases tax type</span>
                   <input type="text" placeholder="e.g. INPUT2" value="${escapeAttribute(settings.purchaseTaxType || '')}" data-xero-purchase-tax-type />
                 </label>
-                <label>
-                  <span>Purchases exempt/zero-rated tax type (optional)</span>
+                <label class="xeroFieldGrid--span2">
+                  <span>Exempt/zero-rated tax type <em>optional</em></span>
                   <input type="text" placeholder="e.g. EXEMPTINPUT" value="${escapeAttribute(settings.purchaseExemptTaxType || '')}" data-xero-purchase-exempt-tax-type />
+                  <small class="xeroFieldHint">Used for GRV lines on zero-rated stock items instead of the tax type above.</small>
                 </label>
-                <label class="xeroCheckboxRow">
-                  <input type="checkbox" data-xero-grv-enabled ${grvSyncEnabled ? 'checked' : ''} />
-                  <span>Push GRVs to Xero daily (as Draft Bills, with sales)</span>
+                <label class="xeroFieldGrid--span2">
+                  <span>COD payment account <em>optional</em></span>
+                  <input type="text" placeholder="e.g. 090" value="${escapeAttribute(settings.codPaymentAccountCode || '')}" data-xero-cod-payment-account />
+                  <small class="xeroFieldHint">Bank account COD supplier GRVs are marked paid from. Leave blank to push them Authorised without a payment.</small>
                 </label>
+              </div>
+              <label class="xeroToggleRow">
+                <span class="xeroToggleCopy"><strong>Push GRVs to Xero daily</strong><small>Sent as Bills alongside sales — COD suppliers push Authorised, every other payment method pushes Draft.</small></span>
+                <input type="checkbox" data-xero-grv-enabled ${grvSyncEnabled ? 'checked' : ''} />
+              </label>
+              <div class="xeroFormActions">
                 <button type="submit" class="xeroCompactButton xeroCompactButton--primary" data-xero-settings-submit>
                   ${icon('shieldCheck')}
                   <span>Save settings</span>
                 </button>
-              </form>` : `
-              <div class="yocoActionLock" title="Only a KCP super user can configure Xero account mapping.">
-                <span class="yocoActionIcon">${icon('lock')}</span>
-                <span><strong>Configuration locked</strong><small>Contact a KCP super user to map accounts or enable sync.</small></span>
-              </div>`}
-            </section>
+              </div>` : lockedNotice}
+            </div>
+          </form>
 
-            <section class="yocoActionPanel" aria-label="Xero connection and manual sync">
+          <div class="xeroTabPane ${activeTab === 'sync' ? 'is-active' : ''}" data-xero-pane="sync">
+            <div class="xeroActionGrid">
+              <button type="button" class="xeroCompactButton" data-xero-connect ${isConfigured ? '' : 'disabled'}>
+                ${icon('link')}
+                <span>${isConnected ? 'Reconnect Xero' : 'Connect Xero'}</span>
+              </button>
+              <button type="button" class="xeroCompactButton" data-xero-sync-items ${isConnected ? '' : 'disabled'}>
+                ${icon('boxes')}
+                <span>Push catalogue now</span>
+              </button>
+              <button type="button" class="xeroCompactButton" data-xero-sync-invoice-today ${isConnected ? '' : 'disabled'}>
+                ${icon('link')}
+                <span>Push today's sales</span>
+              </button>
+              <button type="button" class="xeroCompactButton" data-xero-sync-invoice ${isConnected ? '' : 'disabled'}>
+                ${icon('link')}
+                <span>Push yesterday's sales</span>
+              </button>
+              <button type="button" class="xeroCompactButton" data-xero-sync-grv ${isConnected ? '' : 'disabled'}>
+                ${icon('link')}
+                <span>Sync GRVs now</span>
+              </button>
+            </div>
+
+            <section class="yocoActionPanel xeroNeedsAttentionPanel" aria-label="Suppliers needing a Xero contact match">
               <div class="yocoActionPanelHead">
-                <span>Connection & sync</span>
-                <strong>Run a one-off push or manage the connection.</strong>
+                <span>Needs attention</span>
+                <strong>GRVs waiting on a supplier match before they can push to Xero.</strong>
               </div>
-              <div class="xeroActionStack">
-                <button type="button" class="xeroCompactButton" data-xero-connect ${isConfigured ? '' : 'disabled'}>
-                  ${icon('link')}
-                  <span>${isConnected ? 'Reconnect Xero' : 'Connect Xero'}</span>
-                </button>
-                <button type="button" class="xeroCompactButton" data-xero-sync-items ${isConnected ? '' : 'disabled'}>
-                  ${icon('boxes')}
-                  <span>Push catalogue now</span>
-                </button>
-                <button type="button" class="xeroCompactButton" data-xero-sync-invoice-today ${isConnected ? '' : 'disabled'}>
-                  ${icon('link')}
-                  <span>Push today's sales</span>
-                </button>
-                <button type="button" class="xeroCompactButton" data-xero-sync-invoice ${isConnected ? '' : 'disabled'}>
-                  ${icon('link')}
-                  <span>Push yesterday's sales</span>
-                </button>
-                <button type="button" class="xeroCompactButton" data-xero-sync-grv ${isConnected ? '' : 'disabled'}>
-                  ${icon('link')}
-                  <span>Sync GRVs now</span>
-                </button>
-                ${canManageXero ? `
-                <button type="button" class="xeroCompactButton xeroCompactButton--danger" data-xero-disconnect ${isConnected ? '' : 'disabled'}>
-                  ${icon('unlink')}
-                  <span>Disconnect</span>
-                </button>` : ''}
-              </div>
+              <div data-xero-pending-matches>${renderPendingSupplierMatchesList(pendingSupplierMatches, canManageXero)}</div>
             </section>
           </div>
 
-          <section class="yocoActionPanel" aria-label="Suppliers needing a Xero contact match">
-            <div class="yocoActionPanelHead">
-              <span>Needs attention</span>
-              <strong>GRVs waiting on a supplier match before they can push to Xero.</strong>
+          ${canManageXero ? `
+          <div class="xeroTabPane ${activeTab === 'danger' ? 'is-active' : ''}" data-xero-pane="danger">
+            <div class="xeroDangerCard">
+              <div>
+                <strong>Disconnect Xero</strong>
+                <span>Stops all sync immediately. Historical pushes stay in Xero — this only breaks the live connection for this workspace.</span>
+              </div>
+              <button type="button" class="xeroCompactButton xeroCompactButton--danger" data-xero-disconnect ${isConnected ? '' : 'disabled'}>
+                ${icon('unlink')}
+                <span>Disconnect</span>
+              </button>
             </div>
-            <div data-xero-pending-matches>${renderPendingSupplierMatchesList(pendingSupplierMatches, canManageXero)}</div>
-          </section>
+          </div>` : ''}
 
           <div class="yocoModalNotice" data-xero-modal-status${noticeTone}>
             ${escapeHtml(xeroDrawerState.message)}
@@ -1096,6 +1154,14 @@ function updateXeroStatus(view, status = {}, options = {}) {
   setText(view, '[data-xero-item-sync]', formatDateTime(settings.lastItemSyncAt) || 'Not synced yet');
   setText(view, '[data-xero-invoice-sync]', settings.lastInvoiceSyncDate || 'None yet');
   setText(view, '[data-xero-grv-sync]', settings.lastGrvSyncDate || 'None yet');
+  const dot = view.querySelector('[data-xero-connection-dot]');
+  if (dot) dot.classList.toggle('is-connected', status.connectionActive === true);
+  const pendingCount = (status.pendingSupplierMatches || []).length;
+  setText(view, '[data-xero-pending-count]', pendingCount ? `${pendingCount} supplier${pendingCount === 1 ? '' : 's'}` : 'None');
+  const pendingStat = view.querySelector('[data-xero-pending-count]')?.closest('article');
+  if (pendingStat) pendingStat.classList.toggle('xeroStatRail--warning', pendingCount > 0);
+  const syncTabBadge = view.querySelector('[data-xero-tab="sync"] .xeroTabBadge');
+  if (syncTabBadge) syncTabBadge.textContent = String(pendingCount);
   const pendingMatchesContainer = view.querySelector('[data-xero-pending-matches]');
   if (pendingMatchesContainer) {
     pendingMatchesContainer.innerHTML = renderPendingSupplierMatchesList(status.pendingSupplierMatches || [], xeroDrawerState.canManageXero === true);
@@ -1309,6 +1375,20 @@ function closeXeroModal(view) {
   xeroDrawerState.open = false;
   const modal = view.querySelector('[data-xero-modal]');
   if (modal) modal.hidden = true;
+}
+
+// Toggles tab/pane CSS classes directly rather than a full re-render, so in-progress edits in the
+// (still-mounted) settings form fields aren't lost when switching tabs.
+function setActiveXeroTab(view, tabId) {
+  xeroDrawerState.activeTab = tabId;
+  view.querySelectorAll('[data-xero-tab]').forEach((button) => {
+    const isActive = button.dataset.xeroTab === tabId;
+    button.classList.toggle('is-active', isActive);
+    button.setAttribute('aria-selected', String(isActive));
+  });
+  view.querySelectorAll('[data-xero-pane]').forEach((pane) => {
+    pane.classList.toggle('is-active', pane.dataset.xeroPane === tabId);
+  });
 }
 
 async function runYocoAction(view, message, task) {

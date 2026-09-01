@@ -22,7 +22,7 @@ export function renderGRVEntry({ state, onGrvFilterChange, onGrvAction = {} } = 
   const draft = getDraft(grv);
   const vatRate = getVatRate(state);
   const vatRegistered = isWorkspaceVatRegistered(state);
-  const supplierVatRate = getSupplierVatRate(state);
+  const supplierVatRate = getSupplierVatRate(state, draft.supplierId);
   const supplierMatches = getSupplierMatches(state, grv, draft.supplierName || '');
   const convertibleOrders = filterConvertibleOrders(grv.orders || [], filters.poQuery || filters.query || '');
   const stockMatches = getStockMatches(grv.stockItems || [], filters.lineQuery || '', draft.items || []);
@@ -193,7 +193,7 @@ export function renderGRVEntry({ state, onGrvFilterChange, onGrvAction = {} } = 
 
 function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, onGrvAction) {
   const vatRegistered = isWorkspaceVatRegistered(state);
-  const supplierVatRate = getSupplierVatRate(state);
+  const supplierVatRate = getSupplierVatRate(state, draft.supplierId);
   const blurActiveDraftField = () => {
     const active = document.activeElement;
     if (!active || !view.contains(active)) return;
@@ -1828,12 +1828,34 @@ function isWorkspaceVatRegistered(state) {
   return settings.vatRegistered !== false;
 }
 
+function findGrvSupplierById(state, supplierId) {
+  if (!supplierId) return null;
+  const id = String(supplierId);
+  const fromGrv = (state.grv?.suppliers || []).find((supplier) => String(supplier.id) === id);
+  if (fromGrv) return fromGrv;
+  return (state.suppliers?.items || []).find((supplier) => String(supplier.id) === id) || null;
+}
+
+// A non-VAT-registered SUPPLIER (a different concept from isWorkspaceVatRegistered, which is about
+// whether THIS business can reclaim VAT) never charges VAT on anything they sell, regardless of
+// the item — defaults to true (registered) when the supplier isn't found/selected yet, so a fresh
+// draft with no supplier chosen still shows VAT normally.
+function isGrvSupplierVatRegistered(state, supplierId) {
+  const supplier = findGrvSupplierById(state, supplierId);
+  return supplier ? supplier.vatRegistered !== false : true;
+}
+
 // Unlike getVatRate (zeroed above so no VAT ever shows on a non-registered workspace's live
 // previews/totals), this is the real rate a VATable supplier actually charges on their invoice —
 // it must stay non-zero regardless of OUR OWN registration status. A non-registered business still
 // pays that VAT; it just can't reclaim it, so the input VAT becomes a genuine, unrecoverable part
 // of the item's cost (see finalizeReceivedCost below) rather than a separate line it can net off.
-function getSupplierVatRate(state) {
+//
+// EXCEPT when the SUPPLIER itself isn't VAT registered — then they never charged VAT in the first
+// place, so this correctly returns 0, which cascades through calculateDraftTotals/
+// finalizeReceivedCost/calculateDisplayedLinePrice exactly like "no VAT on this purchase at all".
+function getSupplierVatRate(state, supplierId) {
+  if (!isGrvSupplierVatRegistered(state, supplierId)) return 0;
   const settings = state.settings?.draft || state.settings?.values || {};
   return (Number(settings.vatRate ?? settings.vatPercentage ?? 15) || 15) / 100;
 }

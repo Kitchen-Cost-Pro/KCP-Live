@@ -91,6 +91,29 @@ export async function isWorkspaceVatRegistered(env: Env, workspaceId: string): P
   return Number(row?.vat_registered ?? 1) !== 0;
 }
 
+/**
+ * Whether a SUPPLIER is VAT registered — a different concept from isWorkspaceVatRegistered (which
+ * is about whether THIS business can reclaim VAT). A non-VAT-registered supplier never charges VAT
+ * on anything they sell, regardless of whether the item itself is normally VATable (bread vs beer)
+ * — so a GRV/PO/Credit Note line must carry VAT only when BOTH the stock item is VATable AND the
+ * supplier is VAT registered. Stored in suppliers.raw_json (like most other supplier fields —
+ * there's no dedicated column), defaulting to true when unset or when there's no supplier at all
+ * (a manual/no-supplier receipt), matching stock_items.vat_enabled's own "assume VATable" default.
+ */
+export async function isSupplierVatRegistered(env: Env, workspaceId: string, supplierId: string): Promise<boolean> {
+  if (!supplierId) return true;
+  const row = await env.DB.prepare(
+    `SELECT raw_json FROM suppliers WHERE id = ?1 AND workspace_id = ?2 LIMIT 1`
+  ).bind(supplierId, workspaceId).first<{ raw_json?: string }>();
+  if (!row?.raw_json) return true;
+  try {
+    const parsed = jsonObject(row.raw_json);
+    return parsed.vatRegistered !== false;
+  } catch {
+    return true;
+  }
+}
+
 export interface VatAwareLineInput {
   stockItemId?: unknown;
   lineTotalEx?: unknown;
@@ -121,12 +144,17 @@ export interface VatAwareLineTotals {
  * already folded VAT into the line's cost before it reached this function. Getting this backwards
  * either silently drops real VAT or double-counts it — see the caller for why each is set the way
  * it is.
+ *
+ * `supplierIsVatRegistered` (default true) is a second, independent gate on top of vat_enabled: a
+ * non-VAT-registered supplier never charges VAT on anything, so when false, EVERY line is treated
+ * as non-VATable regardless of its own stock item's vat_enabled flag — bread and beer alike.
  */
 export function sumVatAwareLineTotals(
   items: VatAwareLineInput[],
   vatRate: number,
   vatEnabledByStockItemId: Map<string, boolean>,
-  linesAreAlreadyVatInclusive = false
+  linesAreAlreadyVatInclusive = false,
+  supplierIsVatRegistered = true
 ): VatAwareLineTotals {
   let totalEx = 0;
   let totalVat = 0;
@@ -134,7 +162,7 @@ export function sumVatAwareLineTotals(
   for (const line of items) {
     const submitted = numberValue(line.lineTotalEx, 0);
     const stockItemId = text(line.stockItemId);
-    const isVatable = vatEnabledByStockItemId.get(stockItemId) !== false;
+    const isVatable = supplierIsVatRegistered && vatEnabledByStockItemId.get(stockItemId) !== false;
     if (!isVatable) {
       totalEx += submitted;
       continue;
