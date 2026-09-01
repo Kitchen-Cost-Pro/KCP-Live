@@ -685,6 +685,13 @@
   box-shadow: inset 3px 0 0 rgba(16, 185, 129, 0.65);
 }
 
+/* Transport is a header-level cost shown as a trailing read-only row, not an editable stock line —
+   the muted background and no hover state signal it isn't interactive like the rows above it. */
+#view-grv .grv-table tbody tr.grv-lineRow--transport td {
+  background: rgba(148, 163, 184, 0.08);
+  font-style: italic;
+}
+
 #view-grv .grv-lineCheck {
   padding-right: 0;
   vertical-align: middle;

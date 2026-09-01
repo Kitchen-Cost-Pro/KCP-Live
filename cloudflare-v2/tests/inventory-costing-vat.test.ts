@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { TENANT_SCHEMA_SQL } from '../src/tenant-schema.generated';
 import type { DbLike, DbResult, DbStatementLike } from '../src/legacy/types';
 import {
+  applyProRataDiscount,
   getWorkspaceEffectiveVatRate,
   isWorkspaceVatRegistered,
   loadVatEnabledByStockItemId,
@@ -184,4 +185,37 @@ test('a non-VATable-only order never carries VAT, registered or not', () => {
   assert.equal(notRegistered.totalVat, 0);
   assert.equal(registered.totalInc, 50);
   assert.equal(notRegistered.totalInc, 50);
+});
+
+// applyProRataDiscount — a GRV header-level discount (GRVEntry.js's "Discount (Ex)" field) must
+// reduce taxable and non-taxable spend in proportion to their share of the pre-discount subtotal,
+// mirroring calculateDraftTotals exactly, not apply at one flat rate to the whole discount.
+
+test('applyProRataDiscount on an all-VATable order reduces the taxable base by the full discount', () => {
+  const vatEnabled = new Map([['beer', true]]);
+  const preDiscount = sumVatAwareLineTotals([{ stockItemId: 'beer', lineTotalEx: 100 }], 0.15, vatEnabled);
+  const result = applyProRataDiscount(preDiscount, 20, 0.15);
+  assert.ok(Math.abs(result.totalEx - 80) < 1e-9);
+  assert.ok(Math.abs(result.totalVat - 12) < 1e-9); // 80 * 0.15
+  assert.ok(Math.abs(result.totalInc - 92) < 1e-9);
+});
+
+test('applyProRataDiscount on a mixed VATable/exempt order splits the discount by taxable share', () => {
+  // 60 taxable + 40 exempt = 100 subtotal; a 10 discount removes 6 from taxable, 4 from exempt.
+  const vatEnabled = new Map([['beer', true], ['bread', false]]);
+  const preDiscount = sumVatAwareLineTotals(
+    [{ stockItemId: 'beer', lineTotalEx: 60 }, { stockItemId: 'bread', lineTotalEx: 40 }],
+    0.15,
+    vatEnabled,
+  );
+  const result = applyProRataDiscount(preDiscount, 10, 0.15);
+  assert.ok(Math.abs(result.taxableEx - 54) < 1e-9, `expected ~54, got ${result.taxableEx}`); // 60 - 6
+  assert.ok(Math.abs(result.totalEx - 90) < 1e-9); // 100 - 10
+  assert.ok(Math.abs(result.totalVat - 8.1) < 1e-9, `expected ~8.1, got ${result.totalVat}`); // 54 * 0.15
+});
+
+test('applyProRataDiscount is a no-op when the discount is 0', () => {
+  const vatEnabled = new Map([['beer', true]]);
+  const preDiscount = sumVatAwareLineTotals([{ stockItemId: 'beer', lineTotalEx: 100 }], 0.15, vatEnabled);
+  assert.deepEqual(applyProRataDiscount(preDiscount, 0, 0.15), preDiscount);
 });

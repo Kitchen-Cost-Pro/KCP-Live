@@ -83,3 +83,71 @@ test('Bill fields: Type is ACCPAY, Status is DRAFT, Contact is the resolved Cont
   assert.equal(bill.Status, 'DRAFT');
   assert.deepEqual(bill.Contact, { ContactID: 'contact_42' });
 });
+
+test('a GRV with a transport cost pushes it as its own taxable line item', () => {
+  const settings = { purchaseAccountCode: '310', purchaseTaxType: 'INPUT2', purchaseExemptTaxType: 'EXEMPTINPUT' };
+  const lines = [{ stock_item_id: 'si_1', stock_item_name: 'Flour', quantity: 10, unit_price: 10, total_ex: 100, total_vat: 15 }];
+
+  const payload = buildGrvBillPayload(grv({ transport_ex: 25 }), lines, 'contact_1', settings);
+  const items = payload.Invoices[0].LineItems;
+  assert.equal(items.length, 2);
+  const transportLine = items.find((item) => item.Description === 'Transport');
+  assert.equal(transportLine.UnitAmount, 25);
+  // Transport is always taxable, regardless of what stock items it shipped — never the exempt type.
+  assert.equal(transportLine.TaxType, 'INPUT2');
+});
+
+test('no transport line is added when transport_ex is 0/null', () => {
+  const settings = { purchaseAccountCode: '310', purchaseTaxType: 'INPUT2', purchaseExemptTaxType: '' };
+  const lines = [{ stock_item_id: 'si_1', stock_item_name: 'Flour', quantity: 10, unit_price: 10, total_ex: 100, total_vat: 15 }];
+  const payload = buildGrvBillPayload(grv({ transport_ex: 0 }), lines, 'contact_1', settings);
+  assert.equal(payload.Invoices[0].LineItems.some((item) => item.Description === 'Transport'), false);
+});
+
+test('a discount on an all-VATable GRV is pushed as a single negative taxable line, not split', () => {
+  const settings = { purchaseAccountCode: '310', purchaseTaxType: 'INPUT2', purchaseExemptTaxType: 'EXEMPTINPUT' };
+  const lines = [{ stock_item_id: 'si_1', stock_item_name: 'Beer', quantity: 10, unit_price: 10, total_ex: 100, total_vat: 15 }];
+
+  const payload = buildGrvBillPayload(grv({ discount_ex: 20 }), lines, 'contact_1', settings);
+  const discountLines = payload.Invoices[0].LineItems.filter((item) => String(item.Description).startsWith('Discount'));
+  assert.equal(discountLines.length, 1);
+  assert.equal(discountLines[0].UnitAmount, -20);
+  assert.equal(discountLines[0].TaxType, 'INPUT2');
+});
+
+test('a discount on a mixed VATable/exempt GRV is pro-rated across two lines, matching each share\'s tax type', () => {
+  const settings = { purchaseAccountCode: '310', purchaseTaxType: 'INPUT2', purchaseExemptTaxType: 'EXEMPTINPUT' };
+  // 60 taxable (beer) + 40 exempt (bread) = 100 subtotal; a 10 discount should split 6/4.
+  const lines = [
+    { stock_item_id: 'si_beer', stock_item_name: 'Beer', quantity: 1, unit_price: 60, total_ex: 60, total_vat: 9 },
+    { stock_item_id: 'si_bread', stock_item_name: 'Bread', quantity: 1, unit_price: 40, total_ex: 40, total_vat: 0 }
+  ];
+
+  const payload = buildGrvBillPayload(grv({ discount_ex: 10 }), lines, 'contact_1', settings);
+  const discountLines = payload.Invoices[0].LineItems.filter((item) => String(item.Description).startsWith('Discount'));
+  assert.equal(discountLines.length, 2);
+  const taxableDiscount = discountLines.find((item) => item.TaxType === 'INPUT2');
+  const exemptDiscount = discountLines.find((item) => item.TaxType === 'EXEMPTINPUT');
+  assert.ok(Math.abs(taxableDiscount.UnitAmount - -6) < 1e-9, `expected ~-6, got ${taxableDiscount.UnitAmount}`);
+  assert.ok(Math.abs(exemptDiscount.UnitAmount - -4) < 1e-9, `expected ~-4, got ${exemptDiscount.UnitAmount}`);
+});
+
+test('transport counts toward the taxable base a discount is pro-rated against (transport is always taxable)', () => {
+  const settings = { purchaseAccountCode: '310', purchaseTaxType: 'INPUT2', purchaseExemptTaxType: 'EXEMPTINPUT' };
+  // 50 exempt (bread) + 50 transport (always taxable) = 100 subtotal; a 20 discount should split 10/10.
+  const lines = [{ stock_item_id: 'si_bread', stock_item_name: 'Bread', quantity: 1, unit_price: 50, total_ex: 50, total_vat: 0 }];
+
+  const payload = buildGrvBillPayload(grv({ transport_ex: 50, discount_ex: 20 }), lines, 'contact_1', settings);
+  const discountLines = payload.Invoices[0].LineItems.filter((item) => String(item.Description).startsWith('Discount'));
+  const taxableDiscount = discountLines.find((item) => item.TaxType === 'INPUT2');
+  const exemptDiscount = discountLines.find((item) => item.TaxType === 'EXEMPTINPUT');
+  assert.ok(Math.abs(taxableDiscount.UnitAmount - -10) < 1e-9, `expected ~-10, got ${taxableDiscount.UnitAmount}`);
+  assert.ok(Math.abs(exemptDiscount.UnitAmount - -10) < 1e-9, `expected ~-10, got ${exemptDiscount.UnitAmount}`);
+});
+
+test('no discount lines are added when discount_ex is 0/null', () => {
+  const settings = { purchaseAccountCode: '310', purchaseTaxType: 'INPUT2', purchaseExemptTaxType: '' };
+  const lines = [{ stock_item_id: 'si_1', stock_item_name: 'Flour', quantity: 10, unit_price: 10, total_ex: 100, total_vat: 15 }];
+  const payload = buildGrvBillPayload(grv({ discount_ex: 0 }), lines, 'contact_1', settings);
+  assert.equal(payload.Invoices[0].LineItems.some((item) => String(item.Description).startsWith('Discount')), false);
+});

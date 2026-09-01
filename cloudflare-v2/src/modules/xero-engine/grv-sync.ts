@@ -24,6 +24,8 @@ interface GrvRow {
   total_ex: number | null;
   total_vat: number | null;
   total_inc: number | null;
+  transport_ex: number | null;
+  discount_ex: number | null;
   raw_json: string | null;
 }
 
@@ -54,6 +56,7 @@ interface GrvLineRow {
   stock_item_name: string | null;
   quantity: number | null;
   unit_price: number | null;
+  total_ex: number | null;
   total_vat: number | null;
 }
 
@@ -69,7 +72,7 @@ interface GrvLineRow {
  */
 async function loadGrvLines(env: Env, workspaceId: string, grvId: string): Promise<GrvLineRow[]> {
   const rows = await env.DB.prepare(
-    `SELECT gl.stock_item_id, si.name AS stock_item_name, gl.quantity, gl.unit_price, gl.total_vat
+    `SELECT gl.stock_item_id, si.name AS stock_item_name, gl.quantity, gl.unit_price, gl.total_ex, gl.total_vat
      FROM grv_lines gl
      LEFT JOIN stock_items si ON si.id = gl.stock_item_id AND si.workspace_id = gl.workspace_id
      WHERE gl.grv_id = ?1 AND gl.workspace_id = ?2
@@ -99,7 +102,7 @@ export async function loadPendingGrvs(env: Env, workspaceId: string, limit = 500
   const rows = await env.DB.prepare(
     `SELECT
        grv.id, grv.supplier_id, s.name AS supplier_name, s.xero_contact_id AS supplier_xero_contact_id,
-       grv.invoice_number, grv.received_at, grv.prices_include_vat, grv.total_ex, grv.total_vat, grv.total_inc, grv.raw_json
+       grv.invoice_number, grv.received_at, grv.prices_include_vat, grv.total_ex, grv.total_vat, grv.total_inc, grv.transport_ex, grv.discount_ex, grv.raw_json
      FROM grvs grv
      LEFT JOIN suppliers s ON s.id = grv.supplier_id AND s.workspace_id = grv.workspace_id
      WHERE grv.workspace_id = ?1
@@ -145,6 +148,27 @@ export async function resolveXeroContactForSupplier(
   return contactId;
 }
 
+/**
+ * Splits a header-level discount across the taxable vs non-taxable share of the pre-discount
+ * subtotal (lines + transport), mirroring GRVEntry.js's calculateDraftTotals / the backend's
+ * applyProRataDiscount (inventory-costing.ts) — a discount on a mixed bread+beer GRV isn't its own
+ * flat-rate line, it reduces both taxable and non-taxable spend in proportion to their share.
+ * grv_lines are the PRE-discount per-line totals (discount is only ever applied at the header
+ * level, never written back into grv_lines), so they're the correct base to pro-rate against here.
+ */
+function proRataDiscountShares(lines: GrvLineRow[], transportEx: number, discountEx: number): { taxableShare: number; nonTaxableShare: number } {
+  if (!discountEx) return { taxableShare: 0, nonTaxableShare: 0 };
+  let taxableExBeforeDiscount = transportEx > 0 ? transportEx : 0; // transport is always taxable
+  let subtotalBeforeDiscount = transportEx > 0 ? transportEx : 0;
+  for (const line of lines) {
+    const lineEx = Number(line.total_ex) || 0;
+    subtotalBeforeDiscount += lineEx;
+    if (Number(line.total_vat) > 0) taxableExBeforeDiscount += lineEx;
+  }
+  const taxableShare = subtotalBeforeDiscount > 0 ? discountEx * (taxableExBeforeDiscount / subtotalBeforeDiscount) : 0;
+  return { taxableShare, nonTaxableShare: discountEx - taxableShare };
+}
+
 export function buildGrvBillPayload(
   grv: GrvRow,
   lines: GrvLineRow[],
@@ -152,6 +176,9 @@ export function buildGrvBillPayload(
   settings: { purchaseAccountCode: string; purchaseTaxType: string; purchaseExemptTaxType: string },
   existingBillId?: string
 ) {
+  const transportEx = Number(grv.transport_ex) || 0;
+  const discountEx = Number(grv.discount_ex) || 0;
+  const discountShares = proRataDiscountShares(lines, transportEx, discountEx);
   return {
     Invoices: [
       {
@@ -165,23 +192,58 @@ export function buildGrvBillPayload(
         // "prices include VAT" toggle was set at entry — that only affects what price the user
         // typed on screen, never what's stored — so this is always Exclusive, never conditional.
         LineAmountTypes: 'Exclusive',
-        LineItems: (lines.length
-          ? lines
-          : [{ stock_item_id: null, stock_item_name: 'Goods received', quantity: 1, unit_price: grv.total_ex || 0, total_vat: grv.total_vat }]
-        ).map((line) => {
-          // A zero-rated/VAT-exempt stock item (total_vat = 0, driven by stock_items.vat_enabled —
-          // see loadGrvLines) uses the exempt tax type if one's configured, instead of blanket-
-          // applying the normal purchases tax type to every line regardless of its real taxability.
-          const isTaxable = Number(line.total_vat) > 0;
-          const taxType = !isTaxable && settings.purchaseExemptTaxType ? settings.purchaseExemptTaxType : settings.purchaseTaxType;
-          return {
-            Description: text(line.stock_item_name) || text(line.stock_item_id) || 'Goods received',
-            Quantity: Number(line.quantity) || 1,
-            UnitAmount: Number(line.unit_price) || 0,
-            AccountCode: settings.purchaseAccountCode,
-            TaxType: taxType
-          };
-        })
+        LineItems: [
+          ...(lines.length
+            ? lines
+            : [{ stock_item_id: null, stock_item_name: 'Goods received', quantity: 1, unit_price: grv.total_ex || 0, total_vat: grv.total_vat }]
+          ).map((line) => {
+            // A zero-rated/VAT-exempt stock item (total_vat = 0, driven by stock_items.vat_enabled —
+            // see loadGrvLines) uses the exempt tax type if one's configured, instead of blanket-
+            // applying the normal purchases tax type to every line regardless of its real taxability.
+            const isTaxable = Number(line.total_vat) > 0;
+            const taxType = !isTaxable && settings.purchaseExemptTaxType ? settings.purchaseExemptTaxType : settings.purchaseTaxType;
+            return {
+              Description: text(line.stock_item_name) || text(line.stock_item_id) || 'Goods received',
+              Quantity: Number(line.quantity) || 1,
+              UnitAmount: Number(line.unit_price) || 0,
+              AccountCode: settings.purchaseAccountCode,
+              TaxType: taxType
+            };
+          }),
+          // Transport is always taxable at the standard purchases tax type (same VAT treatment as
+          // any other GRV line) — never the exempt type, regardless of which stock items it shipped.
+          ...(transportEx > 0
+            ? [{
+              Description: 'Transport',
+              Quantity: 1,
+              UnitAmount: transportEx,
+              AccountCode: settings.purchaseAccountCode,
+              TaxType: settings.purchaseTaxType
+            }]
+            : []),
+          // A negative-UnitAmount line, same account code — Xero's own standard way to model a
+          // discount on a Bill. Split into up to two lines (taxable / non-taxable share) so Xero
+          // computes the same VAT reduction our own totals already reflect, instead of over- or
+          // under-taxing the discount at one flat rate.
+          ...(discountShares.taxableShare > 0
+            ? [{
+              Description: 'Discount',
+              Quantity: 1,
+              UnitAmount: -discountShares.taxableShare,
+              AccountCode: settings.purchaseAccountCode,
+              TaxType: settings.purchaseTaxType
+            }]
+            : []),
+          ...(discountShares.nonTaxableShare > 0
+            ? [{
+              Description: 'Discount (zero-rated/exempt items)',
+              Quantity: 1,
+              UnitAmount: -discountShares.nonTaxableShare,
+              AccountCode: settings.purchaseAccountCode,
+              TaxType: settings.purchaseExemptTaxType || settings.purchaseTaxType
+            }]
+            : [])
+        ]
       }
     ]
   };
@@ -200,6 +262,8 @@ async function pushGrvAttachment(env: Env, workspaceId: string, grv: GrvRow, bil
       supplierName: grv.supplier_name,
       date: grv.received_at,
       items,
+      transportEx: grv.transport_ex,
+      discountEx: grv.discount_ex,
       totalEx: grv.total_ex,
       totalVat: grv.total_vat,
       totalInc: grv.total_inc

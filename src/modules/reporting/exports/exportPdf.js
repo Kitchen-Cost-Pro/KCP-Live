@@ -203,6 +203,8 @@ export async function grvToPdfDocument(grv = {}, options = {}) {
     branding: options.branding || {}
   });
 
+  const transportEx = Number(grv.transportEx || 0) || 0;
+  const discountEx = Number(grv.discountEx || 0) || 0;
   const headers = ['Item', 'Qty', 'Unit', 'Unit Cost', 'Line Total'];
   const body = items.length
     ? items.map((line) => [
@@ -213,6 +215,12 @@ export async function grvToPdfDocument(grv = {}, options = {}) {
       pdfMoney(line.lineTotalEx)
     ])
     : [['No line items were recorded.', '', '', '', '']];
+  if (transportEx) {
+    body.push(['Transport', '', '', '', pdfMoney(transportEx)]);
+  }
+  if (discountEx) {
+    body.push(['Discount', '', '', '', pdfMoney(-discountEx)]);
+  }
   const tableTheme = kcpPdfTableTheme();
   autoTable(doc, {
     startY: header.tableStartY,

@@ -46,6 +46,7 @@ import { sendEmail } from "./email";
 import { TENANT_MIGRATIONS } from "../tenant-migrations";
 import { checkRateLimit } from "./rate-limit";
 import {
+  applyProRataDiscount,
   calculateIncomingLocationCost,
   getWorkspaceEffectiveVatRate,
   getWorkspaceInventoryCostingMethod,
@@ -8834,6 +8835,8 @@ function normalizeGoodsReceiptPayload(raw: Record<string, unknown>, vatRate = 0.
       receipt.override_cost_price !== false &&
       receipt.override_cost_price !== 0,
     costingMethod: text(receipt.costingMethod || receipt.costing_method),
+    transportEx: numberValue(receipt.transportEx, 0),
+    discountEx: numberValue(receipt.discountEx, 0),
     status: "finalized",
     workflowStatus: "finalized",
     totalEx,
@@ -8865,6 +8868,8 @@ function normalizeGoodsReceiptPayload(raw: Record<string, unknown>, vatRate = 0.
         : 0,
     overrideCostPrice: normalized.overrideCostPrice === true ? 1 : 0,
     costingMethod: normalized.costingMethod,
+    transportEx: normalized.transportEx,
+    discountEx: normalized.discountEx,
     totalEx,
     totalVat,
     totalInc,
@@ -9158,12 +9163,25 @@ export async function postGoodsReceipt(
   // ex-VAT/VAT split must be backed OUT of that already-inclusive figure, not added on top of it
   // again (that would double the real VAT paid). See sumVatAwareLineTotals's doc comment.
   const grvWorkspaceIsVatRegistered = await isWorkspaceVatRegistered(env, workspaceId);
-  const grvVatAwareTotals = sumVatAwareLineTotals(
-    payload.normalized.items,
+  // Transport is folded in as a synthetic VATable "line" (no matching entry in
+  // grvVatEnabledByStockItemId, so sumVatAwareLineTotals treats it as VATable by default, same as
+  // any other line) so it shares the exact same VAT-rate/inclusive-vs-exclusive handling as stock
+  // lines. It must NOT be pushed into payload.normalized.items — that array also drives the
+  // grv_lines insert loop below, and grv_lines.stock_item_id is a NOT NULL FK to a real stock item.
+  const transportEx = numberValue(payload.transportEx, 0);
+  const preDiscountTotals = sumVatAwareLineTotals(
+    transportEx
+      ? [...payload.normalized.items, { stockItemId: "__transport__", lineTotalEx: transportEx }]
+      : payload.normalized.items,
     workspaceVatRate,
     grvVatEnabledByStockItemId,
     !grvWorkspaceIsVatRegistered,
   );
+  // A discount is NOT its own VATable/non-VATable line — it's pro-rated across the taxable vs
+  // non-taxable share of the pre-discount subtotal, matching GRVEntry.js's calculateDraftTotals
+  // exactly (discountTaxableShare) so the saved total matches what the user saw on screen.
+  const discountEx = numberValue(payload.discountEx, 0);
+  const grvVatAwareTotals = applyProRataDiscount(preDiscountTotals, discountEx, workspaceVatRate);
   payload.totalEx = grvVatAwareTotals.totalEx;
   payload.totalVat = grvVatAwareTotals.totalVat;
   payload.totalInc = grvVatAwareTotals.totalInc;
@@ -9227,8 +9245,8 @@ export async function postGoodsReceipt(
     env.DB.prepare(
       `INSERT INTO grvs
         (id, workspace_id, supplier_id, purchase_order_id, invoice_number, received_at, prices_include_vat,
-         split_by_location, total_ex, total_vat, total_inc, created_by, raw_json, created_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)`,
+         split_by_location, total_ex, total_vat, total_inc, transport_ex, discount_ex, created_by, raw_json, created_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)`,
     ).bind(
       payload.id,
       workspaceId,
@@ -9241,6 +9259,8 @@ export async function postGoodsReceipt(
       payload.totalEx,
       payload.totalVat,
       payload.totalInc,
+      transportEx,
+      discountEx,
       auth.uid,
       payload.rawJson,
       now,

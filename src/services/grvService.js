@@ -147,6 +147,8 @@ function normalizeReceiptPayload(receipt = {}) {
     splitByLocation: receipt.splitByLocation === true,
     overrideCostPrice: receipt.overrideCostPrice !== false,
     costingMethod: normalizeCostingMethod(receipt.costingMethod || receipt.costing_method),
+    transportEx: Number(receipt.transportEx || 0) || 0,
+    discountEx: Number(receipt.invoiceDiscountEx || receipt.discountEx || 0) || 0,
     items: (receipt.items || [])
       .map((line) => normalizeReceiptLine(line, { defaultLocationId, defaultLocationName }))
       .filter((line) => line.stockItemId && Number(line.receivedQty || 0) > 0)

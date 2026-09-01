@@ -3,6 +3,19 @@ import { YOCO_V2_FOUNDATION_MIGRATION, YOCO_V2_SALE_SHADOW_MIGRATION, YOCO_V2_RE
 import { MODIFIER_ENGINE_CORE_ACTIONS_MIGRATION, MODIFIER_ENGINE_REFUNDS_RELIABILITY_NOTES_MIGRATION } from './modules/modifier-engine/migrations';
 import { XERO_V2_FOUNDATION_MIGRATION, XERO_V2_GRV_PUSH_MIGRATION } from './modules/xero-engine/migrations';
 
+// 47 — persist the GRV Transport cost. It previously only lived in the frontend draft/preview
+// total (GRVEntry.js's transportEx) and was silently dropped before saving — never reached the
+// saved GRV total, the PDF, or Xero. Stored as its own column (not a grv_lines row) because
+// grv_lines.stock_item_id is a NOT NULL FK to a real stock item. Exported (rather than inlined in
+// TENANT_MIGRATIONS below) so tests that build a tenant schema from TENANT_SCHEMA_SQL +
+// individually-named migrations, without running the full numbered chain, can apply it too.
+export const GRV_TRANSPORT_EX_MIGRATION = `ALTER TABLE grvs ADD COLUMN transport_ex REAL NOT NULL DEFAULT 0;`;
+
+// 48 — same fix as migration 47, for the GRV Discount field (GRVEntry.js's invoiceDiscountEx),
+// which was dropped by the same normalizeReceiptPayload whitelist gap. See GRV_TRANSPORT_EX_MIGRATION's
+// comment for the full rationale (own column, not a grv_lines row).
+export const GRV_DISCOUNT_EX_MIGRATION = `ALTER TABLE grvs ADD COLUMN discount_ex REAL NOT NULL DEFAULT 0;`;
+
 /**
  * Ordered per-tenant schema migrations, applied INSIDE each WorkspaceDO's own SQLite on first
  * access (and whenever new migrations are appended). The DO records the last-applied index in a
@@ -746,5 +759,9 @@ CREATE INDEX IF NOT EXISTS idx_stock_movements_workspace_effective_date
   XERO_V2_FOUNDATION_MIGRATION,
   // 46 — GRV -> Xero Bill (ACCPAY) push + Supplier -> Xero Contact mapping. See
   // modules/xero-engine/migrations.ts's XERO_V2_GRV_PUSH_MIGRATION doc comment and grv-sync.ts.
-  XERO_V2_GRV_PUSH_MIGRATION
+  XERO_V2_GRV_PUSH_MIGRATION,
+  // 47 — see GRV_TRANSPORT_EX_MIGRATION's doc comment above.
+  GRV_TRANSPORT_EX_MIGRATION,
+  // 48 — see GRV_DISCOUNT_EX_MIGRATION's doc comment above.
+  GRV_DISCOUNT_EX_MIGRATION
 ];

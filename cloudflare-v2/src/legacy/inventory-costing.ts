@@ -100,6 +100,10 @@ export interface VatAwareLineTotals {
   totalEx: number;
   totalVat: number;
   totalInc: number;
+  /** Sum of only the VATable lines' ex-VAT amounts — the base a header-level discount's VAT
+   * portion must be pro-rated against (see applyProRataDiscount below), since totalVat is not a
+   * flat rate on the whole order. */
+  taxableEx: number;
 }
 
 /**
@@ -126,6 +130,7 @@ export function sumVatAwareLineTotals(
 ): VatAwareLineTotals {
   let totalEx = 0;
   let totalVat = 0;
+  let taxableEx = 0;
   for (const line of items) {
     const submitted = numberValue(line.lineTotalEx, 0);
     const stockItemId = text(line.stockItemId);
@@ -137,13 +142,35 @@ export function sumVatAwareLineTotals(
     if (linesAreAlreadyVatInclusive) {
       const ex = submitted / (1 + vatRate);
       totalEx += ex;
+      taxableEx += ex;
       totalVat += submitted - ex;
     } else {
       totalEx += submitted;
+      taxableEx += submitted;
       totalVat += submitted * vatRate;
     }
   }
-  return { totalEx, totalVat, totalInc: totalEx + totalVat };
+  return { totalEx, totalVat, totalInc: totalEx + totalVat, taxableEx };
+}
+
+/**
+ * Applies a header-level discount (GRV's "Discount (Ex)" field) across pre-discount VAT-aware
+ * totals, pro-rating the VAT reduction by the taxable share of the order — mirrors
+ * GRVEntry.js's calculateDraftTotals exactly (discountTaxableShare/taxableAfterDiscount), so the
+ * saved/pushed totals match what the user saw in the live preview. A discount is NOT modeled as
+ * its own line with its own VAT rate — a discount on a mixed bread+beer GRV reduces both the
+ * taxable and non-taxable spend in proportion to their share of the pre-discount subtotal, not
+ * at a single flat rate applied to the whole discount amount.
+ */
+export function applyProRataDiscount(preDiscount: VatAwareLineTotals, discountEx: number, vatRate: number): VatAwareLineTotals {
+  const discount = Math.max(0, numberValue(discountEx, 0));
+  if (!discount) return preDiscount;
+  const subtotal = preDiscount.totalEx;
+  const discountTaxableShare = subtotal > 0 ? discount * (preDiscount.taxableEx / subtotal) : 0;
+  const taxableEx = Math.max(0, preDiscount.taxableEx - discountTaxableShare);
+  const totalEx = Math.max(0, subtotal - discount);
+  const totalVat = taxableEx * vatRate;
+  return { totalEx, totalVat, totalInc: totalEx + totalVat, taxableEx };
 }
 
 /** Batched vat_enabled lookup for a set of stock items — one query regardless of line count. */

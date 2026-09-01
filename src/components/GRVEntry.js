@@ -629,8 +629,45 @@ function renderDraftTable(draft, vatRate, vatRegistered, supplierVatRate, select
       </thead>
       <tbody>
         ${(draft.items || []).map((line, index) => renderDraftRow(line, index, draft.pricesIncludeVat, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes, splitByLocation, locations, openDropdown, stockItems, draft.locationId)).join('')}
+        ${renderTransportRow(draft, supplierVatRate)}
       </tbody>
     </table>
+  `;
+}
+
+// Transport (set via the "Transport (Ex)" field in the Adjustments card) is carried on the draft
+// as a header-level cost, not a stock line — it has no stockItemId/qty/UOM, so it's rendered as a
+// read-only trailing row rather than through renderDraftRow. It's VATable at the standard rate
+// like any other GRV line (see calculateDraftTotals, which already folds it into the taxable
+// base), never removable here — edit or clear it via the Adjustments field instead.
+function renderTransportRow(draft, supplierVatRate) {
+  const transportEx = Number(draft.transportEx || 0) || 0;
+  if (!transportEx) return '';
+  const transportVat = transportEx * supplierVatRate;
+  return `
+    <tr class="grv-lineRow grv-lineRow--transport">
+      <td class="grv-lineCheck"></td>
+      <td>
+        <div class="grv-itemCell">
+          <strong>Transport</strong>
+          <span>ADJUSTMENT · VAT on</span>
+        </div>
+      </td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td>
+        <div class="grv-tableStat grv-tableStat--price">
+          <strong>${formatCurrency(transportVat)}</strong>
+          <span>line VAT</span>
+        </div>
+      </td>
+      <td class="grv-totalCell">${formatCurrency(transportEx)}</td>
+      <td class="grv-actionsCell"></td>
+    </tr>
   `;
 }
 

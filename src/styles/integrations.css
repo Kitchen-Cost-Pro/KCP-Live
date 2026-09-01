@@ -556,7 +556,7 @@
    two additions: a smaller card width, and the two yocoActionPanel sections placed side by side
    instead of stacked, to fit everything in view without scrolling. */
 .xeroModalCard {
-  width: min(720px, 94vw);
+  width: min(1080px, 96vw);
 }
 
 .xeroPanelsGrid {
@@ -568,7 +568,17 @@
 
 .xeroSettingsForm {
   display: grid;
-  gap: 10px;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 14px;
+}
+
+/* Checkboxes and the submit button always take the full form width, so short text fields
+   (account codes, tax types) can sit two-per-row above/below them instead of every field
+   stacking in one long single column — this was the main source of the modal needing so much
+   vertical scrolling. */
+.xeroSettingsForm .xeroCheckboxRow,
+.xeroSettingsForm button[type="submit"] {
+  grid-column: 1 / -1;
 }
 
 .xeroSettingsForm label {
@@ -720,6 +730,10 @@
 
 @media (max-width: 720px) {
   .xeroPanelsGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .xeroSettingsForm {
     grid-template-columns: 1fr;
   }
 }
