@@ -42,16 +42,19 @@ export function xeroRateCaps(env: Env): { dailyCap: number; perMinuteCap: number
 }
 
 // Xero deprecated the old blanket 'accounting.transactions' scope in favor of granular per-endpoint
-// scopes. KCP only ever creates Invoices (see invoice-sync.ts) and Items (see item-sync.ts, which
-// lives under the 'settings' scope group in Xero's API, alongside accounts/tax rates/currencies) —
-// no bank transactions, payments, or manual journals — so 'accounting.invoices' (write) is the
-// correct replacement, not the old catch-all.
+// scopes. KCP creates Invoices/Bills (see invoice-sync.ts, grv-sync.ts) and Items (see item-sync.ts,
+// which lives under the 'settings' scope group in Xero's API, alongside accounts/tax rates/
+// currencies) — no bank transactions, payments, or manual journals — so 'accounting.invoices' (write)
+// is the correct replacement, not the old catch-all. 'accounting.attachments' is Xero's separate
+// granular scope for attaching files (the GRV PDF) to a Bill — it doesn't ride along with
+// 'accounting.invoices' the way reading/writing the invoice body does.
 const DEFAULT_XERO_SCOPES = [
   'openid',
   'profile',
   'email',
   'accounting.invoices',
   'accounting.contacts',
+  'accounting.attachments',
   'accounting.settings',
   'offline_access'
 ];

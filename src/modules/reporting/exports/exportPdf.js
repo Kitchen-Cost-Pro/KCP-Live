@@ -164,6 +164,88 @@ export async function reportResultsToPdfBytes(results = [], options = {}) {
   return buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
 }
 
+function pdfMoney(value) {
+  return `R ${(Number(value) || 0).toFixed(2)}`;
+}
+
+/**
+ * A GRV's own PDF, built from the same normalized shape getGoodsReceipts already returns to the
+ * frontend (grvNumber/supplierName/date/items with stockItemName/receivedQty/unitCost/lineTotalEx)
+ * — no separate model needed. Runs equally in the browser (for the existing on-demand "view PDF"
+ * action) and in the Worker (for the Xero attachment push in grv-sync.ts), same as
+ * reportToPdfBytes/reportResultsToPdfBytes already do for scheduled report email attachments.
+ */
+export async function grvToPdfDocument(grv = {}, options = {}) {
+  const [{ jsPDF }, autoTableModule] = await Promise.all([
+    import('jspdf'),
+    import('jspdf-autotable')
+  ]);
+  const autoTable = autoTableModule.default || autoTableModule.autoTable;
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'pt', format: 'a4' });
+  const items = Array.isArray(grv.items) ? grv.items : [];
+  const reference = text(grv.grvNumber || grv.invoice || grv.id || 'GRV');
+
+  doc.setProperties({
+    title: `GRV ${reference}`,
+    subject: `Goods Received Voucher ${reference}`,
+    creator: 'Kitchen Cost Pro'
+  });
+
+  const subtitle = [
+    `Supplier: ${text(grv.supplierName || grv.supplier || 'Manual Receipt')}`,
+    `Date: ${text(grv.date).slice(0, 10)}`,
+    `Reference: ${reference}`
+  ].join('  |  ');
+  const header = await drawReportPdfHeader(doc, {
+    title: 'Goods Received Voucher',
+    subtitle,
+    description: '',
+    branding: options.branding || {}
+  });
+
+  const headers = ['Item', 'Qty', 'Unit', 'Unit Cost', 'Line Total'];
+  const body = items.length
+    ? items.map((line) => [
+      text(line.stockItemName || line.stockItemId || 'Item'),
+      String(Number(line.receivedQty ?? line.qty ?? 0) || 0),
+      text(line.selectedUom || line.unit || 'ea'),
+      pdfMoney(line.unitCost),
+      pdfMoney(line.lineTotalEx)
+    ])
+    : [['No line items were recorded.', '', '', '', '']];
+  const tableTheme = kcpPdfTableTheme();
+  autoTable(doc, {
+    startY: header.tableStartY,
+    head: [headers],
+    body,
+    showHead: 'everyPage',
+    tableWidth: 'auto',
+    margin: { left: 36, right: 36 },
+    styles: { font: 'helvetica', fontSize: 9, cellPadding: 5, textColor: KCP_PDF_THEME.text, lineColor: KCP_PDF_THEME.border, lineWidth: 0.35 },
+    headStyles: tableTheme.headStyles,
+    bodyStyles: tableTheme.bodyStyles,
+    alternateRowStyles: tableTheme.alternateRowStyles,
+    columnStyles: { 1: { halign: 'right' }, 3: { halign: 'right' }, 4: { halign: 'right' } }
+  });
+
+  const finalY = Number(doc.lastAutoTable?.finalY || header.tableStartY) + 20;
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(10);
+  doc.setTextColor(...KCP_PDF_THEME.navy);
+  const totalsX = doc.internal.pageSize.getWidth() - 36;
+  doc.text(`Subtotal: ${pdfMoney(grv.totalEx)}`, totalsX, finalY, { align: 'right' });
+  doc.text(`VAT: ${pdfMoney(grv.totalVat)}`, totalsX, finalY + 14, { align: 'right' });
+  doc.text(`Total: ${pdfMoney(grv.totalInc)}`, totalsX, finalY + 28, { align: 'right' });
+
+  return doc;
+}
+
+export async function grvToPdfBytes(grv = {}, options = {}) {
+  const doc = await grvToPdfDocument(grv, options);
+  const buffer = doc.output('arraybuffer');
+  return buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+}
+
 export async function downloadReportPdf(result = {}, options = {}) {
   const doc = await reportToPdfDocument(result, options);
   const fileName = options.fileName || buildExportFileName(result, 'pdf', { workspaceName: options.workspaceName || options.branding?.companyName });

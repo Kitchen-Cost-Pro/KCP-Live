@@ -5,6 +5,14 @@ import { getXeroConnection, saveXeroConnection, disconnectXero } from './connect
 import { canManageXero } from './admin-permissions';
 import { syncXeroItemsForWorkspace } from './item-sync';
 import { syncXeroDailyInvoice, upsertXeroTodayInvoice, claimDailyInvoiceSyncIfDue, releaseDailyInvoiceSyncClaim, yesterdayDateKey, todayDateKey } from './invoice-sync';
+import { getWorkspaceTradingDayStartHour } from './trading-day';
+import {
+  syncPendingXeroGrvs,
+  claimDailyGrvSyncIfDue,
+  releaseDailyGrvSyncClaim,
+  listPendingSupplierMatches,
+  resolveSupplierMatch
+} from './grv-sync';
 
 function response(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
@@ -42,9 +50,13 @@ interface SyncSettingsRow {
   sales_account_code: string | null;
   default_tax_type: string | null;
   item_account_code: string | null;
+  purchase_account_code: string | null;
+  purchase_tax_type: string | null;
   enabled: number;
+  grv_sync_enabled: number;
   last_item_sync_at: string | null;
   last_invoice_sync_date: string | null;
+  last_grv_sync_date: string | null;
 }
 
 async function getSyncSettings(env: Env, workspaceId: string): Promise<SyncSettingsRow | null> {
@@ -52,7 +64,11 @@ async function getSyncSettings(env: Env, workspaceId: string): Promise<SyncSetti
 }
 
 async function getStatus(env: Env, workspaceId: string) {
-  const [connection, settings] = await Promise.all([getXeroConnection(env, workspaceId), getSyncSettings(env, workspaceId)]);
+  const [connection, settings, pendingSupplierMatches] = await Promise.all([
+    getXeroConnection(env, workspaceId),
+    getSyncSettings(env, workspaceId),
+    listPendingSupplierMatches(env, workspaceId)
+  ]);
   return response({
     ok: true,
     configured: xeroConfigured(env),
@@ -64,11 +80,16 @@ async function getStatus(env: Env, workspaceId: string) {
           salesAccountCode: text(settings.sales_account_code),
           defaultTaxType: text(settings.default_tax_type),
           itemAccountCode: text(settings.item_account_code),
+          purchaseAccountCode: text(settings.purchase_account_code),
+          purchaseTaxType: text(settings.purchase_tax_type),
           enabled: Boolean(settings.enabled),
+          grvSyncEnabled: Boolean(settings.grv_sync_enabled),
           lastItemSyncAt: text(settings.last_item_sync_at),
-          lastInvoiceSyncDate: text(settings.last_invoice_sync_date)
+          lastInvoiceSyncDate: text(settings.last_invoice_sync_date),
+          lastGrvSyncDate: text(settings.last_grv_sync_date)
         }
-      : null
+      : null,
+    pendingSupplierMatches
   });
 }
 
@@ -134,27 +155,52 @@ async function postSettings(request: Request, env: Env, workspaceId: string) {
   const defaultTaxType = text(body.defaultTaxType);
   const itemAccountCode = text(body.itemAccountCode) || salesAccountCode;
   const enabled = Boolean(body.enabled);
+  const purchaseAccountCode = text(body.purchaseAccountCode);
+  const purchaseTaxType = text(body.purchaseTaxType);
+  const grvSyncEnabled = Boolean(body.grvSyncEnabled);
   if (enabled && (!salesAccountCode || !defaultTaxType)) {
     return response({ ok: false, error: 'A sales account code and tax type are required before enabling sync.' }, 400);
   }
+  if (grvSyncEnabled && (!purchaseAccountCode || !purchaseTaxType)) {
+    return response({ ok: false, error: 'A purchases account code and tax type are required before enabling GRV sync.' }, 400);
+  }
   await env.DB.prepare(
-    `INSERT INTO xero_sync_settings (workspace_id, sales_account_code, default_tax_type, item_account_code, enabled, created_at, updated_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+    `INSERT INTO xero_sync_settings (workspace_id, sales_account_code, default_tax_type, item_account_code, enabled, purchase_account_code, purchase_tax_type, grv_sync_enabled, created_at, updated_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
      ON CONFLICT(workspace_id) DO UPDATE SET
        sales_account_code = excluded.sales_account_code,
        default_tax_type = excluded.default_tax_type,
        item_account_code = excluded.item_account_code,
        enabled = excluded.enabled,
+       purchase_account_code = excluded.purchase_account_code,
+       purchase_tax_type = excluded.purchase_tax_type,
+       grv_sync_enabled = excluded.grv_sync_enabled,
        updated_at = excluded.updated_at`
   )
-    .bind(workspaceId, salesAccountCode, defaultTaxType, itemAccountCode, enabled ? 1 : 0, nowIso())
+    .bind(workspaceId, salesAccountCode, defaultTaxType, itemAccountCode, enabled ? 1 : 0, purchaseAccountCode, purchaseTaxType, grvSyncEnabled ? 1 : 0, nowIso())
     .run();
   return response({ ok: true });
 }
 
+async function postResolveSupplierMatch(request: Request, env: Env, workspaceId: string) {
+  const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+  const supplierId = text(body.supplierId);
+  if (!supplierId) return response({ ok: false, error: 'supplierId is required.' }, 400);
+  const result = await resolveSupplierMatch(env, workspaceId, {
+    supplierId,
+    xeroContactId: text(body.xeroContactId) || undefined,
+    createNew: Boolean(body.createNew)
+  });
+  if (!result.ok) return response({ ok: false, error: result.error }, 400);
+  return response({ ok: true, contactId: result.contactId });
+}
+
 async function postSyncNow(env: Env, workspaceId: string, kind: string) {
   const settings = await getSyncSettings(env, workspaceId);
-  if (!settings || !settings.sales_account_code || !settings.default_tax_type) {
+  if (!settings) return response({ ok: false, error: 'Connect Xero and set up sync settings first.' }, 400);
+  // GRV sync has its own independent account-code/tax settings (checked in its own branch below) —
+  // it doesn't need sales_account_code/default_tax_type, which only gate the sales-side kinds.
+  if (kind !== 'grv' && (!settings.sales_account_code || !settings.default_tax_type)) {
     return response({ ok: false, error: 'Set a sales account code and tax type in Xero settings first.' }, 400);
   }
   if (kind === 'items') {
@@ -165,42 +211,88 @@ async function postSyncNow(env: Env, workspaceId: string, kind: string) {
     return response({ ok: true, result });
   }
   if (kind === 'invoice') {
-    // The real day-to-day push: always targets yesterday's closed business day, same as the
+    // The real day-to-day push: always targets yesterday's closed trading day, same as the
     // automatic due-check, and is a strict once-per-day no-op if already pushed.
-    const dateKey = yesterdayDateKey();
+    const startHour = await getWorkspaceTradingDayStartHour(env, workspaceId);
+    const dateKey = yesterdayDateKey(startHour);
     const result = await syncXeroDailyInvoice(env, workspaceId, dateKey, {
       salesAccountCode: text(settings.sales_account_code),
       defaultTaxType: text(settings.default_tax_type)
-    });
+    }, startHour);
     return response({ ok: true, dateKey, result });
   }
   if (kind === 'invoice-today') {
     // Unlike "invoice" above, this re-aggregates and upserts on every call — see
     // upsertXeroTodayInvoice's comment for why that's safe/correct only for a still-open day.
+    const startHour = await getWorkspaceTradingDayStartHour(env, workspaceId);
     const result = await upsertXeroTodayInvoice(env, workspaceId, {
       salesAccountCode: text(settings.sales_account_code),
       defaultTaxType: text(settings.default_tax_type)
-    });
-    return response({ ok: true, dateKey: todayDateKey(), result });
+    }, startHour);
+    return response({ ok: true, dateKey: todayDateKey(startHour), result });
   }
-  return response({ ok: false, error: 'Unknown sync kind. Use "items", "invoice", or "invoice-today".' }, 400);
+  if (kind === 'grv') {
+    if (!settings.purchase_account_code || !settings.purchase_tax_type) {
+      return response({ ok: false, error: 'Set a purchases account code and tax type in Xero settings first.' }, 400);
+    }
+    // Same underlying scan as the automatic due-check (see runDueGrvSync below) — this just runs
+    // it immediately instead of waiting for the once-a-day claim to become due.
+    const result = await syncPendingXeroGrvs(env, workspaceId, {
+      purchaseAccountCode: text(settings.purchase_account_code),
+      purchaseTaxType: text(settings.purchase_tax_type)
+    });
+    return response({ ok: true, result });
+  }
+  return response({ ok: false, error: 'Unknown sync kind. Use "items", "invoice", "invoice-today", or "grv".' }, 400);
 }
 
-async function postDueCheck(env: Env, workspaceId: string) {
-  const claim = await claimDailyInvoiceSyncIfDue(env, workspaceId);
-  if (!claim.due || !claim.dateKey) return response({ ok: true, skipped: true });
+async function runDueInvoiceSync(env: Env, workspaceId: string) {
+  // Read once and pass through everywhere below — claimDailyInvoiceSyncIfDue and
+  // syncXeroDailyInvoice must agree on which calendar date "yesterday's trading day" is, or a
+  // late-trading venue could claim one date and aggregate sales for a different one.
+  const startHour = await getWorkspaceTradingDayStartHour(env, workspaceId);
+  const claim = await claimDailyInvoiceSyncIfDue(env, workspaceId, startHour);
+  if (!claim.due || !claim.dateKey) return { skipped: true } as const;
   const settings = await getSyncSettings(env, workspaceId);
   if (!settings || !settings.sales_account_code || !settings.default_tax_type) {
     await releaseDailyInvoiceSyncClaim(env, workspaceId, claim.dateKey, false);
-    return response({ ok: true, skipped: true, reason: 'Xero sync settings incomplete.' });
+    return { skipped: true, reason: 'Xero sync settings incomplete.' } as const;
   }
   const result = await syncXeroDailyInvoice(env, workspaceId, claim.dateKey, {
     salesAccountCode: text(settings.sales_account_code),
     defaultTaxType: text(settings.default_tax_type)
-  });
+  }, startHour);
   const success = result.status === 'applied' || result.status === 'duplicate' || result.status === 'skipped_no_sales';
   await releaseDailyInvoiceSyncClaim(env, workspaceId, claim.dateKey, success);
-  return response({ ok: true, dateKey: claim.dateKey, result });
+  return { dateKey: claim.dateKey, result } as const;
+}
+
+// GRVs are claimed/released independently of the sales invoice above — a workspace can run one
+// without the other, and a failure in one never blocks the other's due-check tick. Runs from the
+// same due-check tick so GRVs go out "along with POS data once a day," per the plan.
+async function runDueGrvSync(env: Env, workspaceId: string) {
+  const claim = await claimDailyGrvSyncIfDue(env, workspaceId);
+  if (!claim.due || !claim.dateKey) return { skipped: true } as const;
+  const settings = await getSyncSettings(env, workspaceId);
+  if (!settings || !settings.purchase_account_code || !settings.purchase_tax_type) {
+    await releaseDailyGrvSyncClaim(env, workspaceId, claim.dateKey, false);
+    return { skipped: true, reason: 'Xero GRV sync settings incomplete.' } as const;
+  }
+  const result = await syncPendingXeroGrvs(env, workspaceId, {
+    purchaseAccountCode: text(settings.purchase_account_code),
+    purchaseTaxType: text(settings.purchase_tax_type)
+  });
+  // A failed or needs-supplier-match GRV isn't lost — it stays retryable in its own outbox row and
+  // syncPendingXeroGrvs re-scans ALL such rows (not just today's) on every call, including
+  // tomorrow's due-check. This claim only gates HOW OFTEN the automatic scan runs (once/day), not
+  // which GRVs it looks at, so it's released as "handled" once genuinely attempted either way.
+  await releaseDailyGrvSyncClaim(env, workspaceId, claim.dateKey, true);
+  return { dateKey: claim.dateKey, result } as const;
+}
+
+async function postDueCheck(env: Env, workspaceId: string) {
+  const [invoice, grv] = await Promise.all([runDueInvoiceSync(env, workspaceId), runDueGrvSync(env, workspaceId)]);
+  return response({ ok: true, invoice, grv });
 }
 
 export async function handleXeroAdminRoute(
@@ -236,6 +328,9 @@ export async function handleXeroAdminRoute(
     const kind = new URL(request.url).searchParams.get('kind') || 'invoice';
     return postSyncNow(env, workspaceId, kind);
   }
+  if (request.method === 'GET' && resource === 'xero/pending-supplier-matches') {
+    return response({ ok: true, pendingSupplierMatches: await listPendingSupplierMatches(env, workspaceId) });
+  }
 
   // Connecting/disconnecting Xero and changing the account-code mapping is a workspace-owner-level
   // action — the same bar as connecting Yoco (denyUnlessPermissionManager in legacy/routes.ts):
@@ -254,6 +349,9 @@ export async function handleXeroAdminRoute(
   }
   if (request.method === 'POST' && resource === 'xero/settings') {
     return postSettings(request, env, workspaceId);
+  }
+  if (request.method === 'POST' && resource === 'xero/resolve-supplier-match') {
+    return postResolveSupplierMatch(request, env, workspaceId);
   }
 
   return null;

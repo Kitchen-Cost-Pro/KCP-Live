@@ -323,12 +323,14 @@ test('an order stuck waiting for Yoco is reprocessable via refetch; a dead-lette
   assert.equal(row.reprocessRawEventId, rawEventId);
 });
 
-test('an order stuck on the broken payment.created retry path is reprocessable via refetch, not silently left for a daily reconciliation tick', async () => {
-  // Live incident, 2026-08-31 (Gonubie): payment.created correctly refuses to record a still-open
-  // order and asks the queue to retry — but queue redelivery for delayed retries is independently
-  // broken in production, and reconciliation only attempts once per 24h per workspace, so a row like
-  // this had NO reliable automatic path back. It must be manually reprocessable, same as any other
-  // stuck bucket — PROCESSING must not be treated as "will sort itself out."
+test('a payment.created event for a still-open order skips cleanly instead of parking on the broken queue-retry path', async () => {
+  // Live incident, 2026-08-31 (Gonubie): payment.created used to refuse to record a still-open order
+  // and ask the queue to retry — but queue redelivery for delayed retries is independently broken in
+  // production (every retry request sits at attempt 1 forever, never actually redelivered), and
+  // reconciliation only attempts once per 24h per workspace, so a row like this had NO reliable
+  // automatic path back short of a manual admin reprocess. Fixed by folding payment.created into the
+  // same skip-cleanly path order.updated already used: no domain event write, ack immediately, and
+  // let the order's next webhook (or reconciliation) resolve it once it's genuinely closed.
   const db = createDb();
   seedCore(db);
   await configureApiKey(db);
@@ -340,15 +342,15 @@ test('an order stuck on the broken payment.created retry path is reprocessable v
     'payment.created',
     'evt_payment_stuck'
   );
-  assert.equal(result.action, 'retry');
+  assert.equal(result.action, 'ack');
 
   const log = await callAdmin(env, 'webhook-log');
   const row = log.rows.find((r: any) => r.sourceOrderId === 'ord_multi');
   assert.ok(row, 'expected ord_multi to appear in the log');
-  assert.equal(row.bucket, 'PROCESSING');
+  assert.equal(row.bucket, 'SKIPPED_NOT_FINAL_YET');
+  assert.equal(row.reprocessRawEventId, rawEventId);
   assert.equal(row.canReprocess, true);
   assert.equal(row.reprocessAction, 'refetch');
-  assert.equal(row.reprocessRawEventId, rawEventId);
 });
 
 test('a plain (non-admin) webhook delivery always bypasses the order-detail cache, not just admin refetch', async () => {

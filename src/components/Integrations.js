@@ -14,6 +14,7 @@ import {
   subscribeXeroIntegration,
   subscribeYocoIntegration,
   syncXeroNow,
+  resolveXeroSupplierMatch,
   syncYocoCatalogue
 } from '../services/integrationService.js';
 import { canManagePermissionSets } from '../services/roleService.js';
@@ -62,7 +63,7 @@ const INTEGRATIONS = [
     status: 'Available',
     stage: 'Live',
     popular: false,
-    description: 'Push daily sales summaries and your product catalogue into your Xero ledger.',
+    description: 'Push daily sales summaries, GRVs as Bills with PDFs, and your product catalogue into your Xero ledger.',
     logo: xeroLogo,
     tone: 'blue',
     action: 'Connect Xero'
@@ -141,7 +142,7 @@ const gmailDrawerState = {
 const xeroDrawerState = {
   open: false,
   busy: false,
-  message: 'Connect Xero, then set a sales account code and tax type before turning sync on. KCP pushes one summarized invoice per day for completed sales, plus your product catalogue as Xero Items.',
+  message: 'Connect Xero, then set your account codes and tax types before turning sync on. KCP pushes one summarized invoice per day for completed sales, your product catalogue as Xero Items, and each GRV as a Draft Bill with its PDF attached (also once daily, alongside sales).',
   tone: '',
   status: null
 };
@@ -395,8 +396,19 @@ function bindIntegrationEvents(view) {
     const defaultTaxType = String(view.querySelector('[data-xero-tax-type]')?.value || '').trim();
     const itemAccountCode = String(view.querySelector('[data-xero-item-account]')?.value || '').trim();
     const enabled = view.querySelector('[data-xero-enabled]')?.checked === true;
+    const purchaseAccountCode = String(view.querySelector('[data-xero-purchase-account]')?.value || '').trim();
+    const purchaseTaxType = String(view.querySelector('[data-xero-purchase-tax-type]')?.value || '').trim();
+    const grvSyncEnabled = view.querySelector('[data-xero-grv-enabled]')?.checked === true;
     await runXeroAction(view, 'Saving Xero settings...', async () => {
-      await saveXeroSettings(view.dataset.workspaceId || '', { salesAccountCode, defaultTaxType, itemAccountCode, enabled });
+      await saveXeroSettings(view.dataset.workspaceId || '', {
+        salesAccountCode,
+        defaultTaxType,
+        itemAccountCode,
+        enabled,
+        purchaseAccountCode,
+        purchaseTaxType,
+        grvSyncEnabled
+      });
       setXeroModalStatus(view, 'Xero settings saved.', 'success');
       bindXeroStatus(view, view.dataset.workspaceId || '', { once: true });
     });
@@ -434,6 +446,46 @@ function bindIntegrationEvents(view) {
   // sales come in sends everything not yet reflected rather than being skipped as a duplicate.
   view.querySelector('[data-xero-sync-invoice-today]')?.addEventListener('click', () => {
     runXeroInvoicePush('invoice-today', "Pushing today's sales to Xero...");
+  });
+
+  view.querySelector('[data-xero-sync-grv]')?.addEventListener('click', async () => {
+    await runXeroAction(view, 'Pushing GRVs to Xero...', async () => {
+      const result = await syncXeroNow(view.dataset.workspaceId || '', 'grv');
+      const counts = result?.result || {};
+      const applied = Number(counts.applied || 0);
+      const needsMatch = Number(counts.needsSupplierMatch || 0);
+      const failed = Number(counts.failed || 0);
+      const parts = [`${applied} GRV${applied === 1 ? '' : 's'} pushed`];
+      if (needsMatch) parts.push(`${needsMatch} waiting on a supplier match`);
+      if (failed) parts.push(`${failed} failed`);
+      setXeroModalStatus(view, parts.join(', ') + '.', failed ? 'error' : 'success');
+      bindXeroStatus(view, view.dataset.workspaceId || '', { once: true });
+    });
+  });
+
+  // Delegated: the pending-matches list is re-rendered wholesale on every status refresh
+  // (updateXeroStatus), so listeners are bound on the stable container rather than its rows.
+  view.querySelector('[data-xero-pending-matches]')?.addEventListener('click', async (event) => {
+    const row = event.target.closest('li[data-supplier-id]');
+    if (!row) return;
+    const supplierId = row.dataset.supplierId;
+    const isCreate = event.target.closest('[data-xero-resolve-create]');
+    const isMap = event.target.closest('[data-xero-resolve-map]');
+    if (!isCreate && !isMap) return;
+    const xeroContactId = isMap ? String(row.querySelector('[data-xero-match-contact-id]')?.value || '').trim() : undefined;
+    if (isMap && !xeroContactId) {
+      setXeroModalStatus(view, 'Enter an existing Xero Contact ID to map to first.', 'error');
+      return;
+    }
+    await runXeroAction(view, isCreate ? 'Creating Xero contact...' : 'Mapping to Xero contact...', async () => {
+      const result = await resolveXeroSupplierMatch(view.dataset.workspaceId || '', supplierId, {
+        xeroContactId,
+        createNew: isCreate ? true : undefined
+      });
+      if (result?.ok === false) throw new Error(result.error || 'Could not resolve the supplier match.');
+      setXeroModalStatus(view, 'Supplier linked to Xero. Its GRVs will push on the next sync.', 'success');
+      bindXeroStatus(view, view.dataset.workspaceId || '', { once: true });
+    });
   });
 
   window.addEventListener('message', (event) => {
@@ -736,12 +788,39 @@ function renderGmailModal() {
   `;
 }
 
+function renderPendingSupplierMatchesList(matches = [], canManageXero = false) {
+  if (!matches.length) return '<p class="xeroPendingMatchesEmpty">No supplier matches need attention.</p>';
+  if (!canManageXero) {
+    return `<p class="xeroPendingMatchesEmpty">${matches.length} supplier${matches.length === 1 ? '' : 's'} need a Xero contact match — ask a workspace owner to resolve ${matches.length === 1 ? 'it' : 'them'}.</p>`;
+  }
+  return `
+    <ul class="xeroPendingMatchesList">
+      ${matches.map((match) => `
+        <li data-supplier-id="${escapeAttribute(match.supplierId)}">
+          <div class="xeroPendingMatchInfo">
+            <strong>${escapeHtml(match.supplierName)}</strong>
+            <span>${match.grvCount} GRV${match.grvCount === 1 ? '' : 's'} waiting to push</span>
+          </div>
+          <div class="xeroPendingMatchActions">
+            <input type="text" placeholder="Existing Xero Contact ID" data-xero-match-contact-id />
+            <button type="button" class="xeroCompactButton" data-xero-resolve-map>Map to existing</button>
+            <button type="button" class="xeroCompactButton xeroCompactButton--primary" data-xero-resolve-create>Create new contact</button>
+          </div>
+        </li>
+      `).join('')}
+    </ul>
+  `;
+}
+
 function renderXeroModal({ canManageXero = false } = {}) {
+  xeroDrawerState.canManageXero = canManageXero;
   const status = xeroDrawerState.status || {};
   const isConnected = status.connectionActive === true;
   const isConfigured = status.configured !== false;
   const settings = status.settings || {};
   const syncEnabled = settings.enabled === true;
+  const grvSyncEnabled = settings.grvSyncEnabled === true;
+  const pendingSupplierMatches = status.pendingSupplierMatches || [];
   const noticeTone = xeroDrawerState.tone ? ` data-tone="${escapeAttribute(xeroDrawerState.tone)}"` : '';
 
   return `
@@ -774,6 +853,10 @@ function renderXeroModal({ canManageXero = false } = {}) {
               <span>Last invoice pushed</span>
               <strong data-xero-invoice-sync>${escapeHtml(settings.lastInvoiceSyncDate || 'None yet')}</strong>
             </article>
+            <article>
+              <span>Last GRVs pushed</span>
+              <strong data-xero-grv-sync>${escapeHtml(settings.lastGrvSyncDate || 'None yet')}</strong>
+            </article>
           </div>
 
           <div class="xeroPanelsGrid">
@@ -798,7 +881,19 @@ function renderXeroModal({ canManageXero = false } = {}) {
                 </label>
                 <label class="xeroCheckboxRow">
                   <input type="checkbox" data-xero-enabled ${syncEnabled ? 'checked' : ''} />
-                  <span>Enable daily sync</span>
+                  <span>Enable daily sales sync</span>
+                </label>
+                <label>
+                  <span>Purchases account code</span>
+                  <input type="text" placeholder="e.g. 300" value="${escapeAttribute(settings.purchaseAccountCode || '')}" data-xero-purchase-account />
+                </label>
+                <label>
+                  <span>Purchases tax type</span>
+                  <input type="text" placeholder="e.g. INPUT2" value="${escapeAttribute(settings.purchaseTaxType || '')}" data-xero-purchase-tax-type />
+                </label>
+                <label class="xeroCheckboxRow">
+                  <input type="checkbox" data-xero-grv-enabled ${grvSyncEnabled ? 'checked' : ''} />
+                  <span>Push GRVs to Xero daily (as Draft Bills, with sales)</span>
                 </label>
                 <button type="submit" class="xeroCompactButton xeroCompactButton--primary" data-xero-settings-submit>
                   ${icon('shieldCheck')}
@@ -833,6 +928,10 @@ function renderXeroModal({ canManageXero = false } = {}) {
                   ${icon('link')}
                   <span>Push yesterday's sales</span>
                 </button>
+                <button type="button" class="xeroCompactButton" data-xero-sync-grv ${isConnected ? '' : 'disabled'}>
+                  ${icon('link')}
+                  <span>Sync GRVs now</span>
+                </button>
                 ${canManageXero ? `
                 <button type="button" class="xeroCompactButton xeroCompactButton--danger" data-xero-disconnect ${isConnected ? '' : 'disabled'}>
                   ${icon('unlink')}
@@ -841,6 +940,14 @@ function renderXeroModal({ canManageXero = false } = {}) {
               </div>
             </section>
           </div>
+
+          <section class="yocoActionPanel" aria-label="Suppliers needing a Xero contact match">
+            <div class="yocoActionPanelHead">
+              <span>Needs attention</span>
+              <strong>GRVs waiting on a supplier match before they can push to Xero.</strong>
+            </div>
+            <div data-xero-pending-matches>${renderPendingSupplierMatchesList(pendingSupplierMatches, canManageXero)}</div>
+          </section>
 
           <div class="yocoModalNotice" data-xero-modal-status${noticeTone}>
             ${escapeHtml(xeroDrawerState.message)}
@@ -954,6 +1061,11 @@ function updateXeroStatus(view, status = {}, options = {}) {
   setText(view, '[data-xero-tenant]', status.tenantName || 'No organisation');
   setText(view, '[data-xero-item-sync]', formatDateTime(settings.lastItemSyncAt) || 'Not synced yet');
   setText(view, '[data-xero-invoice-sync]', settings.lastInvoiceSyncDate || 'None yet');
+  setText(view, '[data-xero-grv-sync]', settings.lastGrvSyncDate || 'None yet');
+  const pendingMatchesContainer = view.querySelector('[data-xero-pending-matches]');
+  if (pendingMatchesContainer) {
+    pendingMatchesContainer.innerHTML = renderPendingSupplierMatchesList(status.pendingSupplierMatches || [], xeroDrawerState.canManageXero === true);
+  }
   updateIntegrationCardStatus(view, 'xero', nextStatus, nextStatus === 'Active' ? 'Manage Xero' : nextStatus === 'Setup Required' ? 'Needs Config' : 'Connect Xero');
   if (status.lastError) setXeroModalStatus(view, status.lastError, 'error');
 }
@@ -1230,10 +1342,10 @@ function setGmailBusy(view, busy) {
 
 function setXeroBusy(view, busy) {
   xeroDrawerState.busy = busy;
-  view.querySelectorAll('[data-xero-connect], [data-xero-disconnect], [data-xero-sync-items], [data-xero-sync-invoice], [data-xero-sync-invoice-today], [data-xero-settings-submit]').forEach((button) => {
+  view.querySelectorAll('[data-xero-connect], [data-xero-disconnect], [data-xero-sync-items], [data-xero-sync-invoice], [data-xero-sync-invoice-today], [data-xero-sync-grv], [data-xero-settings-submit]').forEach((button) => {
     const isDisconnect = button.hasAttribute('data-xero-disconnect');
     const isConnect = button.hasAttribute('data-xero-connect');
-    const isSync = button.hasAttribute('data-xero-sync-items') || button.hasAttribute('data-xero-sync-invoice') || button.hasAttribute('data-xero-sync-invoice-today');
+    const isSync = button.hasAttribute('data-xero-sync-items') || button.hasAttribute('data-xero-sync-invoice') || button.hasAttribute('data-xero-sync-invoice-today') || button.hasAttribute('data-xero-sync-grv');
     button.disabled = busy ||
       (isConnect && xeroDrawerState.status?.configured === false) ||
       (isDisconnect && xeroDrawerState.status?.connectionActive !== true) ||

@@ -122,15 +122,14 @@ function completedOrder(order: Row): boolean {
 }
 
 /**
- * Any completed-sale-trigger webhook OTHER than `payment.created` (which has its own retry branch
- * just below) can land here with a fresh Yoco fetch that still shows the order not yet complete —
- * most commonly `order.updated`, which fires on every edit to a still-open tab (add a line, change a
- * modifier), not just close-out; Yoco keeps it subscribed mainly so refund handling has a real-time
- * signal (see kcp-live-development-vs-kcp-live memory / rebuild plan). But it also happens for
- * `order.completed` itself: a live audit (2026-08-31, Gonubie Sports Club) found a genuine
- * `order.completed` webhook whose own fresh fetch still returned `status: "open"` (see
- * YOCO_V2_ORDER_CACHE_TTL_MS — a 30s order-detail cache means a fetch shortly after a prior "open"
- * read for the same order can still be served the stale copy).
+ * Any completed-sale-trigger webhook, including `payment.created`, can land here with a fresh Yoco
+ * fetch that still shows the order not yet complete — most commonly `order.updated`, which fires on
+ * every edit to a still-open tab (add a line, change a modifier), not just close-out; Yoco keeps it
+ * subscribed mainly so refund handling has a real-time signal (see kcp-live-development-vs-kcp-live
+ * memory / rebuild plan). But it also happens for `order.completed` itself: a live audit (2026-08-31,
+ * Gonubie Sports Club) found a genuine `order.completed` webhook whose own fresh fetch still returned
+ * `status: "open"` (see YOCO_V2_ORDER_CACHE_TTL_MS — a 30s order-detail cache means a fetch shortly
+ * after a prior "open" read for the same order can still be served the stale copy).
  *
  * Before this fix, any of these fell straight into `resolutionStatus()`, which returns
  * 'UNSUPPORTED_ORDER_STATE' (the lowest completeness rank) — a permanent, wrong "unsupported" record
@@ -140,17 +139,21 @@ function completedOrder(order: Row): boolean {
  * found during a reporting-completeness audit, 2026-08-31. Nothing un-stamps it unless a LATER webhook
  * happens to arrive with a genuinely-closed fetch.
  *
- * Retrying via the queue (the same mechanism `payment.created` uses) was considered and rejected:
- * queue redelivery for delayed retries is independently broken right now (confirmed live, 2026-08-31
- * — every `payment.created` retry request sits at attempt 1 forever, never actually redelivered), so
- * making this retryable through the same path would just move the stuck state, not fix it. Skip
- * cleanly instead (no domain event write, so no reporting/stock effect is attempted or blocked) — a
- * later webhook for the same order (another `order.updated`, or the eventual `order.completed`) gets
- * its own independent fresh fetch and resolves correctly once the order is genuinely closed by then,
- * and reconciliation is the backstop for an order that never gets another webhook at all.
+ * `payment.created` used to get its own retry-through-the-queue branch instead of this skip path, on
+ * the theory that it deserved an actual retry rather than waiting for a later webhook. That branch is
+ * what got confirmed stuck live (2026-08-31): queue redelivery for delayed retries is independently
+ * broken right now — every `payment.created` retry request sits at attempt 1 forever, never actually
+ * redelivered, so the row parks in RETRY_SCHEDULED permanently once Cloudflare's native queue retries
+ * (consumed by the no-op early-return redeliveries, not real attempts) run out silently past the DLQ,
+ * with no DEAD_LETTERED bookkeeping and no automatic way back short of a manual admin reprocess. Since
+ * `payment.created` is always followed by at least one more webhook for the same order (`order.updated`
+ * at minimum, `order.completed` eventually), it's just as safe to fold it into this skip-cleanly path:
+ * no domain event write, so no reporting/stock effect is attempted or blocked — a later webhook for the
+ * same order gets its own independent fresh fetch and resolves correctly once the order is genuinely
+ * closed by then, and reconciliation is the backstop for an order that never gets another webhook at all.
  */
-function isSkippableNonFinalEvent(eventType: string, completed: boolean): boolean {
-  return normalizeYocoV2EventType(eventType) !== 'payment.created' && !completed;
+function isSkippableNonFinalEvent(_eventType: string, completed: boolean): boolean {
+  return !completed;
 }
 
 function orderLocationId(order: Row): string {
@@ -548,22 +551,6 @@ export async function resolveCanonicalYocoSale(env: YocoV2ApiClientEnv, input: R
   const lines: CanonicalSaleLine[] = [];
   for (const [index, line] of orderLines(order).entries()) lines.push(await resolveLine(env, workspaceId, line, index));
   const completed = completedOrder(order);
-  // payment.created is Yoco's earliest documented live device-sale notification.
-  // It can arrive a moment before the order endpoint reflects the final paid
-  // state. Retry instead of permanently recording a non-final sale with no
-  // effects; a later retry or order.completed delivery resolves the same order
-  // and the source-order idempotency keys prevent duplicate reporting/stock.
-  if (eventType === 'payment.created' && !completed) {
-    throw new YocoV2ApiClientError({
-      message: 'Yoco payment was created, but the order is not final yet; live sale processing will retry.',
-      status: 409,
-      category: 'YOCO_TEMPORARY_ERROR',
-      code: 'YOCO_V2_PAYMENT_ORDER_NOT_FINAL_YET',
-      retryable: true,
-      retryAfterSeconds: 5,
-      details: { source_order_id: sourceOrderId, raw_event_type: eventType }
-    });
-  }
   if (isSkippableNonFinalEvent(eventType, completed)) {
     await appendTimeline(env.DB, {
       rawEventId,

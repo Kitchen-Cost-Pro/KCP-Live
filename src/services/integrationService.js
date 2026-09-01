@@ -129,6 +129,13 @@ export async function syncXeroNow(workspaceId, kind) {
   return callCloudflareWorkspaceRoute(workspaceId, `xero/sync-now?kind=${encodeURIComponent(kind)}`, { method: 'POST' });
 }
 
+/** Resolves one pending "needs a supplier match" entry: pass either { xeroContactId } to map to a
+ * Xero contact the user already picked, or { createNew: true } to create a new one — the daily
+ * background sync never creates a Xero contact on its own, only this explicit user action does. */
+export async function resolveXeroSupplierMatch(workspaceId, supplierId, { xeroContactId, createNew } = {}) {
+  return callCloudflareXeroRoute(workspaceId, 'resolve-supplier-match', { supplierId, xeroContactId, createNew });
+}
+
 async function callCloudflareXeroRoute(workspaceId, action, payload = {}, options = {}) {
   const method = String(options.method || 'POST').toUpperCase();
   return callCloudflareWorkspaceRoute(workspaceId, `xero/${action}`, {
@@ -141,6 +148,7 @@ function normalizeXeroStatus(value = {}) {
   const status = value && typeof value === 'object' ? value : {};
   const rawStatus = String(status.status || '').trim().toLowerCase();
   const settings = status.settings && typeof status.settings === 'object' ? status.settings : {};
+  const pendingSupplierMatches = Array.isArray(status.pendingSupplierMatches) ? status.pendingSupplierMatches : [];
   return {
     status: rawStatus || 'disconnected',
     configured: status.configured !== false,
@@ -151,10 +159,19 @@ function normalizeXeroStatus(value = {}) {
       salesAccountCode: settings.salesAccountCode || '',
       defaultTaxType: settings.defaultTaxType || '',
       itemAccountCode: settings.itemAccountCode || '',
+      purchaseAccountCode: settings.purchaseAccountCode || '',
+      purchaseTaxType: settings.purchaseTaxType || '',
       enabled: settings.enabled === true,
+      grvSyncEnabled: settings.grvSyncEnabled === true,
       lastItemSyncAt: settings.lastItemSyncAt || '',
-      lastInvoiceSyncDate: settings.lastInvoiceSyncDate || ''
-    }
+      lastInvoiceSyncDate: settings.lastInvoiceSyncDate || '',
+      lastGrvSyncDate: settings.lastGrvSyncDate || ''
+    },
+    pendingSupplierMatches: pendingSupplierMatches.map((match) => ({
+      supplierId: match.supplierId || '',
+      supplierName: match.supplierName || 'Unknown supplier',
+      grvCount: Number(match.grvCount) || 0
+    }))
   };
 }
 

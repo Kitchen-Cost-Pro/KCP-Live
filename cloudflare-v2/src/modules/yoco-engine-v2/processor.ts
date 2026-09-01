@@ -292,18 +292,21 @@ export async function processYocoV2QueueMessage(env: YocoV2QueueEnv, message: Yo
     return { ok: true, action: 'ack', status: 'WAITING' };
   }
 
-  if (existingStatus === 'RETRY_SCHEDULED' && existing.next_attempt_at) {
-    const retryAt = Date.parse(String(existing.next_attempt_at));
-    const remainingMs = retryAt - Date.now();
-    if (Number.isFinite(retryAt) && remainingMs > 0) {
-      return {
-        ok: false,
-        action: 'retry',
-        delaySeconds: Math.max(1, Math.ceil(remainingMs / 1000)),
-        status: 'RETRY_SCHEDULED'
-      };
-    }
-  }
+  // A prior "still waiting on next_attempt_at" short-circuit used to sit here — it re-emitted a
+  // no-op `retry` (with a recomputed delaySeconds) instead of attempting real work whenever the
+  // queue redelivered a RETRY_SCHEDULED message early. `acquireProcessingLock` below is already a
+  // single atomic, race-safe UPDATE (only one concurrent caller can win it; a loser gets `null` and
+  // acks), so that short-circuit added no real safety — it only mattered when Cloudflare honored the
+  // requested `delaySeconds` exactly. Confirmed live (2026-08-31): it doesn't. Queue redelivery for
+  // delayed retries is broken in production, so every message hit this branch's early-return on each
+  // redelivery, `processing_attempts` (only incremented inside `acquireProcessingLock`) never moved
+  // past 1, `exhausted` below never became true, and the native queue's own `max_retries` (wrangler.toml)
+  // silently ran out from these no-ops alone — dropping the message to the DLQ without ever reaching
+  // the DEAD_LETTERED bookkeeping further down, so the row parked in RETRY_SCHEDULED forever (see the
+  // stuck payment.created sale this fixed, and sale-resolver.ts's now-removed payment.created special
+  // case, which existed only to route around this). Removing the short-circuit means every redelivery
+  // — early or not — does a real, attempt-counted try, so exhaustion and dead-lettering work correctly
+  // regardless of whether Cloudflare's actual redelivery timing matches the requested delay.
 
   const rawEvent = await acquireProcessingLock(env.DB, rawEventId, workspaceId);
   if (!rawEvent) return { ok: true, action: 'ack', status: existingStatus as YocoV2QueueDispatchResult['status'] };

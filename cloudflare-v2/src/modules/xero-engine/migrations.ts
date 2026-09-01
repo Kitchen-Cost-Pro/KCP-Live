@@ -60,3 +60,43 @@ CREATE TABLE IF NOT EXISTS xero_v2_rate_state (
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 `;
+
+/**
+ * GRV -> Xero Bill (ACCPAY) push + Supplier -> Xero Contact mapping, extending the foundation
+ * "lean MVP" migration above. xero_v2_effect_outbox.effect_type has a CHECK constraint SQLite
+ * can't widen in place, so this rebuilds the table via the _next-table pattern (drop/create/copy/
+ * drop/rename) already established by tenant-migrations.ts's migration 11 for the same reason. See
+ * grv-sync.ts.
+ */
+export const XERO_V2_GRV_PUSH_MIGRATION = `
+DROP TABLE IF EXISTS xero_v2_effect_outbox_next;
+CREATE TABLE xero_v2_effect_outbox_next (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  effect_type TEXT NOT NULL CHECK (effect_type IN ('ITEM_PUSH', 'INVOICE_PUSH', 'GRV_PUSH', 'GRV_ATTACHMENT')),
+  effect_key TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'PROCESSING' CHECK (status IN ('PROCESSING', 'APPLIED', 'FAILED')),
+  xero_object_id TEXT,
+  attempt_count INTEGER NOT NULL DEFAULT 1,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (workspace_id, effect_type, effect_key)
+);
+INSERT INTO xero_v2_effect_outbox_next (id, workspace_id, effect_type, effect_key, status, xero_object_id, attempt_count, last_error, created_at, updated_at)
+  SELECT id, workspace_id, effect_type, effect_key, status, xero_object_id, attempt_count, last_error, created_at, updated_at
+  FROM xero_v2_effect_outbox;
+DROP TABLE xero_v2_effect_outbox;
+ALTER TABLE xero_v2_effect_outbox_next RENAME TO xero_v2_effect_outbox;
+CREATE INDEX IF NOT EXISTS idx_xero_v2_effect_outbox_workspace_status
+  ON xero_v2_effect_outbox(workspace_id, effect_type, status);
+
+ALTER TABLE xero_sync_settings ADD COLUMN purchase_account_code TEXT;
+ALTER TABLE xero_sync_settings ADD COLUMN purchase_tax_type TEXT;
+ALTER TABLE xero_sync_settings ADD COLUMN grv_sync_enabled INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE xero_sync_settings ADD COLUMN last_grv_sync_date TEXT;
+ALTER TABLE xero_sync_settings ADD COLUMN grv_sync_claimed_at TEXT;
+
+ALTER TABLE suppliers ADD COLUMN xero_contact_id TEXT;
+ALTER TABLE suppliers ADD COLUMN xero_contact_synced_at TEXT;
+`;

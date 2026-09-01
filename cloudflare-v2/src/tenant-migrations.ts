@@ -1,7 +1,7 @@
 import { TENANT_SCHEMA_SQL } from './tenant-schema.generated';
 import { YOCO_V2_FOUNDATION_MIGRATION, YOCO_V2_SALE_SHADOW_MIGRATION, YOCO_V2_REFUND_RECONCILIATION_MIGRATION, YOCO_V2_CONTROLLED_CUTOVER_MIGRATION, YOCO_V2_REFUND_CONTROLLED_CUTOVER_MIGRATION, YOCO_V2_LEGACY_SHUTDOWN_MIGRATION, YOCO_V2_ADMIN_CONTROL_CENTRE_MIGRATION, YOCO_V2_RECONCILIATION_BACKOFF_MIGRATION, YOCO_V2_EFFECT_GATE_MIGRATION } from './modules/yoco-engine-v2/migrations';
 import { MODIFIER_ENGINE_CORE_ACTIONS_MIGRATION, MODIFIER_ENGINE_REFUNDS_RELIABILITY_NOTES_MIGRATION } from './modules/modifier-engine/migrations';
-import { XERO_V2_FOUNDATION_MIGRATION } from './modules/xero-engine/migrations';
+import { XERO_V2_FOUNDATION_MIGRATION, XERO_V2_GRV_PUSH_MIGRATION } from './modules/xero-engine/migrations';
 
 /**
  * Ordered per-tenant schema migrations, applied INSIDE each WorkspaceDO's own SQLite on first
@@ -743,5 +743,8 @@ CREATE INDEX IF NOT EXISTS idx_stock_movements_workspace_effective_date
   // 45 — KCP -> Xero outbound integration (lean MVP): per-workspace Xero OAuth connection,
   // account-code/tax mapping settings, and the idempotent effect-outbox + rate-state tables the
   // item/invoice push jobs rely on. See modules/xero-engine/.
-  XERO_V2_FOUNDATION_MIGRATION
+  XERO_V2_FOUNDATION_MIGRATION,
+  // 46 — GRV -> Xero Bill (ACCPAY) push + Supplier -> Xero Contact mapping. See
+  // modules/xero-engine/migrations.ts's XERO_V2_GRV_PUSH_MIGRATION doc comment and grv-sync.ts.
+  XERO_V2_GRV_PUSH_MIGRATION
 ];

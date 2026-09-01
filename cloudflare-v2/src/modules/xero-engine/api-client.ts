@@ -82,3 +82,62 @@ export async function executeXeroApiRequest(
   }
   return bodyJson;
 }
+
+/**
+ * Attachment upload — Xero's `PUT /Invoices/{InvoiceID}/Attachments/{FileName}` (used for Bills
+ * too, since a Bill is just an Invoice with Type ACCPAY) takes the raw file bytes as the body with
+ * a real Content-Type, not a JSON envelope, so this can't share executeXeroApiRequest's
+ * JSON.stringify/parse — everything else (token load/refresh, rate reservation, error
+ * classification, diagnostic logging) is identical, so it's kept alongside that function rather
+ * than in its own file.
+ */
+export async function executeXeroBinaryPutRequest(
+  env: Env,
+  workspaceId: string,
+  input: { invoiceId: string; fileName: string; bytes: Uint8Array; contentType: string }
+): Promise<Record<string, unknown>> {
+  const reservation = await reserveXeroApiCall(env, workspaceId);
+  if (!reservation.allowed) {
+    throw new XeroApiClientError(reservation.reason || 'Xero API rate limit reached.', 'RATE_LIMITED');
+  }
+  const { accessToken, xeroTenantId } = await loadValidXeroAccessToken(env, workspaceId);
+  if (!xeroTenantId) throw new XeroApiClientError('This workspace\'s Xero connection has no organisation selected.', 'NON_RETRYABLE_CLIENT_ERROR');
+
+  const path = `Invoices/${encodeURIComponent(input.invoiceId)}/Attachments/${encodeURIComponent(input.fileName)}`;
+  const url = `${xeroApiBaseUrl(env)}/api.xro/2.0/${path}`;
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        'xero-tenant-id': xeroTenantId,
+        accept: 'application/json',
+        'content-type': input.contentType
+      },
+      body: input.bytes.slice().buffer
+    });
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : 'Network error calling Xero.';
+    await recordXeroDiagnosticIfNotable(env, workspaceId, { operation: `xero-api:${path}`, status: 'failed', message });
+    throw new XeroApiClientError(message, 'NETWORK_ERROR');
+  }
+
+  const bodyJson = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!response.ok) {
+    const category = classify(response.status);
+    const message = text(
+      (bodyJson as { Message?: string; Detail?: string }).Message ||
+        (bodyJson as { Message?: string; Detail?: string }).Detail ||
+        `Xero API returned HTTP ${response.status} for ${path}.`
+    );
+    await recordXeroDiagnosticIfNotable(env, workspaceId, {
+      operation: `xero-api:${path}`,
+      status: category === 'RATE_LIMITED' ? 'warning' : 'failed',
+      message,
+      details: { status: response.status, path }
+    });
+    throw new XeroApiClientError(message, category, response.status);
+  }
+  return bodyJson;
+}
