@@ -213,12 +213,17 @@ async function loadXeroTrackingCategoriesIfNeeded(view) {
   xeroDrawerState.trackingCategoriesLoading = true;
   try {
     xeroDrawerState.trackingCategories = await fetchXeroTrackingCategories(view.dataset.workspaceId || '');
+    if (xeroDrawerState.trackingCategories.length) refreshXeroTrackingCategoryControl(view);
   } catch {
-    xeroDrawerState.trackingCategories = [];
+    // Left as null (not []) on failure — a genuinely empty successful fetch is cached as [] and
+    // won't retry, but a FAILED fetch (e.g. hit before this route was deployed, or a transient
+    // network error) must not be cached as "confirmed empty" forever for the rest of this browser
+    // session. Leaving it null lets the next tab-switch/reopen retry instead of permanently
+    // showing "Loaded once Xero is connected" even after the category actually exists.
+    xeroDrawerState.trackingCategories = null;
   } finally {
     xeroDrawerState.trackingCategoriesLoading = false;
   }
-  if (xeroDrawerState.trackingCategories.length) refreshXeroTrackingCategoryControl(view);
 }
 
 function refreshXeroTrackingCategoryControl(view) {
@@ -237,12 +242,14 @@ async function loadXeroTaxRatesIfNeeded(view) {
   xeroDrawerState.taxRatesLoading = true;
   try {
     xeroDrawerState.taxRates = await fetchXeroTaxRates(view.dataset.workspaceId || '');
+    if (xeroDrawerState.taxRates.length) refreshXeroTaxTypeControls(view);
   } catch {
-    xeroDrawerState.taxRates = [];
+    // See loadXeroTrackingCategoriesIfNeeded's identical comment: null (not []) on failure so a
+    // later retry isn't permanently blocked by one transient/pre-deploy failure.
+    xeroDrawerState.taxRates = null;
   } finally {
     xeroDrawerState.taxRatesLoading = false;
   }
-  if (xeroDrawerState.taxRates.length) refreshXeroTaxTypeControls(view);
 }
 
 // Runs once, right after the fetch resolves — swaps the three plain text inputs for the live
@@ -1350,6 +1357,41 @@ function updateGmailStatus(view, status = {}, options = {}) {
   else if (status.message && status.configured === false) setGmailModalStatus(view, status.message, 'error');
 }
 
+// The settings form (Sales/Purchases tabs) is rendered ONCE, baked from whatever settings snapshot
+// was available at that instant (often the localStorage cache, taken before the live fetch below
+// resolves). updateXeroStatus previously only refreshed small text stats/badges from the fresh
+// fetch — never the actual form inputs/checkboxes — so a stale or empty initial paint (e.g. first
+// load in a fresh browser, or a snapshot cached before a field existed) stayed wrong in the form
+// forever, even though the true saved values were sitting right there in the response. This syncs
+// every plain (non-live-picker) field to the latest fetched truth. Only fires on the initial
+// subscribe and right after an action completes (see bindXeroStatus/its {once:true} call sites) —
+// never on a timer — so it never clobbers input the user is actively mid-typing.
+function refreshXeroSettingsFormFields(view, settings) {
+  const setValue = (selector, value) => {
+    const el = view.querySelector(selector);
+    if (el) el.value = value || '';
+  };
+  const setChecked = (selector, checked) => {
+    const el = view.querySelector(selector);
+    if (el) el.checked = checked === true;
+  };
+  setValue('[data-xero-sales-account]', settings.salesAccountCode);
+  setValue('[data-xero-item-account]', settings.itemAccountCode);
+  setChecked('[data-xero-enabled]', settings.enabled);
+  setValue('[data-xero-purchase-account]', settings.purchaseAccountCode);
+  setValue('[data-xero-cod-payment-account]', settings.codPaymentAccountCode);
+  setChecked('[data-xero-grv-enabled]', settings.grvSyncEnabled);
+  setChecked('[data-xero-credit-note-enabled]', settings.creditNoteSyncEnabled);
+  // The tax-type/location-tracking controls are live-pickers that manage their own refresh once
+  // their fetch resolves (refreshXeroTaxTypeControls/refreshXeroTrackingCategoryControl) — but
+  // until that fetch completes they're still a plain fallback <input>, which needs the same sync.
+  setValue('[data-xero-tax-type]', settings.defaultTaxType);
+  setValue('[data-xero-sales-exempt-tax-type]', settings.salesExemptTaxType);
+  setValue('[data-xero-purchase-tax-type]', settings.purchaseTaxType);
+  setValue('[data-xero-purchase-exempt-tax-type]', settings.purchaseExemptTaxType);
+  setValue('[data-xero-location-tracking-category]', settings.locationTrackingCategoryId);
+}
+
 function updateXeroStatus(view, status = {}, options = {}) {
   xeroDrawerState.status = status;
   if (!options.skipCache) cacheXeroStatus(view.dataset.workspaceId || '', status);
@@ -1360,6 +1402,7 @@ function updateXeroStatus(view, status = {}, options = {}) {
     loadXeroTrackingCategoriesIfNeeded(view);
   }
   const settings = status.settings || {};
+  refreshXeroSettingsFormFields(view, settings);
   const nextStatus = status.configured === false
     ? 'Setup Required'
     : status.connectionActive === true
