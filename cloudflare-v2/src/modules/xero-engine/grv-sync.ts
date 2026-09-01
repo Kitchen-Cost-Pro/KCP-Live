@@ -491,10 +491,16 @@ export interface PendingSupplierMatch {
   supplierId: string;
   supplierName: string;
   grvCount: number;
+  // 'grv_blocked': a real GRV push failed because this supplier has no linked Contact.
+  // 'manual_sync': surfaced by the standalone "Sync Suppliers" button, no GRV involved at all.
+  reason: 'grv_blocked' | 'manual_sync';
 }
 
-/** Backing query for the "needs attention" UI list — GRV_PUSH failures coded as a pending
- * supplier match, not a real API error. */
+/** Backing query for the "needs attention" UI list. Unions two independent sources: real GRV_PUSH
+ * failures coded as a pending supplier match (not a real API error), and suppliers flagged by
+ * syncAllSuppliersToXero below that couldn't be auto-matched even though no GRV has tried them
+ * yet. A supplier present in both is deduped, GRV-blocked taking priority since it's the more
+ * urgent of the two (something is actually stuck, not just "not yet linked"). */
 export async function listPendingSupplierMatches(env: Env, workspaceId: string): Promise<PendingSupplierMatch[]> {
   const rows = await env.DB.prepare(
     `SELECT
@@ -509,7 +515,86 @@ export async function listPendingSupplierMatches(env: Env, workspaceId: string):
   )
     .bind(workspaceId)
     .all<{ supplier_id: string; supplier_name: string; grv_count: number }>();
-  return (rows.results || []).map((row) => ({ supplierId: row.supplier_id, supplierName: row.supplier_name, grvCount: Number(row.grv_count) || 0 }));
+  const grvBlocked = (rows.results || []).map((row) => ({
+    supplierId: row.supplier_id,
+    supplierName: row.supplier_name,
+    grvCount: Number(row.grv_count) || 0,
+    reason: 'grv_blocked' as const
+  }));
+  const seen = new Set(grvBlocked.map((m) => m.supplierId));
+
+  const flaggedRows = await env.DB.prepare(
+    `SELECT id, name FROM suppliers
+      WHERE workspace_id = ?1 AND xero_contact_id IS NULL
+        AND json_extract(raw_json, '$.needsXeroMatch') = 1`
+  )
+    .bind(workspaceId)
+    .all<{ id: string; name: string }>();
+  const manualSync = (flaggedRows.results || [])
+    .filter((row) => !seen.has(row.id))
+    .map((row) => ({ supplierId: row.id, supplierName: row.name || 'Unknown supplier', grvCount: 0, reason: 'manual_sync' as const }));
+
+  return [...grvBlocked, ...manualSync];
+}
+
+/** Merge-updates a supplier's raw_json with a single new key, preserving every other field
+ * already stored there (category, paymentTerms, vatRegistered, etc.) — same pattern as
+ * normalizeSupplierPayload in legacy/routes.ts. */
+async function setSupplierRawJsonFlag(env: Env, workspaceId: string, supplierId: string, rawJson: string | null, key: string, value: boolean): Promise<void> {
+  let parsed: Record<string, unknown> = {};
+  if (rawJson) {
+    try {
+      parsed = objectValue(JSON.parse(rawJson));
+    } catch {
+      parsed = {};
+    }
+  }
+  if (value) parsed[key] = true;
+  else delete parsed[key];
+  await env.DB.prepare(`UPDATE suppliers SET raw_json = ?3 WHERE id = ?1 AND workspace_id = ?2`)
+    .bind(supplierId, workspaceId, JSON.stringify(parsed))
+    .run();
+}
+
+/**
+ * Standalone "Sync Suppliers" button — attempts a match-only resolveXeroContactForSupplier for
+ * every supplier that doesn't already have a usable linked Contact, independent of any GRV. Never
+ * creates a Contact (same "ask before creating" policy as everywhere else in this module) — a
+ * supplier that can't be auto-matched is flagged via raw_json.needsXeroMatch so it surfaces in the
+ * SAME "needs attention" list a blocked GRV push would produce, ready for the existing
+ * map/create-contact UI to resolve.
+ */
+export async function syncAllSuppliersToXero(env: Env, workspaceId: string): Promise<{ checked: number; matched: number; alreadyLinked: number; needsAttention: number }> {
+  const rows = await env.DB.prepare(`SELECT id, name, xero_contact_id, raw_json FROM suppliers WHERE workspace_id = ?1`)
+    .bind(workspaceId)
+    .all<{ id: string; name: string | null; xero_contact_id: string | null; raw_json: string | null }>();
+  const suppliers = rows.results || [];
+  let matched = 0;
+  let alreadyLinked = 0;
+  let needsAttention = 0;
+  for (const supplier of suppliers) {
+    const hadLink = Boolean(supplier.xero_contact_id);
+    const contactId = await resolveXeroContactForSupplier(env, workspaceId, {
+      id: supplier.id,
+      name: supplier.name,
+      xeroContactId: supplier.xero_contact_id
+    });
+    if (contactId) {
+      if (hadLink && supplier.xero_contact_id === contactId) alreadyLinked += 1;
+      else matched += 1;
+      let wasFlagged = false;
+      try {
+        wasFlagged = objectValue(JSON.parse(supplier.raw_json || '{}')).needsXeroMatch === true;
+      } catch {
+        wasFlagged = false;
+      }
+      if (wasFlagged) await setSupplierRawJsonFlag(env, workspaceId, supplier.id, supplier.raw_json, 'needsXeroMatch', false);
+    } else {
+      needsAttention += 1;
+      await setSupplierRawJsonFlag(env, workspaceId, supplier.id, supplier.raw_json, 'needsXeroMatch', true);
+    }
+  }
+  return { checked: suppliers.length, matched, alreadyLinked, needsAttention };
 }
 
 /**
@@ -535,9 +620,9 @@ export async function resolveSupplierMatch(
   workspaceId: string,
   input: { supplierId: string; xeroContactId?: string; createNew?: boolean }
 ): Promise<{ ok: true; contactId: string } | { ok: false; error: string }> {
-  const supplier = await env.DB.prepare(`SELECT id, name FROM suppliers WHERE id = ?1 AND workspace_id = ?2 LIMIT 1`)
+  const supplier = await env.DB.prepare(`SELECT id, name, raw_json FROM suppliers WHERE id = ?1 AND workspace_id = ?2 LIMIT 1`)
     .bind(input.supplierId, workspaceId)
-    .first<{ id: string; name: string }>();
+    .first<{ id: string; name: string; raw_json: string | null }>();
   if (!supplier) return { ok: false, error: 'Supplier not found.' };
 
   let contactId = text(input.xeroContactId);
@@ -560,6 +645,7 @@ export async function resolveSupplierMatch(
   await env.DB.prepare(`UPDATE suppliers SET xero_contact_id = ?3, xero_contact_synced_at = ?4 WHERE id = ?1 AND workspace_id = ?2`)
     .bind(supplier.id, workspaceId, contactId, nowIso())
     .run();
+  await setSupplierRawJsonFlag(env, workspaceId, supplier.id, supplier.raw_json, 'needsXeroMatch', false);
   await requeueGrvPushesForSupplier(env, workspaceId, supplier.id);
   return { ok: true, contactId };
 }

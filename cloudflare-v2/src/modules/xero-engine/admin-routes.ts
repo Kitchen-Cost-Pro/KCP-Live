@@ -11,7 +11,8 @@ import {
   claimDailyGrvSyncIfDue,
   releaseDailyGrvSyncClaim,
   listPendingSupplierMatches,
-  resolveSupplierMatch
+  resolveSupplierMatch,
+  syncAllSuppliersToXero
 } from './grv-sync';
 
 function response(data: unknown, status = 200): Response {
@@ -208,8 +209,13 @@ async function postSyncNow(env: Env, workspaceId: string, kind: string) {
   if (!settings) return response({ ok: false, error: 'Connect Xero and set up sync settings first.' }, 400);
   // GRV sync has its own independent account-code/tax settings (checked in its own branch below) —
   // it doesn't need sales_account_code/default_tax_type, which only gate the sales-side kinds.
-  if (kind !== 'grv' && (!settings.sales_account_code || !settings.default_tax_type)) {
+  // Supplier matching needs no account-code/tax setup at all — it only reads/matches Contacts.
+  if (kind !== 'grv' && kind !== 'suppliers' && (!settings.sales_account_code || !settings.default_tax_type)) {
     return response({ ok: false, error: 'Set a sales account code and tax type in Xero settings first.' }, 400);
+  }
+  if (kind === 'suppliers') {
+    const result = await syncAllSuppliersToXero(env, workspaceId);
+    return response({ ok: true, result });
   }
   if (kind === 'items') {
     const result = await syncXeroItemsForWorkspace(env, workspaceId, {
@@ -253,7 +259,7 @@ async function postSyncNow(env: Env, workspaceId: string, kind: string) {
     });
     return response({ ok: true, result });
   }
-  return response({ ok: false, error: 'Unknown sync kind. Use "items", "invoice", "invoice-today", or "grv".' }, 400);
+  return response({ ok: false, error: 'Unknown sync kind. Use "items", "invoice", "invoice-today", "grv", or "suppliers".' }, 400);
 }
 
 async function runDueInvoiceSync(env: Env, workspaceId: string) {
