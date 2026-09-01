@@ -104,6 +104,11 @@ test('no transport line is added when transport_ex is 0/null', () => {
   assert.equal(payload.Invoices[0].LineItems.some((item) => item.Description === 'Transport'), false);
 });
 
+// A discount is pushed as its own explicit negative-UnitAmount LineItem (or two, split by tax
+// share) so it stays visible on the Bill — Xero's own documented pattern for a Bill discount,
+// since ACCPAY doesn't support the native DiscountRate field at all (that's ACCREC/sales-invoice
+// only).
+
 test('a discount on an all-VATable GRV is pushed as a single negative taxable line, not split', () => {
   const settings = { purchaseAccountCode: '310', purchaseTaxType: 'INPUT2', purchaseExemptTaxType: 'EXEMPTINPUT' };
   const lines = [{ stock_item_id: 'si_1', stock_item_name: 'Beer', quantity: 10, unit_price: 10, total_ex: 100, total_vat: 15 }];
@@ -150,4 +155,14 @@ test('no discount lines are added when discount_ex is 0/null', () => {
   const lines = [{ stock_item_id: 'si_1', stock_item_name: 'Flour', quantity: 10, unit_price: 10, total_ex: 100, total_vat: 15 }];
   const payload = buildGrvBillPayload(grv({ discount_ex: 0 }), lines, 'contact_1', settings);
   assert.equal(payload.Invoices[0].LineItems.some((item) => String(item.Description).startsWith('Discount')), false);
+});
+
+test('regular stock/transport line UnitAmounts are NOT scaled by the discount — only the explicit Discount line(s) carry it', () => {
+  const settings = { purchaseAccountCode: '310', purchaseTaxType: 'INPUT2', purchaseExemptTaxType: '' };
+  const lines = [{ stock_item_id: 'si_1', stock_item_name: 'Beer', quantity: 10, unit_price: 10, total_ex: 100, total_vat: 15 }];
+  const payload = buildGrvBillPayload(grv({ transport_ex: 25, discount_ex: 20 }), lines, 'contact_1', settings);
+  const beerLine = payload.Invoices[0].LineItems.find((item) => item.Description === 'Beer');
+  const transportLine = payload.Invoices[0].LineItems.find((item) => item.Description === 'Transport');
+  assert.equal(beerLine.UnitAmount, 10);
+  assert.equal(transportLine.UnitAmount, 25);
 });

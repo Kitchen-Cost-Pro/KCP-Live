@@ -155,6 +155,12 @@ export async function resolveXeroContactForSupplier(
  * flat-rate line, it reduces both taxable and non-taxable spend in proportion to their share.
  * grv_lines are the PRE-discount per-line totals (discount is only ever applied at the header
  * level, never written back into grv_lines), so they're the correct base to pro-rate against here.
+ *
+ * Pushed to Xero as an explicit negative-UnitAmount LineItem (or two, one per tax share) rather
+ * than folded into the other lines' amounts, so the discount stays visible on the Bill — this is
+ * Xero's own documented pattern for a Bill discount (ACCPAY doesn't support the native
+ * DiscountRate field at all; that's ACCREC/sales-invoice only), and an explicit TaxType on a
+ * negative line is meant to compute correctly.
  */
 function proRataDiscountShares(lines: GrvLineRow[], transportEx: number, discountEx: number): { taxableShare: number; nonTaxableShare: number } {
   if (!discountEx) return { taxableShare: 0, nonTaxableShare: 0 };
@@ -195,7 +201,7 @@ export function buildGrvBillPayload(
         LineItems: [
           ...(lines.length
             ? lines
-            : [{ stock_item_id: null, stock_item_name: 'Goods received', quantity: 1, unit_price: grv.total_ex || 0, total_vat: grv.total_vat }]
+            : [{ stock_item_id: null, stock_item_name: 'Goods received', quantity: 1, unit_price: grv.total_ex || 0, total_ex: grv.total_ex, total_vat: grv.total_vat }]
           ).map((line) => {
             // A zero-rated/VAT-exempt stock item (total_vat = 0, driven by stock_items.vat_enabled —
             // see loadGrvLines) uses the exempt tax type if one's configured, instead of blanket-
@@ -221,10 +227,11 @@ export function buildGrvBillPayload(
               TaxType: settings.purchaseTaxType
             }]
             : []),
-          // A negative-UnitAmount line, same account code — Xero's own standard way to model a
-          // discount on a Bill. Split into up to two lines (taxable / non-taxable share) so Xero
-          // computes the same VAT reduction our own totals already reflect, instead of over- or
-          // under-taxing the discount at one flat rate.
+          // A negative-UnitAmount line, same account code — Xero's own documented way to model a
+          // discount on a Bill (ACCPAY doesn't support the native DiscountRate field at all). Split
+          // into up to two lines (taxable / non-taxable share) so Xero computes the same VAT
+          // reduction our own totals already reflect, instead of over- or under-taxing the discount
+          // at one flat rate.
           ...(discountShares.taxableShare > 0
             ? [{
               Description: 'Discount',
