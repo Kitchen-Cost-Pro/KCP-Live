@@ -249,36 +249,22 @@ function refreshXeroTrackingCategoryControl(view) {
 }
 
 async function loadXeroTaxRatesIfNeeded(view) {
-  console.log('[KCP-XERO-DIAG] loadXeroTaxRatesIfNeeded called', {
-    taxRatesAlready: xeroDrawerState.taxRates,
-    taxRatesLoading: xeroDrawerState.taxRatesLoading,
-    connectionActive: xeroDrawerState.status?.connectionActive
-  });
   if (xeroDrawerState.taxRates !== null || xeroDrawerState.taxRatesLoading) return;
   if (xeroDrawerState.status?.connectionActive !== true) return;
   xeroDrawerState.taxRatesLoading = true;
   try {
     xeroDrawerState.taxRates = await fetchXeroTaxRates(view.dataset.workspaceId || '');
-  } catch (err) {
-    console.log('[KCP-XERO-DIAG] fetchXeroTaxRates threw', err);
+  } catch {
     // See loadXeroTrackingCategoriesIfNeeded's identical comment: null (not []) on failure so a
     // later retry isn't permanently blocked by one transient/pre-deploy failure.
     xeroDrawerState.taxRates = null;
   } finally {
     xeroDrawerState.taxRatesLoading = false;
   }
-  console.log('[KCP-XERO-DIAG] fetch settled, taxRates length =', xeroDrawerState.taxRates?.length);
   // Deliberately OUTSIDE the try/catch above — see loadXeroTrackingCategoriesIfNeeded's identical
   // comment: a rendering bug must never be misattributed to "the fetch failed" and silently discard
   // perfectly good already-fetched data.
-  if (xeroDrawerState.taxRates?.length) {
-    try {
-      refreshXeroTaxTypeControls(view);
-      console.log('[KCP-XERO-DIAG] refreshXeroTaxTypeControls completed without throwing');
-    } catch (err) {
-      console.log('[KCP-XERO-DIAG] refreshXeroTaxTypeControls THREW', err);
-    }
-  }
+  if (xeroDrawerState.taxRates?.length) refreshXeroTaxTypeControls(view);
 }
 
 // Runs once, right after the fetch resolves — swaps the three plain text inputs for the live
@@ -292,10 +278,8 @@ function refreshXeroTaxTypeControls(view) {
     { wrapper: 'purchaseTaxType', dataAttr: 'data-xero-purchase-tax-type', currentValue: settings.purchaseTaxType, placeholder: 'e.g. INPUT2', applicability: 'expenses' },
     { wrapper: 'purchaseExemptTaxType', dataAttr: 'data-xero-purchase-exempt-tax-type', currentValue: settings.purchaseExemptTaxType, placeholder: 'e.g. EXEMPTINPUT', applicability: 'expenses' }
   ];
-  console.log('[KCP-XERO-DIAG] refreshXeroTaxTypeControls: view attached to document?', document.body.contains(view));
   fields.forEach((field) => {
     const wrapper = view.querySelector(`[data-xero-tax-control="${field.wrapper}"]`);
-    console.log('[KCP-XERO-DIAG] field', field.wrapper, 'wrapper found?', Boolean(wrapper), 'wrapper attached?', wrapper ? document.body.contains(wrapper) : null);
     if (!wrapper) return;
     wrapper.innerHTML = renderXeroTaxTypeControl({
       dataAttr: field.dataAttr,
@@ -304,7 +288,6 @@ function refreshXeroTaxTypeControls(view) {
       taxRates: xeroDrawerState.taxRates,
       applicability: field.applicability
     });
-    console.log('[KCP-XERO-DIAG] field', field.wrapper, 'after innerHTML swap, wrapper.innerHTML starts with:', wrapper.innerHTML.slice(0, 40));
   });
 }
 

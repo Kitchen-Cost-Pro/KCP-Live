@@ -801,6 +801,43 @@
   width: 100%;
 }
 
+.xeroFieldGrid input[type="text"]:focus,
+.xeroFieldGrid select:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-blue) 20%, transparent);
+}
+
+.xeroFieldGrid input[type="text"]:disabled,
+.xeroFieldGrid select:disabled,
+.xeroFieldGrid input[type="text"][readonly] {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Custom dropdown chrome for the tax-rate/tracking-category pickers — the native OS select arrow
+   looks out of place against this modal's own dark surfaces/accent colors. A data-URI SVG chevron
+   can't reference CSS custom properties directly, so light/dark each get their own hardcoded stroke
+   color matching that theme's --text-muted, same pattern as the chevron in manufacturing.css. */
+.xeroFieldGrid select {
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  padding-right: 34px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%234f6075' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+}
+
+:root[data-theme="dark"] .xeroFieldGrid select {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23b6c2d1' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+}
+
+.xeroFieldGrid select option {
+  background: var(--surface-elevated, var(--surface-primary));
+  color: var(--text-main);
+}
+
 /* Wraps the tax-type input/select so it can be swapped for a live Xero-backed dropdown once tax
    rates load, without disturbing the label's grid layout. */
 .xeroFieldGrid [data-xero-tax-control] {
