@@ -38,6 +38,18 @@ export function renderCreditNotes({ state, onCreditNoteFilterChange, onCreditNot
   view.innerHTML = `
     ${creditNotes.editingNoteId ? renderEditingBanner(draft) : ''}
 
+    <div class="cn-pageHeader">
+      <h2 class="cn-pageHeader__title">Credit Notes</h2>
+      <div class="cn-pageHeader__menu" data-cn-dropdown-root>
+        <button type="button" class="cn-recentTrigger" data-cn-open-dropdown="recent-notes" aria-haspopup="true" aria-expanded="${filters.openDropdown === 'recent-notes' ? 'true' : 'false'}">
+          ${icon('clipboard')}
+          <span>Recent Credit Notes</span>
+          ${icon('chevronDown')}
+        </button>
+        ${filters.openDropdown === 'recent-notes' ? renderRecentCreditNotesMenu(creditNotes) : ''}
+      </div>
+    </div>
+
     <div class="cn-frame">
       <div class="cn-layout">
         <aside class="cn-sidebar">
@@ -112,8 +124,6 @@ export function renderCreditNotes({ state, onCreditNoteFilterChange, onCreditNot
               </button>
             </div>
           </article>
-
-          ${renderRecentCreditNotesCard(creditNotes)}
         </aside>
 
         <section class="cn-card cn-draft-panel">
@@ -848,25 +858,26 @@ function renderEditingBanner(draft) {
   `;
 }
 
-function renderRecentCreditNotesCard(creditNotes) {
-  const notes = (creditNotes.creditNotes || []).slice(0, 8);
-  if (!notes.length) return '';
+function renderRecentCreditNotesMenu(creditNotes) {
+  const notes = (creditNotes.creditNotes || []).slice(0, 10);
   return `
-    <article class="cn-card cn-sidecard">
-      <h3 class="cn-side-title">Recent Credit Notes</h3>
-      <div class="cn-stack">
-        ${notes.map((note) => `
-          <div class="cn-recentNoteRow" data-cn-edit-note="${escapeAttribute(note.id)}" role="button" tabindex="0">
-            <div class="cn-recentNoteRow__info">
-              <span class="cn-recentNoteRow__title">${escapeHtml(note.cnNumber || note.invoice || 'Credit Note')}</span>
-              <span class="cn-recentNoteRow__meta">${escapeHtml(note.supplierName || note.supplier || 'Supplier')} · ${escapeHtml(formatDisplayDate(note.date || ''))}</span>
-            </div>
-            <div class="cn-recentNoteRow__total">${escapeHtml(formatCurrency(note.totalEx))}</div>
-            <span class="cn-iconBtn" aria-hidden="true">${icon('edit')}</span>
-          </div>
-        `).join('')}
-      </div>
-    </article>
+    <div class="cn-recentMenu">
+      <p class="cn-recentMenu__title">Recent Credit Notes</p>
+      ${notes.length
+        ? `<div class="cn-stack">
+            ${notes.map((note) => `
+              <div class="cn-recentNoteRow" data-cn-edit-note="${escapeAttribute(note.id)}" role="button" tabindex="0">
+                <div class="cn-recentNoteRow__info">
+                  <span class="cn-recentNoteRow__title">${escapeHtml(note.cnNumber || note.invoice || 'Credit Note')}</span>
+                  <span class="cn-recentNoteRow__meta">${escapeHtml(note.supplierName || note.supplier || 'Supplier')} · ${escapeHtml(formatDisplayDate(note.date || ''))}</span>
+                </div>
+                <div class="cn-recentNoteRow__total">${escapeHtml(formatCurrency(note.totalEx))}</div>
+                <span class="cn-iconBtn" aria-hidden="true">${icon('edit')}</span>
+              </div>
+            `).join('')}
+          </div>`
+        : `<div class="cn-recentMenu__empty">No credit notes yet.</div>`}
+    </div>
   `;
 }
 

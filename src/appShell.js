@@ -135,6 +135,8 @@ const moduleContracts = {
 export function renderAuthenticatedApp({
   state,
   onNavigate,
+  onRequestGrvEdit,
+  onRequestCreditNoteEdit,
   onSignOut,
   onWorkspaceSelect,
   onAutoLoginToggle,
@@ -644,7 +646,9 @@ function renderActiveSection({
           openSuppliers: (payload = {}) => {
             onSupplierFilterChange?.({ query: payload.supplierName || payload.itemName || '' });
             onNavigate?.('suppliers');
-          }
+          },
+          editGrv: (grvId) => onRequestGrvEdit?.(grvId),
+          editCreditNote: (creditNoteId) => onRequestCreditNoteEdit?.(creditNoteId)
         }
       },
       onRefresh: () => {}

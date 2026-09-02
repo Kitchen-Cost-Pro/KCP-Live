@@ -3857,6 +3857,30 @@ body > .reportActionMenu__panel--portal {
   letter-spacing: 0.04em;
 }
 
+.transactionDetailDrawer__toolbarActions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.transactionDetailDrawer__editButton {
+  min-height: 36px;
+  padding: 0 16px;
+  border: 1px solid rgba(96, 165, 250, 0.45);
+  border-radius: 10px;
+  background: rgba(59, 130, 246, 0.18);
+  color: #bfdbfe;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.transactionDetailDrawer__editButton:hover,
+.transactionDetailDrawer__editButton:focus-visible {
+  background: rgba(59, 130, 246, 0.28);
+  border-color: rgba(96, 165, 250, 0.7);
+}
+
 .transactionDetailDrawer__exports {
   display: flex;
   gap: 8px;
@@ -4091,6 +4115,8 @@ body > .reportActionMenu__panel--portal {
   .transactionDetailDrawer__header,
   .transactionDetailDrawer__body { padding-left: 18px; padding-right: 18px; }
   .transactionDetailDrawer__toolbar { align-items: flex-start; flex-direction: column; }
+  .transactionDetailDrawer__toolbarActions { width: 100%; flex-direction: column; align-items: stretch; }
+  .transactionDetailDrawer__editButton { width: 100%; }
   .transactionDetailDrawer__exports { width: 100%; }
   .transactionDetailDrawer__exports button { flex: 1; }
 }

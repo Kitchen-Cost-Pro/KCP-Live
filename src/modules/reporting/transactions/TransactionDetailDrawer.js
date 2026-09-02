@@ -69,12 +69,12 @@ export function openTransactionDetailDrawer({
 
   const loader = services?.reporting?.getTransactionDetail || fetchTransactionDetail;
   Promise.resolve(loader({ workspaceId, transactionReference, entityType, entityId }))
-    .then((detail) => renderLoadedDetail(overlay, detail, { branding, canExport, workspaceId, services }))
+    .then((detail) => renderLoadedDetail(overlay, detail, { branding, canExport, workspaceId, services, entityType, entityId, close }))
     .catch((error) => renderDetailError(overlay, error));
   return overlay;
 }
 
-function renderLoadedDetail(overlay, detail = {}, { branding = {}, canExport = true, workspaceId = "", services = {} } = {}) {
+function renderLoadedDetail(overlay, detail = {}, { branding = {}, canExport = true, workspaceId = "", services = {}, entityType = "", entityId = "", close = () => {} } = {}) {
   const definition = getTransactionDetailDefinition(detail.entityType);
   const title = overlay.querySelector("#transactionDetailTitle");
   const subtitle = overlay.querySelector("[data-transaction-detail-subtitle]");
@@ -82,17 +82,31 @@ function renderLoadedDetail(overlay, detail = {}, { branding = {}, canExport = t
   if (title) title.textContent = detail.transactionReference || "Transaction";
   if (subtitle) subtitle.textContent = [definition.label, detail.status, detail.occurredAt || detail.createdAt].filter(Boolean).join(" · ");
   if (!body) return;
+  // Editing (Phase 1's patchGoodsReceipt/patchCreditNote) only exists for these two entity types
+  // so far — the edit action is only offered when both the detail actually resolved to one of
+  // them AND the host app wired up a handler for it (services.reportingActions.editGrv/
+  // editCreditNote, from appShell.js — absent in contexts that don't support navigating there).
+  const effectiveEntityType = detail.entityType || entityType;
+  const editAction =
+    effectiveEntityType === "grv" && typeof services?.reportingActions?.editGrv === "function"
+      ? () => services.reportingActions.editGrv(entityId)
+      : effectiveEntityType === "credit_note" && typeof services?.reportingActions?.editCreditNote === "function"
+        ? () => services.reportingActions.editCreditNote(entityId)
+        : null;
   body.innerHTML = `
     <div class="transactionDetailDrawer__toolbar">
       <div class="transactionDetailDrawer__identity">
         <span class="transactionDetailDrawer__type">${escapeHtml(definition.icon)}</span>
         <div><strong>${escapeHtml(detail.title || definition.label)}</strong><span>${escapeHtml((detail.locationNames || []).join(" · ") || "No location label")}</span></div>
       </div>
-      ${canExport ? `<div class="transactionDetailDrawer__exports" aria-label="Transaction exports">
-        <button type="button" data-transaction-export="csv">CSV</button>
-        <button type="button" data-transaction-export="xlsx">XLSX</button>
-        <button type="button" data-transaction-export="pdf">PDF</button>
-      </div>` : ""}
+      <div class="transactionDetailDrawer__toolbarActions">
+        ${editAction ? `<button type="button" class="transactionDetailDrawer__editButton" data-transaction-edit>Edit</button>` : ""}
+        ${canExport ? `<div class="transactionDetailDrawer__exports" aria-label="Transaction exports">
+          <button type="button" data-transaction-export="csv">CSV</button>
+          <button type="button" data-transaction-export="xlsx">XLSX</button>
+          <button type="button" data-transaction-export="pdf">PDF</button>
+        </div>` : ""}
+      </div>
     </div>
     ${renderSummaryCards(detail.summaryCards)}
     <nav class="transactionDetailTabs" aria-label="Transaction detail sections">
@@ -112,6 +126,10 @@ function renderLoadedDetail(overlay, detail = {}, { branding = {}, canExport = t
   body.querySelector(".transactionDetailTabs")?.addEventListener("click", (event) => {
     const button = event.target.closest("[data-transaction-tab]");
     if (button) renderTab(button.dataset.transactionTab);
+  });
+  body.querySelector("[data-transaction-edit]")?.addEventListener("click", () => {
+    close({ restoreFocus: false });
+    editAction?.();
   });
   body.querySelector('[data-transaction-export="csv"]')?.addEventListener("click", () => downloadTransactionDetailCsv(detail, { workspaceName: branding?.companyName }));
   body.querySelector('[data-transaction-export="xlsx"]')?.addEventListener("click", () => downloadTransactionDetailExcel(detail, { workspaceName: branding?.companyName }));

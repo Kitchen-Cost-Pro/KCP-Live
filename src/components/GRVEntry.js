@@ -51,6 +51,18 @@ export function renderGRVEntry({ state, onGrvFilterChange, onGrvAction = {} } = 
     ${grv.actionError ? renderNotice(grv.actionError, 'error') : ''}
     ${grv.editingReceiptId ? renderEditingBanner(draft) : ''}
 
+    <div class="grv-pageHeader">
+      <h2 class="grv-pageHeader__title">Goods Received</h2>
+      <div class="grv-pageHeader__menu" data-grv-dropdown-root>
+        <button type="button" class="grv-recentTrigger" data-grv-dropdown="recent-receipts" aria-haspopup="true" aria-expanded="${filters.openDropdown === 'recent-receipts' ? 'true' : 'false'}">
+          ${icon('history')}
+          <span>Recent GRVs</span>
+          ${icon('chevron')}
+        </button>
+        ${filters.openDropdown === 'recent-receipts' ? renderRecentReceiptsMenu(grv) : ''}
+      </div>
+    </div>
+
     <div class="grv-frame">
       <div class="grv-layout">
         <aside class="grv-sidebar">
@@ -162,8 +174,6 @@ export function renderGRVEntry({ state, onGrvFilterChange, onGrvAction = {} } = 
               />
             </div>
           </article>
-
-          ${renderRecentReceiptsCard(grv)}
         </aside>
 
         ${renderDraftLauncher(statusLabel, totals, draft, headerReady)}
@@ -1597,25 +1607,26 @@ function renderEditingBanner(draft) {
   `;
 }
 
-function renderRecentReceiptsCard(grv) {
-  const receipts = (grv.receipts || []).slice(0, 8);
-  if (!receipts.length) return '';
+function renderRecentReceiptsMenu(grv) {
+  const receipts = (grv.receipts || []).slice(0, 10);
   return `
-    <article class="grv-card grv-sidecard">
-      <p class="grv-side-title">Recent Receipts</p>
-      <div class="grv-stack">
-        ${receipts.map((receipt) => `
-          <div class="grv-recentReceiptRow" data-grv-edit-receipt="${escapeAttribute(receipt.id)}" role="button" tabindex="0">
-            <div class="grv-recentReceiptRow__info">
-              <span class="grv-recentReceiptRow__title">${escapeHtml(receipt.grvNumber || receipt.invoice || 'GRV')}</span>
-              <span class="grv-recentReceiptRow__meta">${escapeHtml(receipt.supplierName || 'Manual Receipt')} · ${escapeHtml(formatDisplayDate(receipt.date || ''))}</span>
-            </div>
-            <div class="grv-recentReceiptRow__total">${escapeHtml(formatCurrency(receipt.totalEx))}</div>
-            <span class="grv-iconBtn" aria-hidden="true">${icon('edit')}</span>
-          </div>
-        `).join('')}
-      </div>
-    </article>
+    <div class="grv-recentMenu">
+      <p class="grv-recentMenu__title">Recent GRVs</p>
+      ${receipts.length
+        ? `<div class="grv-stack">
+            ${receipts.map((receipt) => `
+              <div class="grv-recentReceiptRow" data-grv-edit-receipt="${escapeAttribute(receipt.id)}" role="button" tabindex="0">
+                <div class="grv-recentReceiptRow__info">
+                  <span class="grv-recentReceiptRow__title">${escapeHtml(receipt.grvNumber || receipt.invoice || 'GRV')}</span>
+                  <span class="grv-recentReceiptRow__meta">${escapeHtml(receipt.supplierName || 'Manual Receipt')} · ${escapeHtml(formatDisplayDate(receipt.date || ''))}</span>
+                </div>
+                <div class="grv-recentReceiptRow__total">${escapeHtml(formatCurrency(receipt.totalEx))}</div>
+                <span class="grv-iconBtn" aria-hidden="true">${icon('edit')}</span>
+              </div>
+            `).join('')}
+          </div>`
+        : `<div class="grv-recentMenu__empty">No GRVs received yet.</div>`}
+    </div>
   `;
 }
 

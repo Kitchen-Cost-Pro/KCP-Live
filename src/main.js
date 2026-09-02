@@ -2080,7 +2080,7 @@ function navigateTo(sectionId) {
     cleanupStockTakeSubscription();
     cleanupLocationSubscription();
     cleanupManufacturingSubscription();
-    appState.grv = createGrvState('loading', appState.grv.filters, appState.grv.pendingSourcePoId);
+    appState.grv = createGrvState('loading', appState.grv.filters, appState.grv.pendingSourcePoId, appState.grv.pendingEditReceiptId);
     renderApp();
     startGrvSubscription(appState.workspace?.id);
     return;
@@ -2098,7 +2098,7 @@ function navigateTo(sectionId) {
     cleanupStockTakeSubscription();
     cleanupLocationSubscription();
     cleanupManufacturingSubscription();
-    appState.creditNotes = createCreditNoteState('loading', appState.creditNotes.filters);
+    appState.creditNotes = createCreditNoteState('loading', appState.creditNotes.filters, appState.creditNotes.pendingEditNoteId);
     renderApp();
     startCreditNoteSubscription(appState.workspace?.id);
     return;
@@ -3135,11 +3135,11 @@ async function startGrvSubscription(workspaceId) {
   const subscriptionToken = ++grvSubscriptionToken;
 
   if (!workspaceId) {
-    appState.grv = createGrvState('idle', appState.grv.filters, appState.grv.pendingSourcePoId);
+    appState.grv = createGrvState('idle', appState.grv.filters, appState.grv.pendingSourcePoId, appState.grv.pendingEditReceiptId);
     return;
   }
 
-  appState.grv = createGrvState('loading', appState.grv.filters, appState.grv.pendingSourcePoId);
+  appState.grv = createGrvState('loading', appState.grv.filters, appState.grv.pendingSourcePoId, appState.grv.pendingEditReceiptId);
 
   try {
     const { subscribeGrvWorkspace } = await import('./services/grvService.js');
@@ -3193,6 +3193,20 @@ async function startGrvSubscription(workspaceId) {
             openGrvFromPurchaseOrder(appState.grv.pendingSourcePoId);
           });
         }
+        if (appState.grv.pendingEditReceiptId && !appState.grv.actionStatus && loaded?.receipts) {
+          queueMicrotask(() => {
+            const pendingId = appState.grv.pendingEditReceiptId;
+            if (appState.route.active !== 'grv' || !pendingId) return;
+            const target = (appState.grv.receipts || []).find((entry) => String(entry.id) === pendingId);
+            appState.grv = { ...appState.grv, pendingEditReceiptId: '' };
+            if (target) {
+              openGrvEditDraft(target);
+            } else {
+              showGrvToast('That GRV could not be found — it may have been removed.', 'error');
+              renderApp();
+            }
+          });
+        }
       },
       onError: (error) => {
         if (
@@ -3230,11 +3244,11 @@ async function startCreditNoteSubscription(workspaceId) {
   const subscriptionToken = ++creditNoteSubscriptionToken;
 
   if (!workspaceId) {
-    appState.creditNotes = createCreditNoteState('idle', appState.creditNotes.filters);
+    appState.creditNotes = createCreditNoteState('idle', appState.creditNotes.filters, appState.creditNotes.pendingEditNoteId);
     return;
   }
 
-  appState.creditNotes = createCreditNoteState('loading', appState.creditNotes.filters);
+  appState.creditNotes = createCreditNoteState('loading', appState.creditNotes.filters, appState.creditNotes.pendingEditNoteId);
 
   try {
     const { subscribeCreditNotesWorkspace } = await import('./services/creditNoteService.js');
@@ -3279,6 +3293,20 @@ async function startCreditNoteSubscription(workspaceId) {
           editingNoteId
         };
         renderApp();
+        if (appState.creditNotes.pendingEditNoteId && !appState.creditNotes.actionStatus && loaded?.creditNotes) {
+          queueMicrotask(() => {
+            const pendingId = appState.creditNotes.pendingEditNoteId;
+            if (appState.route.active !== 'credit-note' || !pendingId) return;
+            const target = (appState.creditNotes.creditNotes || []).find((entry) => String(entry.id) === pendingId);
+            appState.creditNotes = { ...appState.creditNotes, pendingEditNoteId: '' };
+            if (target) {
+              openCreditNoteEditDraft(target);
+            } else {
+              showCreditNoteToast('That credit note could not be found — it may have been removed.', 'error');
+              renderApp();
+            }
+          });
+        }
       },
       onError: (error) => {
         if (
@@ -9259,6 +9287,25 @@ async function sendPurchaseOrder(orderId) {
   }
 }
 
+// Entry point for "Edit" from the GRV Log report's transaction detail drawer (see appShell.js's
+// reportingActions.editGrv). Queues the id and navigates — resolved into an actual
+// openGrvEditDraft call once the GRV section's own receipts list has loaded, same pattern as
+// redirectPurchaseOrderToGrv/pendingSourcePoId below.
+function requestGrvEditFromReport(grvId) {
+  const id = String(grvId || '').trim();
+  if (!id) return;
+  appState.grv = { ...appState.grv, pendingEditReceiptId: id, actionError: '' };
+  navigateTo('grv');
+}
+
+// See requestGrvEditFromReport's doc comment — same flow, Credit Notes side.
+function requestCreditNoteEditFromReport(creditNoteId) {
+  const id = String(creditNoteId || '').trim();
+  if (!id) return;
+  appState.creditNotes = { ...appState.creditNotes, pendingEditNoteId: id, actionError: '' };
+  navigateTo('credit-note');
+}
+
 function redirectPurchaseOrderToGrv(orderId) {
   const id = String(orderId || '').trim();
   if (!id) return;
@@ -9932,6 +9979,7 @@ function openGrvEditDraft(receipt) {
   appState.grv = {
     ...appState.grv,
     pendingSourcePoId: '',
+    pendingEditReceiptId: '',
     lineDetailDraft: null,
     missingSupplierPrompt: null,
     draftReceipt: createEmptyGrvDraft({
@@ -11239,6 +11287,7 @@ function openCreditNoteEditDraft(note) {
   if (!note || !note.id) return;
   appState.creditNotes = {
     ...appState.creditNotes,
+    pendingEditNoteId: '',
     lineDetailDraft: null,
     draftNote: createEmptyCreditNoteDraft(note),
     editingNoteId: note.id,
@@ -11247,7 +11296,8 @@ function openCreditNoteEditDraft(note) {
       ...appState.creditNotes.filters,
       selectedLineIndexes: [],
       selectedStockIds: [],
-      overlay: ''
+      overlay: '',
+      openDropdown: ''
     }
   };
   clearPersistedDraft('credit-note');
@@ -19839,6 +19889,8 @@ function renderApp() {
   replaceApp(renderAuthenticatedApp({
     state: appState,
     onNavigate: navigateTo,
+    onRequestGrvEdit: requestGrvEditFromReport,
+    onRequestCreditNoteEdit: requestCreditNoteEditFromReport,
     onSignOut: () => signOutAndStop(),
     onWorkspaceSelect: (workspace) => selectWorkspace(workspace),
     onAutoLoginToggle: toggleAutoLoginPreference,
@@ -21407,7 +21459,7 @@ function createPurchaseOrderState(status, filters = {}) {
   };
 }
 
-function createGrvState(status, filters = {}, pendingSourcePoId = '') {
+function createGrvState(status, filters = {}, pendingSourcePoId = '', pendingEditReceiptId = '') {
   return {
     status,
     receipts: [],
@@ -21421,6 +21473,11 @@ function createGrvState(status, filters = {}, pendingSourcePoId = '') {
     updatedAt: '',
     error: '',
     pendingSourcePoId: String(pendingSourcePoId || '').trim(),
+    // Set by requestGrvEditFromReport (clicked "Edit" from the GRV Log report's transaction
+    // detail drawer) before navigating here — resolved into an actual openGrvEditDraft call once
+    // this section's own receipts list has loaded (see startGrvSubscription's onSnapshot), same
+    // "queue it, resolve once loaded" pattern pendingSourcePoId already uses.
+    pendingEditReceiptId: String(pendingEditReceiptId || '').trim(),
     lineDetailDraft: null,
     missingSupplierPrompt: null,
     draftReceipt: {
@@ -21464,7 +21521,7 @@ function createGrvState(status, filters = {}, pendingSourcePoId = '') {
   };
 }
 
-function createCreditNoteState(status, filters = {}) {
+function createCreditNoteState(status, filters = {}, pendingEditNoteId = '') {
   return {
     status,
     creditNotes: [],
@@ -21477,6 +21534,9 @@ function createCreditNoteState(status, filters = {}) {
     source: '',
     updatedAt: '',
     error: '',
+    // See createGrvState's pendingEditReceiptId doc comment — same "Edit" flow from the Credit
+    // Notes report's transaction detail drawer.
+    pendingEditNoteId: String(pendingEditNoteId || '').trim(),
     lineDetailDraft: null,
     draftNote: createEmptyCreditNoteDraft(),
     // See createGrvState's editingReceiptId doc comment — same reasoning, credit note side.
