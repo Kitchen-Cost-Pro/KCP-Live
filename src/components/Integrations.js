@@ -24,6 +24,13 @@ import {
   fetchXeroAccounts,
   syncYocoCatalogue
 } from '../services/integrationService.js';
+import {
+  subscribeDriveIntegration,
+  startDriveConnection,
+  disconnectDriveIntegration,
+  saveDriveSettings,
+  syncDriveNow
+} from '../services/driveService.js';
 import { canManagePermissionSets } from '../services/roleService.js';
 import { bindFieldHelpTooltips, renderFieldHelpLabel } from './fieldHelp.js';
 
@@ -56,13 +63,13 @@ const INTEGRATIONS = [
     id: 'google-drive',
     name: 'Google Drive',
     category: 'Cloud Storage',
-    status: 'Coming Soon',
-    stage: 'Planned',
+    status: 'Available',
+    stage: 'Live',
     popular: false,
-    description: 'Back up exports, recipes, and reports straight to a connected Google Drive folder.',
+    description: 'Push GRV and Credit Note PDFs straight into a connected Google Drive folder, and optionally turn on the KCP Assistant to pre-fill GRVs from photographed supplier invoices.',
     logo: googleDriveLogo,
-    tone: 'amber',
-    action: 'Coming Soon'
+    tone: 'blue',
+    action: 'Connect Google Drive'
   },
   {
     id: 'xero',
@@ -167,6 +174,14 @@ const xeroDrawerState = {
   // Same lazy-load-once-per-modal-session contract as taxRates above, for every account-code field
   // (sales/item/purchases/COD/wastage) — see loadXeroAccountsIfNeeded.
   accounts: null
+};
+
+const driveDrawerState = {
+  open: false,
+  busy: false,
+  message: 'Connect a Google Drive account to receive GRV and Credit Note PDFs. Each connected workspace uses its own Drive — nothing is stored on KCP’s servers.',
+  tone: '',
+  status: null
 };
 
 function closeAllXeroComboboxes(view) {
@@ -530,7 +545,8 @@ export function renderIntegrations({ state } = {}) {
   const cachedYocoStatus = getCachedYocoStatus(workspaceId);
   const cachedGmailStatus = getCachedGmailStatus(workspaceId);
   const cachedXeroStatus = getCachedXeroStatus(workspaceId);
-  const integrations = getRenderedIntegrations(cachedYocoStatus, cachedGmailStatus, cachedXeroStatus);
+  const cachedDriveStatus = getCachedDriveStatus(workspaceId);
+  const integrations = getRenderedIntegrations(cachedYocoStatus, cachedGmailStatus, cachedXeroStatus, cachedDriveStatus);
   const view = document.createElement('section');
   view.className = 'integrationsView';
   view.dataset.workspaceId = workspaceId;
@@ -589,6 +605,7 @@ export function renderIntegrations({ state } = {}) {
       ${renderYocoModal({ canDisconnectYoco })}
       ${renderGmailModal()}
       ${renderXeroModal({ canManageXero })}
+      ${renderDriveModal({ canManageDrive: canManageXero })}
     </div>
   `;
 
@@ -597,12 +614,15 @@ export function renderIntegrations({ state } = {}) {
   if (cachedYocoStatus) updateYocoStatus(view, cachedYocoStatus, { skipCache: true });
   if (cachedGmailStatus) updateGmailStatus(view, cachedGmailStatus, { skipCache: true });
   if (cachedXeroStatus) updateXeroStatus(view, cachedXeroStatus, { skipCache: true });
+  if (cachedDriveStatus) updateDriveStatus(view, cachedDriveStatus, { skipCache: true });
   bindYocoStatus(view, workspaceId);
   bindGmailStatus(view, workspaceId);
   bindXeroStatus(view, workspaceId);
+  bindDriveStatus(view, workspaceId);
   setYocoBusy(view, yocoDrawerState.busy);
   setGmailBusy(view, gmailDrawerState.busy);
   setXeroBusy(view, xeroDrawerState.busy);
+  setDriveBusy(view, driveDrawerState.busy);
   applyIntegrationFilters(view);
   return view;
 }
@@ -678,6 +698,10 @@ function bindIntegrationEvents(view) {
     openXeroModal(view);
   });
 
+  view.querySelector('[data-drive-open]')?.addEventListener('click', () => {
+    openDriveModal(view);
+  });
+
   view.querySelectorAll('[data-yoco-close]').forEach((button) => {
     button.addEventListener('click', () => closeYocoModal(view));
   });
@@ -688,6 +712,10 @@ function bindIntegrationEvents(view) {
 
   view.querySelectorAll('[data-xero-close]').forEach((button) => {
     button.addEventListener('click', () => closeXeroModal(view));
+  });
+
+  view.querySelectorAll('[data-drive-close]').forEach((button) => {
+    button.addEventListener('click', () => closeDriveModal(view));
   });
 
   view.querySelectorAll('[data-xero-tab]').forEach((button) => {
@@ -780,6 +808,49 @@ function bindIntegrationEvents(view) {
       await disconnectXeroIntegration(view.dataset.workspaceId || '');
       setXeroModalStatus(view, 'Xero disconnected for this workspace.', 'success');
       updateXeroStatus(view, { status: 'disconnected', configured: true, connectionActive: false, settings: xeroDrawerState.status?.settings });
+    });
+  });
+
+  view.querySelector('[data-drive-connect]')?.addEventListener('click', async () => {
+    await runDriveAction(view, 'Opening Google consent...', async () => {
+      const result = await startDriveConnection(view.dataset.workspaceId || '');
+      if (!result.authUrl) throw new Error('Google Drive did not return a connection link.');
+      // Deliberately no noopener/noreferrer, same reasoning as the Xero connect handler above: the
+      // callback page posts back via window.opener.postMessage, which noopener would sever.
+      const popup = window.open(result.authUrl, 'kcp-drive-oauth', 'width=520,height=720');
+      if (!popup) window.location.href = result.authUrl;
+      setDriveModalStatus(view, 'Finish the Google consent screen, then this tile will update.', 'busy');
+    }, { keepMessage: true });
+  });
+
+  view.querySelector('[data-drive-disconnect]')?.addEventListener('click', async () => {
+    await runDriveAction(view, 'Disconnecting Google Drive...', async () => {
+      await disconnectDriveIntegration(view.dataset.workspaceId || '');
+      setDriveModalStatus(view, 'Google Drive disconnected for this workspace.', 'success');
+      updateDriveStatus(view, { status: 'disconnected', configured: true, connectionActive: false, settings: driveDrawerState.status?.settings });
+    });
+  });
+
+  view.querySelector('[data-drive-settings-form]')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const pushGrvEnabled = view.querySelector('[data-drive-grv-enabled]')?.checked === true;
+    const pushCreditNoteEnabled = view.querySelector('[data-drive-credit-note-enabled]')?.checked === true;
+    const ocrEnabled = view.querySelector('[data-drive-ocr-enabled]')?.checked === true;
+    await runDriveAction(view, 'Saving Google Drive settings...', async () => {
+      await saveDriveSettings(view.dataset.workspaceId || '', { pushGrvEnabled, pushCreditNoteEnabled, ocrEnabled });
+      setDriveModalStatus(view, 'Google Drive settings saved.', 'success');
+      bindDriveStatus(view, view.dataset.workspaceId || '', { once: true });
+    });
+  });
+
+  view.querySelector('[data-drive-sync-now]')?.addEventListener('click', async () => {
+    await runDriveAction(view, 'Pushing pending documents to Drive...', async () => {
+      const [grvResult, creditNoteResult] = await Promise.all([
+        syncDriveNow(view.dataset.workspaceId || '', 'grv').catch((error) => ({ ok: false, error: error.message })),
+        syncDriveNow(view.dataset.workspaceId || '', 'credit-notes').catch((error) => ({ ok: false, error: error.message }))
+      ]);
+      const pushed = (grvResult?.result?.pushed || 0) + (creditNoteResult?.result?.pushed || 0);
+      setDriveModalStatus(view, `Pushed ${pushed} document${pushed === 1 ? '' : 's'} to Drive.`, 'success');
     });
   });
 
@@ -986,6 +1057,14 @@ function bindIntegrationEvents(view) {
       bindXeroStatus(view, view.dataset.workspaceId || '', { once: true });
     }
   }, { once: true });
+
+  window.addEventListener('message', (event) => {
+    if (event.data?.type !== 'kcp:drive-oauth') return;
+    setDriveModalStatus(view, event.data.message || (event.data.ok ? 'Google Drive connected.' : 'Google Drive connection failed.'), event.data.ok ? 'success' : 'error');
+    if (event.data.ok) {
+      bindDriveStatus(view, view.dataset.workspaceId || '', { once: true });
+    }
+  }, { once: true });
 }
 
 function applyIntegrationFilters(view) {
@@ -1090,7 +1169,7 @@ function renderIntegrationCard(item) {
   const statusClass = getIntegrationStatusClass(item.status);
   return `
     <article
-      class="integrationCard ${item.id === 'yoco' || item.id === 'gmail' || item.id === 'xero' ? 'integrationCard--featured' : ''}"
+      class="integrationCard ${item.id === 'yoco' || item.id === 'gmail' || item.id === 'xero' || item.id === 'google-drive' ? 'integrationCard--featured' : ''}"
       data-integration-card
       data-integration-id="${escapeAttribute(item.id)}"
       data-category="${escapeAttribute(item.category)}"
@@ -1116,8 +1195,8 @@ function renderIntegrationCard(item) {
         ${item.popular ? '<span>Popular</span>' : '<span>Workspace Tool</span>'}
       </div>
       <div class="integrationActions">
-        <button type="button" class="${item.id === 'yoco' || item.id === 'gmail' || item.id === 'xero' ? 'integrationPrimaryAction' : 'integrationGhostAction'}" ${item.id === 'yoco' ? 'data-yoco-open' : ''} ${item.id === 'gmail' ? 'data-gmail-open' : ''} ${item.id === 'xero' ? 'data-xero-open' : ''}>
-          ${item.id === 'yoco' || item.id === 'gmail' || item.id === 'xero' ? icon('link') : icon('clock')}
+        <button type="button" class="${item.id === 'yoco' || item.id === 'gmail' || item.id === 'xero' || item.id === 'google-drive' ? 'integrationPrimaryAction' : 'integrationGhostAction'}" ${item.id === 'yoco' ? 'data-yoco-open' : ''} ${item.id === 'gmail' ? 'data-gmail-open' : ''} ${item.id === 'xero' ? 'data-xero-open' : ''} ${item.id === 'google-drive' ? 'data-drive-open' : ''}>
+          ${item.id === 'yoco' || item.id === 'gmail' || item.id === 'xero' || item.id === 'google-drive' ? icon('link') : icon('clock')}
           <span data-integration-action-label>${escapeHtml(item.action)}</span>
         </button>
       </div>
@@ -1289,6 +1368,98 @@ function renderGmailModal() {
 
           <div class="yocoModalNotice" data-gmail-modal-status${noticeTone}>
             ${escapeHtml(gmailDrawerState.message)}
+          </div>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function renderDriveModal({ canManageDrive = false } = {}) {
+  driveDrawerState.canManageDrive = canManageDrive;
+  const status = driveDrawerState.status || {};
+  const isConnected = status.connectionActive === true;
+  const isConfigured = status.configured !== false;
+  const settings = status.settings || {};
+  const noticeTone = driveDrawerState.tone ? ` data-tone="${escapeAttribute(driveDrawerState.tone)}"` : '';
+  const lockedNotice = `<div class="yocoActionLock" title="Only a workspace owner, admin, or super user can change Google Drive settings."><span class="yocoActionIcon">${icon('lock')}</span><span><strong>Settings locked</strong><small>Ask a workspace owner or admin to change these.</small></span></div>`;
+  return `
+    <div class="yocoModalBackdrop" data-drive-modal ${driveDrawerState.open ? '' : 'hidden'}>
+      <section class="yocoModalCard" role="dialog" aria-modal="true" aria-labelledby="drive-modal-title">
+        <header class="yocoModalHead">
+          <div>
+            <p>Cloud Storage</p>
+            <h2 id="drive-modal-title">Connect Google Drive</h2>
+            <span data-drive-live-status>${isConnected ? `Connected as ${escapeHtml(status.accountEmail || 'Google Drive')}` : isConfigured ? 'Disconnected' : 'Setup required'}</span>
+          </div>
+          <button type="button" class="integrationIconAction" data-drive-close aria-label="Close Google Drive setup">${icon('x')}</button>
+        </header>
+
+        <div class="yocoDrawerBody">
+          <aside class="yocoKeyHelper" aria-label="Google Drive helper">
+            <div class="yocoKeyHelperIcon">${icon('boxes')}</div>
+            <div>
+              <strong>Your own Drive, not KCP's</strong>
+              <span>Files are stored in the connected Google account's own Drive, under a "KCP Documents" folder — nothing is kept on KCP's servers.</span>
+            </div>
+          </aside>
+
+          <div class="yocoStatusGrid">
+            <article>
+              <span>Status</span>
+              <strong data-drive-status>${isConnected ? 'Connected' : isConfigured ? 'Ready' : 'Not configured'}</strong>
+            </article>
+            <article>
+              <span>Account</span>
+              <strong data-drive-account>${escapeHtml(status.accountEmail || 'No account')}</strong>
+            </article>
+          </div>
+
+          <section class="yocoActionPanel" aria-label="Google Drive controls">
+            <div class="yocoActionPanelHead">
+              <span>Connection</span>
+              <strong>Connect the Google account whose Drive should receive KCP documents.</strong>
+            </div>
+            <div class="yocoActionRow">
+              <button type="button" class="yocoActionButton" data-drive-connect ${isConfigured ? '' : 'disabled'}>
+                <span class="yocoActionIcon">${icon('link')}</span>
+                <span><strong>${isConnected ? 'Reconnect Google Drive' : 'Connect Google Drive'}</strong><small>Google consent flow</small></span>
+              </button>
+              <button type="button" class="yocoActionButton yocoActionButton--danger" data-drive-disconnect ${isConnected ? '' : 'disabled'}>
+                <span class="yocoActionIcon">${icon('unlink')}</span>
+                <span><strong>Disconnect</strong><small>Remove Drive token</small></span>
+              </button>
+            </div>
+          </section>
+
+          <form class="xeroSettingsForm" data-drive-settings-form>
+            ${canManageDrive ? `
+            <label class="xeroToggleRow">
+              <span class="xeroToggleCopy"><strong>Push GRVs to Drive</strong><small>Sends each GRV's PDF into that location's "GRVs" folder.</small></span>
+              <input type="checkbox" data-drive-grv-enabled ${settings.pushGrvEnabled ? 'checked' : ''} ${isConnected ? '' : 'disabled'} />
+            </label>
+            <label class="xeroToggleRow">
+              <span class="xeroToggleCopy"><strong>Push Credit Notes to Drive</strong><small>Sends each Credit Note's PDF into that location's "Credit Notes" folder.</small></span>
+              <input type="checkbox" data-drive-credit-note-enabled ${settings.pushCreditNoteEnabled ? 'checked' : ''} ${isConnected ? '' : 'disabled'} />
+            </label>
+            <label class="xeroToggleRow">
+              <span class="xeroToggleCopy"><strong>Enable KCP Assistant (OCR)</strong><small>Lets staff process a photographed supplier invoice from Drive's "Invoices/Inbox" folder straight into a pre-filled GRV draft.</small></span>
+              <input type="checkbox" data-drive-ocr-enabled ${settings.ocrEnabled ? 'checked' : ''} ${isConnected ? '' : 'disabled'} />
+            </label>
+            <div class="xeroFormActions">
+              <button type="submit" class="xeroCompactButton xeroCompactButton--primary" data-drive-settings-submit ${isConnected ? '' : 'disabled'}>
+                ${icon('shieldCheck')}
+                <span>Save settings</span>
+              </button>
+              <button type="button" class="xeroCompactButton" data-drive-sync-now ${isConnected ? '' : 'disabled'}>
+                ${icon('boxes')}
+                <span>Push pending documents now</span>
+              </button>
+            </div>` : lockedNotice}
+          </form>
+
+          <div class="yocoModalNotice" data-drive-modal-status${noticeTone}>
+            ${escapeHtml(driveDrawerState.message)}
           </div>
         </div>
       </section>
@@ -1610,6 +1781,21 @@ function bindXeroStatus(view, workspaceId, options = {}) {
   observer.observe(document.body, { childList: true, subtree: true });
 }
 
+function bindDriveStatus(view, workspaceId, options = {}) {
+  if (!workspaceId) return;
+  const unsubscribe = subscribeDriveIntegration(workspaceId, (status) => {
+    updateDriveStatus(view, status);
+    if (options.once) unsubscribe?.();
+  });
+  if (options.once) return;
+  const observer = new MutationObserver(() => {
+    if (document.body.contains(view)) return;
+    unsubscribe?.();
+    observer.disconnect();
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+}
+
 function updateYocoStatus(view, status = {}, options = {}) {
   if (!options.skipCache) cacheYocoStatus(view.dataset.workspaceId || '', status);
   const isActive = isYocoStatusActive(status);
@@ -1656,6 +1842,21 @@ function updateGmailStatus(view, status = {}, options = {}) {
   updateIntegrationCardStatus(view, 'gmail', nextStatus, nextStatus === 'Active' ? 'Manage Gmail' : nextStatus === 'Setup Required' ? 'Needs Config' : 'Connect Gmail');
   if (status.lastError) setGmailModalStatus(view, status.lastError, 'error');
   else if (status.message && status.configured === false) setGmailModalStatus(view, status.message, 'error');
+}
+
+function updateDriveStatus(view, status = {}, options = {}) {
+  driveDrawerState.status = status;
+  if (!options.skipCache) cacheDriveStatus(view.dataset.workspaceId || '', status);
+  const nextStatus = status.configured === false
+    ? 'Setup Required'
+    : status.connectionActive === true
+      ? 'Active'
+      : 'Available';
+  setText(view, '[data-drive-live-status]', status.connectionActive ? `Connected as ${status.accountEmail || 'Google Drive'}` : status.configured === false ? 'Setup required' : 'Disconnected');
+  setText(view, '[data-drive-status]', status.connectionActive ? 'Connected' : status.configured === false ? 'Not configured' : 'Ready');
+  setText(view, '[data-drive-account]', status.accountEmail || 'No account');
+  updateIntegrationCardStatus(view, 'google-drive', nextStatus, nextStatus === 'Active' ? 'Manage Google Drive' : nextStatus === 'Setup Required' ? 'Needs Config' : 'Connect Google Drive');
+  if (status.lastError) setDriveModalStatus(view, status.lastError, 'error');
 }
 
 // The settings form (Sales/Purchases tabs) is rendered ONCE, baked from whatever settings snapshot
@@ -1773,7 +1974,7 @@ function updateIntegrationCardStatus(view, integrationId, nextStatus, nextAction
   applyIntegrationFilters(view);
 }
 
-function getRenderedIntegrations(yocoStatus, gmailStatus, xeroStatus) {
+function getRenderedIntegrations(yocoStatus, gmailStatus, xeroStatus, driveStatus) {
   const yocoActive = isYocoStatusActive(yocoStatus);
   const gmailCardStatus = gmailStatus?.configured === false
     ? 'Setup Required'
@@ -1783,6 +1984,11 @@ function getRenderedIntegrations(yocoStatus, gmailStatus, xeroStatus) {
   const xeroCardStatus = xeroStatus?.configured === false
     ? 'Setup Required'
     : xeroStatus?.connectionActive === true
+      ? 'Active'
+      : 'Available';
+  const driveCardStatus = driveStatus?.configured === false
+    ? 'Setup Required'
+    : driveStatus?.connectionActive === true
       ? 'Active'
       : 'Available';
   return INTEGRATIONS.map((item) => {
@@ -1798,6 +2004,13 @@ function getRenderedIntegrations(yocoStatus, gmailStatus, xeroStatus) {
         ...item,
         status: xeroCardStatus,
         action: xeroCardStatus === 'Active' ? 'Manage Xero' : xeroCardStatus === 'Setup Required' ? 'Needs Config' : item.action
+      };
+    }
+    if (item.id === 'google-drive') {
+      return {
+        ...item,
+        status: driveCardStatus,
+        action: driveCardStatus === 'Active' ? 'Manage Google Drive' : driveCardStatus === 'Setup Required' ? 'Needs Config' : item.action
       };
     }
     if (item.id !== 'yoco') return item;
@@ -1921,6 +2134,40 @@ function cacheXeroStatus(workspaceId, status = {}) {
   }
 }
 
+function driveCacheKey(workspaceId) {
+  return `kcp-drive-status:${String(workspaceId || 'default')}`;
+}
+
+function getCachedDriveStatus(workspaceId) {
+  if (!workspaceId || typeof window === 'undefined') return null;
+  try {
+    const value = window.localStorage.getItem(driveCacheKey(workspaceId));
+    if (!value) return null;
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch (error) {
+    console.warn('[Drive] Could not read cached integration status:', error);
+    return null;
+  }
+}
+
+function cacheDriveStatus(workspaceId, status = {}) {
+  if (!workspaceId || typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(driveCacheKey(workspaceId), JSON.stringify({
+      status: String(status.status || '').trim().toLowerCase() || 'disconnected',
+      configured: status.configured !== false,
+      connectionActive: status.connectionActive === true,
+      accountEmail: status.accountEmail || '',
+      lastError: status.lastError || '',
+      settings: status.settings || {},
+      cachedAt: new Date().toISOString()
+    }));
+  } catch (error) {
+    console.warn('[Drive] Could not cache integration status:', error);
+  }
+}
+
 function getIntegrationStatusClass(status) {
   if (status === 'Active') return 'is-active';
   if (status === 'Available') return 'is-available';
@@ -1962,6 +2209,18 @@ function openXeroModal(view) {
 function closeXeroModal(view) {
   xeroDrawerState.open = false;
   const modal = view.querySelector('[data-xero-modal]');
+  if (modal) modal.hidden = true;
+}
+
+function openDriveModal(view) {
+  driveDrawerState.open = true;
+  const modal = view.querySelector('[data-drive-modal]');
+  if (modal) modal.hidden = false;
+}
+
+function closeDriveModal(view) {
+  driveDrawerState.open = false;
+  const modal = view.querySelector('[data-drive-modal]');
   if (modal) modal.hidden = true;
 }
 
@@ -2024,6 +2283,21 @@ async function runXeroAction(view, message, task, options = {}) {
   }
 }
 
+async function runDriveAction(view, message, task, options = {}) {
+  window.__KCP_SUPPRESS_INTEGRATIONS_RENDER__ = true;
+  setDriveBusy(view, true);
+  setDriveModalStatus(view, message, 'busy');
+  try {
+    await task();
+  } catch (error) {
+    setDriveModalStatus(view, error.message || 'Google Drive action failed.', 'error');
+  } finally {
+    setDriveBusy(view, false);
+    window.__KCP_SUPPRESS_INTEGRATIONS_RENDER__ = false;
+    if (!options.keepMessage) window.dispatchEvent(new CustomEvent('kcp:integrations-sync-complete'));
+  }
+}
+
 function setYocoBusy(view, busy) {
   yocoDrawerState.busy = busy;
   view.querySelectorAll('[data-yoco-submit], [data-yoco-sync-catalogue], [data-yoco-disconnect]').forEach((button) => {
@@ -2055,6 +2329,19 @@ function setXeroBusy(view, busy) {
   });
 }
 
+function setDriveBusy(view, busy) {
+  driveDrawerState.busy = busy;
+  view.querySelectorAll('[data-drive-connect], [data-drive-disconnect], [data-drive-settings-submit], [data-drive-sync-now]').forEach((button) => {
+    const isDisconnect = button.hasAttribute('data-drive-disconnect');
+    const isConnect = button.hasAttribute('data-drive-connect');
+    const needsConnection = button.hasAttribute('data-drive-settings-submit') || button.hasAttribute('data-drive-sync-now');
+    button.disabled = busy ||
+      (isConnect && driveDrawerState.status?.configured === false) ||
+      (isDisconnect && driveDrawerState.status?.connectionActive !== true) ||
+      (needsConnection && driveDrawerState.status?.connectionActive !== true);
+  });
+}
+
 function setYocoModalStatus(view, message, tone = 'busy') {
   yocoDrawerState.message = message;
   yocoDrawerState.tone = tone;
@@ -2077,6 +2364,15 @@ function setXeroModalStatus(view, message, tone = 'busy') {
   xeroDrawerState.message = message;
   xeroDrawerState.tone = tone;
   const target = view.querySelector('[data-xero-modal-status]');
+  if (!target) return;
+  target.textContent = message;
+  target.dataset.tone = tone;
+}
+
+function setDriveModalStatus(view, message, tone = 'busy') {
+  driveDrawerState.message = message;
+  driveDrawerState.tone = tone;
+  const target = view.querySelector('[data-drive-modal-status]');
   if (!target) return;
   target.textContent = message;
   target.dataset.tone = tone;

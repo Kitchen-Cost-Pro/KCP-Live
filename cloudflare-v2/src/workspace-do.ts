@@ -13,6 +13,7 @@ import type { Env } from './types';
 import { dispatchWorkspaceRoute } from './legacy/index';
 import { dispatchYocoV2WorkspaceRoute } from './modules/yoco-engine-v2/route-dispatch';
 import { dispatchXeroWorkspaceRoute } from './modules/xero-engine/route-dispatch';
+import { dispatchDriveWorkspaceRoute } from './modules/drive-engine/route-dispatch';
 import { getEffectRuntime } from './modules/yoco-engine-v2/effect-gate';
 import {
   ADJUSTMENT_LINES_INDEX_SCHEMA_REPAIR,
@@ -785,8 +786,23 @@ export class WorkspaceDO extends DurableObject<Env> {
       );
     }
 
-    // Non-Yoco/Xero workspace routes still use the shared tenant dispatcher. Yoco webhook, queue,
-    // reconciliation, sale, and refund effects are handled exclusively by the V2 dispatcher above.
+    // Google Drive routes (connection/OAuth, settings, GRV/Credit Note PDF push, KCP Assistant
+    // OCR) are likewise isolated from the legacy dispatcher — see
+    // modules/drive-engine/route-dispatch.ts. Same defensive try/catch as the Xero dispatch above,
+    // for the same reason (a drifted tenant migration can still throw a raw SQLite error here).
+    try {
+      const driveResponse = await dispatchDriveWorkspaceRoute(request, tenantEnv, auth, workspaceId, resource);
+      if (driveResponse) return driveResponse;
+    } catch (err) {
+      return new Response(
+        JSON.stringify({ ok: false, error: 'Google Drive request failed. If this persists, contact support.', detail: String((err as Error)?.message || err) }),
+        { status: 500, headers: { 'content-type': 'application/json' } },
+      );
+    }
+
+    // Non-Yoco/Xero/Drive workspace routes still use the shared tenant dispatcher. Yoco webhook,
+    // queue, reconciliation, sale, and refund effects are handled exclusively by the V2 dispatcher
+    // above.
     return dispatchWorkspaceRoute(request, tenantEnv, auth, workspaceId, resource);
   }
 }

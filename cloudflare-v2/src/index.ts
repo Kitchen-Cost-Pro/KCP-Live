@@ -23,6 +23,7 @@ import type { YocoV2QueueDispatchResult, YocoV2QueueMessage } from './modules/yo
 import { permissionsForAdminRole } from './modules/yoco-engine-v2/admin-permissions';
 import { normalizeYocoV2AdminActionPath } from './modules/yoco-engine-v2/admin-route-path';
 import { xeroWorkspaceIdFromOauthState } from './modules/xero-engine/oauth';
+import { driveWorkspaceIdFromOauthState } from './modules/drive-engine/oauth';
 
 export { WorkspaceDO } from './workspace-do';
 export { YocoV2RateGateDO } from './yoco-v2-rate-gate-do';
@@ -1385,6 +1386,24 @@ async function handle(request: Request, env: Env): Promise<Response> {
         workspaceId,
         'xero-oauth-callback',
         { uid: 'xero-oauth-callback', email: '' }
+      );
+      const headers = new Headers(response.headers);
+      for (const [k, v] of Object.entries(corsHeaders(request, env))) headers.set(k, v);
+      return new Response(response.body, { status: response.status, headers });
+    }
+  }
+
+  // Google Drive OAuth returns to a global callback URL too — same decode-only-then-verify-in-the-
+  // tenant-handler pattern as Xero/Gmail above.
+  if (request.method === 'GET' && url.pathname === '/api/gdrive/oauth/callback') {
+    const workspaceId = driveWorkspaceIdFromOauthState(text(url.searchParams.get('state')));
+    if (workspaceId) {
+      const response = await forwardToWorkspaceDO(
+        request,
+        env,
+        workspaceId,
+        'drive-oauth-callback',
+        { uid: 'drive-oauth-callback', email: '' }
       );
       const headers = new Headers(response.headers);
       for (const [k, v] of Object.entries(corsHeaders(request, env))) headers.set(k, v);

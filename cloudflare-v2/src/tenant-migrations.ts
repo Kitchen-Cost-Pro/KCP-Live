@@ -2,6 +2,7 @@ import { TENANT_SCHEMA_SQL } from './tenant-schema.generated';
 import { YOCO_V2_FOUNDATION_MIGRATION, YOCO_V2_SALE_SHADOW_MIGRATION, YOCO_V2_REFUND_RECONCILIATION_MIGRATION, YOCO_V2_CONTROLLED_CUTOVER_MIGRATION, YOCO_V2_REFUND_CONTROLLED_CUTOVER_MIGRATION, YOCO_V2_LEGACY_SHUTDOWN_MIGRATION, YOCO_V2_ADMIN_CONTROL_CENTRE_MIGRATION, YOCO_V2_RECONCILIATION_BACKOFF_MIGRATION, YOCO_V2_EFFECT_GATE_MIGRATION } from './modules/yoco-engine-v2/migrations';
 import { MODIFIER_ENGINE_CORE_ACTIONS_MIGRATION, MODIFIER_ENGINE_REFUNDS_RELIABILITY_NOTES_MIGRATION } from './modules/modifier-engine/migrations';
 import { XERO_V2_FOUNDATION_MIGRATION, XERO_V2_GRV_PUSH_MIGRATION, XERO_V2_GRV_COD_PAYMENT_MIGRATION, XERO_V2_SALES_VAT_MIGRATION, XERO_V2_CREDIT_NOTE_PUSH_MIGRATION, XERO_V2_LOCATION_TRACKING_MIGRATION, XERO_V2_WASTAGE_PUSH_MIGRATION } from './modules/xero-engine/migrations';
+import { DRIVE_FOUNDATION_MIGRATION } from './modules/drive-engine/migrations';
 
 // 47 — persist the GRV Transport cost. It previously only lived in the frontend draft/preview
 // total (GRVEntry.js's transportEx) and was silently dropped before saving — never reached the
@@ -785,5 +786,9 @@ CREATE INDEX IF NOT EXISTS idx_stock_movements_workspace_effective_date
   // 53 — see XERO_V2_WASTAGE_PUSH_MIGRATION's doc comment (modules/xero-engine/migrations.ts).
   XERO_V2_WASTAGE_PUSH_MIGRATION,
   // 54 — see GRV_CREDIT_NOTE_EDIT_MIGRATION's doc comment above.
-  GRV_CREDIT_NOTE_EDIT_MIGRATION
+  GRV_CREDIT_NOTE_EDIT_MIGRATION,
+  // 55 — KCP -> Google Drive integration: per-workspace Drive OAuth connection, a local record of
+  // documents pushed/read (drive_documents), and Drive's own idempotent effect outbox. See
+  // modules/drive-engine/migrations.ts's DRIVE_FOUNDATION_MIGRATION doc comment.
+  DRIVE_FOUNDATION_MIGRATION
 ];

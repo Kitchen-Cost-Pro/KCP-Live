@@ -3141,6 +3141,12 @@ async function startGrvSubscription(workspaceId) {
 
   appState.grv = createGrvState('loading', appState.grv.filters, appState.grv.pendingSourcePoId, appState.grv.pendingEditReceiptId);
 
+  import('./services/driveService.js').then(({ fetchDriveOcrEnabled }) => fetchDriveOcrEnabled(workspaceId)).then((enabled) => {
+    if (subscriptionToken !== grvSubscriptionToken || appState.route.active !== 'grv' || appState.workspace?.id !== workspaceId) return;
+    appState.grv = { ...appState.grv, driveOcrEnabled: enabled };
+    renderApp();
+  }).catch(() => {});
+
   try {
     const { subscribeGrvWorkspace } = await import('./services/grvService.js');
 
@@ -10433,6 +10439,118 @@ async function openGrvFromPurchaseOrder(orderId) {
   });
 }
 
+// "Process GRV with KCP Assistant" (see the header button in GRVEntry.js, gated on
+// appState.grv.driveOcrEnabled): lists whatever's sitting in the draft's location's Drive
+// "Invoices/Inbox" folder so staff can pick a photographed supplier invoice and pre-fill this
+// draft from it, instead of typing every line by hand. Mirrors openGrvFromPurchaseOrder's overall
+// shape (fetch → merge into draftReceipt → renderApp) but the source is a Drive file run through
+// Gemini extraction rather than an existing purchase order.
+async function openGrvAssistant() {
+  const draft = appState.grv.draftReceipt || createEmptyGrvDraft();
+  const locationId = String(draft.locationId || '');
+  appState.grv = {
+    ...appState.grv,
+    filters: { ...appState.grv.filters, overlay: 'assistant' },
+    assistant: { status: 'loading', invoices: [], error: '', locationId, locationName: draft.locationName || '' }
+  };
+  renderApp();
+  try {
+    const { fetchDriveInboxInvoices } = await import('./services/driveService.js');
+    const result = await fetchDriveInboxInvoices(appState.workspace?.id, locationId);
+    if (appState.grv.filters.overlay !== 'assistant') return; // closed while the fetch was in flight
+    appState.grv = {
+      ...appState.grv,
+      assistant: { status: 'ready', invoices: result.invoices, error: '', locationId: result.locationId, locationName: result.locationName }
+    };
+  } catch (error) {
+    if (appState.grv.filters.overlay !== 'assistant') return;
+    appState.grv = {
+      ...appState.grv,
+      assistant: { ...appState.grv.assistant, status: 'error', error: error.message || 'Could not load invoices from Google Drive.' }
+    };
+  }
+  renderApp();
+}
+
+// Runs the picked Inbox file through Gemini extraction, then merges whatever it found into the
+// current draft: header fields only fill in if still blank (so a supplier/date already typed in
+// by hand is never clobbered), and line items are matched by name against this workspace's own
+// stock items — an item KCP doesn't recognise is listed in the toast rather than silently added,
+// since grv_lines requires a real stock_item_id and a made-up one would fail to save anyway.
+async function selectGrvAssistantInvoice(fileId) {
+  if (!fileId || appState.grv.assistant?.extracting) return;
+  appState.grv = { ...appState.grv, assistant: { ...appState.grv.assistant, extracting: true } };
+  renderApp();
+  try {
+    const { extractDriveInvoice } = await import('./services/driveService.js');
+    const extract = await extractDriveInvoice(appState.workspace?.id, fileId);
+    if (!extract) throw new Error('KCP Assistant did not return anything usable from that invoice.');
+
+    const stockItems = appState.grv.stockItems || [];
+    const matchStockItem = (name) => {
+      const needle = String(name || '').trim().toLowerCase();
+      if (!needle) return null;
+      return stockItems.find((item) => String(item.name || '').trim().toLowerCase() === needle)
+        || stockItems.find((item) => String(item.name || '').trim().toLowerCase().includes(needle) || needle.includes(String(item.name || '').trim().toLowerCase()))
+        || null;
+    };
+
+    const draft = appState.grv.draftReceipt || createEmptyGrvDraft();
+    const locationId = appState.grv.assistant?.locationId || draft.locationId || '';
+    const locationName = appState.grv.assistant?.locationName || draft.locationName || '';
+    const unmatchedNames = [];
+    const matchedItems = (extract.items || []).flatMap((row) => {
+      const stockItem = matchStockItem(row.name);
+      if (!stockItem) {
+        if (String(row.name || '').trim()) unmatchedNames.push(row.name.trim());
+        return [];
+      }
+      const qty = Number(row.quantity) || 0;
+      return [{
+        id: stockItem.id,
+        stockItemId: stockItem.id,
+        stockItemName: stockItem.name,
+        unit: row.unit || stockItem.unit || 'ea',
+        selectedUom: row.unit || stockItem.unit || 'ea',
+        uomConfigurations: normalizeLineUomConfigurations(stockItem.uomConfigurations || stockItem.uomConfig || stockItem.uomConversions),
+        receivedQty: qty > 0 ? qty : 1,
+        unitCost: Number(row.unitCost) || Number(stockItem.unitCost) || 0,
+        vatEnabled: stockItem.vatEnabled !== false,
+        locationId,
+        targetLocation: locationId,
+        locationName,
+        targetLocationName: locationName
+      }];
+    });
+
+    appState.grv = {
+      ...appState.grv,
+      draftReceipt: {
+        ...draft,
+        supplierName: draft.supplierName || extract.supplierName || draft.supplierName,
+        grvNumber: draft.grvNumber || extract.invoiceNumber || draft.grvNumber,
+        date: draft.date || extract.invoiceDate || draft.date,
+        items: [...(draft.items || []), ...matchedItems]
+      },
+      assistantSource: { fileId, locationId },
+      assistant: { ...appState.grv.assistant, extracting: false },
+      filters: { ...appState.grv.filters, overlay: '' }
+    };
+    persistGrvDraftSnapshot(appState.grv.draftReceipt);
+    if (unmatchedNames.length) {
+      showGrvToast(`Added ${matchedItems.length} matched line${matchedItems.length === 1 ? '' : 's'}. Could not match: ${unmatchedNames.join(', ')} — add ${unmatchedNames.length === 1 ? 'it' : 'them'} manually.`, 'error');
+    } else if (matchedItems.length) {
+      showGrvToast(`Added ${matchedItems.length} line${matchedItems.length === 1 ? '' : 's'} from the invoice. Review quantities and costs before saving.`, 'success');
+    } else {
+      showGrvToast('KCP Assistant could not match any line items on that invoice to your stock items.', 'error');
+    }
+  } catch (error) {
+    appState.grv = { ...appState.grv, assistant: { ...appState.grv.assistant, extracting: false } };
+    showGrvToast(error.message || 'KCP Assistant could not read that invoice.', 'error');
+  }
+  renderApp();
+}
+
 function closeGrvDraft() {
   appState.grv = {
     ...appState.grv,
@@ -11188,12 +11306,27 @@ async function saveGrvReceipt(options = {}) {
       ? await updateGoodsReceipt(appState.workspace?.id, editingReceiptId, receiptPayload)
       : await saveGoodsReceipt(appState.workspace?.id, receiptPayload);
 
+    // If this GRV was drafted from a Drive "Invoices/Inbox" photo via KCP Assistant, tag that file
+    // as processed so it drops out of the Inbox picker on next open. Best-effort and fire-and-
+    // forget — a failure here should never block the GRV save the user is actually waiting on.
+    const assistantSource = appState.grv.assistantSource;
+    if (assistantSource?.fileId && savedReceipt?.id) {
+      import('./services/driveService.js')
+        .then(({ markDriveInvoiceProcessed }) => markDriveInvoiceProcessed(appState.workspace?.id, {
+          fileId: assistantSource.fileId,
+          grvId: savedReceipt.id,
+          locationId: assistantSource.locationId
+        }))
+        .catch(() => {});
+    }
+
     appState.grv = {
       ...appState.grv,
       editingReceiptId: '',
       missingSupplierPrompt: null,
       lineDetailDraft: null,
       draftReceipt: createEmptyGrvDraft(),
+      assistantSource: null,
       actionStatus: '',
       actionError: '',
       filters: {
@@ -20105,6 +20238,8 @@ function renderApp() {
       onPreserveFocus: preserveFieldFocus,
       onLoadLastInvoice: loadLastGrvInvoice,
       onConvertPo: openGrvFromPurchaseOrder,
+      onOpenAssistant: openGrvAssistant,
+      onSelectAssistantInvoice: selectGrvAssistantInvoice,
       onOpenLineDetail: openGrvLineDetail,
       onUpdateLineDetailDraft: updateGrvLineDetailDraft,
       onUpdateLineDetailLocationAll: updateGrvLineDetailLocationAll,
@@ -21505,6 +21640,18 @@ function createGrvState(status, filters = {}, pendingSourcePoId = '', pendingEdi
     actionStatus: '',
     actionError: '',
     toast: null,
+    // "Process GRV with KCP Assistant" (see openGrvAssistant/selectGrvAssistantInvoice in this
+    // file): the list of Drive Inbox invoices for the current draft's location, and — once one has
+    // been picked and turned into line items — which Drive file this draft came from, so saving
+    // can tag that file as processed. assistantSource survives closeGrvDraft/saveGrvReceipt
+    // clearing draftReceipt (it's cleared explicitly once markDriveInvoiceProcessed succeeds).
+    assistant: { status: 'idle', invoices: [], error: '', locationId: '', locationName: '' },
+    assistantSource: null,
+    // Refreshed once per GRV section load by startGrvSubscription (fetchDriveOcrEnabled) — an
+    // admin-console-only flag, same "workspace users can't turn this on themselves" shape as
+    // aiOnboardingEnabled, so it's read fresh from the backend rather than trusted from
+    // appState.settings.values (which is only populated once the Settings route itself has loaded).
+    driveOcrEnabled: false,
     filters: {
       query: '',
       source: '',

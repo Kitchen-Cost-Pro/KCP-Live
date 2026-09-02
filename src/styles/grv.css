@@ -2210,3 +2210,64 @@
 #view-grv .grv-locationInput {
   width: 100%;
 }
+
+#view-grv .grv-assistantGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 14px;
+}
+
+#view-grv .grv-assistantCard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 1rem;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(255, 255, 255, 0.94);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+}
+
+#view-grv .grv-assistantCard:hover:not(:disabled) {
+  border-color: rgba(59, 130, 246, 0.48);
+  background: rgba(37, 99, 235, 0.1);
+  transform: translateY(-1px);
+}
+
+#view-grv .grv-assistantCard:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
+#view-grv .grv-assistantCard img {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border-radius: 0.65rem;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+#view-grv .grv-assistantCard__icon {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 4 / 3;
+  border-radius: 0.65rem;
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.48);
+}
+
+#view-grv .grv-assistantCard__icon svg {
+  width: 28px;
+  height: 28px;
+}
+
+#view-grv .grv-assistantCard__name {
+  font-size: 0.82rem;
+  color: rgba(255, 255, 255, 0.78);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

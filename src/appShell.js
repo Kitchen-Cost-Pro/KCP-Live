@@ -200,6 +200,8 @@ export function renderAuthenticatedApp({
   main.appendChild(renderActiveSection({
     state,
     onNavigate,
+    onRequestGrvEdit,
+    onRequestCreditNoteEdit,
     onThemeToggle,
         onMenuFilterChange,
     onMenuAction,
@@ -508,6 +510,8 @@ function readReportingDeepLinkReportId() {
 function renderActiveSection({
   state,
   onNavigate,
+  onRequestGrvEdit,
+  onRequestCreditNoteEdit,
   onThemeToggle,
   onMenuFilterChange,
   onMenuAction,

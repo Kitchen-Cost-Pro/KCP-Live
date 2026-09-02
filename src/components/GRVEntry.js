@@ -54,6 +54,11 @@ export function renderGRVEntry({ state, onGrvFilterChange, onGrvAction = {} } = 
 
     <div class="grv-pageHeader">
       <h2 class="grv-pageHeader__title">Goods Received</h2>
+      ${grv.driveOcrEnabled ? `
+      <button type="button" class="grv-recentTrigger" data-grv-open-assistant>
+        ${icon('camera')}
+        <span>Process GRV with KCP Assistant</span>
+      </button>` : ''}
       <button type="button" class="grv-recentTrigger" data-grv-open-recent>
         ${icon('history')}
         <span>Recent GRVs</span>
@@ -179,6 +184,7 @@ export function renderGRVEntry({ state, onGrvFilterChange, onGrvAction = {} } = 
 
     ${filters.overlay === 'draft' ? renderDraftDrawer(statusLabel, totals, draft, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes, headerReady, grv.actionStatus, grv.actionError || '', grv.locations || [], filters.openDropdown || '', grv.stockItems || []) : ''}
     ${filters.overlay === 'po' ? renderPurchaseOrderOverlay(convertibleOrders, filters.poQuery || '') : ''}
+    ${filters.overlay === 'assistant' ? renderGrvAssistantOverlay(grv.assistant || {}) : ''}
     ${filters.overlay === 'recent-receipts' ? renderRecentReceiptsOverlay(grv.receipts || [], filters.receiptQuery || '') : ''}
     ${filters.overlay === 'stock' ? renderStockOverlay(stockMatches, filters.lineQuery || '', headerReady, selectedStockIds) : ''}
     ${filters.overlay === 'calendar' ? renderCustomCalendarOverlay({
@@ -342,6 +348,13 @@ function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, 
       calendarCursor: '',
       openDropdown: ''
     });
+  });
+  view.querySelector('[data-grv-open-assistant]')?.addEventListener('click', () => {
+    blurActiveDraftField();
+    onGrvAction.onOpenAssistant?.();
+  });
+  view.querySelectorAll('[data-grv-assistant-select]').forEach((button) => {
+    button.addEventListener('click', () => onGrvAction.onSelectAssistantInvoice?.(button.dataset.grvAssistantSelect));
   });
   view.querySelector('[data-grv-open-draft]')?.addEventListener('click', () => {
     blurActiveDraftField();
@@ -1239,6 +1252,44 @@ function renderPurchaseOrderOverlay(orders, query) {
         `).join('')
       : '<div class="grv-pickerEmpty">No pending purchase orders match this search.</div>'
   });
+}
+
+function renderGrvAssistantOverlay(assistant = {}) {
+  const status = assistant.status || 'loading';
+  const invoices = assistant.invoices || [];
+  const busy = assistant.extracting === true;
+  const body = status === 'loading'
+    ? '<div class="grv-pickerEmpty">Looking in Google Drive for new invoices...</div>'
+    : status === 'error'
+      ? `<div class="grv-pickerEmpty">${escapeHtml(assistant.error || 'Could not load invoices from Google Drive.')}</div>`
+      : invoices.length
+        ? `<div class="grv-assistantGrid">${invoices.map((file) => `
+            <button type="button" class="grv-assistantCard" data-grv-assistant-select="${escapeAttribute(file.id)}" ${busy ? 'disabled' : ''}>
+              ${file.thumbnailLink
+                ? `<img src="${escapeAttribute(file.thumbnailLink)}" alt="${escapeAttribute(file.name)}" loading="lazy" />`
+                : `<span class="grv-assistantCard__icon">${icon('clipboard')}</span>`}
+              <span class="grv-assistantCard__name">${escapeHtml(file.name)}</span>
+            </button>
+          `).join('')}</div>`
+        : `<div class="grv-pickerEmpty">No new invoices in ${escapeHtml(assistant.locationName || 'this location')}'s Drive Inbox folder yet. Add a photo or PDF to "KCP Documents / ${escapeHtml(assistant.locationName || 'your location')} / Invoices / Inbox" in Google Drive, then reopen this.</div>`;
+  return `
+    <div class="grv-overlay" data-grv-overlay>
+      <div class="grv-overlayCard" role="dialog" aria-modal="true">
+        <div class="grv-overlayHeader">
+          <div>
+            <h3>Process GRV with KCP Assistant</h3>
+            <p>${busy ? 'Reading that invoice and matching it to your stock items...' : 'Pick a photographed invoice to pre-fill this GRV.'}</p>
+          </div>
+          <button type="button" class="grv-removeBtn" data-grv-overlay-close aria-label="Close overlay">
+            ${icon('x')}
+          </button>
+        </div>
+        <div class="grv-overlayList" data-scroll-key="grv-assistant-picker">
+          ${body}
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 function renderStockOverlay(stockItems, query, headerReady, selectedStockIds) {
