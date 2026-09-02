@@ -221,7 +221,6 @@ async function loadXeroTrackingCategoriesIfNeeded(view) {
   xeroDrawerState.trackingCategoriesLoading = true;
   try {
     xeroDrawerState.trackingCategories = await fetchXeroTrackingCategories(view.dataset.workspaceId || '');
-    if (xeroDrawerState.trackingCategories.length) refreshXeroTrackingCategoryControl(view);
   } catch {
     // Left as null (not []) on failure — a genuinely empty successful fetch is cached as [] and
     // won't retry, but a FAILED fetch (e.g. hit before this route was deployed, or a transient
@@ -232,6 +231,11 @@ async function loadXeroTrackingCategoriesIfNeeded(view) {
   } finally {
     xeroDrawerState.trackingCategoriesLoading = false;
   }
+  // Deliberately OUTSIDE the try/catch above: a bug in rendering must never be swallowed by the
+  // fetch's catch block and misreported as "the fetch failed" (which would wipe out perfectly good
+  // fetched data back to null) — a real regression this exact structure caused once already (see
+  // loadXeroTaxRatesIfNeeded's identical fix).
+  if (xeroDrawerState.trackingCategories?.length) refreshXeroTrackingCategoryControl(view);
 }
 
 function refreshXeroTrackingCategoryControl(view) {
@@ -250,7 +254,6 @@ async function loadXeroTaxRatesIfNeeded(view) {
   xeroDrawerState.taxRatesLoading = true;
   try {
     xeroDrawerState.taxRates = await fetchXeroTaxRates(view.dataset.workspaceId || '');
-    if (xeroDrawerState.taxRates.length) refreshXeroTaxTypeControls(view);
   } catch {
     // See loadXeroTrackingCategoriesIfNeeded's identical comment: null (not []) on failure so a
     // later retry isn't permanently blocked by one transient/pre-deploy failure.
@@ -258,6 +261,10 @@ async function loadXeroTaxRatesIfNeeded(view) {
   } finally {
     xeroDrawerState.taxRatesLoading = false;
   }
+  // Deliberately OUTSIDE the try/catch above — see loadXeroTrackingCategoriesIfNeeded's identical
+  // comment: a rendering bug must never be misattributed to "the fetch failed" and silently discard
+  // perfectly good already-fetched data.
+  if (xeroDrawerState.taxRates?.length) refreshXeroTaxTypeControls(view);
 }
 
 // Runs once, right after the fetch resolves — swaps the three plain text inputs for the live
