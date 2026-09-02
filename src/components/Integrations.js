@@ -153,13 +153,14 @@ const xeroDrawerState = {
   activeTab: 'sales',
   // null = not yet fetched, [] = fetched but empty/failed. Loaded lazily (see
   // loadXeroTaxRatesIfNeeded) rather than on every status poll — it's a real Xero API call, not a
-  // free local read, so it should happen once per modal session, not repeatedly.
+  // free local read, so it should happen once per modal session, not repeatedly. Shared across
+  // however many `view` DOM trees get built during that session (see loadXeroTaxRatesIfNeeded's doc
+  // comment on why that matters) — in-flight-fetch tracking lives in its own module-level variable,
+  // not here, since a shared PROMISE (not just a boolean) is what lets every view join one fetch.
   taxRates: null,
-  taxRatesLoading: false,
   // Same lazy-load-once-per-modal-session contract as taxRates above, for the Tracking Categories
   // picker (Location tracking category, purchases tab).
-  trackingCategories: null,
-  trackingCategoriesLoading: false
+  trackingCategories: null
 };
 
 function closeAllXeroComboboxes(view) {
@@ -311,27 +312,50 @@ function renderXeroTrackingCategoryControl({ currentValue, trackingCategories })
   });
 }
 
+// Module-level (not on xeroDrawerState) — holds the SHARED in-flight fetch promise, if any, so
+// every caller joins the SAME request rather than each starting its own.
+let xeroTrackingCategoriesFetchPromise = null;
+
+// Regression: the Integrations page gets re-rendered (a brand new `view` DOM tree) whenever OTHER
+// unrelated app state resolves (Yoco/Gmail status, access permissions, etc. — see
+// renderContentForSection in appShell.js), not just once per page load. The old guard
+// (`if (trackingCategories !== null) return`) meant that once the FIRST view's fetch succeeded and
+// cached the result, every SUBSEQUENT view's call to this function bailed out immediately without
+// ever applying the already-fetched data to ITS OWN wrapper — so whichever view the user happened
+// to be looking at after a re-render could show the plain fallback input forever, depending purely
+// on timing, even though the data had been fetched successfully. Every call now ALWAYS applies
+// already-cached data to its own `view`, and concurrent in-flight calls join one shared promise
+// instead of each firing a separate request.
 async function loadXeroTrackingCategoriesIfNeeded(view) {
-  if (xeroDrawerState.trackingCategories !== null || xeroDrawerState.trackingCategoriesLoading) return;
   if (xeroDrawerState.status?.connectionActive !== true) return;
-  xeroDrawerState.trackingCategoriesLoading = true;
-  try {
-    xeroDrawerState.trackingCategories = await fetchXeroTrackingCategories(view.dataset.workspaceId || '');
-  } catch {
-    // Left as null (not []) on failure — a genuinely empty successful fetch is cached as [] and
-    // won't retry, but a FAILED fetch (e.g. hit before this route was deployed, or a transient
-    // network error) must not be cached as "confirmed empty" forever for the rest of this browser
-    // session. Leaving it null lets the next tab-switch/reopen retry instead of permanently
-    // showing "Loaded once Xero is connected" even after the category actually exists.
-    xeroDrawerState.trackingCategories = null;
-  } finally {
-    xeroDrawerState.trackingCategoriesLoading = false;
+  if (xeroDrawerState.trackingCategories?.length) {
+    refreshXeroTrackingCategoryControl(view);
+    return;
   }
-  // Deliberately OUTSIDE the try/catch above: a bug in rendering must never be swallowed by the
-  // fetch's catch block and misreported as "the fetch failed" (which would wipe out perfectly good
-  // fetched data back to null) — a real regression this exact structure caused once already (see
-  // loadXeroTaxRatesIfNeeded's identical fix).
-  if (xeroDrawerState.trackingCategories?.length) refreshXeroTrackingCategoryControl(view);
+  if (!xeroTrackingCategoriesFetchPromise) {
+    xeroTrackingCategoriesFetchPromise = fetchXeroTrackingCategories(view.dataset.workspaceId || '')
+      .then((categories) => {
+        xeroDrawerState.trackingCategories = categories;
+        return categories;
+      })
+      .catch(() => {
+        // Left as null (not []) on failure — a genuinely empty successful fetch is cached as [] and
+        // won't retry, but a FAILED fetch (e.g. hit before this route was deployed, or a transient
+        // network error) must not be cached as "confirmed empty" forever for the rest of this
+        // browser session.
+        xeroDrawerState.trackingCategories = null;
+        return null;
+      })
+      .finally(() => {
+        xeroTrackingCategoriesFetchPromise = null;
+      });
+  }
+  // Captured into a local before awaiting — the shared module variable gets reset to null in
+  // `.finally` above the moment the fetch settles, so re-reading it after the await (instead of
+  // using this local reference) would risk picking up null or a newer, unrelated promise.
+  const promise = xeroTrackingCategoriesFetchPromise;
+  const categories = await promise;
+  if (categories?.length) refreshXeroTrackingCategoryControl(view);
 }
 
 function refreshXeroTrackingCategoryControl(view) {
@@ -344,36 +368,41 @@ function refreshXeroTrackingCategoryControl(view) {
   });
 }
 
+// Module-level (not on xeroDrawerState) — holds the SHARED in-flight fetch promise, if any.
+let xeroTaxRatesFetchPromise = null;
+
+// Same re-render race as loadXeroTrackingCategoriesIfNeeded (see its doc comment): the Integrations
+// page can be rebuilt into a brand new `view` DOM tree at any point (whenever unrelated app state
+// resolves elsewhere), so this must ALWAYS apply already-cached tax rates to whichever `view` it's
+// called with, not just the one that originally fetched them — otherwise whichever view the user
+// happens to be looking at after a re-render can be stuck showing the plain fallback input
+// indefinitely, purely depending on timing, even though the data was fetched successfully earlier.
 async function loadXeroTaxRatesIfNeeded(view) {
-  console.log('[KCP-XERO-DIAG2] called', { already: xeroDrawerState.taxRates?.length, loading: xeroDrawerState.taxRatesLoading, connectionActive: xeroDrawerState.status?.connectionActive, comboboxBound: view.dataset.xeroComboboxBound });
-  if (xeroDrawerState.taxRates !== null || xeroDrawerState.taxRatesLoading) return;
   if (xeroDrawerState.status?.connectionActive !== true) return;
-  xeroDrawerState.taxRatesLoading = true;
-  try {
-    xeroDrawerState.taxRates = await fetchXeroTaxRates(view.dataset.workspaceId || '');
-  } catch (err) {
-    console.log('[KCP-XERO-DIAG2] threw', err);
-    // See loadXeroTrackingCategoriesIfNeeded's identical comment: null (not []) on failure so a
-    // later retry isn't permanently blocked by one transient/pre-deploy failure.
-    xeroDrawerState.taxRates = null;
-  } finally {
-    xeroDrawerState.taxRatesLoading = false;
-  }
-  console.log('[KCP-XERO-DIAG2] settled, length =', xeroDrawerState.taxRates?.length);
-  // Deliberately OUTSIDE the try/catch above — see loadXeroTrackingCategoriesIfNeeded's identical
-  // comment: a rendering bug must never be misattributed to "the fetch failed" and silently discard
-  // perfectly good already-fetched data.
   if (xeroDrawerState.taxRates?.length) {
-    const wrapper = view.querySelector('[data-xero-tax-control="defaultTaxType"]');
-    console.log('[KCP-XERO-DIAG2] before refresh, wrapper html:', wrapper?.innerHTML?.slice(0, 80));
-    try {
-      refreshXeroTaxTypeControls(view);
-    } catch (err) {
-      console.log('[KCP-XERO-DIAG2] refresh threw', err);
-    }
-    const wrapperAfter = view.querySelector('[data-xero-tax-control="defaultTaxType"]');
-    console.log('[KCP-XERO-DIAG2] after refresh, wrapper html:', wrapperAfter?.innerHTML?.slice(0, 120));
+    refreshXeroTaxTypeControls(view);
+    return;
   }
+  if (!xeroTaxRatesFetchPromise) {
+    xeroTaxRatesFetchPromise = fetchXeroTaxRates(view.dataset.workspaceId || '')
+      .then((rates) => {
+        xeroDrawerState.taxRates = rates;
+        return rates;
+      })
+      .catch(() => {
+        // Left as null (not []) on failure — see loadXeroTrackingCategoriesIfNeeded's identical
+        // comment: a genuinely empty successful fetch is cached as [] and won't retry, but a FAILED
+        // fetch must not be cached as "confirmed empty" forever for the rest of this browser session.
+        xeroDrawerState.taxRates = null;
+        return null;
+      })
+      .finally(() => {
+        xeroTaxRatesFetchPromise = null;
+      });
+  }
+  const promise = xeroTaxRatesFetchPromise;
+  const rates = await promise;
+  if (rates?.length) refreshXeroTaxTypeControls(view);
 }
 
 // Runs once, right after the fetch resolves — swaps the three plain text inputs for the live
