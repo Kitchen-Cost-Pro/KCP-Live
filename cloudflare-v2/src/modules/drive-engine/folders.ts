@@ -6,14 +6,17 @@ export interface LocationFolderIds {
   locationId: string;
   grvsFolderId: string;
   creditNotesFolderId: string;
-  inboxFolderId: string;
-  processedFolderId: string;
+  invoicesFolderId: string;
 }
 
-/** Ensures `KCP Documents / {Location Name} / {GRVs,Credit Notes,Invoices/Inbox,Invoices/Processed}`
- * exists in the connected Drive for one location, creating anything missing. Idempotent —
- * findOrCreateFolder searches before creating, so calling this repeatedly (e.g. once per push) is
- * safe and cheap once the tree already exists. */
+/** Ensures `KCP Documents / {Location Name} / {GRVs, Credit Notes, Invoices}` exists in the
+ * connected Drive for one location, creating anything missing. Idempotent — findOrCreateFolder
+ * searches before creating, so calling this repeatedly (e.g. once per push) is safe and cheap once
+ * the tree already exists.
+ *
+ * Invoices has no Inbox/Processed split — KCP Assistant uploads a photo straight into this folder
+ * the moment staff capture it (see assistant.ts's processInvoicePhoto), there's no longer a
+ * "browse what's pending" step that an Inbox/Processed distinction existed to support. */
 export async function ensureLocationFolders(env: Env, workspaceId: string, locationId: string, locationName: string): Promise<LocationFolderIds> {
   const connection = await getDriveConnection(env, workspaceId);
   let rootFolderId = connection?.root_folder_id || '';
@@ -27,11 +30,7 @@ export async function ensureLocationFolders(env: Env, workspaceId: string, locat
     findOrCreateFolder(env, workspaceId, 'Credit Notes', locationFolderId),
     findOrCreateFolder(env, workspaceId, 'Invoices', locationFolderId)
   ]);
-  const [inboxFolderId, processedFolderId] = await Promise.all([
-    findOrCreateFolder(env, workspaceId, 'Inbox', invoicesFolderId),
-    findOrCreateFolder(env, workspaceId, 'Processed', invoicesFolderId)
-  ]);
-  return { locationId, grvsFolderId, creditNotesFolderId, inboxFolderId, processedFolderId };
+  return { locationId, grvsFolderId, creditNotesFolderId, invoicesFolderId };
 }
 
 interface LocationRow {

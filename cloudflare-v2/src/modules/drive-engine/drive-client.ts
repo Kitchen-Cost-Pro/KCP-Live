@@ -1,6 +1,5 @@
 import type { Env } from '../../legacy/types';
 import { loadValidDriveAccessToken } from './connection';
-import { text } from './config';
 
 export class DriveApiClientError extends Error {}
 
@@ -19,11 +18,6 @@ async function driveFetch(env: Env, workspaceId: string, path: string, init: Req
 interface DriveFile {
   id: string;
   name: string;
-  mimeType?: string;
-  thumbnailLink?: string;
-  createdTime?: string;
-  parents?: string[];
-  appProperties?: Record<string, string>;
 }
 
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
@@ -81,45 +75,12 @@ export async function uploadFile(
   return (await response.json()) as { id: string };
 }
 
-/** Lists non-trashed files directly under `folderId`, newest first — used by the GRV Assistant's
- * Inbox picker. Filters out anything already tagged kcp_status=processed so a processed invoice
- * silently drops out on the next listing without a separate move having to happen first. */
-export async function listFolderFiles(env: Env, workspaceId: string, folderId: string): Promise<DriveFile[]> {
-  const q = encodeURIComponent(`'${folderId}' in parents and trashed=false and not appProperties has { key='kcp_status' and value='processed' }`);
-  const fields = encodeURIComponent('files(id,name,mimeType,thumbnailLink,createdTime,appProperties)');
-  const response = await driveFetch(
-    env,
-    workspaceId,
-    `https://www.googleapis.com/drive/v3/files?q=${q}&fields=${fields}&orderBy=createdTime desc&spaces=drive&pageSize=50`
-  );
-  const result = (await response.json()) as { files?: DriveFile[] };
-  return result.files || [];
-}
-
-export async function getFileBytes(env: Env, workspaceId: string, fileId: string): Promise<{ bytes: Uint8Array; mimeType: string }> {
-  const metaResponse = await driveFetch(env, workspaceId, `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=mimeType`);
-  const meta = (await metaResponse.json()) as { mimeType: string };
-  const mediaResponse = await driveFetch(env, workspaceId, `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`);
-  const bytes = new Uint8Array(await mediaResponse.arrayBuffer());
-  return { bytes, mimeType: text(meta.mimeType) || 'application/octet-stream' };
-}
-
-/** Tags a file with custom key/value metadata (used to mark kcp_status=processed / kcp_grv_id) and
- * optionally moves it between folders in the same call — Drive's files.update takes addParents/
- * removeParents as query params rather than body fields for a move. */
-export async function updateFile(
-  env: Env,
-  workspaceId: string,
-  fileId: string,
-  input: { appProperties?: Record<string, string>; addParentId?: string; removeParentId?: string }
-): Promise<void> {
-  const params = new URLSearchParams();
-  if (input.addParentId) params.set('addParents', input.addParentId);
-  if (input.removeParentId) params.set('removeParents', input.removeParentId);
-  const query = params.toString() ? `?${params.toString()}` : '';
-  await driveFetch(env, workspaceId, `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}${query}`, {
+/** Tags a file with custom key/value metadata — used to record kcp_status=processed / kcp_grv_id
+ * once an uploaded invoice photo's extraction has been turned into a saved GRV. */
+export async function updateFile(env: Env, workspaceId: string, fileId: string, input: { appProperties: Record<string, string> }): Promise<void> {
+  await driveFetch(env, workspaceId, `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}`, {
     method: 'PATCH',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(input.appProperties ? { appProperties: input.appProperties } : {})
+    body: JSON.stringify({ appProperties: input.appProperties })
   });
 }

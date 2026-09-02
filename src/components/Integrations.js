@@ -835,9 +835,8 @@ function bindIntegrationEvents(view) {
     event.preventDefault();
     const pushGrvEnabled = view.querySelector('[data-drive-grv-enabled]')?.checked === true;
     const pushCreditNoteEnabled = view.querySelector('[data-drive-credit-note-enabled]')?.checked === true;
-    const ocrEnabled = view.querySelector('[data-drive-ocr-enabled]')?.checked === true;
     await runDriveAction(view, 'Saving Google Drive settings...', async () => {
-      await saveDriveSettings(view.dataset.workspaceId || '', { pushGrvEnabled, pushCreditNoteEnabled, ocrEnabled });
+      await saveDriveSettings(view.dataset.workspaceId || '', { pushGrvEnabled, pushCreditNoteEnabled });
       setDriveModalStatus(view, 'Google Drive settings saved.', 'success');
       bindDriveStatus(view, view.dataset.workspaceId || '', { once: true });
     });
@@ -1432,19 +1431,20 @@ function renderDriveModal({ canManageDrive = false } = {}) {
             </div>
           </section>
 
+          <div class="yocoModalNotice" data-tone="">
+            <strong>GRV Invoice Assistant (OCR)</strong> is enabled per-workspace by a KCP admin in the Admin Console, not here — currently
+            <strong data-drive-ocr-status>${settings.ocrEnabled ? 'enabled' : 'disabled'}</strong> for this workspace.
+          </div>
+
           <form class="xeroSettingsForm" data-drive-settings-form>
             ${canManageDrive ? `
             <label class="xeroToggleRow">
               <span class="xeroToggleCopy"><strong>Push GRVs to Drive</strong><small>Sends each GRV's PDF into that location's "GRVs" folder.</small></span>
-              <input type="checkbox" data-drive-grv-enabled ${settings.pushGrvEnabled ? 'checked' : ''} ${isConnected ? '' : 'disabled'} />
+              <input type="checkbox" data-drive-grv-enabled ${settings.pushGrvEnabled ? 'checked' : ''} />
             </label>
             <label class="xeroToggleRow">
               <span class="xeroToggleCopy"><strong>Push Credit Notes to Drive</strong><small>Sends each Credit Note's PDF into that location's "Credit Notes" folder.</small></span>
-              <input type="checkbox" data-drive-credit-note-enabled ${settings.pushCreditNoteEnabled ? 'checked' : ''} ${isConnected ? '' : 'disabled'} />
-            </label>
-            <label class="xeroToggleRow">
-              <span class="xeroToggleCopy"><strong>Enable KCP Assistant (OCR)</strong><small>Lets staff process a photographed supplier invoice from Drive's "Invoices/Inbox" folder straight into a pre-filled GRV draft.</small></span>
-              <input type="checkbox" data-drive-ocr-enabled ${settings.ocrEnabled ? 'checked' : ''} ${isConnected ? '' : 'disabled'} />
+              <input type="checkbox" data-drive-credit-note-enabled ${settings.pushCreditNoteEnabled ? 'checked' : ''} />
             </label>
             <div class="xeroFormActions">
               <button type="submit" class="xeroCompactButton xeroCompactButton--primary" data-drive-settings-submit ${isConnected ? '' : 'disabled'}>
@@ -1855,8 +1855,26 @@ function updateDriveStatus(view, status = {}, options = {}) {
   setText(view, '[data-drive-live-status]', status.connectionActive ? `Connected as ${status.accountEmail || 'Google Drive'}` : status.configured === false ? 'Setup required' : 'Disconnected');
   setText(view, '[data-drive-status]', status.connectionActive ? 'Connected' : status.configured === false ? 'Not configured' : 'Ready');
   setText(view, '[data-drive-account]', status.accountEmail || 'No account');
+  setText(view, '[data-drive-ocr-status]', status.settings?.ocrEnabled ? 'enabled' : 'disabled');
+  refreshDriveSettingsFormFields(view, status.settings || {});
+  // The connect/disconnect/save/sync buttons' disabled state is JS-driven (see setDriveBusy),
+  // computed from driveDrawerState.status — it must be re-run every time fresh status arrives, not
+  // just at initial mount, or a button stays stuck at whatever it was when the modal first
+  // rendered (e.g. "Disconnect" and the settings toggles remaining permanently disabled after
+  // completing the OAuth popup, since nothing else re-evaluates them once connectionActive flips
+  // to true).
+  setDriveBusy(view, driveDrawerState.busy);
   updateIntegrationCardStatus(view, 'google-drive', nextStatus, nextStatus === 'Active' ? 'Manage Google Drive' : nextStatus === 'Setup Required' ? 'Needs Config' : 'Connect Google Drive');
   if (status.lastError) setDriveModalStatus(view, status.lastError, 'error');
+}
+
+function refreshDriveSettingsFormFields(view, settings) {
+  const setChecked = (selector, checked) => {
+    const el = view.querySelector(selector);
+    if (el) el.checked = checked === true;
+  };
+  setChecked('[data-drive-grv-enabled]', settings.pushGrvEnabled);
+  setChecked('[data-drive-credit-note-enabled]', settings.pushCreditNoteEnabled);
 }
 
 // The settings form (Sales/Purchases tabs) is rendered ONCE, baked from whatever settings snapshot
@@ -2339,6 +2357,13 @@ function setDriveBusy(view, busy) {
       (isConnect && driveDrawerState.status?.configured === false) ||
       (isDisconnect && driveDrawerState.status?.connectionActive !== true) ||
       (needsConnection && driveDrawerState.status?.connectionActive !== true);
+  });
+  // Same "nothing to push to without a connection" reasoning as needsConnection above, but for the
+  // toggle checkboxes themselves — re-evaluated here (not baked into the initial render markup) so
+  // they correctly unlock the moment a connection completes, instead of staying stuck at whatever
+  // they were when the modal first mounted.
+  view.querySelectorAll('[data-drive-grv-enabled], [data-drive-credit-note-enabled]').forEach((checkbox) => {
+    checkbox.disabled = busy || driveDrawerState.status?.connectionActive !== true;
   });
 }
 

@@ -57,7 +57,7 @@ export function renderGRVEntry({ state, onGrvFilterChange, onGrvAction = {} } = 
       ${grv.driveOcrEnabled ? `
       <button type="button" class="grv-recentTrigger" data-grv-open-assistant>
         ${icon('camera')}
-        <span>Process GRV with KCP Assistant</span>
+        <span>Process Invoice with KCP</span>
       </button>` : ''}
       <button type="button" class="grv-recentTrigger" data-grv-open-recent>
         ${icon('history')}
@@ -353,8 +353,14 @@ function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, 
     blurActiveDraftField();
     onGrvAction.onOpenAssistant?.();
   });
-  view.querySelectorAll('[data-grv-assistant-select]').forEach((button) => {
-    button.addEventListener('click', () => onGrvAction.onSelectAssistantInvoice?.(button.dataset.grvAssistantSelect));
+  view.querySelector('[data-grv-assistant-retry]')?.addEventListener('click', () => onGrvAction.onOpenAssistant?.());
+  view.querySelector('[data-grv-assistant-trigger]')?.addEventListener('click', () => {
+    view.querySelector('[data-grv-assistant-input]')?.click();
+  });
+  view.querySelector('[data-grv-assistant-input]')?.addEventListener('change', (event) => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = '';
+    if (file) onGrvAction.onProcessInvoicePhoto?.(file);
   });
   view.querySelector('[data-grv-open-draft]')?.addEventListener('click', () => {
     blurActiveDraftField();
@@ -1255,36 +1261,38 @@ function renderPurchaseOrderOverlay(orders, query) {
 }
 
 function renderGrvAssistantOverlay(assistant = {}) {
-  const status = assistant.status || 'loading';
-  const invoices = assistant.invoices || [];
-  const busy = assistant.extracting === true;
-  const body = status === 'loading'
-    ? '<div class="grv-pickerEmpty">Looking in Google Drive for new invoices...</div>'
+  const status = assistant.status || 'idle';
+  const isProcessing = status === 'processing';
+  const body = isProcessing
+    ? '<div class="grv-pickerEmpty">Reading that invoice and matching it to your stock items...</div>'
     : status === 'error'
-      ? `<div class="grv-pickerEmpty">${escapeHtml(assistant.error || 'Could not load invoices from Google Drive.')}</div>`
-      : invoices.length
-        ? `<div class="grv-assistantGrid">${invoices.map((file) => `
-            <button type="button" class="grv-assistantCard" data-grv-assistant-select="${escapeAttribute(file.id)}" ${busy ? 'disabled' : ''}>
-              ${file.thumbnailLink
-                ? `<img src="${escapeAttribute(file.thumbnailLink)}" alt="${escapeAttribute(file.name)}" loading="lazy" />`
-                : `<span class="grv-assistantCard__icon">${icon('clipboard')}</span>`}
-              <span class="grv-assistantCard__name">${escapeHtml(file.name)}</span>
-            </button>
-          `).join('')}</div>`
-        : `<div class="grv-pickerEmpty">No new invoices in ${escapeHtml(assistant.locationName || 'this location')}'s Drive Inbox folder yet. Add a photo or PDF to "KCP Documents / ${escapeHtml(assistant.locationName || 'your location')} / Invoices / Inbox" in Google Drive, then reopen this.</div>`;
+      ? `
+        <div class="grv-pickerEmpty">${escapeHtml(assistant.error || 'KCP Assistant could not read that invoice.')}</div>
+        <button type="button" class="grv-add-btn" data-grv-assistant-retry>Try Again</button>
+      `
+      : `
+        <div class="grv-assistantUpload">
+          <input type="file" accept="image/*,application/pdf" capture="environment" hidden data-grv-assistant-input />
+          <button type="button" class="grv-add-btn grv-add-btn--success" data-grv-assistant-trigger>
+            ${icon('camera')}
+            <span>Take Photo or Choose File</span>
+          </button>
+          <p class="grv-muted">Photograph or upload the supplier invoice — KCP will read it, match items to your stock list, and archive a copy to Google Drive.</p>
+        </div>
+      `;
   return `
     <div class="grv-overlay" data-grv-overlay>
       <div class="grv-overlayCard" role="dialog" aria-modal="true">
         <div class="grv-overlayHeader">
           <div>
-            <h3>Process GRV with KCP Assistant</h3>
-            <p>${busy ? 'Reading that invoice and matching it to your stock items...' : 'Pick a photographed invoice to pre-fill this GRV.'}</p>
+            <h3>Process Invoice with KCP</h3>
+            <p>${isProcessing ? 'This can take a moment on a busy photo.' : 'Pre-fill this GRV straight from a photo of the invoice.'}</p>
           </div>
-          <button type="button" class="grv-removeBtn" data-grv-overlay-close aria-label="Close overlay">
+          <button type="button" class="grv-removeBtn" data-grv-overlay-close aria-label="Close overlay" ${isProcessing ? 'disabled' : ''}>
             ${icon('x')}
           </button>
         </div>
-        <div class="grv-overlayList" data-scroll-key="grv-assistant-picker">
+        <div class="grv-overlayList" data-scroll-key="grv-assistant-upload">
           ${body}
         </div>
       </div>

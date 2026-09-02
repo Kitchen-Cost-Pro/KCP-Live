@@ -50,31 +50,30 @@ export async function syncDriveNow(workspaceId, kind) {
   return callCloudflareWorkspaceRoute(workspaceId, `drive/sync-now?kind=${encodeURIComponent(kind)}`, { method: 'POST' });
 }
 
-/** Lists whatever's sitting in a location's Drive "Invoices/Inbox" folder — the picker for
- * "Process GRV with KCP Assistant". Staff drop a photo/PDF into that folder from their phone's own
- * Drive app; nothing here uploads anything. */
-export async function fetchDriveInboxInvoices(workspaceId, locationId) {
-  const query = locationId ? `?locationId=${encodeURIComponent(locationId)}` : '';
-  const result = await callCloudflareWorkspaceRoute(workspaceId, `drive/assistant/inbox${query}`, { method: 'GET' });
-  return {
-    locationId: result?.locationId || '',
-    locationName: result?.locationName || '',
-    invoices: Array.isArray(result?.invoices) ? result.invoices : []
-  };
+// Vision extraction takes longer than a typical API call — same reasoning/value as
+// aiExtractionService.js's EXTRACT_TIMEOUT_MS, plus this call also archives the photo to Drive
+// afterward.
+const PROCESS_INVOICE_TIMEOUT_MS = 175000;
+
+/** "Process Invoice with KCP": hands a captured/uploaded invoice photo straight to the Worker,
+ * which runs it through Gemini extraction and archives the original into that location's Drive
+ * "Invoices" folder — Drive is the destination here, not something staff have to interact with
+ * themselves. Returns supplier/invoice/line-item fields to pre-fill a GRV draft with (everything
+ * stays editable afterwards, same as manual entry) plus the archived file's Drive id. */
+export async function processDriveInvoicePhoto(workspaceId, { mimeType, imageBase64, locationId }) {
+  const result = await callCloudflareWorkspaceRoute(workspaceId, 'drive/assistant/process', {
+    method: 'POST',
+    timeoutMs: PROCESS_INVOICE_TIMEOUT_MS,
+    payload: { mimeType, imageBase64, locationId }
+  });
+  return { extract: result?.extract || null, driveFileId: result?.driveFileId || '', locationId: result?.locationId || locationId || '' };
 }
 
-/** Runs one Inbox file through Gemini extraction and returns supplier/invoice/line-item fields to
- * pre-fill a GRV draft with — everything stays editable in the form afterwards, same as manual
- * entry. */
-export async function extractDriveInvoice(workspaceId, fileId) {
-  const result = await callCloudflareDriveRoute(workspaceId, 'assistant/extract', { fileId });
-  return result?.extract || null;
-}
-
-/** Tags the source Inbox file as processed and moves it into "Invoices/Processed" so it drops out
- * of the picker on next open — call this once the GRV it was used to draft has been saved. */
-export async function markDriveInvoiceProcessed(workspaceId, { fileId, grvId, locationId }) {
-  return callCloudflareDriveRoute(workspaceId, 'assistant/mark-processed', { fileId, grvId, locationId });
+/** Tags the archived invoice photo with the GRV it ended up creating — call this once that GRV has
+ * actually been saved. Best-effort from the caller's point of view; a failure here should never
+ * block or roll back the GRV save itself. */
+export async function tagDriveInvoiceWithGrv(workspaceId, { fileId, grvId }) {
+  return callCloudflareDriveRoute(workspaceId, 'assistant/tag-grv', { fileId, grvId });
 }
 
 async function callCloudflareDriveRoute(workspaceId, action, payload = {}, options = {}) {

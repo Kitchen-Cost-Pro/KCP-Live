@@ -4610,7 +4610,15 @@ export async function postWorkspaceMemberRoute(
     )
     .run();
 
-  // Ensure the user has an app_users record and send a welcome / set-password email
+  // Ensure the user has an app_users record and send a welcome / set-password email. A failure
+  // here must never fail the member creation itself (the workspace_members row above already
+  // committed) — but it used to be swallowed with a bare `catch {}` and no logging at all, so a
+  // real delivery failure (bad email provider config, a DB error building the reset token, etc.)
+  // was completely invisible: the API always returned { ok: true } and the UI always reported
+  // success, even when no email had gone out. Surfacing emailSent/emailError here lets the
+  // frontend tell the difference and the Worker logs capture the real cause for one that fails.
+  let emailSent = false;
+  let emailError = "";
   try {
     const existingUser = await env.CENTRAL_DB.prepare(
       `SELECT id, status FROM app_users WHERE lower(email) = lower(?1) LIMIT 1`,
@@ -4653,7 +4661,7 @@ export async function postWorkspaceMemberRoute(
     const workspaceName = text(payload.workspaceName || "your workspace");
     const recipientName = text(displayName || email.split("@")[0]);
 
-    await sendEmail(env, emailConfig, {
+    const sendResult = await sendEmail(env, emailConfig, {
       to: email,
       subject: `You've been added to ${workspaceName} on Kitchen Cost Pro`,
       text: [
@@ -4672,11 +4680,15 @@ export async function postWorkspaceMemberRoute(
         "— Kitchen Cost Pro",
       ].join("\n"),
     });
-  } catch {
-    // Don't fail the member creation if email delivery fails
+    emailSent = sendResult?.sent !== false;
+    if (!emailSent) emailError = text((sendResult as { reason?: string })?.reason) || "Email delivery failed.";
+  } catch (cause) {
+    emailSent = false;
+    emailError = cause instanceof Error ? cause.message : "Email delivery failed.";
+    console.error(`[members] invite email failed for workspace ${workspaceId}, ${email}:`, cause);
   }
 
-  return json(request, env, { ok: true, id: memberId });
+  return json(request, env, { ok: true, id: memberId, emailSent, emailError: emailSent ? "" : emailError });
 }
 
 export async function resendWorkspaceMemberInvite(
@@ -4707,6 +4719,9 @@ export async function resendWorkspaceMemberInvite(
   const email = text(member.email);
   const displayName = text(member.display_name || email.split("@")[0]);
 
+  // Same "don't hide the real failure" reasoning as postWorkspaceMemberRoute above.
+  let emailSent = false;
+  let emailError = "";
   try {
     const existingUser = await env.CENTRAL_DB.prepare(
       `SELECT id FROM app_users WHERE lower(email) = lower(?1) LIMIT 1`,
@@ -4750,7 +4765,7 @@ export async function resendWorkspaceMemberInvite(
       .first<{ name: string }>();
     const workspaceName = text(workspace?.name || "your workspace");
 
-    await sendEmail(env, emailConfig, {
+    const sendResult = await sendEmail(env, emailConfig, {
       to: email,
       subject: `Your invitation to ${workspaceName} on Kitchen Cost Pro`,
       text: [
@@ -4769,11 +4784,15 @@ export async function resendWorkspaceMemberInvite(
         "— Kitchen Cost Pro",
       ].join("\n"),
     });
-  } catch {
-    // Don't fail if email delivery fails
+    emailSent = sendResult?.sent !== false;
+    if (!emailSent) emailError = text((sendResult as { reason?: string })?.reason) || "Email delivery failed.";
+  } catch (cause) {
+    emailSent = false;
+    emailError = cause instanceof Error ? cause.message : "Email delivery failed.";
+    console.error(`[members] resend-invite email failed for workspace ${workspaceId}, ${email}:`, cause);
   }
 
-  return json(request, env, { ok: true });
+  return json(request, env, { ok: true, emailSent, emailError: emailSent ? "" : emailError });
 }
 
 export async function patchWorkspaceMemberRoute(

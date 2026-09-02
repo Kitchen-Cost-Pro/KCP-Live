@@ -5,7 +5,7 @@ import { getDriveConnection, saveDriveConnection, disconnectDrive } from './conn
 import { canManageDrive } from './admin-permissions';
 import { syncPendingDriveGrvs } from './grv-drive-sync';
 import { syncPendingDriveCreditNotes } from './credit-note-drive-sync';
-import { listInboxInvoices, extractInvoiceFromDrive, markInvoiceProcessed, GrvExtractResult } from './assistant';
+import { processInvoicePhoto, tagDriveInvoiceWithGrv, GrvExtractResult } from './assistant';
 import { listActiveLocations } from './folders';
 
 function response(data: unknown, status = 200): Response {
@@ -120,12 +120,15 @@ async function postDisconnect(env: Env, workspaceId: string) {
   return response({ ok: true });
 }
 
+// ocr_enabled is deliberately NOT settable here — like ai_onboarding_enabled, it's an
+// admin-console-only flag a workspace owner can't turn on themselves (see the KCP Admin Console's
+// toggleWorkspaceOcrAssistant, which writes it through the separate superuser-gated
+// PATCH /api/admin/workspaces/:id/settings route). This route only owns the two push toggles.
 async function postSettings(request: Request, env: Env, workspaceId: string) {
   const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
   await mergeWorkspaceSettingsJson(env, workspaceId, {
     drive_push_grv_enabled: Boolean(body.pushGrvEnabled),
-    drive_push_credit_note_enabled: Boolean(body.pushCreditNoteEnabled),
-    ocr_enabled: Boolean(body.ocrEnabled)
+    drive_push_credit_note_enabled: Boolean(body.pushCreditNoteEnabled)
   });
   return response({ ok: true });
 }
@@ -152,36 +155,32 @@ async function postDueCheck(env: Env, workspaceId: string) {
   return response({ ok: true, grv, creditNotes });
 }
 
-async function getAssistantInbox(env: Env, workspaceId: string, locationId: string) {
+async function resolveLocation(env: Env, workspaceId: string, locationId: string) {
   const locations = await listActiveLocations(env, workspaceId);
-  const location = locations.find((l) => l.id === locationId) || locations[0];
-  if (!location) return response({ ok: false, error: 'This workspace has no active locations yet.' }, 400);
-  const invoices = await listInboxInvoices(env, workspaceId, location.id, location.name);
-  return response({ ok: true, locationId: location.id, locationName: location.name, invoices });
+  return locations.find((l) => l.id === locationId) || locations[0] || null;
 }
 
-async function postAssistantExtract(request: Request, env: Env, workspaceId: string) {
+async function postAssistantProcess(request: Request, env: Env, workspaceId: string) {
   const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
-  const fileId = text(body.fileId);
-  if (!fileId) return response({ ok: false, error: 'fileId is required.' }, 400);
+  const mimeType = text(body.mimeType);
+  const imageBase64 = text(body.imageBase64);
+  if (!imageBase64) return response({ ok: false, error: 'imageBase64 is required.' }, 400);
+  const location = await resolveLocation(env, workspaceId, text(body.locationId));
+  if (!location) return response({ ok: false, error: 'This workspace has no active locations yet.' }, 400);
   try {
-    const result: GrvExtractResult = await extractInvoiceFromDrive(env, workspaceId, fileId);
-    return response({ ok: true, extract: result });
+    const result: { extract: GrvExtractResult; driveFileId: string } = await processInvoicePhoto(env, workspaceId, location.id, location.name, { mimeType, imageBase64 });
+    return response({ ok: true, extract: result.extract, driveFileId: result.driveFileId, locationId: location.id });
   } catch (cause) {
     return response({ ok: false, error: cause instanceof Error ? cause.message : 'KCP Assistant could not read that invoice.' }, 502);
   }
 }
 
-async function postAssistantMarkProcessed(request: Request, env: Env, workspaceId: string) {
+async function postAssistantTagGrv(request: Request, env: Env, workspaceId: string) {
   const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
   const fileId = text(body.fileId);
   const grvId = text(body.grvId);
-  const locationId = text(body.locationId);
-  if (!fileId || !grvId || !locationId) return response({ ok: false, error: 'fileId, grvId, and locationId are required.' }, 400);
-  const locations = await listActiveLocations(env, workspaceId);
-  const location = locations.find((l) => l.id === locationId);
-  if (!location) return response({ ok: false, error: 'Unknown location.' }, 400);
-  await markInvoiceProcessed(env, workspaceId, location.id, location.name, fileId, grvId);
+  if (!fileId || !grvId) return response({ ok: false, error: 'fileId and grvId are required.' }, 400);
+  await tagDriveInvoiceWithGrv(env, workspaceId, fileId, grvId);
   return response({ ok: true });
 }
 
@@ -217,15 +216,11 @@ export async function handleDriveAdminRoute(
     const kind = new URL(request.url).searchParams.get('kind') || 'grv';
     return postSyncNow(env, workspaceId, kind);
   }
-  if (request.method === 'GET' && resource === 'drive/assistant/inbox') {
-    const locationId = new URL(request.url).searchParams.get('locationId') || '';
-    return getAssistantInbox(env, workspaceId, locationId);
+  if (request.method === 'POST' && resource === 'drive/assistant/process') {
+    return postAssistantProcess(request, env, workspaceId);
   }
-  if (request.method === 'POST' && resource === 'drive/assistant/extract') {
-    return postAssistantExtract(request, env, workspaceId);
-  }
-  if (request.method === 'POST' && resource === 'drive/assistant/mark-processed') {
-    return postAssistantMarkProcessed(request, env, workspaceId);
+  if (request.method === 'POST' && resource === 'drive/assistant/tag-grv') {
+    return postAssistantTagGrv(request, env, workspaceId);
   }
 
   if (!(await canManageDrive(env, auth, workspaceId))) {
