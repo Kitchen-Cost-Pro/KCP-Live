@@ -6,7 +6,7 @@ import { claimXeroEffect, markXeroEffectApplied, markXeroEffectFailed } from './
 import { recordXeroDiagnosticIfNotable } from './observability';
 import { resolveXeroContactForSupplier } from './grv-sync';
 import { loadLocationTrackingContext, resolveLocationTracking } from './tracking';
-import { yesterdayDateKey } from './invoice-sync';
+import { autoSyncDueDateKey } from './invoice-sync';
 
 // Same prefix grv-sync.ts's NEEDS_SUPPLIER_MATCH_PREFIX uses — deliberately the identical string
 // (not re-exported/imported, to keep the two push modules independent) so listPendingSupplierMatches
@@ -255,8 +255,10 @@ export async function syncPendingXeroCreditNotes(
 export async function claimDailyCreditNoteSyncIfDue(env: Env, workspaceId: string): Promise<{ due: boolean; dateKey?: string }> {
   // Not tied to trading-day-start-hour the way the sales invoice/GRV claims are — this is purely
   // a "run at most once per calendar day" lock (loadPendingCreditNotes isn't date-bounded either,
-  // matching loadPendingGrvs), so the plain default (midnight SAST) shift is enough here.
-  const dateKey = yesterdayDateKey();
+  // matching loadPendingGrvs), so the plain default (midnight SAST) shift is enough here. Same
+  // 1-hour post-close grace buffer as the other two automatic claims — see autoSyncDueDateKey's doc
+  // comment in invoice-sync.ts.
+  const dateKey = autoSyncDueDateKey();
   const now = nowIso();
   const settings = await env.DB.prepare(`SELECT last_credit_note_sync_date, credit_note_sync_claimed_at, credit_note_sync_enabled FROM xero_sync_settings WHERE workspace_id = ?1`)
     .bind(workspaceId)

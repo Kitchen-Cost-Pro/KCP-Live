@@ -5,7 +5,7 @@ import { executeXeroApiRequest, executeXeroBinaryPutRequest, XeroApiClientError 
 import { claimXeroEffect, markXeroEffectApplied, markXeroEffectFailed } from './outbox';
 import { recordXeroDiagnosticIfNotable } from './observability';
 import { loadLocationTrackingContext, resolveLocationTracking } from './tracking';
-import { yesterdayDateKey } from './invoice-sync';
+import { yesterdayDateKey, autoSyncDueDateKey } from './invoice-sync';
 import { grvToPdfBytes } from '../../../../src/modules/reporting/exports/exportPdf.js';
 
 export { yesterdayDateKey };
@@ -633,7 +633,9 @@ export async function syncPendingXeroGrvs(
 }
 
 export async function claimDailyGrvSyncIfDue(env: Env, workspaceId: string): Promise<{ due: boolean; dateKey?: string }> {
-  const dateKey = yesterdayDateKey();
+  // Same 1-hour post-close grace buffer as the sales invoice's own automatic claim — see
+  // autoSyncDueDateKey's doc comment in invoice-sync.ts.
+  const dateKey = autoSyncDueDateKey();
   const now = nowIso();
   const settings = await env.DB.prepare(`SELECT last_grv_sync_date, grv_sync_claimed_at, grv_sync_enabled FROM xero_sync_settings WHERE workspace_id = ?1`)
     .bind(workspaceId)

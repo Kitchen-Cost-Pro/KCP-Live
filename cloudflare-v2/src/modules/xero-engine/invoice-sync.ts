@@ -287,8 +287,21 @@ export function todayDateKey(startHour = 0, now: Date = new Date()): string {
   return currentTradingDayShifted(startHour, now).toISOString().slice(0, 10);
 }
 
+// Automatic daily due-checks (this one, plus GRV/Credit Note's own claim functions in
+// grv-sync.ts/credit-note-sync.ts) wait an extra hour past the trading day's exact close before
+// treating that day as syncable — a deliberate buffer so a payment/webhook still settling in the
+// last few minutes of the day, or a GRV/credit note keyed slightly after midnight, isn't raced past
+// by the very first check after the boundary. The manual "push now" buttons (postSyncNow) use the
+// plain yesterdayDateKey/no buffer at all — a human clicking the button has already decided the day
+// is done, so there's nothing to protect against there.
+const AUTO_SYNC_GRACE_HOURS = 1;
+
+export function autoSyncDueDateKey(startHour = 0, now: Date = new Date()): string {
+  return yesterdayDateKey(startHour, new Date(now.getTime() - AUTO_SYNC_GRACE_HOURS * 60 * 60 * 1000));
+}
+
 export async function claimDailyInvoiceSyncIfDue(env: Env, workspaceId: string, startHour = 0): Promise<{ due: boolean; dateKey?: string }> {
-  const dateKey = yesterdayDateKey(startHour);
+  const dateKey = autoSyncDueDateKey(startHour);
   const now = nowIso();
   const settings = await env.DB.prepare(`SELECT last_invoice_sync_date, invoice_sync_claimed_at, enabled FROM xero_sync_settings WHERE workspace_id = ?1`)
     .bind(workspaceId)

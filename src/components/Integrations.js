@@ -169,11 +169,19 @@ const xeroDrawerState = {
 // Archived for this org, and nothing surfaced that until every GRV push failed in production.
 // Renders a live dropdown once tax rates are loaded; falls back to the original free-text input
 // before they're loaded (or if Xero isn't connected/the fetch failed) so the field never breaks.
-function renderXeroTaxTypeControl({ dataAttr, currentValue, placeholder, taxRates }) {
+//
+// Regression: the dropdown used to list EVERY tax rate Xero returned in every field, with no
+// filtering — so a purchases-only rate (e.g. "Standard Rate Purchases") could be picked for the
+// Sales tab's tax type, which Xero itself flatly rejects at push time: "The TaxType code 'X' cannot
+// be used with account code 'Y'" (a rate's CanApplyToRevenue/CanApplyToExpenses flags gate which
+// account types it's valid for). `applicability` filters the list to only rates Xero would actually
+// accept for that field — 'revenue' for Sales-tab fields, 'expenses' for Purchases-tab fields.
+function renderXeroTaxTypeControl({ dataAttr, currentValue, placeholder, taxRates, applicability }) {
   if (!Array.isArray(taxRates) || !taxRates.length) {
     return `<input type="text" placeholder="${escapeAttribute(placeholder)}" value="${escapeAttribute(currentValue || '')}" ${dataAttr} />`;
   }
-  const sorted = [...taxRates].sort((a, b) => {
+  const applicable = taxRates.filter((rate) => (applicability === 'revenue' ? rate.canApplyToRevenue !== false : rate.canApplyToExpenses !== false));
+  const sorted = applicable.sort((a, b) => {
     if (a.status === b.status) return a.name.localeCompare(b.name);
     return a.status === 'ACTIVE' ? -1 : 1;
   });
@@ -258,10 +266,10 @@ async function loadXeroTaxRatesIfNeeded(view) {
 function refreshXeroTaxTypeControls(view) {
   const settings = xeroDrawerState.status?.settings || {};
   const fields = [
-    { wrapper: 'defaultTaxType', dataAttr: 'data-xero-tax-type', currentValue: settings.defaultTaxType, placeholder: 'e.g. OUTPUT2' },
-    { wrapper: 'salesExemptTaxType', dataAttr: 'data-xero-sales-exempt-tax-type', currentValue: settings.salesExemptTaxType, placeholder: 'e.g. EXEMPTOUTPUT' },
-    { wrapper: 'purchaseTaxType', dataAttr: 'data-xero-purchase-tax-type', currentValue: settings.purchaseTaxType, placeholder: 'e.g. INPUT2' },
-    { wrapper: 'purchaseExemptTaxType', dataAttr: 'data-xero-purchase-exempt-tax-type', currentValue: settings.purchaseExemptTaxType, placeholder: 'e.g. EXEMPTINPUT' }
+    { wrapper: 'defaultTaxType', dataAttr: 'data-xero-tax-type', currentValue: settings.defaultTaxType, placeholder: 'e.g. OUTPUT2', applicability: 'revenue' },
+    { wrapper: 'salesExemptTaxType', dataAttr: 'data-xero-sales-exempt-tax-type', currentValue: settings.salesExemptTaxType, placeholder: 'e.g. EXEMPTOUTPUT', applicability: 'revenue' },
+    { wrapper: 'purchaseTaxType', dataAttr: 'data-xero-purchase-tax-type', currentValue: settings.purchaseTaxType, placeholder: 'e.g. INPUT2', applicability: 'expenses' },
+    { wrapper: 'purchaseExemptTaxType', dataAttr: 'data-xero-purchase-exempt-tax-type', currentValue: settings.purchaseExemptTaxType, placeholder: 'e.g. EXEMPTINPUT', applicability: 'expenses' }
   ];
   fields.forEach((field) => {
     const wrapper = view.querySelector(`[data-xero-tax-control="${field.wrapper}"]`);
@@ -270,7 +278,8 @@ function refreshXeroTaxTypeControls(view) {
       dataAttr: field.dataAttr,
       currentValue: wrapper.querySelector('input,select')?.value || field.currentValue,
       placeholder: field.placeholder,
-      taxRates: xeroDrawerState.taxRates
+      taxRates: xeroDrawerState.taxRates,
+      applicability: field.applicability
     });
   });
 }
@@ -1136,11 +1145,11 @@ function renderXeroModal({ canManageXero = false } = {}) {
                 </label>
                 <label>
                   <span>Tax type</span>
-                  <span data-xero-tax-control="defaultTaxType">${renderXeroTaxTypeControl({ dataAttr: 'data-xero-tax-type', currentValue: settings.defaultTaxType, placeholder: 'e.g. OUTPUT2', taxRates: xeroDrawerState.taxRates })}</span>
+                  <span data-xero-tax-control="defaultTaxType">${renderXeroTaxTypeControl({ dataAttr: 'data-xero-tax-type', currentValue: settings.defaultTaxType, placeholder: 'e.g. OUTPUT2', taxRates: xeroDrawerState.taxRates, applicability: 'revenue' })}</span>
                 </label>
                 <label class="xeroFieldGrid--span2">
                   <span>Exempt/zero-rated tax type <em>optional</em></span>
-                  <span data-xero-tax-control="salesExemptTaxType">${renderXeroTaxTypeControl({ dataAttr: 'data-xero-sales-exempt-tax-type', currentValue: settings.salesExemptTaxType, placeholder: 'e.g. EXEMPTOUTPUT', taxRates: xeroDrawerState.taxRates })}</span>
+                  <span data-xero-tax-control="salesExemptTaxType">${renderXeroTaxTypeControl({ dataAttr: 'data-xero-sales-exempt-tax-type', currentValue: settings.salesExemptTaxType, placeholder: 'e.g. EXEMPTOUTPUT', taxRates: xeroDrawerState.taxRates, applicability: 'revenue' })}</span>
                   <small class="xeroFieldHint">Used for products marked zero-rated/VAT-exempt in Yoco, instead of the tax type above.</small>
                 </label>
                 <label class="xeroFieldGrid--span2">
@@ -1169,11 +1178,11 @@ function renderXeroModal({ canManageXero = false } = {}) {
                 </label>
                 <label>
                   <span>Purchases tax type</span>
-                  <span data-xero-tax-control="purchaseTaxType">${renderXeroTaxTypeControl({ dataAttr: 'data-xero-purchase-tax-type', currentValue: settings.purchaseTaxType, placeholder: 'e.g. INPUT2', taxRates: xeroDrawerState.taxRates })}</span>
+                  <span data-xero-tax-control="purchaseTaxType">${renderXeroTaxTypeControl({ dataAttr: 'data-xero-purchase-tax-type', currentValue: settings.purchaseTaxType, placeholder: 'e.g. INPUT2', taxRates: xeroDrawerState.taxRates, applicability: 'expenses' })}</span>
                 </label>
                 <label class="xeroFieldGrid--span2">
                   <span>Exempt/zero-rated tax type <em>optional</em></span>
-                  <span data-xero-tax-control="purchaseExemptTaxType">${renderXeroTaxTypeControl({ dataAttr: 'data-xero-purchase-exempt-tax-type', currentValue: settings.purchaseExemptTaxType, placeholder: 'e.g. EXEMPTINPUT', taxRates: xeroDrawerState.taxRates })}</span>
+                  <span data-xero-tax-control="purchaseExemptTaxType">${renderXeroTaxTypeControl({ dataAttr: 'data-xero-purchase-exempt-tax-type', currentValue: settings.purchaseExemptTaxType, placeholder: 'e.g. EXEMPTINPUT', taxRates: xeroDrawerState.taxRates, applicability: 'expenses' })}</span>
                   <small class="xeroFieldHint">Used for GRV lines on zero-rated stock items instead of the tax type above.</small>
                 </label>
                 <label class="xeroFieldGrid--span2">

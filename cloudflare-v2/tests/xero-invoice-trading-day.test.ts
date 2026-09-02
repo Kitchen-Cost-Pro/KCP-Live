@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { TENANT_SCHEMA_SQL } from '../src/tenant-schema.generated';
 import type { DbLike, DbResult, DbStatementLike } from '../src/legacy/types';
-import { businessDayUtcBounds, yesterdayDateKey, todayDateKey, claimDailyInvoiceSyncIfDue, buildDailyInvoicePayload, aggregateDailySalesLines } from '../src/modules/xero-engine/invoice-sync';
+import { businessDayUtcBounds, yesterdayDateKey, todayDateKey, autoSyncDueDateKey, claimDailyInvoiceSyncIfDue, buildDailyInvoicePayload, aggregateDailySalesLines } from '../src/modules/xero-engine/invoice-sync';
 import { XERO_V2_FOUNDATION_MIGRATION } from '../src/modules/xero-engine/migrations';
 
 // Regression: the Xero daily-sales push used to bucket every venue into a hardcoded
@@ -160,12 +160,38 @@ test('claimDailyInvoiceSyncIfDue picks the trading-day-aware date, not a fixed m
   const env = createEnv({ enabled: 1 });
   const claim = await claimDailyInvoiceSyncIfDue(env, 'ws_1', 5);
   assert.equal(claim.due, true);
-  assert.equal(claim.dateKey, yesterdayDateKey(5));
+  // claimDailyInvoiceSyncIfDue uses autoSyncDueDateKey (yesterdayDateKey + a 1-hour post-close
+  // grace buffer), not the plain yesterdayDateKey a manual push button would use — see
+  // autoSyncDueDateKey's doc comment in invoice-sync.ts.
+  assert.equal(claim.dateKey, autoSyncDueDateKey(5));
   // Sanity: for this same instant, a midnight-start venue would (in general) claim a different date
   // once the current SAST hour is between 0 and 5 — not asserted directly here since it depends on
   // the real current time when this test runs, but the two calls below prove startHour is honored
   // rather than ignored.
   assert.notEqual(claim.dateKey, undefined);
+});
+
+// Regression: the automatic due-check previously flipped to a new "yesterday" the INSTANT the
+// trading day closed (e.g. exactly midnight SAST) — racing a payment/webhook still settling in the
+// last few minutes of the day. autoSyncDueDateKey deliberately waits an extra hour before treating
+// that day as syncable; the manual "push now" buttons (plain yesterdayDateKey) are unaffected.
+test('autoSyncDueDateKey lags yesterdayDateKey by exactly one hour of real time', () => {
+  // 00:30 SAST on 2026-08-31 (22:30Z on 2026-08-30) — 30 minutes past a midnight-start trading day's
+  // close. Without a buffer this would already report the new "yesterday" (2026-08-30).
+  const justAfterMidnight = new Date('2026-08-30T22:30:00.000Z');
+  assert.equal(yesterdayDateKey(0, justAfterMidnight), '2026-08-30', 'sanity: the plain (unbuffered) date key has already flipped');
+  assert.equal(autoSyncDueDateKey(0, justAfterMidnight), '2026-08-29', 'the buffered auto-sync date key has NOT flipped yet — still within the 1-hour grace window');
+
+  // 01:30 SAST (23:30Z on 2026-08-30) — a full hour past close — now the buffered version catches up.
+  const pastGraceWindow = new Date('2026-08-30T23:30:00.000Z');
+  assert.equal(autoSyncDueDateKey(0, pastGraceWindow), '2026-08-30', 'a full hour after close, the buffered date key has caught up to the closed day');
+});
+
+test('autoSyncDueDateKey respects a non-midnight trading-day start hour the same way yesterdayDateKey does', () => {
+  // 05:30 SAST on 2026-08-31 (03:30Z) — 30 minutes past a 5am-start trading day's close.
+  const justAfterClose = new Date('2026-08-31T03:30:00.000Z');
+  assert.equal(yesterdayDateKey(5, justAfterClose), '2026-08-30', 'sanity: the plain date key has already flipped for a 5am-start venue');
+  assert.equal(autoSyncDueDateKey(5, justAfterClose), '2026-08-29', 'the buffered version still lags by the same 1-hour grace window');
 });
 
 test('claimDailyInvoiceSyncIfDue is a no-op once that trading day has already been synced, independent of startHour', async () => {

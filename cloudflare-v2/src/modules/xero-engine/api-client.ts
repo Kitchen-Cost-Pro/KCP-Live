@@ -133,6 +133,7 @@ export interface XeroTaxRateSummary {
   taxType: string;
   status: string;
   canApplyToExpenses: boolean;
+  canApplyToRevenue: boolean;
 }
 
 /**
@@ -143,16 +144,27 @@ export interface XeroTaxRateSummary {
  * right code (it's a standard South Africa default) but was Archived for this org, and Xero's
  * error ("Tax rate must be Active") gave no indication of what a valid replacement would be. Used
  * to populate a real dropdown instead of a free-text field a person has to guess at.
+ *
+ * `canApplyToRevenue`/`canApplyToExpenses` come straight from Xero's own per-rate flags — a rate
+ * scoped to expenses only (e.g. a "...Purchases" rate) is REJECTED by Xero if used on a revenue
+ * account, and vice versa ("The TaxType code 'X' cannot be used with account code 'Y'" — a real
+ * production failure this exact confusion caused: a purchases rate had been picked for the Sales
+ * tab's tax type, which the old undifferentiated dropdown never prevented). Callers filter the
+ * Sales tab's picker to `canApplyToRevenue` rates and the Purchases tab's to `canApplyToExpenses`
+ * ones, same reasoning as never trusting a typed/guessed value.
  */
 export async function fetchXeroTaxRates(env: Env, workspaceId: string): Promise<XeroTaxRateSummary[]> {
   const result = await executeXeroApiRequest(env, workspaceId, { method: 'GET', path: 'TaxRates' });
-  const rates = (result.TaxRates as Array<{ Name?: string; TaxType?: string; Status?: string; CanApplyToExpenses?: boolean }> | undefined) || [];
+  const rates = (result.TaxRates as
+    | Array<{ Name?: string; TaxType?: string; Status?: string; CanApplyToExpenses?: boolean; CanApplyToRevenue?: boolean }>
+    | undefined) || [];
   return rates
     .map((rate) => ({
       name: text(rate.Name),
       taxType: text(rate.TaxType),
       status: text(rate.Status) || 'UNKNOWN',
-      canApplyToExpenses: rate.CanApplyToExpenses !== false
+      canApplyToExpenses: rate.CanApplyToExpenses !== false,
+      canApplyToRevenue: rate.CanApplyToRevenue !== false
     }))
     .filter((rate) => rate.taxType);
 }
