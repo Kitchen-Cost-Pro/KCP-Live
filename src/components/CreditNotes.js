@@ -13,6 +13,7 @@ export function renderCreditNotes({ state, onCreditNoteFilterChange, onCreditNot
     stockSearch: '',
     stockCategory: '',
     grvQuery: '',
+    noteQuery: '',
     overlay: '',
     openDropdown: '',
     calendarCursor: '',
@@ -40,14 +41,10 @@ export function renderCreditNotes({ state, onCreditNoteFilterChange, onCreditNot
 
     <div class="cn-pageHeader">
       <h2 class="cn-pageHeader__title">Credit Notes</h2>
-      <div class="cn-pageHeader__menu" data-cn-dropdown-root>
-        <button type="button" class="cn-recentTrigger" data-cn-open-dropdown="recent-notes" aria-haspopup="true" aria-expanded="${filters.openDropdown === 'recent-notes' ? 'true' : 'false'}">
-          ${icon('clipboard')}
-          <span>Recent Credit Notes</span>
-          ${icon('chevronDown')}
-        </button>
-        ${filters.openDropdown === 'recent-notes' ? renderRecentCreditNotesMenu(creditNotes) : ''}
-      </div>
+      <button type="button" class="cn-recentTrigger" data-cn-open-recent>
+        ${icon('clipboard')}
+        <span>Recent Credit Notes</span>
+      </button>
     </div>
 
     <div class="cn-frame">
@@ -162,6 +159,7 @@ export function renderCreditNotes({ state, onCreditNoteFilterChange, onCreditNot
 
     ${filters.overlay === 'stock' ? renderStockOverlay(stockMatches, filters, creditNotes.locations || [], selectedStockIds, headerReady, draft.locationId || '') : ''}
     ${filters.overlay === 'grv' ? renderProcessedGrvOverlay(grvMatches, filters.grvQuery || '') : ''}
+    ${filters.overlay === 'recent-notes' ? renderRecentCreditNotesOverlay(creditNotes.creditNotes || [], filters.noteQuery || '') : ''}
     ${filters.overlay === 'calendar' ? renderCustomCalendarOverlay({
       title: 'Select Credit Note Date',
       selectedDate: draft.date || todayLocal(),
@@ -179,7 +177,7 @@ export function renderCreditNotes({ state, onCreditNoteFilterChange, onCreditNot
 }
 
 function bindCreditNoteEvents(view, state, filters, draft, onCreditNoteFilterChange, onCreditNoteAction) {
-  const closeOverlay = () => onCreditNoteFilterChange?.({ overlay: '', selectedStockIds: [], calendarCursor: '', grvQuery: '' });
+  const closeOverlay = () => onCreditNoteFilterChange?.({ overlay: '', selectedStockIds: [], calendarCursor: '', grvQuery: '', noteQuery: '' });
 
   view.querySelectorAll('[data-cn-draft-field]').forEach((field) => {
     const apply = () => {
@@ -315,6 +313,10 @@ function bindCreditNoteEvents(view, state, filters, draft, onCreditNoteFilterCha
     onCreditNoteFilterChange?.({ overlay: 'grv', grvQuery: '' });
   });
 
+  view.querySelector('[data-cn-open-recent]')?.addEventListener('click', () => {
+    onCreditNoteFilterChange?.({ overlay: 'recent-notes', noteQuery: '' });
+  });
+
   view.querySelector('[data-cn-open-calendar]')?.addEventListener('click', () => {
     onCreditNoteFilterChange?.({
       overlay: 'calendar',
@@ -325,6 +327,7 @@ function bindCreditNoteEvents(view, state, filters, draft, onCreditNoteFilterCha
 
   view.querySelector('[data-cn-stock-close]')?.addEventListener('click', closeOverlay);
   view.querySelector('[data-cn-grv-close]')?.addEventListener('click', closeOverlay);
+  view.querySelector('[data-cn-recent-close]')?.addEventListener('click', closeOverlay);
 
   view.querySelector('[data-cn-stock-search]')?.addEventListener('input', (event) => {
     onCreditNoteFilterChange?.({ stockSearch: event.target.value });
@@ -332,6 +335,10 @@ function bindCreditNoteEvents(view, state, filters, draft, onCreditNoteFilterCha
 
   view.querySelector('[data-cn-grv-search]')?.addEventListener('input', (event) => {
     onCreditNoteFilterChange?.({ grvQuery: event.target.value });
+  });
+
+  view.querySelector('[data-cn-recent-search]')?.addEventListener('input', (event) => {
+    onCreditNoteFilterChange?.({ noteQuery: event.target.value });
   });
 
   view.querySelectorAll('[data-cn-stock-select]').forEach((checkbox) => {
@@ -858,25 +865,44 @@ function renderEditingBanner(draft) {
   `;
 }
 
-function renderRecentCreditNotesMenu(creditNotes) {
-  const notes = (creditNotes.creditNotes || []).slice(0, 10);
+function filterCreditNotesForEdit(notes = [], query = '') {
+  const term = String(query || '').trim().toLowerCase();
+  if (!term) return notes;
+  return notes.filter((note) => [
+    note.cnNumber,
+    note.invoice,
+    note.supplierName,
+    note.supplier,
+    note.poNumber
+  ].some((value) => String(value || '').toLowerCase().includes(term)));
+}
+
+function renderRecentCreditNotesOverlay(notes = [], query = '') {
+  const matches = filterCreditNotesForEdit(notes, query).slice(0, 100);
   return `
-    <div class="cn-recentMenu">
-      <p class="cn-recentMenu__title">Recent Credit Notes</p>
-      ${notes.length
-        ? `<div class="cn-stack">
-            ${notes.map((note) => `
-              <div class="cn-recentNoteRow" data-cn-edit-note="${escapeAttribute(note.id)}" role="button" tabindex="0">
-                <div class="cn-recentNoteRow__info">
-                  <span class="cn-recentNoteRow__title">${escapeHtml(note.cnNumber || note.invoice || 'Credit Note')}</span>
-                  <span class="cn-recentNoteRow__meta">${escapeHtml(note.supplierName || note.supplier || 'Supplier')} · ${escapeHtml(formatDisplayDate(note.date || ''))}</span>
-                </div>
-                <div class="cn-recentNoteRow__total">${escapeHtml(formatCurrency(note.totalEx))}</div>
-                <span class="cn-iconBtn" aria-hidden="true">${icon('edit')}</span>
-              </div>
-            `).join('')}
-          </div>`
-        : `<div class="cn-recentMenu__empty">No credit notes yet.</div>`}
+    <div class="cn-overlayBackdrop">
+      <section class="cn-overlayCard">
+        <header>
+          <div>
+            <p>Recent Credit Notes</p>
+            <h3>Search and select a credit note to edit</h3>
+          </div>
+          <button type="button" class="cn-iconButton" data-cn-recent-close aria-label="Close">${icon('x')}</button>
+        </header>
+        <div class="cn-overlayFilters">
+          <input type="search" value="${escapeAttribute(query)}" placeholder="Search CN #, invoice, or supplier..." data-cn-recent-search data-focus-key="cn-recent-search" />
+        </div>
+        <div class="cn-pickerList" data-scroll-key="credit-note-recent-picker">
+          ${matches.length
+            ? matches.map((note) => `
+                <button type="button" class="cn-supplierOption cn-grvOption" data-cn-edit-note="${escapeAttribute(note.id)}">
+                  <strong>${escapeHtml(note.cnNumber || note.invoice || 'Credit Note')}</strong>
+                  <span>${escapeHtml(note.supplierName || note.supplier || 'Supplier')} · ${escapeHtml(formatDisplayDate(note.date || ''))} · ${escapeHtml(formatCurrency(note.totalEx))}</span>
+                </button>
+              `).join('')
+            : `<div class="cn-empty"><span>${notes.length ? 'No credit notes match this search.' : 'No credit notes yet.'}</span></div>`}
+        </div>
+      </section>
     </div>
   `;
 }

@@ -15,6 +15,7 @@ export function renderGRVEntry({ state, onGrvFilterChange, onGrvAction = {} } = 
     openDropdown: '',
     overlay: '',
     poQuery: '',
+    receiptQuery: '',
     selectedStockIds: [],
     calendarCursor: '',
     ...grv.filters
@@ -53,14 +54,10 @@ export function renderGRVEntry({ state, onGrvFilterChange, onGrvAction = {} } = 
 
     <div class="grv-pageHeader">
       <h2 class="grv-pageHeader__title">Goods Received</h2>
-      <div class="grv-pageHeader__menu" data-grv-dropdown-root>
-        <button type="button" class="grv-recentTrigger" data-grv-dropdown="recent-receipts" aria-haspopup="true" aria-expanded="${filters.openDropdown === 'recent-receipts' ? 'true' : 'false'}">
-          ${icon('history')}
-          <span>Recent GRVs</span>
-          ${icon('chevron')}
-        </button>
-        ${filters.openDropdown === 'recent-receipts' ? renderRecentReceiptsMenu(grv) : ''}
-      </div>
+      <button type="button" class="grv-recentTrigger" data-grv-open-recent>
+        ${icon('history')}
+        <span>Recent GRVs</span>
+      </button>
     </div>
 
     <div class="grv-frame">
@@ -182,6 +179,7 @@ export function renderGRVEntry({ state, onGrvFilterChange, onGrvAction = {} } = 
 
     ${filters.overlay === 'draft' ? renderDraftDrawer(statusLabel, totals, draft, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes, headerReady, grv.actionStatus, grv.actionError || '', grv.locations || [], filters.openDropdown || '', grv.stockItems || []) : ''}
     ${filters.overlay === 'po' ? renderPurchaseOrderOverlay(convertibleOrders, filters.poQuery || '') : ''}
+    ${filters.overlay === 'recent-receipts' ? renderRecentReceiptsOverlay(grv.receipts || [], filters.receiptQuery || '') : ''}
     ${filters.overlay === 'stock' ? renderStockOverlay(stockMatches, filters.lineQuery || '', headerReady, selectedStockIds) : ''}
     ${filters.overlay === 'calendar' ? renderCustomCalendarOverlay({
       title: 'Select Trade Date',
@@ -335,6 +333,16 @@ function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, 
       openDropdown: ''
     });
   });
+  view.querySelector('[data-grv-open-recent]')?.addEventListener('click', () => {
+    blurActiveDraftField();
+    onGrvFilterChange?.({
+      overlay: 'recent-receipts',
+      receiptQuery: '',
+      selectedStockIds: [],
+      calendarCursor: '',
+      openDropdown: ''
+    });
+  });
   view.querySelector('[data-grv-open-draft]')?.addEventListener('click', () => {
     blurActiveDraftField();
     onGrvFilterChange?.({ overlay: 'draft', selectedStockIds: [], calendarCursor: '', openDropdown: '' });
@@ -355,7 +363,7 @@ function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, 
   view.querySelector('[data-grv-cancel-edit]')?.addEventListener('click', () => onGrvAction.onCancelEdit?.());
   view.querySelectorAll('[data-grv-edit-receipt]').forEach((row) => {
     const openEdit = () => {
-      const receipt = (grv.receipts || []).find((entry) => String(entry.id) === row.dataset.grvEditReceipt);
+      const receipt = ((state.grv || {}).receipts || []).find((entry) => String(entry.id) === row.dataset.grvEditReceipt);
       if (receipt) onGrvAction.onEditReceipt?.(receipt);
     };
     row.addEventListener('click', openEdit);
@@ -599,6 +607,7 @@ function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, 
         overlay: '',
         poQuery: '',
         lineQuery: '',
+        receiptQuery: '',
         selectedStockIds: [],
         calendarCursor: '',
         openDropdown: ''
@@ -614,6 +623,7 @@ function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, 
         overlay: '',
         poQuery: '',
         lineQuery: '',
+        receiptQuery: '',
         selectedStockIds: [],
         calendarCursor: '',
         openDropdown: ''
@@ -1607,27 +1617,40 @@ function renderEditingBanner(draft) {
   `;
 }
 
-function renderRecentReceiptsMenu(grv) {
-  const receipts = (grv.receipts || []).slice(0, 10);
-  return `
-    <div class="grv-recentMenu">
-      <p class="grv-recentMenu__title">Recent GRVs</p>
-      ${receipts.length
-        ? `<div class="grv-stack">
-            ${receipts.map((receipt) => `
-              <div class="grv-recentReceiptRow" data-grv-edit-receipt="${escapeAttribute(receipt.id)}" role="button" tabindex="0">
-                <div class="grv-recentReceiptRow__info">
-                  <span class="grv-recentReceiptRow__title">${escapeHtml(receipt.grvNumber || receipt.invoice || 'GRV')}</span>
-                  <span class="grv-recentReceiptRow__meta">${escapeHtml(receipt.supplierName || 'Manual Receipt')} · ${escapeHtml(formatDisplayDate(receipt.date || ''))}</span>
-                </div>
-                <div class="grv-recentReceiptRow__total">${escapeHtml(formatCurrency(receipt.totalEx))}</div>
-                <span class="grv-iconBtn" aria-hidden="true">${icon('edit')}</span>
-              </div>
-            `).join('')}
-          </div>`
-        : `<div class="grv-recentMenu__empty">No GRVs received yet.</div>`}
-    </div>
-  `;
+function filterReceiptsForEdit(receipts = [], query = '') {
+  const term = String(query || '').trim().toLowerCase();
+  if (!term) return receipts;
+  return receipts.filter((receipt) => [
+    receipt.grvNumber,
+    receipt.invoice,
+    receipt.supplierName,
+    receipt.supplier,
+    receipt.poNumber
+  ].some((value) => String(value || '').toLowerCase().includes(term)));
+}
+
+function renderRecentReceiptsOverlay(receipts, query) {
+  const matches = filterReceiptsForEdit(receipts, query).slice(0, 100);
+  return renderOverlay({
+    title: 'Recent GRVs',
+    subtitle: 'Search and select a GRV to edit',
+    filterKey: 'receiptQuery',
+    value: query,
+    placeholder: 'Search GRV #, invoice, or supplier...',
+    content: matches.length
+      ? matches.map((receipt) => `
+          <button type="button" class="grv-pickerItem" data-grv-edit-receipt="${escapeAttribute(receipt.id)}">
+            <div>
+              <strong>${escapeHtml(receipt.grvNumber || receipt.invoice || 'GRV')}</strong>
+              <span>${escapeHtml(receipt.supplierName || 'Manual Receipt')} · ${escapeHtml(formatDisplayDate(receipt.date || ''))}</span>
+            </div>
+            <em class="grv-pickerBadge neutral">${escapeHtml(formatCurrency(receipt.totalEx))}</em>
+          </button>
+        `).join('')
+      : (receipts.length
+          ? '<div class="grv-pickerEmpty">No GRVs match this search.</div>'
+          : '<div class="grv-pickerEmpty">No GRVs received yet.</div>')
+  });
 }
 
 function renderGrvLocationPicker(draft, locations = [], openDropdown = '', query = '') {
