@@ -146,6 +146,14 @@ export async function fetchXeroTrackingCategories(workspaceId) {
   return Array.isArray(result?.trackingCategories) ? result.trackingCategories : [];
 }
 
+/** Real Chart of Accounts codes from the connected Xero organisation — same "never guess, show the
+ * real thing" reasoning as fetchXeroTaxRates: every account-code field used to be free text a
+ * person had to know the raw Xero GL code for. */
+export async function fetchXeroAccounts(workspaceId) {
+  const result = await callCloudflareWorkspaceRoute(workspaceId, 'xero/accounts', { method: 'GET' });
+  return Array.isArray(result?.accounts) ? result.accounts : [];
+}
+
 /** Resolves one pending "needs a supplier match" entry: pass either { xeroContactId } to map to a
  * Xero contact the user already picked, or { createNew: true } to create a new one — the daily
  * background sync never creates a Xero contact on its own, only this explicit user action does. */
@@ -186,13 +194,17 @@ function normalizeXeroStatus(value = {}) {
       purchaseExemptTaxType: settings.purchaseExemptTaxType || '',
       codPaymentAccountCode: settings.codPaymentAccountCode || '',
       locationTrackingCategoryId: settings.locationTrackingCategoryId || '',
+      wastageExpenseAccountCode: settings.wastageExpenseAccountCode || '',
+      wastageAssetAccountCode: settings.wastageAssetAccountCode || '',
       enabled: settings.enabled === true,
       grvSyncEnabled: settings.grvSyncEnabled === true,
       creditNoteSyncEnabled: settings.creditNoteSyncEnabled === true,
+      wastageSyncEnabled: settings.wastageSyncEnabled === true,
       lastItemSyncAt: settings.lastItemSyncAt || '',
       lastInvoiceSyncDate: settings.lastInvoiceSyncDate || '',
       lastGrvSyncDate: settings.lastGrvSyncDate || '',
-      lastCreditNoteSyncDate: settings.lastCreditNoteSyncDate || ''
+      lastCreditNoteSyncDate: settings.lastCreditNoteSyncDate || '',
+      lastWastageSyncDate: settings.lastWastageSyncDate || ''
     },
     pendingSupplierMatches: pendingSupplierMatches.map((match) => ({
       supplierId: match.supplierId || '',

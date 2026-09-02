@@ -20,6 +20,7 @@ import {
   resolveXeroSupplierMatch,
   fetchXeroTaxRates,
   fetchXeroTrackingCategories,
+  fetchXeroAccounts,
   syncYocoCatalogue
 } from '../services/integrationService.js';
 import { canManagePermissionSets } from '../services/roleService.js';
@@ -160,7 +161,10 @@ const xeroDrawerState = {
   taxRates: null,
   // Same lazy-load-once-per-modal-session contract as taxRates above, for the Tracking Categories
   // picker (Location tracking category, purchases tab).
-  trackingCategories: null
+  trackingCategories: null,
+  // Same lazy-load-once-per-modal-session contract as taxRates above, for every account-code field
+  // (sales/item/purchases/COD/wastage) — see loadXeroAccountsIfNeeded.
+  accounts: null
 };
 
 function closeAllXeroComboboxes(view) {
@@ -285,6 +289,32 @@ function renderXeroTaxTypeControl({ dataAttr, currentValue, placeholder, taxRate
     return `<input type="text" placeholder="${escapeAttribute(placeholder)}" value="${escapeAttribute(currentValue || '')}" ${dataAttr} />`;
   }
   return renderXeroCombobox({ dataAttr, currentValue, emptyLabel: '— Select a tax rate —', options: buildXeroTaxRateOptions(taxRates, applicability) });
+}
+
+// Builds the {value,label} list an account-code combobox shows — same sharing reasoning as
+// buildXeroTaxRateOptions. `filterClass` narrows the list to the Xero account Class actually valid
+// for that field (e.g. REVENUE for sales/item, EXPENSE for purchases/wastage expense, ASSET for
+// the wastage inventory account, BANK for the COD payment account) — Xero itself doesn't reject a
+// mismatched class the way it rejects a mismatched tax type, but showing every account regardless
+// of class would make the right one much harder to find in a long Chart of Accounts.
+function buildXeroAccountOptions(accounts, filterClass) {
+  const applicable = filterClass ? accounts.filter((account) => account.class === filterClass) : accounts;
+  return [...applicable]
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((account) => ({
+      value: account.code,
+      label: `${account.code} — ${account.name}`
+    }));
+}
+
+// Same live-picker contract as renderXeroTaxTypeControl: every account-code field used to be a
+// free-text input a person had to know the raw Xero GL code for, with no way to tell from inside
+// KCP whether that code still exists or is Active in this organisation.
+function renderXeroAccountCodeControl({ dataAttr, currentValue, placeholder, accounts, filterClass }) {
+  if (!Array.isArray(accounts) || !accounts.length) {
+    return `<input type="text" placeholder="${escapeAttribute(placeholder)}" value="${escapeAttribute(currentValue || '')}" ${dataAttr} />`;
+  }
+  return renderXeroCombobox({ dataAttr, currentValue, emptyLabel: '— Select an account —', options: buildXeroAccountOptions(accounts, filterClass) });
 }
 
 // Builds the {value,label} list a location-tracking-category combobox shows — same sharing
@@ -425,6 +455,64 @@ function refreshXeroTaxTypeControls(view) {
       placeholder: field.placeholder,
       taxRates: xeroDrawerState.taxRates,
       applicability: field.applicability
+    });
+  });
+}
+
+// Module-level (not on xeroDrawerState) — holds the SHARED in-flight fetch promise, if any.
+let xeroAccountsFetchPromise = null;
+
+// Same re-render race as loadXeroTaxRatesIfNeeded/loadXeroTrackingCategoriesIfNeeded (see their doc
+// comments) — always applies already-cached accounts to whichever `view` it's called with.
+async function loadXeroAccountsIfNeeded(view) {
+  if (xeroDrawerState.status?.connectionActive !== true) return;
+  if (xeroDrawerState.accounts?.length) {
+    refreshXeroAccountCodeControls(view);
+    return;
+  }
+  if (!xeroAccountsFetchPromise) {
+    xeroAccountsFetchPromise = fetchXeroAccounts(view.dataset.workspaceId || '')
+      .then((accounts) => {
+        xeroDrawerState.accounts = accounts;
+        return accounts;
+      })
+      .catch(() => {
+        // Left as null (not []) on failure — same reasoning as the tax-rates/tracking-categories
+        // fetches: a genuinely empty successful fetch is cached as [] and won't retry, but a FAILED
+        // fetch must not be cached as "confirmed empty" forever for the rest of this browser session.
+        xeroDrawerState.accounts = null;
+        return null;
+      })
+      .finally(() => {
+        xeroAccountsFetchPromise = null;
+      });
+  }
+  const promise = xeroAccountsFetchPromise;
+  const accounts = await promise;
+  if (accounts?.length) refreshXeroAccountCodeControls(view);
+}
+
+// Runs once, right after the fetch resolves — swaps every plain text account-code input for the
+// live dropdown in place, same pattern as refreshXeroTaxTypeControls.
+function refreshXeroAccountCodeControls(view) {
+  const settings = xeroDrawerState.status?.settings || {};
+  const fields = [
+    { wrapper: 'salesAccountCode', dataAttr: 'data-xero-sales-account', currentValue: settings.salesAccountCode, placeholder: 'e.g. 200', filterClass: 'REVENUE' },
+    { wrapper: 'itemAccountCode', dataAttr: 'data-xero-item-account', currentValue: settings.itemAccountCode, placeholder: 'Defaults to sales account', filterClass: 'REVENUE' },
+    { wrapper: 'purchaseAccountCode', dataAttr: 'data-xero-purchase-account', currentValue: settings.purchaseAccountCode, placeholder: 'e.g. 300', filterClass: 'EXPENSE' },
+    { wrapper: 'codPaymentAccountCode', dataAttr: 'data-xero-cod-payment-account', currentValue: settings.codPaymentAccountCode, placeholder: 'e.g. 090', filterClass: 'BANK' },
+    { wrapper: 'wastageExpenseAccountCode', dataAttr: 'data-xero-wastage-expense-account', currentValue: settings.wastageExpenseAccountCode, placeholder: 'e.g. 310', filterClass: 'EXPENSE' },
+    { wrapper: 'wastageAssetAccountCode', dataAttr: 'data-xero-wastage-asset-account', currentValue: settings.wastageAssetAccountCode, placeholder: 'e.g. 630', filterClass: 'ASSET' }
+  ];
+  fields.forEach((field) => {
+    const wrapper = view.querySelector(`[data-xero-account-control="${field.wrapper}"]`);
+    if (!wrapper) return;
+    wrapper.innerHTML = renderXeroAccountCodeControl({
+      dataAttr: field.dataAttr,
+      currentValue: wrapper.querySelector('input,select')?.value || field.currentValue,
+      placeholder: field.placeholder,
+      accounts: xeroDrawerState.accounts,
+      filterClass: field.filterClass
     });
   });
 }
@@ -603,12 +691,16 @@ function bindIntegrationEvents(view) {
     button.addEventListener('click', () => {
       const tabId = button.dataset.xeroTab || 'sales';
       setActiveXeroTab(view, tabId);
-      if (tabId === 'sales' || tabId === 'purchases') loadXeroTaxRatesIfNeeded(view);
+      if (tabId === 'sales' || tabId === 'purchases') {
+        loadXeroTaxRatesIfNeeded(view);
+        loadXeroAccountsIfNeeded(view);
+      }
       if (tabId === 'purchases') loadXeroTrackingCategoriesIfNeeded(view);
     });
   });
   if (xeroDrawerState.activeTab === 'sales' || xeroDrawerState.activeTab === 'purchases') {
     loadXeroTaxRatesIfNeeded(view);
+    loadXeroAccountsIfNeeded(view);
   }
   if (xeroDrawerState.activeTab === 'purchases') {
     loadXeroTrackingCategoriesIfNeeded(view);
@@ -700,8 +792,11 @@ function bindIntegrationEvents(view) {
     const purchaseExemptTaxType = String(view.querySelector('[data-xero-purchase-exempt-tax-type]')?.value || '').trim();
     const codPaymentAccountCode = String(view.querySelector('[data-xero-cod-payment-account]')?.value || '').trim();
     const locationTrackingCategoryId = String(view.querySelector('[data-xero-location-tracking-category]')?.value || '').trim();
+    const wastageExpenseAccountCode = String(view.querySelector('[data-xero-wastage-expense-account]')?.value || '').trim();
+    const wastageAssetAccountCode = String(view.querySelector('[data-xero-wastage-asset-account]')?.value || '').trim();
     const grvSyncEnabled = view.querySelector('[data-xero-grv-enabled]')?.checked === true;
     const creditNoteSyncEnabled = view.querySelector('[data-xero-credit-note-enabled]')?.checked === true;
+    const wastageSyncEnabled = view.querySelector('[data-xero-wastage-enabled]')?.checked === true;
     await runXeroAction(view, 'Saving Xero settings...', async () => {
       await saveXeroSettings(view.dataset.workspaceId || '', {
         salesAccountCode,
@@ -714,8 +809,11 @@ function bindIntegrationEvents(view) {
         purchaseExemptTaxType,
         codPaymentAccountCode,
         locationTrackingCategoryId,
+        wastageExpenseAccountCode,
+        wastageAssetAccountCode,
         grvSyncEnabled,
-        creditNoteSyncEnabled
+        creditNoteSyncEnabled,
+        wastageSyncEnabled
       });
       setXeroModalStatus(view, 'Xero settings saved.', 'success');
       bindXeroStatus(view, view.dataset.workspaceId || '', { once: true });
@@ -802,6 +900,30 @@ function bindIntegrationEvents(view) {
       setXeroModalStatus(view, message, failed ? 'error' : 'success');
       bindXeroStatus(view, view.dataset.workspaceId || '', { once: true });
     });
+  });
+
+  const runXeroWastagePush = async (kind, busyMessage) => {
+    await runXeroAction(view, busyMessage, async () => {
+      const result = await syncXeroNow(view.dataset.workspaceId || '', kind);
+      const status = String(result?.result?.status || '');
+      const label = status === 'applied' ? 'Wastage journal pushed to Xero.'
+        : status === 'updated' ? "Today's Xero wastage journal updated with all wastage so far."
+        : status === 'duplicate' ? 'Already pushed for that day — skipped.'
+        : status === 'skipped_no_wastage' ? 'No wastage found for that day.'
+        : result?.result?.error || 'Wastage push failed.';
+      setXeroModalStatus(view, label, status === 'failed' ? 'error' : 'success');
+      bindXeroStatus(view, view.dataset.workspaceId || '', { once: true });
+    });
+  };
+
+  view.querySelector('[data-xero-sync-wastage]')?.addEventListener('click', () => {
+    runXeroWastagePush('wastage', 'Pushing yesterday’s wastage to Xero...');
+  });
+
+  // Unlike the yesterday push above, this re-sends the FULL set of today's wastage on every click —
+  // same "top up" pattern as data-xero-sync-invoice-today (see upsertXeroTodayWastage).
+  view.querySelector('[data-xero-sync-wastage-today]')?.addEventListener('click', () => {
+    runXeroWastagePush('wastage-today', "Pushing today's wastage to Xero...");
   });
 
   // Match-only, never creates a Contact (same "ask before creating" policy as the pending-matches
@@ -1211,6 +1333,7 @@ function renderXeroModal({ canManageXero = false } = {}) {
   const syncEnabled = settings.enabled === true;
   const grvSyncEnabled = settings.grvSyncEnabled === true;
   const creditNoteSyncEnabled = settings.creditNoteSyncEnabled === true;
+  const wastageSyncEnabled = settings.wastageSyncEnabled === true;
   const pendingSupplierMatches = status.pendingSupplierMatches || [];
   const pendingCount = pendingSupplierMatches.length;
   const noticeTone = xeroDrawerState.tone ? ` data-tone="${escapeAttribute(xeroDrawerState.tone)}"` : '';
@@ -1260,6 +1383,10 @@ function renderXeroModal({ canManageXero = false } = {}) {
               <span>Last Credit Notes pushed</span>
               <strong data-xero-credit-note-sync>${escapeHtml(settings.lastCreditNoteSyncDate || 'None yet')}</strong>
             </article>
+            <article>
+              <span>Last wastage pushed</span>
+              <strong data-xero-wastage-sync>${escapeHtml(settings.lastWastageSyncDate || 'None yet')}</strong>
+            </article>
             <article class="${pendingCount ? 'xeroStatRail--warning' : ''}">
               <span>Needs attention</span>
               <strong data-xero-pending-count>${pendingCount ? `${pendingCount} supplier${pendingCount === 1 ? '' : 's'}` : 'None'}</strong>
@@ -1287,7 +1414,7 @@ function renderXeroModal({ canManageXero = false } = {}) {
               <div class="xeroFieldGrid">
                 <label>
                   <span>Sales account code</span>
-                  <input type="text" placeholder="e.g. 200" value="${escapeAttribute(settings.salesAccountCode || '')}" data-xero-sales-account />
+                  <span data-xero-account-control="salesAccountCode">${renderXeroAccountCodeControl({ dataAttr: 'data-xero-sales-account', currentValue: settings.salesAccountCode, placeholder: 'e.g. 200', accounts: xeroDrawerState.accounts, filterClass: 'REVENUE' })}</span>
                 </label>
                 <label>
                   <span>Tax type</span>
@@ -1300,7 +1427,7 @@ function renderXeroModal({ canManageXero = false } = {}) {
                 </label>
                 <label class="xeroFieldGrid--span2">
                   <span>Item account <em>optional, defaults to sales account</em></span>
-                  <input type="text" placeholder="Defaults to sales account" value="${escapeAttribute(settings.itemAccountCode || '')}" data-xero-item-account />
+                  <span data-xero-account-control="itemAccountCode">${renderXeroAccountCodeControl({ dataAttr: 'data-xero-item-account', currentValue: settings.itemAccountCode, placeholder: 'Defaults to sales account', accounts: xeroDrawerState.accounts, filterClass: 'REVENUE' })}</span>
                 </label>
               </div>
               <label class="xeroToggleRow">
@@ -1320,7 +1447,7 @@ function renderXeroModal({ canManageXero = false } = {}) {
               <div class="xeroFieldGrid">
                 <label>
                   <span>Purchases account code</span>
-                  <input type="text" placeholder="e.g. 300" value="${escapeAttribute(settings.purchaseAccountCode || '')}" data-xero-purchase-account />
+                  <span data-xero-account-control="purchaseAccountCode">${renderXeroAccountCodeControl({ dataAttr: 'data-xero-purchase-account', currentValue: settings.purchaseAccountCode, placeholder: 'e.g. 300', accounts: xeroDrawerState.accounts, filterClass: 'EXPENSE' })}</span>
                 </label>
                 <label>
                   <span>Purchases tax type</span>
@@ -1333,13 +1460,22 @@ function renderXeroModal({ canManageXero = false } = {}) {
                 </label>
                 <label class="xeroFieldGrid--span2">
                   <span>COD payment account <em>optional</em></span>
-                  <input type="text" placeholder="e.g. 090" value="${escapeAttribute(settings.codPaymentAccountCode || '')}" data-xero-cod-payment-account />
+                  <span data-xero-account-control="codPaymentAccountCode">${renderXeroAccountCodeControl({ dataAttr: 'data-xero-cod-payment-account', currentValue: settings.codPaymentAccountCode, placeholder: 'e.g. 090', accounts: xeroDrawerState.accounts, filterClass: 'BANK' })}</span>
                   <small class="xeroFieldHint">Bank account COD supplier GRVs are marked paid from. Leave blank to push them Authorised without a payment.</small>
                 </label>
                 <label class="xeroFieldGrid--span2">
                   <span>Location tracking category <em>optional</em></span>
                   <span data-xero-tax-control="locationTrackingCategoryId">${renderXeroTrackingCategoryControl({ currentValue: settings.locationTrackingCategoryId, trackingCategories: xeroDrawerState.trackingCategories })}</span>
                   <small class="xeroFieldHint">Tags GRVs, Credit Notes, and daily sales lines with a Xero Tracking Option matching the KCP location — lets Xero report P&amp;L per location. Matched by name; a location with no matching option is pushed without tracking.</small>
+                </label>
+                <label>
+                  <span>Wastage expense account</span>
+                  <span data-xero-account-control="wastageExpenseAccountCode">${renderXeroAccountCodeControl({ dataAttr: 'data-xero-wastage-expense-account', currentValue: settings.wastageExpenseAccountCode, placeholder: 'e.g. 310', accounts: xeroDrawerState.accounts, filterClass: 'EXPENSE' })}</span>
+                </label>
+                <label>
+                  <span>Inventory asset account</span>
+                  <span data-xero-account-control="wastageAssetAccountCode">${renderXeroAccountCodeControl({ dataAttr: 'data-xero-wastage-asset-account', currentValue: settings.wastageAssetAccountCode, placeholder: 'e.g. 630', accounts: xeroDrawerState.accounts, filterClass: 'ASSET' })}</span>
+                  <small class="xeroFieldHint">Wastage posts as a Manual Journal: debits the expense account above, credits this inventory account, for that day's stock write-offs.</small>
                 </label>
               </div>
               <label class="xeroToggleRow">
@@ -1349,6 +1485,10 @@ function renderXeroModal({ canManageXero = false } = {}) {
               <label class="xeroToggleRow">
                 <span class="xeroToggleCopy"><strong>Push Credit Notes to Xero daily</strong><small>Sent as Draft Credit Notes against the same supplier — reduces what's owed once a bookkeeper approves it.</small></span>
                 <input type="checkbox" data-xero-credit-note-enabled ${creditNoteSyncEnabled ? 'checked' : ''} />
+              </label>
+              <label class="xeroToggleRow">
+                <span class="xeroToggleCopy"><strong>Push wastage to Xero daily</strong><small>Sent as one Manual Journal per day summarising that day's stock write-offs.</small></span>
+                <input type="checkbox" data-xero-wastage-enabled ${wastageSyncEnabled ? 'checked' : ''} />
               </label>
               <div class="xeroFormActions">
                 <button type="submit" class="xeroCompactButton xeroCompactButton--primary" data-xero-settings-submit>
@@ -1384,6 +1524,14 @@ function renderXeroModal({ canManageXero = false } = {}) {
               <button type="button" class="xeroCompactButton" data-xero-sync-credit-notes ${isConnected ? '' : 'disabled'}>
                 ${icon('link')}
                 <span>Sync Credit Notes now</span>
+              </button>
+              <button type="button" class="xeroCompactButton" data-xero-sync-wastage-today ${isConnected ? '' : 'disabled'}>
+                ${icon('link')}
+                <span>Push today's wastage</span>
+              </button>
+              <button type="button" class="xeroCompactButton" data-xero-sync-wastage ${isConnected ? '' : 'disabled'}>
+                ${icon('link')}
+                <span>Push yesterday's wastage</span>
               </button>
               <button type="button" class="xeroCompactButton" data-xero-sync-suppliers ${isConnected ? '' : 'disabled'}>
                 ${icon('link')}
@@ -1522,34 +1670,33 @@ function updateGmailStatus(view, status = {}, options = {}) {
 // subscribe and right after an action completes (see bindXeroStatus/its {once:true} call sites) —
 // never on a timer — so it never clobbers input the user is actively mid-typing.
 function refreshXeroSettingsFormFields(view, settings) {
-  const setValue = (selector, value) => {
-    const el = view.querySelector(selector);
-    if (el) el.value = value || '';
-  };
   const setChecked = (selector, checked) => {
     const el = view.querySelector(selector);
     if (el) el.checked = checked === true;
   };
-  setValue('[data-xero-sales-account]', settings.salesAccountCode);
-  setValue('[data-xero-item-account]', settings.itemAccountCode);
   setChecked('[data-xero-enabled]', settings.enabled);
-  setValue('[data-xero-purchase-account]', settings.purchaseAccountCode);
-  setValue('[data-xero-cod-payment-account]', settings.codPaymentAccountCode);
   setChecked('[data-xero-grv-enabled]', settings.grvSyncEnabled);
   setChecked('[data-xero-credit-note-enabled]', settings.creditNoteSyncEnabled);
-  // The tax-type/location-tracking controls are live-pickers that manage their own refresh once
-  // their fetch resolves (refreshXeroTaxTypeControls/refreshXeroTrackingCategoryControl). Before
-  // that fetch completes they're still a plain fallback <input> — setComboboxValue's plain `.value`
-  // path covers that case. Once the fetch resolves, renderXeroCombobox has already replaced the
-  // fallback with a custom combobox (hidden <input> + a separate visible trigger label) — a plain
-  // `.value =` there would silently desync the hidden value from what the user actually SEES, so
-  // this also re-derives and updates the visible label/selected option from the same options list
-  // the combobox itself was built from.
+  setChecked('[data-xero-wastage-enabled]', settings.wastageSyncEnabled);
+  // The tax-type/location-tracking/account-code controls are live-pickers that manage their own
+  // refresh once their fetch resolves (refreshXeroTaxTypeControls/refreshXeroTrackingCategoryControl/
+  // refreshXeroAccountCodeControls). Before that fetch completes they're still a plain fallback
+  // <input> — setComboboxValue's plain `.value` path covers that case. Once the fetch resolves,
+  // renderXeroCombobox has already replaced the fallback with a custom combobox (hidden <input> + a
+  // separate visible trigger label) — a plain `.value =` there would silently desync the hidden
+  // value from what the user actually SEES, so this also re-derives and updates the visible
+  // label/selected option from the same options list the combobox itself was built from.
   setComboboxValue(view, 'data-xero-tax-type', settings.defaultTaxType, xeroDrawerState.taxRates && buildXeroTaxRateOptions(xeroDrawerState.taxRates, 'revenue'));
   setComboboxValue(view, 'data-xero-sales-exempt-tax-type', settings.salesExemptTaxType, xeroDrawerState.taxRates && buildXeroTaxRateOptions(xeroDrawerState.taxRates, 'revenue'));
   setComboboxValue(view, 'data-xero-purchase-tax-type', settings.purchaseTaxType, xeroDrawerState.taxRates && buildXeroTaxRateOptions(xeroDrawerState.taxRates, 'expenses'));
   setComboboxValue(view, 'data-xero-purchase-exempt-tax-type', settings.purchaseExemptTaxType, xeroDrawerState.taxRates && buildXeroTaxRateOptions(xeroDrawerState.taxRates, 'expenses'));
   setComboboxValue(view, 'data-xero-location-tracking-category', settings.locationTrackingCategoryId, xeroDrawerState.trackingCategories && buildXeroTrackingCategoryOptions(xeroDrawerState.trackingCategories));
+  setComboboxValue(view, 'data-xero-sales-account', settings.salesAccountCode, xeroDrawerState.accounts && buildXeroAccountOptions(xeroDrawerState.accounts, 'REVENUE'));
+  setComboboxValue(view, 'data-xero-item-account', settings.itemAccountCode, xeroDrawerState.accounts && buildXeroAccountOptions(xeroDrawerState.accounts, 'REVENUE'));
+  setComboboxValue(view, 'data-xero-purchase-account', settings.purchaseAccountCode, xeroDrawerState.accounts && buildXeroAccountOptions(xeroDrawerState.accounts, 'EXPENSE'));
+  setComboboxValue(view, 'data-xero-cod-payment-account', settings.codPaymentAccountCode, xeroDrawerState.accounts && buildXeroAccountOptions(xeroDrawerState.accounts, 'BANK'));
+  setComboboxValue(view, 'data-xero-wastage-expense-account', settings.wastageExpenseAccountCode, xeroDrawerState.accounts && buildXeroAccountOptions(xeroDrawerState.accounts, 'EXPENSE'));
+  setComboboxValue(view, 'data-xero-wastage-asset-account', settings.wastageAssetAccountCode, xeroDrawerState.accounts && buildXeroAccountOptions(xeroDrawerState.accounts, 'ASSET'));
 }
 
 // Syncs a combobox field to a fresh server value on both paths it can currently be in: still the
@@ -1578,6 +1725,7 @@ function updateXeroStatus(view, status = {}, options = {}) {
   if (!options.skipCache) cacheXeroStatus(view.dataset.workspaceId || '', status);
   if (status.connectionActive === true && (xeroDrawerState.activeTab === 'sales' || xeroDrawerState.activeTab === 'purchases')) {
     loadXeroTaxRatesIfNeeded(view);
+    loadXeroAccountsIfNeeded(view);
   }
   if (status.connectionActive === true && xeroDrawerState.activeTab === 'purchases') {
     loadXeroTrackingCategoriesIfNeeded(view);
@@ -1898,10 +2046,10 @@ function setGmailBusy(view, busy) {
 
 function setXeroBusy(view, busy) {
   xeroDrawerState.busy = busy;
-  view.querySelectorAll('[data-xero-connect], [data-xero-disconnect], [data-xero-sync-items], [data-xero-sync-invoice], [data-xero-sync-invoice-today], [data-xero-sync-grv], [data-xero-sync-credit-notes], [data-xero-sync-suppliers], [data-xero-settings-submit]').forEach((button) => {
+  view.querySelectorAll('[data-xero-connect], [data-xero-disconnect], [data-xero-sync-items], [data-xero-sync-invoice], [data-xero-sync-invoice-today], [data-xero-sync-grv], [data-xero-sync-credit-notes], [data-xero-sync-wastage], [data-xero-sync-wastage-today], [data-xero-sync-suppliers], [data-xero-settings-submit]').forEach((button) => {
     const isDisconnect = button.hasAttribute('data-xero-disconnect');
     const isConnect = button.hasAttribute('data-xero-connect');
-    const isSync = button.hasAttribute('data-xero-sync-items') || button.hasAttribute('data-xero-sync-invoice') || button.hasAttribute('data-xero-sync-invoice-today') || button.hasAttribute('data-xero-sync-grv') || button.hasAttribute('data-xero-sync-credit-notes') || button.hasAttribute('data-xero-sync-suppliers');
+    const isSync = button.hasAttribute('data-xero-sync-items') || button.hasAttribute('data-xero-sync-invoice') || button.hasAttribute('data-xero-sync-invoice-today') || button.hasAttribute('data-xero-sync-grv') || button.hasAttribute('data-xero-sync-credit-notes') || button.hasAttribute('data-xero-sync-wastage') || button.hasAttribute('data-xero-sync-wastage-today') || button.hasAttribute('data-xero-sync-suppliers');
     button.disabled = busy ||
       (isConnect && xeroDrawerState.status?.configured === false) ||
       (isDisconnect && xeroDrawerState.status?.connectionActive !== true) ||

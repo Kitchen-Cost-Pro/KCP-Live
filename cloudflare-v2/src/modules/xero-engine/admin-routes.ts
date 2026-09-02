@@ -2,7 +2,7 @@ import type { AuthContext, Env } from '../../legacy/types';
 import { text, nowIso, xeroConfigured, xeroRedirectUri } from './config';
 import { signXeroState, verifyXeroState, buildXeroAuthorizeUrl, exchangeXeroCode, fetchXeroConnections } from './oauth';
 import { getXeroConnection, saveXeroConnection, disconnectXero } from './connection';
-import { fetchXeroTaxRates, fetchXeroTrackingCategories, XeroApiClientError } from './api-client';
+import { fetchXeroTaxRates, fetchXeroTrackingCategories, fetchXeroAccounts, XeroApiClientError } from './api-client';
 import { canManageXero } from './admin-permissions';
 import { syncXeroItemsForWorkspace } from './item-sync';
 import { syncXeroDailyInvoice, upsertXeroTodayInvoice, claimDailyInvoiceSyncIfDue, releaseDailyInvoiceSyncClaim, yesterdayDateKey, todayDateKey } from './invoice-sync';
@@ -20,6 +20,12 @@ import {
   claimDailyCreditNoteSyncIfDue,
   releaseDailyCreditNoteSyncClaim
 } from './credit-note-sync';
+import {
+  syncXeroDailyWastage,
+  upsertXeroTodayWastage,
+  claimDailyWastageSyncIfDue,
+  releaseDailyWastageSyncClaim
+} from './wastage-sync';
 
 function response(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
@@ -63,13 +69,17 @@ interface SyncSettingsRow {
   purchase_exempt_tax_type: string | null;
   cod_payment_account_code: string | null;
   location_tracking_category_id: string | null;
+  wastage_expense_account_code: string | null;
+  wastage_asset_account_code: string | null;
   enabled: number;
   grv_sync_enabled: number;
   credit_note_sync_enabled: number;
+  wastage_sync_enabled: number;
   last_item_sync_at: string | null;
   last_invoice_sync_date: string | null;
   last_grv_sync_date: string | null;
   last_credit_note_sync_date: string | null;
+  last_wastage_sync_date: string | null;
 }
 
 async function getSyncSettings(env: Env, workspaceId: string): Promise<SyncSettingsRow | null> {
@@ -99,13 +109,17 @@ async function getStatus(env: Env, workspaceId: string) {
           purchaseExemptTaxType: text(settings.purchase_exempt_tax_type),
           codPaymentAccountCode: text(settings.cod_payment_account_code),
           locationTrackingCategoryId: text(settings.location_tracking_category_id),
+          wastageExpenseAccountCode: text(settings.wastage_expense_account_code),
+          wastageAssetAccountCode: text(settings.wastage_asset_account_code),
           enabled: Boolean(settings.enabled),
           grvSyncEnabled: Boolean(settings.grv_sync_enabled),
           creditNoteSyncEnabled: Boolean(settings.credit_note_sync_enabled),
+          wastageSyncEnabled: Boolean(settings.wastage_sync_enabled),
           lastItemSyncAt: text(settings.last_item_sync_at),
           lastInvoiceSyncDate: text(settings.last_invoice_sync_date),
           lastGrvSyncDate: text(settings.last_grv_sync_date),
-          lastCreditNoteSyncDate: text(settings.last_credit_note_sync_date)
+          lastCreditNoteSyncDate: text(settings.last_credit_note_sync_date),
+          lastWastageSyncDate: text(settings.last_wastage_sync_date)
         }
       : null,
     pendingSupplierMatches
@@ -180,8 +194,11 @@ async function postSettings(request: Request, env: Env, workspaceId: string) {
   const purchaseExemptTaxType = text(body.purchaseExemptTaxType);
   const codPaymentAccountCode = text(body.codPaymentAccountCode);
   const locationTrackingCategoryId = text(body.locationTrackingCategoryId);
+  const wastageExpenseAccountCode = text(body.wastageExpenseAccountCode);
+  const wastageAssetAccountCode = text(body.wastageAssetAccountCode);
   const grvSyncEnabled = Boolean(body.grvSyncEnabled);
   const creditNoteSyncEnabled = Boolean(body.creditNoteSyncEnabled);
+  const wastageSyncEnabled = Boolean(body.wastageSyncEnabled);
   if (enabled && (!salesAccountCode || !defaultTaxType)) {
     return response({ ok: false, error: 'A sales account code and tax type are required before enabling sync.' }, 400);
   }
@@ -200,9 +217,12 @@ async function postSettings(request: Request, env: Env, workspaceId: string) {
   if (creditNoteSyncEnabled && (!purchaseAccountCode || !purchaseTaxType)) {
     return response({ ok: false, error: 'A purchases account code and tax type are required before enabling Credit Note sync.' }, 400);
   }
+  if (wastageSyncEnabled && (!wastageExpenseAccountCode || !wastageAssetAccountCode)) {
+    return response({ ok: false, error: 'A wastage expense account and an inventory asset account are required before enabling wastage sync.' }, 400);
+  }
   await env.DB.prepare(
-    `INSERT INTO xero_sync_settings (workspace_id, sales_account_code, default_tax_type, sales_exempt_tax_type, item_account_code, enabled, purchase_account_code, purchase_tax_type, purchase_exempt_tax_type, cod_payment_account_code, location_tracking_category_id, grv_sync_enabled, credit_note_sync_enabled, created_at, updated_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)
+    `INSERT INTO xero_sync_settings (workspace_id, sales_account_code, default_tax_type, sales_exempt_tax_type, item_account_code, enabled, purchase_account_code, purchase_tax_type, purchase_exempt_tax_type, cod_payment_account_code, location_tracking_category_id, wastage_expense_account_code, wastage_asset_account_code, grv_sync_enabled, credit_note_sync_enabled, wastage_sync_enabled, created_at, updated_at)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?17)
      ON CONFLICT(workspace_id) DO UPDATE SET
        sales_account_code = excluded.sales_account_code,
        default_tax_type = excluded.default_tax_type,
@@ -214,11 +234,32 @@ async function postSettings(request: Request, env: Env, workspaceId: string) {
        purchase_exempt_tax_type = excluded.purchase_exempt_tax_type,
        cod_payment_account_code = excluded.cod_payment_account_code,
        location_tracking_category_id = excluded.location_tracking_category_id,
+       wastage_expense_account_code = excluded.wastage_expense_account_code,
+       wastage_asset_account_code = excluded.wastage_asset_account_code,
        grv_sync_enabled = excluded.grv_sync_enabled,
        credit_note_sync_enabled = excluded.credit_note_sync_enabled,
+       wastage_sync_enabled = excluded.wastage_sync_enabled,
        updated_at = excluded.updated_at`
   )
-    .bind(workspaceId, salesAccountCode, defaultTaxType, salesExemptTaxType, itemAccountCode, enabled ? 1 : 0, purchaseAccountCode, purchaseTaxType, purchaseExemptTaxType, codPaymentAccountCode, locationTrackingCategoryId, grvSyncEnabled ? 1 : 0, creditNoteSyncEnabled ? 1 : 0, nowIso())
+    .bind(
+      workspaceId,
+      salesAccountCode,
+      defaultTaxType,
+      salesExemptTaxType,
+      itemAccountCode,
+      enabled ? 1 : 0,
+      purchaseAccountCode,
+      purchaseTaxType,
+      purchaseExemptTaxType,
+      codPaymentAccountCode,
+      locationTrackingCategoryId,
+      wastageExpenseAccountCode,
+      wastageAssetAccountCode,
+      grvSyncEnabled ? 1 : 0,
+      creditNoteSyncEnabled ? 1 : 0,
+      wastageSyncEnabled ? 1 : 0,
+      nowIso()
+    )
     .run();
   return response({ ok: true });
 }
@@ -243,7 +284,14 @@ async function postSyncNow(env: Env, workspaceId: string, kind: string) {
   // their own branches below) — neither needs sales_account_code/default_tax_type, which only
   // gate the sales-side kinds. Supplier matching needs no account-code/tax setup at all — it only
   // reads/matches Contacts.
-  if (kind !== 'grv' && kind !== 'credit-notes' && kind !== 'suppliers' && (!settings.sales_account_code || !settings.default_tax_type)) {
+  if (
+    kind !== 'grv' &&
+    kind !== 'credit-notes' &&
+    kind !== 'wastage' &&
+    kind !== 'wastage-today' &&
+    kind !== 'suppliers' &&
+    (!settings.sales_account_code || !settings.default_tax_type)
+  ) {
     return response({ ok: false, error: 'Set a sales account code and tax type in Xero settings first.' }, 400);
   }
   if (kind === 'suppliers') {
@@ -311,7 +359,32 @@ async function postSyncNow(env: Env, workspaceId: string, kind: string) {
     });
     return response({ ok: true, result });
   }
-  return response({ ok: false, error: 'Unknown sync kind. Use "items", "invoice", "invoice-today", "grv", "credit-notes", or "suppliers".' }, 400);
+  if (kind === 'wastage') {
+    if (!settings.wastage_expense_account_code || !settings.wastage_asset_account_code) {
+      return response({ ok: false, error: 'Set a wastage expense account and an inventory asset account in Xero settings first.' }, 400);
+    }
+    const startHour = await getWorkspaceTradingDayStartHour(env, workspaceId);
+    const dateKey = yesterdayDateKey(startHour);
+    const result = await syncXeroDailyWastage(env, workspaceId, dateKey, {
+      wastageExpenseAccountCode: text(settings.wastage_expense_account_code),
+      wastageAssetAccountCode: text(settings.wastage_asset_account_code),
+      locationTrackingCategoryId: text(settings.location_tracking_category_id)
+    }, startHour);
+    return response({ ok: true, dateKey, result });
+  }
+  if (kind === 'wastage-today') {
+    if (!settings.wastage_expense_account_code || !settings.wastage_asset_account_code) {
+      return response({ ok: false, error: 'Set a wastage expense account and an inventory asset account in Xero settings first.' }, 400);
+    }
+    const startHour = await getWorkspaceTradingDayStartHour(env, workspaceId);
+    const result = await upsertXeroTodayWastage(env, workspaceId, {
+      wastageExpenseAccountCode: text(settings.wastage_expense_account_code),
+      wastageAssetAccountCode: text(settings.wastage_asset_account_code),
+      locationTrackingCategoryId: text(settings.location_tracking_category_id)
+    }, startHour);
+    return response({ ok: true, dateKey: todayDateKey(startHour), result });
+  }
+  return response({ ok: false, error: 'Unknown sync kind. Use "items", "invoice", "invoice-today", "grv", "credit-notes", "wastage", "wastage-today", or "suppliers".' }, 400);
 }
 
 async function runDueInvoiceSync(env: Env, workspaceId: string) {
@@ -386,13 +459,37 @@ async function runDueCreditNoteSync(env: Env, workspaceId: string) {
   return { dateKey: claim.dateKey, result } as const;
 }
 
+// Wastage is claimed/released independently of the other syncs above, same reasoning as
+// runDueGrvSync/runDueCreditNoteSync — but trading-day-bound like the sales invoice claim, since
+// aggregateDailyWastageLines sums one specific trading day's stock_movements (unlike GRV/Credit
+// Note, which aren't date-bounded scans).
+async function runDueWastageSync(env: Env, workspaceId: string) {
+  const startHour = await getWorkspaceTradingDayStartHour(env, workspaceId);
+  const claim = await claimDailyWastageSyncIfDue(env, workspaceId, startHour);
+  if (!claim.due || !claim.dateKey) return { skipped: true } as const;
+  const settings = await getSyncSettings(env, workspaceId);
+  if (!settings || !settings.wastage_expense_account_code || !settings.wastage_asset_account_code) {
+    await releaseDailyWastageSyncClaim(env, workspaceId, claim.dateKey, false);
+    return { skipped: true, reason: 'Xero wastage sync settings incomplete.' } as const;
+  }
+  const result = await syncXeroDailyWastage(env, workspaceId, claim.dateKey, {
+    wastageExpenseAccountCode: text(settings.wastage_expense_account_code),
+    wastageAssetAccountCode: text(settings.wastage_asset_account_code),
+    locationTrackingCategoryId: text(settings.location_tracking_category_id)
+  }, startHour);
+  const success = result.status === 'applied' || result.status === 'duplicate' || result.status === 'skipped_no_wastage';
+  await releaseDailyWastageSyncClaim(env, workspaceId, claim.dateKey, success);
+  return { dateKey: claim.dateKey, result } as const;
+}
+
 async function postDueCheck(env: Env, workspaceId: string) {
-  const [invoice, grv, creditNotes] = await Promise.all([
+  const [invoice, grv, creditNotes, wastage] = await Promise.all([
     runDueInvoiceSync(env, workspaceId),
     runDueGrvSync(env, workspaceId),
-    runDueCreditNoteSync(env, workspaceId)
+    runDueCreditNoteSync(env, workspaceId),
+    runDueWastageSync(env, workspaceId)
   ]);
-  return response({ ok: true, invoice, grv, creditNotes });
+  return response({ ok: true, invoice, grv, creditNotes, wastage });
 }
 
 export async function handleXeroAdminRoute(
@@ -444,6 +541,14 @@ export async function handleXeroAdminRoute(
       return response({ ok: true, trackingCategories: await fetchXeroTrackingCategories(env, workspaceId) });
     } catch (cause) {
       const message = cause instanceof XeroApiClientError ? cause.message : cause instanceof Error ? cause.message : 'Could not load Xero tracking categories.';
+      return response({ ok: false, error: message }, 400);
+    }
+  }
+  if (request.method === 'GET' && resource === 'xero/accounts') {
+    try {
+      return response({ ok: true, accounts: await fetchXeroAccounts(env, workspaceId) });
+    } catch (cause) {
+      const message = cause instanceof XeroApiClientError ? cause.message : cause instanceof Error ? cause.message : 'Could not load Xero accounts.';
       return response({ ok: false, error: message }, 400);
     }
   }

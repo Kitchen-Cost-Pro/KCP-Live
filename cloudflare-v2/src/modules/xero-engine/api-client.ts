@@ -207,6 +207,38 @@ export async function fetchXeroTrackingCategories(env: Env, workspaceId: string)
     .filter((category) => category.id);
 }
 
+export interface XeroAccountSummary {
+  code: string;
+  name: string;
+  type: string;
+  class: string;
+  status: string;
+}
+
+/**
+ * Same reasoning as `fetchXeroTaxRates`: every account-code field in the settings form (sales,
+ * item, purchases, COD payment, wastage expense/asset) was a free-text input a person had to know
+ * the raw Xero GL code for, with no way to tell from inside KCP whether that code still exists or
+ * is Active in this organisation. Surfaces the real Chart of Accounts so each field can be a
+ * dropdown filtered by `class` (e.g. REVENUE for sales, EXPENSE for purchases/wastage, ASSET for
+ * the wastage inventory account, BANK for the COD payment account) instead of a typed guess.
+ */
+export async function fetchXeroAccounts(env: Env, workspaceId: string): Promise<XeroAccountSummary[]> {
+  const result = await executeXeroApiRequest(env, workspaceId, { method: 'GET', path: 'Accounts' });
+  const accounts = (result.Accounts as
+    | Array<{ Code?: string; Name?: string; Type?: string; Class?: string; Status?: string }>
+    | undefined) || [];
+  return accounts
+    .map((account) => ({
+      code: text(account.Code),
+      name: text(account.Name),
+      type: text(account.Type),
+      class: text(account.Class),
+      status: text(account.Status) || 'UNKNOWN'
+    }))
+    .filter((account) => account.code && account.status === 'ACTIVE');
+}
+
 /**
  * Attachment upload — Xero's `PUT /Invoices/{InvoiceID}/Attachments/{FileName}` (used for Bills
  * too, since a Bill is just an Invoice with Type ACCPAY) takes the raw file bytes as the body with

@@ -210,3 +210,47 @@ ALTER TABLE xero_sync_settings ADD COLUMN credit_note_sync_claimed_at TEXT;
 export const XERO_V2_LOCATION_TRACKING_MIGRATION = `
 ALTER TABLE xero_sync_settings ADD COLUMN location_tracking_category_id TEXT;
 `;
+
+/**
+ * Wastage -> Xero Manual Journal push. Unlike GRV/Credit Note, wastage has no supplier and isn't a
+ * purchase document, so it doesn't fit the Bill/Credit-Note shape — it posts as ONE re-computable
+ * daily aggregate Manual Journal (debit wastage_expense_account_code, credit
+ * wastage_asset_account_code), mirroring invoice-sync.ts's syncXeroDailyInvoice/
+ * upsertXeroTodayInvoice pair rather than the per-document GRV/Credit-Note pattern. No tax type
+ * column: an internal inventory write-off isn't a supply or purchase, so its journal lines carry no
+ * VAT — same reasoning as why ITEM_PUSH lines don't have one either.
+ *
+ * Needs the same _next-table CHECK-constraint rebuild as the earlier *_PUSH migrations to add the
+ * WASTAGE_PUSH effect type. Own independent daily claim (wastage_sync_enabled/
+ * last_wastage_sync_date/wastage_sync_claimed_at), same pattern as grv/credit-note, so a wastage
+ * sync failure never blocks or is blocked by any other sync.
+ */
+export const XERO_V2_WASTAGE_PUSH_MIGRATION = `
+DROP TABLE IF EXISTS xero_v2_effect_outbox_next;
+CREATE TABLE xero_v2_effect_outbox_next (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  effect_type TEXT NOT NULL CHECK (effect_type IN ('ITEM_PUSH', 'INVOICE_PUSH', 'GRV_PUSH', 'GRV_ATTACHMENT', 'GRV_PAYMENT', 'CREDIT_NOTE_PUSH', 'WASTAGE_PUSH')),
+  effect_key TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'PROCESSING' CHECK (status IN ('PROCESSING', 'APPLIED', 'FAILED')),
+  xero_object_id TEXT,
+  attempt_count INTEGER NOT NULL DEFAULT 1,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (workspace_id, effect_type, effect_key)
+);
+INSERT INTO xero_v2_effect_outbox_next (id, workspace_id, effect_type, effect_key, status, xero_object_id, attempt_count, last_error, created_at, updated_at)
+  SELECT id, workspace_id, effect_type, effect_key, status, xero_object_id, attempt_count, last_error, created_at, updated_at
+  FROM xero_v2_effect_outbox;
+DROP TABLE xero_v2_effect_outbox;
+ALTER TABLE xero_v2_effect_outbox_next RENAME TO xero_v2_effect_outbox;
+CREATE INDEX IF NOT EXISTS idx_xero_v2_effect_outbox_workspace_status
+  ON xero_v2_effect_outbox(workspace_id, effect_type, status);
+
+ALTER TABLE xero_sync_settings ADD COLUMN wastage_expense_account_code TEXT;
+ALTER TABLE xero_sync_settings ADD COLUMN wastage_asset_account_code TEXT;
+ALTER TABLE xero_sync_settings ADD COLUMN wastage_sync_enabled INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE xero_sync_settings ADD COLUMN last_wastage_sync_date TEXT;
+ALTER TABLE xero_sync_settings ADD COLUMN wastage_sync_claimed_at TEXT;
+`;
