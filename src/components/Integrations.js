@@ -162,12 +162,115 @@ const xeroDrawerState = {
   trackingCategoriesLoading: false
 };
 
+function closeAllXeroComboboxes(view) {
+  view.querySelectorAll('[data-xero-combobox-list]').forEach((list) => { list.hidden = true; });
+  view.querySelectorAll('[data-xero-combobox-trigger]').forEach((trigger) => trigger.setAttribute('aria-expanded', 'false'));
+}
+
+// One delegated listener, bound ONCE when the Xero modal's events are wired, rather than
+// per-element listeners on each trigger/option — the combobox markup gets swapped in dynamically
+// after the tax-rates/tracking-categories fetch resolves, which would destroy any listeners
+// attached to the earlier (plain-input-fallback) elements. Delegation survives that swap because it
+// re-checks the live event target on every click rather than holding a stale element reference.
+function bindXeroComboboxEvents(view) {
+  if (view.dataset.xeroComboboxBound === 'true') return;
+  view.dataset.xeroComboboxBound = 'true';
+  view.addEventListener('click', (event) => {
+    const trigger = event.target.closest('[data-xero-combobox-trigger]');
+    if (trigger) {
+      const combobox = trigger.closest('[data-xero-combobox]');
+      const list = combobox?.querySelector('[data-xero-combobox-list]');
+      const wasOpen = list ? !list.hidden : false;
+      closeAllXeroComboboxes(view);
+      if (list && !wasOpen) {
+        list.hidden = false;
+        trigger.setAttribute('aria-expanded', 'true');
+      }
+      return;
+    }
+    const option = event.target.closest('[data-xero-combobox-list] .xeroComboboxOption');
+    if (option) {
+      const combobox = option.closest('[data-xero-combobox]');
+      const hiddenInput = combobox?.querySelector('input[type="hidden"]');
+      const label = combobox?.querySelector('[data-xero-combobox-label]');
+      if (hiddenInput) hiddenInput.value = option.dataset.value || '';
+      if (label) label.textContent = option.textContent.trim();
+      combobox?.querySelectorAll('.xeroComboboxOption').forEach((candidate) => {
+        const isSelected = candidate === option;
+        candidate.classList.toggle('is-selected', isSelected);
+        candidate.setAttribute('aria-selected', String(isSelected));
+      });
+      closeAllXeroComboboxes(view);
+      return;
+    }
+    if (!event.target.closest('[data-xero-combobox]')) closeAllXeroComboboxes(view);
+  });
+  view.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && view.querySelector('[data-xero-combobox-list]:not([hidden])')) {
+      closeAllXeroComboboxes(view);
+    }
+  });
+}
+
+// A native <select>'s CLOSED control can be fully CSS-styled, but its OPEN popup list is rendered
+// by the OS/browser and can't be restyled in Chrome/Safari (only Firefox partially allows it) — a
+// real platform limitation, not a missed CSS rule. This custom combobox sidesteps that entirely by
+// never using a real <select>: a styled trigger button opens a styled <ul role="listbox"> instead.
+// A hidden <input> carries the actual value under the SAME data-attribute a plain <input>/<select>
+// would have used, so every existing read (the settings form's submit handler) and write
+// (refreshXeroSettingsFormFields/refreshXeroTaxTypeControls) call site keeps working unchanged.
+// Opening/closing/selecting is wired via ONE delegated click listener (see bindXeroComboboxEvents)
+// rather than per-element listeners, since this markup gets swapped in dynamically after the tax
+// rates/tracking categories fetch resolves — per-element listeners attached before that would be
+// destroyed the moment `wrapper.innerHTML` is reassigned.
+function renderXeroCombobox({ dataAttr, currentValue, emptyLabel, options }) {
+  const known = options.find((option) => option.value === currentValue);
+  const displayLabel = known
+    ? known.label
+    : currentValue
+      ? `${currentValue} (currently set — not found in Xero)`
+      : emptyLabel;
+  const allOptions = [
+    { value: '', label: emptyLabel },
+    ...(!known && currentValue ? [{ value: currentValue, label: `${currentValue} (currently set — not found in Xero)` }] : []),
+    ...options
+  ];
+  return `
+    <div class="xeroCombobox" data-xero-combobox>
+      <input type="hidden" value="${escapeAttribute(currentValue || '')}" ${dataAttr} />
+      <button type="button" class="xeroComboboxTrigger" data-xero-combobox-trigger aria-haspopup="listbox" aria-expanded="false">
+        <span class="xeroComboboxTriggerLabel" data-xero-combobox-label>${escapeHtml(displayLabel)}</span>
+        ${icon('chevronDown')}
+      </button>
+      <ul class="xeroComboboxList" data-xero-combobox-list role="listbox" hidden>
+        ${allOptions.map((option) => `<li role="option" class="xeroComboboxOption${option.value === (currentValue || '') ? ' is-selected' : ''}" data-value="${escapeAttribute(option.value)}" aria-selected="${option.value === (currentValue || '')}">${escapeHtml(option.label)}</li>`).join('')}
+      </ul>
+    </div>
+  `;
+}
+
+// Builds the {value,label} list a taxType combobox shows, from the raw Xero API summaries —
+// shared by the render path and refreshXeroSettingsFormFields's label-sync path so the exact same
+// formatting/filtering logic (never duplicated) backs both.
+function buildXeroTaxRateOptions(taxRates, applicability) {
+  const applicable = taxRates.filter((rate) => (applicability === 'revenue' ? rate.canApplyToRevenue !== false : rate.canApplyToExpenses !== false));
+  return [...applicable]
+    .sort((a, b) => {
+      if (a.status === b.status) return a.name.localeCompare(b.name);
+      return a.status === 'ACTIVE' ? -1 : 1;
+    })
+    .map((rate) => ({
+      value: rate.taxType,
+      label: `${rate.name} (${rate.taxType})${rate.status !== 'ACTIVE' ? ` — ${rate.status}` : ''}`
+    }));
+}
+
 // Xero's TaxType codes (e.g. "INPUT2") are never shown in the Chart of Accounts UI, only the
 // friendly Name — so a person configuring these fields had no way to see which literal code was
 // valid, or whether it was Active in their specific organisation, without leaving KCP. This is
 // exactly what caused a real outage: "INPUT2" looked right (it's a standard default) but was
 // Archived for this org, and nothing surfaced that until every GRV push failed in production.
-// Renders a live dropdown once tax rates are loaded; falls back to the original free-text input
+// Renders a live combobox once tax rates are loaded; falls back to the original free-text input
 // before they're loaded (or if Xero isn't connected/the fetch failed) so the field never breaks.
 //
 // Regression: the dropdown used to list EVERY tax rate Xero returned in every field, with no
@@ -180,20 +283,16 @@ function renderXeroTaxTypeControl({ dataAttr, currentValue, placeholder, taxRate
   if (!Array.isArray(taxRates) || !taxRates.length) {
     return `<input type="text" placeholder="${escapeAttribute(placeholder)}" value="${escapeAttribute(currentValue || '')}" ${dataAttr} />`;
   }
-  const applicable = taxRates.filter((rate) => (applicability === 'revenue' ? rate.canApplyToRevenue !== false : rate.canApplyToExpenses !== false));
-  const sorted = applicable.sort((a, b) => {
-    if (a.status === b.status) return a.name.localeCompare(b.name);
-    return a.status === 'ACTIVE' ? -1 : 1;
-  });
-  const knownValue = sorted.some((rate) => rate.taxType === currentValue);
-  const options = [
-    '<option value="">— Select a tax rate —</option>',
-    !knownValue && currentValue
-      ? `<option value="${escapeAttribute(currentValue)}" selected>${escapeHtml(currentValue)} (currently set — not found in Xero)</option>`
-      : '',
-    ...sorted.map((rate) => `<option value="${escapeAttribute(rate.taxType)}" ${rate.taxType === currentValue ? 'selected' : ''}>${escapeHtml(rate.name)} (${escapeHtml(rate.taxType)})${rate.status !== 'ACTIVE' ? ` — ${escapeHtml(rate.status)}` : ''}</option>`)
-  ].join('');
-  return `<select ${dataAttr}>${options}</select>`;
+  return renderXeroCombobox({ dataAttr, currentValue, emptyLabel: '— Select a tax rate —', options: buildXeroTaxRateOptions(taxRates, applicability) });
+}
+
+// Builds the {value,label} list a location-tracking-category combobox shows — same sharing
+// reasoning as buildXeroTaxRateOptions.
+function buildXeroTrackingCategoryOptions(trackingCategories) {
+  return trackingCategories.map((category) => ({
+    value: category.id,
+    label: `${category.name}${category.status !== 'ACTIVE' ? ` — ${category.status}` : ''}`
+  }));
 }
 
 // Xero organisations have at most 2 Tracking Categories, each with a fixed set of Options — a
@@ -204,15 +303,12 @@ function renderXeroTrackingCategoryControl({ currentValue, trackingCategories })
   if (!Array.isArray(trackingCategories) || !trackingCategories.length) {
     return `<input type="text" placeholder="Loaded once Xero is connected" value="${escapeAttribute(currentValue || '')}" data-xero-location-tracking-category readonly />`;
   }
-  const knownValue = trackingCategories.some((category) => category.id === currentValue);
-  const options = [
-    '<option value="">— None (don\'t tag with location) —</option>',
-    !knownValue && currentValue
-      ? `<option value="${escapeAttribute(currentValue)}" selected>${escapeHtml(currentValue)} (currently set — not found in Xero)</option>`
-      : '',
-    ...trackingCategories.map((category) => `<option value="${escapeAttribute(category.id)}" ${category.id === currentValue ? 'selected' : ''}>${escapeHtml(category.name)}${category.status !== 'ACTIVE' ? ` — ${escapeHtml(category.status)}` : ''}</option>`)
-  ].join('');
-  return `<select data-xero-location-tracking-category>${options}</select>`;
+  return renderXeroCombobox({
+    dataAttr: 'data-xero-location-tracking-category',
+    currentValue,
+    emptyLabel: '— None (don\'t tag with location) —',
+    options: buildXeroTrackingCategoryOptions(trackingCategories)
+  });
 }
 
 async function loadXeroTrackingCategoriesIfNeeded(view) {
@@ -249,37 +345,22 @@ function refreshXeroTrackingCategoryControl(view) {
 }
 
 async function loadXeroTaxRatesIfNeeded(view) {
-  window.__KCP_XERO_DIAG_LOG__ = window.__KCP_XERO_DIAG_LOG__ || [];
-  window.__KCP_XERO_DIAG_LOG__.push({ at: 'called', taxRatesAlready: xeroDrawerState.taxRates, loading: xeroDrawerState.taxRatesLoading, connectionActive: xeroDrawerState.status?.connectionActive, viewAttached: document.body.contains(view) });
   if (xeroDrawerState.taxRates !== null || xeroDrawerState.taxRatesLoading) return;
   if (xeroDrawerState.status?.connectionActive !== true) return;
   xeroDrawerState.taxRatesLoading = true;
   try {
     xeroDrawerState.taxRates = await fetchXeroTaxRates(view.dataset.workspaceId || '');
-  } catch (err) {
-    window.__KCP_XERO_DIAG_LOG__.push({ at: 'fetch-threw', err: String(err) });
+  } catch {
     // See loadXeroTrackingCategoriesIfNeeded's identical comment: null (not []) on failure so a
     // later retry isn't permanently blocked by one transient/pre-deploy failure.
     xeroDrawerState.taxRates = null;
   } finally {
     xeroDrawerState.taxRatesLoading = false;
   }
-  window.__KCP_XERO_DIAG_LOG__.push({ at: 'fetch-settled', length: xeroDrawerState.taxRates?.length, viewAttached: document.body.contains(view) });
   // Deliberately OUTSIDE the try/catch above — see loadXeroTrackingCategoriesIfNeeded's identical
   // comment: a rendering bug must never be misattributed to "the fetch failed" and silently discard
   // perfectly good already-fetched data.
-  if (xeroDrawerState.taxRates?.length) {
-    const wrapper = view.querySelector('[data-xero-tax-control="defaultTaxType"]');
-    window.__KCP_XERO_DIAG_LOG__.push({ at: 'before-refresh', wrapperFound: Boolean(wrapper), wrapperAttached: wrapper ? document.body.contains(wrapper) : null, wrapperHtmlBefore: wrapper?.innerHTML?.slice(0, 60) });
-    try {
-      refreshXeroTaxTypeControls(view);
-    } catch (err) {
-      window.__KCP_XERO_DIAG_LOG__.push({ at: 'refresh-threw', err: String(err) });
-    }
-    const wrapperAfter = view.querySelector('[data-xero-tax-control="defaultTaxType"]');
-    window.__KCP_XERO_DIAG_LOG__.push({ at: 'after-refresh', wrapperHtmlAfter: wrapperAfter?.innerHTML?.slice(0, 60) });
-  }
-  console.log('[KCP-XERO-DIAG] full log:', JSON.stringify(window.__KCP_XERO_DIAG_LOG__, null, 2));
+  if (xeroDrawerState.taxRates?.length) refreshXeroTaxTypeControls(view);
 }
 
 // Runs once, right after the fetch resolves — swaps the three plain text inputs for the live
@@ -490,6 +571,7 @@ function bindIntegrationEvents(view) {
   if (xeroDrawerState.activeTab === 'purchases') {
     loadXeroTrackingCategoriesIfNeeded(view);
   }
+  bindXeroComboboxEvents(view);
 
   view.querySelector('[data-yoco-connect-form]')?.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -1414,13 +1496,39 @@ function refreshXeroSettingsFormFields(view, settings) {
   setChecked('[data-xero-grv-enabled]', settings.grvSyncEnabled);
   setChecked('[data-xero-credit-note-enabled]', settings.creditNoteSyncEnabled);
   // The tax-type/location-tracking controls are live-pickers that manage their own refresh once
-  // their fetch resolves (refreshXeroTaxTypeControls/refreshXeroTrackingCategoryControl) — but
-  // until that fetch completes they're still a plain fallback <input>, which needs the same sync.
-  setValue('[data-xero-tax-type]', settings.defaultTaxType);
-  setValue('[data-xero-sales-exempt-tax-type]', settings.salesExemptTaxType);
-  setValue('[data-xero-purchase-tax-type]', settings.purchaseTaxType);
-  setValue('[data-xero-purchase-exempt-tax-type]', settings.purchaseExemptTaxType);
-  setValue('[data-xero-location-tracking-category]', settings.locationTrackingCategoryId);
+  // their fetch resolves (refreshXeroTaxTypeControls/refreshXeroTrackingCategoryControl). Before
+  // that fetch completes they're still a plain fallback <input> — setComboboxValue's plain `.value`
+  // path covers that case. Once the fetch resolves, renderXeroCombobox has already replaced the
+  // fallback with a custom combobox (hidden <input> + a separate visible trigger label) — a plain
+  // `.value =` there would silently desync the hidden value from what the user actually SEES, so
+  // this also re-derives and updates the visible label/selected option from the same options list
+  // the combobox itself was built from.
+  setComboboxValue(view, 'data-xero-tax-type', settings.defaultTaxType, xeroDrawerState.taxRates && buildXeroTaxRateOptions(xeroDrawerState.taxRates, 'revenue'));
+  setComboboxValue(view, 'data-xero-sales-exempt-tax-type', settings.salesExemptTaxType, xeroDrawerState.taxRates && buildXeroTaxRateOptions(xeroDrawerState.taxRates, 'revenue'));
+  setComboboxValue(view, 'data-xero-purchase-tax-type', settings.purchaseTaxType, xeroDrawerState.taxRates && buildXeroTaxRateOptions(xeroDrawerState.taxRates, 'expenses'));
+  setComboboxValue(view, 'data-xero-purchase-exempt-tax-type', settings.purchaseExemptTaxType, xeroDrawerState.taxRates && buildXeroTaxRateOptions(xeroDrawerState.taxRates, 'expenses'));
+  setComboboxValue(view, 'data-xero-location-tracking-category', settings.locationTrackingCategoryId, xeroDrawerState.trackingCategories && buildXeroTrackingCategoryOptions(xeroDrawerState.trackingCategories));
+}
+
+// Syncs a combobox field to a fresh server value on both paths it can currently be in: still the
+// plain fallback <input> (before its options fetch resolves — a plain `.value =` is correct there,
+// same as any other text field), or already swapped to the rich renderXeroCombobox markup (a hidden
+// <input> whose visible trigger label/selected option must be re-derived from `options`, not just
+// the raw value, or the label would silently go stale relative to what's actually selected).
+function setComboboxValue(view, dataAttr, value, options) {
+  const hiddenInput = view.querySelector(`[${dataAttr}]`);
+  if (!hiddenInput) return;
+  hiddenInput.value = value || '';
+  const combobox = hiddenInput.closest('[data-xero-combobox]');
+  if (!combobox || !Array.isArray(options)) return;
+  const known = options.find((option) => option.value === value);
+  const label = combobox.querySelector('[data-xero-combobox-label]');
+  if (label) label.textContent = known ? known.label : value ? `${value} (currently set — not found in Xero)` : label.textContent;
+  combobox.querySelectorAll('.xeroComboboxOption').forEach((option) => {
+    const isSelected = option.dataset.value === (value || '');
+    option.classList.toggle('is-selected', isSelected);
+    option.setAttribute('aria-selected', String(isSelected));
+  });
 }
 
 function updateXeroStatus(view, status = {}, options = {}) {

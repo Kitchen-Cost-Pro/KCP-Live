@@ -788,8 +788,7 @@
   font-weight: 500;
 }
 
-.xeroFieldGrid input[type="text"],
-.xeroFieldGrid select {
+.xeroFieldGrid input[type="text"] {
   min-height: 38px;
   border: 1px solid var(--border-subtle);
   border-radius: 8px;
@@ -801,47 +800,112 @@
   width: 100%;
 }
 
-.xeroFieldGrid input[type="text"]:focus,
-.xeroFieldGrid select:focus {
+.xeroFieldGrid input[type="text"]:focus {
   outline: none;
   border-color: var(--accent-blue);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-blue) 20%, transparent);
 }
 
 .xeroFieldGrid input[type="text"]:disabled,
-.xeroFieldGrid select:disabled,
 .xeroFieldGrid input[type="text"][readonly] {
   opacity: 0.6;
   cursor: not-allowed;
 }
 
-/* Custom dropdown chrome for the tax-rate/tracking-category pickers — the native OS select arrow
-   looks out of place against this modal's own dark surfaces/accent colors. A data-URI SVG chevron
-   can't reference CSS custom properties directly, so light/dark each get their own hardcoded stroke
-   color matching that theme's --text-muted, same pattern as the chevron in manufacturing.css. */
-.xeroFieldGrid select {
-  appearance: none;
-  -webkit-appearance: none;
-  cursor: pointer;
-  padding-right: 34px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%234f6075' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 12px center;
-}
-
-:root[data-theme="dark"] .xeroFieldGrid select {
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23b6c2d1' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
-}
-
-.xeroFieldGrid select option {
-  background: var(--surface-elevated, var(--surface-primary));
-  color: var(--text-main);
-}
-
-/* Wraps the tax-type input/select so it can be swapped for a live Xero-backed dropdown once tax
+/* Wraps the tax-type input/combobox so it can be swapped for a live Xero-backed picker once tax
    rates load, without disturbing the label's grid layout. */
 .xeroFieldGrid [data-xero-tax-control] {
   display: contents;
+}
+
+/* Custom combobox for the tax-rate/tracking-category pickers — a native <select>'s CLOSED control
+   can be CSS-styled, but Chrome/Safari render its OPEN popup list natively with no way to restyle
+   it, which is why this uses a styled button + absolutely-positioned <ul> instead of <select> at
+   all (see renderXeroCombobox's doc comment in Integrations.js). */
+.xeroCombobox {
+  position: relative;
+  width: 100%;
+}
+
+.xeroComboboxTrigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-primary);
+  color: var(--text-main);
+  padding: 0 10px 0 12px;
+  font: inherit;
+  font-weight: 400;
+  text-align: left;
+  cursor: pointer;
+}
+
+.xeroComboboxTrigger:focus-visible,
+.xeroComboboxTrigger[aria-expanded="true"] {
+  outline: none;
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-blue) 20%, transparent);
+}
+
+.xeroComboboxTrigger svg {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  color: var(--text-muted);
+  transition: transform 0.15s ease;
+}
+
+.xeroComboboxTrigger[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
+
+.xeroComboboxTriggerLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xeroComboboxList {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  max-height: 260px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: var(--surface-elevated, var(--surface-primary));
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+}
+
+.xeroComboboxOption {
+  padding: 8px 10px;
+  border-radius: 6px;
+  color: var(--text-main);
+  font-size: 0.86rem;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.xeroComboboxOption:hover {
+  background: color-mix(in srgb, var(--accent-blue) 14%, transparent);
+}
+
+.xeroComboboxOption.is-selected {
+  background: color-mix(in srgb, var(--accent-blue) 22%, transparent);
+  color: var(--accent-blue);
+  font-weight: 700;
 }
 
 .xeroFieldHint {
