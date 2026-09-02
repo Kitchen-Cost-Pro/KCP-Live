@@ -982,6 +982,104 @@
   font-size: 0.82rem;
 }
 
+#view-credit-note .cn-editBanner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+  border: 1px solid rgba(96, 165, 250, 0.3);
+  border-radius: 1rem;
+  padding: 14px 16px;
+  background: rgba(30, 58, 138, 0.22);
+  color: #bfdbfe;
+  font-size: 0.82rem;
+  font-weight: 750;
+}
+
+#view-credit-note .cn-editBanner button {
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 9999px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+#view-credit-note .cn-editBanner button svg {
+  width: 15px;
+  height: 15px;
+}
+
+#view-credit-note .cn-iconBtn {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 9999px;
+  color: rgba(255, 255, 255, 0.65);
+}
+
+#view-credit-note .cn-iconBtn svg {
+  width: 15px;
+  height: 15px;
+}
+
+#view-credit-note .cn-recentNoteRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease;
+}
+
+#view-credit-note .cn-recentNoteRow:hover {
+  border-color: rgba(96, 165, 250, 0.3);
+  background: rgba(96, 165, 250, 0.06);
+}
+
+#view-credit-note .cn-recentNoteRow__info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+#view-credit-note .cn-recentNoteRow__title {
+  font-size: 0.82rem;
+  font-weight: 800;
+  color: rgba(255, 255, 255, 0.92);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#view-credit-note .cn-recentNoteRow__meta {
+  font-size: 0.72rem;
+  color: rgba(255, 255, 255, 0.5);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#view-credit-note .cn-recentNoteRow__total {
+  flex: 0 0 auto;
+  font-size: 0.78rem;
+  font-weight: 800;
+  color: rgba(255, 255, 255, 0.75);
+}
+
 #view-credit-note .cn-toast {
   position: fixed;
   right: 22px;

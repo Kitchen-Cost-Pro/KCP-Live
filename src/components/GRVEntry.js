@@ -49,6 +49,7 @@ export function renderGRVEntry({ state, onGrvFilterChange, onGrvAction = {} } = 
   }
   view.innerHTML = `
     ${grv.actionError ? renderNotice(grv.actionError, 'error') : ''}
+    ${grv.editingReceiptId ? renderEditingBanner(draft) : ''}
 
     <div class="grv-frame">
       <div class="grv-layout">
@@ -161,6 +162,8 @@ export function renderGRVEntry({ state, onGrvFilterChange, onGrvAction = {} } = 
               />
             </div>
           </article>
+
+          ${renderRecentReceiptsCard(grv)}
         </aside>
 
         ${renderDraftLauncher(statusLabel, totals, draft, headerReady)}
@@ -339,6 +342,20 @@ function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, 
   });
   view.querySelector('[data-grv-save]')?.addEventListener('click', () => onGrvAction.onSave?.());
   view.querySelector('[data-grv-toast-close]')?.addEventListener('click', () => onGrvAction.onDismissToast?.());
+  view.querySelector('[data-grv-cancel-edit]')?.addEventListener('click', () => onGrvAction.onCancelEdit?.());
+  view.querySelectorAll('[data-grv-edit-receipt]').forEach((row) => {
+    const openEdit = () => {
+      const receipt = (grv.receipts || []).find((entry) => String(entry.id) === row.dataset.grvEditReceipt);
+      if (receipt) onGrvAction.onEditReceipt?.(receipt);
+    };
+    row.addEventListener('click', openEdit);
+    row.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        openEdit();
+      }
+    });
+  });
   view.querySelector('[data-grv-missing-supplier-confirm]')?.addEventListener('click', () => onGrvAction.onOpenMissingSupplierForm?.());
   view.querySelector('[data-grv-missing-supplier-continue]')?.addEventListener('click', () => onGrvAction.onContinueWithoutSupplier?.());
   view.querySelector('[data-grv-missing-supplier-save]')?.addEventListener('click', () => onGrvAction.onSaveMissingSupplier?.());
@@ -1570,6 +1587,38 @@ function renderToast(toast) {
   `;
 }
 
+function renderEditingBanner(draft) {
+  const label = draft.grvNumber || draft.invoice || 'this GRV';
+  return `
+    <div class="grv-notice grv-notice--editing" style="border-color: rgba(96, 165, 250, 0.3); background: rgba(30, 58, 138, 0.22); color: #bfdbfe;">
+      <span>Editing GRV ${escapeHtml(label)} — saving will adjust stock by the difference from what was originally received.</span>
+      <button type="button" class="grv-removeBtn" data-grv-cancel-edit aria-label="Cancel edit">${icon('x')}</button>
+    </div>
+  `;
+}
+
+function renderRecentReceiptsCard(grv) {
+  const receipts = (grv.receipts || []).slice(0, 8);
+  if (!receipts.length) return '';
+  return `
+    <article class="grv-card grv-sidecard">
+      <p class="grv-side-title">Recent Receipts</p>
+      <div class="grv-stack">
+        ${receipts.map((receipt) => `
+          <div class="grv-recentReceiptRow" data-grv-edit-receipt="${escapeAttribute(receipt.id)}" role="button" tabindex="0">
+            <div class="grv-recentReceiptRow__info">
+              <span class="grv-recentReceiptRow__title">${escapeHtml(receipt.grvNumber || receipt.invoice || 'GRV')}</span>
+              <span class="grv-recentReceiptRow__meta">${escapeHtml(receipt.supplierName || 'Manual Receipt')} · ${escapeHtml(formatDisplayDate(receipt.date || ''))}</span>
+            </div>
+            <div class="grv-recentReceiptRow__total">${escapeHtml(formatCurrency(receipt.totalEx))}</div>
+            <span class="grv-iconBtn" aria-hidden="true">${icon('edit')}</span>
+          </div>
+        `).join('')}
+      </div>
+    </article>
+  `;
+}
+
 function renderGrvLocationPicker(draft, locations = [], openDropdown = '', query = '') {
   const locationId = String(draft.locationId || '');
   const options = locations
@@ -1933,6 +1982,7 @@ function icon(name) {
     calendar: '<path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/>',
     clipboard: '<path d="M9 5h6"/><path d="M9 3h6a2 2 0 0 1 2 2v14H7V5a2 2 0 0 1 2-2Z"/><path d="M9 9h6"/><path d="M9 13h6"/>',
     history: '<path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 3v6h6"/><path d="M12 7v5l3 3"/>',
+    edit: '<path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/>',
     x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>'
   };
   return `

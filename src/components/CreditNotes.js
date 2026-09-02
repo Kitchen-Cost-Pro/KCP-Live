@@ -36,6 +36,8 @@ export function renderCreditNotes({ state, onCreditNoteFilterChange, onCreditNot
     return view;
   }
   view.innerHTML = `
+    ${creditNotes.editingNoteId ? renderEditingBanner(draft) : ''}
+
     <div class="cn-frame">
       <div class="cn-layout">
         <aside class="cn-sidebar">
@@ -110,6 +112,8 @@ export function renderCreditNotes({ state, onCreditNoteFilterChange, onCreditNot
               </button>
             </div>
           </article>
+
+          ${renderRecentCreditNotesCard(creditNotes)}
         </aside>
 
         <section class="cn-card cn-draft-panel">
@@ -406,6 +410,20 @@ function bindCreditNoteEvents(view, state, filters, draft, onCreditNoteFilterCha
   view.querySelector('[data-cn-cancel-clear]')?.addEventListener('click', () => onCreditNoteAction.onCancelClearAll?.());
   view.querySelector('[data-cn-save]')?.addEventListener('click', () => onCreditNoteAction.onSave?.());
   view.querySelector('[data-cn-toast-close]')?.addEventListener('click', () => onCreditNoteAction.onDismissToast?.());
+  view.querySelector('[data-cn-cancel-edit]')?.addEventListener('click', () => onCreditNoteAction.onCancelEdit?.());
+  view.querySelectorAll('[data-cn-edit-note]').forEach((row) => {
+    const openEdit = () => {
+      const note = (state.creditNotes?.creditNotes || []).find((entry) => String(entry.id) === row.dataset.cnEditNote);
+      if (note) onCreditNoteAction.onEditNote?.(note);
+    };
+    row.addEventListener('click', openEdit);
+    row.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        openEdit();
+      }
+    });
+  });
 
   bindCustomCalendarEvents(view, {
     onClose: () => onCreditNoteFilterChange?.({ overlay: '', calendarCursor: '' }),
@@ -820,6 +838,38 @@ function renderToast(toast) {
   `;
 }
 
+function renderEditingBanner(draft) {
+  const label = draft.cnNumber || draft.invoice || 'this credit note';
+  return `
+    <div class="cn-editBanner">
+      <span>Editing Credit Note ${escapeHtml(label)} — saving will adjust stock by the difference from what was originally credited.</span>
+      <button type="button" data-cn-cancel-edit aria-label="Cancel edit">${icon('x')}</button>
+    </div>
+  `;
+}
+
+function renderRecentCreditNotesCard(creditNotes) {
+  const notes = (creditNotes.creditNotes || []).slice(0, 8);
+  if (!notes.length) return '';
+  return `
+    <article class="cn-card cn-sidecard">
+      <h3 class="cn-side-title">Recent Credit Notes</h3>
+      <div class="cn-stack">
+        ${notes.map((note) => `
+          <div class="cn-recentNoteRow" data-cn-edit-note="${escapeAttribute(note.id)}" role="button" tabindex="0">
+            <div class="cn-recentNoteRow__info">
+              <span class="cn-recentNoteRow__title">${escapeHtml(note.cnNumber || note.invoice || 'Credit Note')}</span>
+              <span class="cn-recentNoteRow__meta">${escapeHtml(note.supplierName || note.supplier || 'Supplier')} · ${escapeHtml(formatDisplayDate(note.date || ''))}</span>
+            </div>
+            <div class="cn-recentNoteRow__total">${escapeHtml(formatCurrency(note.totalEx))}</div>
+            <span class="cn-iconBtn" aria-hidden="true">${icon('edit')}</span>
+          </div>
+        `).join('')}
+      </div>
+    </article>
+  `;
+}
+
 function renderClearConfirmOverlay() {
   return `
     <div class="cn-overlayBackdrop">
@@ -1079,7 +1129,8 @@ function icon(name) {
     calendar: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v4"/><path d="M16 2v4"/><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M3 10h18"/></svg>',
     clipboard: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg>',
     chevronDown: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>',
-    camera: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8a2 2 0 0 1 2-2h2l1.2-2h5.6L16 6h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><circle cx="12" cy="13" r="3.5"/></svg>'
+    camera: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8a2 2 0 0 1 2-2h2l1.2-2h5.6L16 6h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><circle cx="12" cy="13" r="3.5"/></svg>',
+    edit: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>'
   };
   return icons[name] || icons.x;
 }

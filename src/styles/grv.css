@@ -1175,6 +1175,80 @@
   color: #fca5a5;
 }
 
+#view-grv .grv-iconBtn {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 9999px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.65);
+  cursor: pointer;
+  transition: border-color 160ms ease, color 160ms ease, background 160ms ease;
+}
+
+#view-grv .grv-iconBtn:hover {
+  border-color: rgba(96, 165, 250, 0.44);
+  background: rgba(96, 165, 250, 0.1);
+  color: #93c5fd;
+}
+
+#view-grv .grv-iconBtn svg {
+  width: 15px;
+  height: 15px;
+}
+
+#view-grv .grv-recentReceiptRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease;
+}
+
+#view-grv .grv-recentReceiptRow:hover {
+  border-color: rgba(96, 165, 250, 0.3);
+  background: rgba(96, 165, 250, 0.06);
+}
+
+#view-grv .grv-recentReceiptRow__info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+#view-grv .grv-recentReceiptRow__title {
+  font-size: 0.82rem;
+  font-weight: 800;
+  color: rgba(255, 255, 255, 0.92);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#view-grv .grv-recentReceiptRow__meta {
+  font-size: 0.72rem;
+  color: rgba(255, 255, 255, 0.5);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#view-grv .grv-recentReceiptRow__total {
+  flex: 0 0 auto;
+  font-size: 0.78rem;
+  font-weight: 800;
+  color: rgba(255, 255, 255, 0.75);
+}
+
 #view-grv .grv-empty {
   min-height: 360px;
   display: flex;

@@ -15,6 +15,13 @@ export { yesterdayDateKey };
 // API failure worth alerting on.
 const NEEDS_SUPPLIER_MATCH_PREFIX = 'NEEDS_SUPPLIER_MATCH:';
 
+// Prefixes a GRV_PUSH failure that happened while trying to UPDATE an already-pushed Bill after a
+// GRV edit (existingBillId was set) — distinguishes "the correction couldn't reach Xero because the
+// Bill is no longer editable there (e.g. someone already AUTHORISED or paid/reconciled it)" from an
+// ordinary create failure. KCP never overwrites a Bill it can't confirm is still safe to update, so
+// this surfaces as a failure to be resolved by hand in Xero, not a silent retry loop.
+const NEEDS_MANUAL_XERO_FIX_PREFIX = 'NEEDS_MANUAL_XERO_FIX:';
+
 interface GrvRow {
   id: string;
   supplier_id: string | null;
@@ -30,6 +37,43 @@ interface GrvRow {
   discount_ex: number | null;
   supplier_raw_json: string | null;
   raw_json: string | null;
+  version: number | null;
+}
+
+/**
+ * The GRV_PUSH effect_key for one GRV. version 1 (never edited since Phase 1's edit feature
+ * shipped) keeps the ORIGINAL bare key ('grv:{ws}:{id}') unchanged, on purpose — every tenant that
+ * already pushed GRVs before this versioned re-sync existed has APPLIED outbox rows under that
+ * bare key, and grvs.version defaults to 1 for all of them (tenant-migrations.ts migration 54).
+ * Switching everyone to a 'v1'-suffixed key here would make loadPendingGrvs treat every
+ * already-pushed, never-edited GRV as newly pending and push a duplicate Bill for it on this
+ * deploy. Only once a GRV is actually edited (version >= 2) does its effect_key change to a
+ * version-suffixed one — a key that has never been APPLIED before, so it's correctly picked up as
+ * pending, without disturbing any GRV nobody has touched.
+ */
+function grvPushEffectKey(workspaceId: string, grvId: string, version: number | null | undefined): string {
+  const v = Number(version) || 1;
+  return v > 1 ? `grv:${workspaceId}:${grvId}:v${v}` : `grv:${workspaceId}:${grvId}`;
+}
+
+/**
+ * The Xero Bill ID from the most recent successful push of this GRV, under ANY of its versions
+ * (the bare key from before it was ever edited, or any 'v{n}'-suffixed key from a later edit) —
+ * used so a re-push after an edit calls buildGrvBillPayload with existingBillId set, updating the
+ * SAME Bill in Xero instead of creating a duplicate. Returns null on a GRV's first-ever push (no
+ * prior APPLIED row exists yet under any key), which is exactly when a create is correct.
+ */
+export async function findLatestAppliedGrvXeroBillId(env: Env, workspaceId: string, grvId: string): Promise<string | null> {
+  const row = await env.DB.prepare(
+    `SELECT xero_object_id FROM xero_v2_effect_outbox
+      WHERE workspace_id = ?1 AND effect_type = 'GRV_PUSH' AND status = 'APPLIED'
+        AND (effect_key = 'grv:' || ?1 || ':' || ?2 OR effect_key LIKE 'grv:' || ?1 || ':' || ?2 || ':v%')
+      ORDER BY updated_at DESC
+      LIMIT 1`
+  )
+    .bind(workspaceId, grvId)
+    .first<{ xero_object_id: string | null }>();
+  return row?.xero_object_id || null;
 }
 
 /**
@@ -167,14 +211,20 @@ export async function loadPendingGrvs(env: Env, workspaceId: string, limit = 500
   const rows = await env.DB.prepare(
     `SELECT
        grv.id, grv.supplier_id, s.name AS supplier_name, s.xero_contact_id AS supplier_xero_contact_id, s.raw_json AS supplier_raw_json,
-       grv.invoice_number, grv.received_at, grv.prices_include_vat, grv.total_ex, grv.total_vat, grv.total_inc, grv.transport_ex, grv.discount_ex, grv.raw_json
+       grv.invoice_number, grv.received_at, grv.prices_include_vat, grv.total_ex, grv.total_vat, grv.total_inc, grv.transport_ex, grv.discount_ex, grv.raw_json, grv.version
      FROM grvs grv
      LEFT JOIN suppliers s ON s.id = grv.supplier_id AND s.workspace_id = grv.workspace_id
      WHERE grv.workspace_id = ?1
        AND NOT EXISTS (
          SELECT 1 FROM xero_v2_effect_outbox o
           WHERE o.workspace_id = grv.workspace_id AND o.effect_type = 'GRV_PUSH'
-            AND o.effect_key = 'grv:' || grv.workspace_id || ':' || grv.id AND o.status = 'APPLIED'
+            AND o.effect_key = (
+              CASE WHEN COALESCE(grv.version, 1) > 1
+                THEN 'grv:' || grv.workspace_id || ':' || grv.id || ':v' || grv.version
+                ELSE 'grv:' || grv.workspace_id || ':' || grv.id
+              END
+            )
+            AND o.status = 'APPLIED'
        )
      ORDER BY grv.received_at DESC
      LIMIT ?2`
@@ -539,7 +589,7 @@ async function pushOneGrv(
   grv: GrvRow,
   settings: { purchaseAccountCode: string; purchaseTaxType: string; purchaseExemptTaxType: string; codPaymentAccountCode?: string; locationTrackingCategoryId?: string }
 ): Promise<PushOneGrvOutcome> {
-  const effectKey = `grv:${workspaceId}:${grv.id}`;
+  const effectKey = grvPushEffectKey(workspaceId, grv.id, grv.version);
   const claim = await claimXeroEffect(env, workspaceId, 'GRV_PUSH', effectKey);
   if (claim.alreadyApplied) return { status: 'duplicate' };
 
@@ -564,6 +614,11 @@ async function pushOneGrv(
     return { status: 'needs_supplier_match' };
   }
 
+  // If this GRV was already pushed under an earlier version (i.e. it's a re-push after an edit —
+  // see grvPushEffectKey's doc comment), find that prior Bill and update it instead of creating a
+  // duplicate. Returns null on a genuine first push, which is exactly when a create is correct.
+  const existingBillId = await findLatestAppliedGrvXeroBillId(env, workspaceId, grv.id);
+
   let payload: ReturnType<typeof buildGrvBillPayload> | undefined;
   try {
     const lines = await loadGrvLines(env, workspaceId, grv.id);
@@ -577,12 +632,21 @@ async function pushOneGrv(
     const linesWithTracking = await Promise.all(
       lines.map(async (line) => ({ ...line, tracking: await resolveLocationTracking(env, workspaceId, trackingContext, line.location_name) }))
     );
-    payload = buildGrvBillPayload(grv, linesWithTracking, contactId, settings, workspaceIsVatRegistered, vatRate, supplierIsVatRegistered, undefined, isCod);
+    payload = buildGrvBillPayload(grv, linesWithTracking, contactId, settings, workspaceIsVatRegistered, vatRate, supplierIsVatRegistered, existingBillId || undefined, isCod);
+    // POSTing an Invoice payload that carries an InvoiceID is how Xero's API expresses "update this
+    // existing Bill" rather than "create a new one" — same endpoint, same verb, InvoiceID is what
+    // switches it. Xero rejects the update if the Bill is no longer in a state that allows editing
+    // (already AUTHORISED/paid/reconciled on Xero's own side, e.g. by a human, or — for a COD
+    // supplier — because pushOneGrv itself sent it AUTHORISED originally); that lands in the catch
+    // block below and is reported as NEEDS_MANUAL_XERO_FIX rather than silently dropped or retried
+    // forever against a Bill that will never accept the update.
     const result = await executeXeroApiRequest(env, workspaceId, { method: 'POST', path: 'Invoices', body: payload });
     const invoices = (result.Invoices as Array<{ InvoiceID?: string }> | undefined) || [];
-    const billId = text(invoices[0]?.InvoiceID);
+    const billId = text(invoices[0]?.InvoiceID) || existingBillId || '';
     await markXeroEffectApplied(env, claim.id, billId);
-    if (billId) {
+    if (billId && !existingBillId) {
+      // Attachment + COD payment are first-push-only side effects — re-attaching the same PDF or
+      // re-applying a COD payment on every subsequent edit would duplicate them against the Bill.
       await pushGrvAttachment(env, workspaceId, grv, billId);
       if (isCod) await applyCodPayment(env, workspaceId, grv, billId, text(settings.codPaymentAccountCode));
     }
@@ -597,9 +661,9 @@ async function pushOneGrv(
     const lineSummary = sentLines?.length
       ? ` Sent: ${sentLines.map((line) => `${line.Description || '?'} [account=${line.AccountCode || '?'}, tax=${line.TaxType || '?'}]`).join(', ')}`
       : '';
-    const message = `${apiMessage}${lineSummary}`;
+    const message = `${existingBillId ? NEEDS_MANUAL_XERO_FIX_PREFIX : ''}${apiMessage}${lineSummary}`;
     await markXeroEffectFailed(env, claim.id, message);
-    await recordXeroDiagnosticIfNotable(env, workspaceId, { operation: 'xero-grv-push', status: 'failed', message, details: { grvId: grv.id } });
+    await recordXeroDiagnosticIfNotable(env, workspaceId, { operation: 'xero-grv-push', status: 'failed', message, details: { grvId: grv.id, existingBillId } });
     return { status: 'failed', message };
   }
 }

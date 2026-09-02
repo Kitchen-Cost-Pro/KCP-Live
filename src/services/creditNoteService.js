@@ -92,6 +92,26 @@ export async function saveCreditNote(workspaceId, creditNote = {}) {
   return { id: result.id || payload.id };
 }
 
+export async function updateCreditNote(workspaceId, creditNoteId, creditNote = {}) {
+  const workspaceKey = String(workspaceId || '').trim();
+  if (!workspaceKey) throw new Error('Workspace id is required to update credit notes.');
+  const noteId = String(creditNoteId || '').trim();
+  if (!noteId) throw new Error('A credit note id is required to update it.');
+
+  const payload = normalizeCreditNotePayload({ ...creditNote, id: noteId });
+  if (!payload.items.length) throw new Error('Add at least one stock item to the credit note.');
+  if (!payload.supplierName) throw new Error('Supplier name is required.');
+  if (!payload.cnNumber) throw new Error('Credit note number is required.');
+  if (!payload.notes) throw new Error('Reasoning is required before saving the credit note.');
+
+  const result = await callCloudflareWorkspaceRoute(workspaceKey, `credit-notes/${noteId}`, {
+    method: 'PATCH',
+    payload: { creditNote: payload }
+  });
+
+  return { id: result.id || noteId, version: result.version };
+}
+
 export function normalizeCreditNotes(value) {
   if (!value) return [];
   const entries = Array.isArray(value)

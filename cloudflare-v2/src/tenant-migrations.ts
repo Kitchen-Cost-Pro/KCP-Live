@@ -16,6 +16,16 @@ export const GRV_TRANSPORT_EX_MIGRATION = `ALTER TABLE grvs ADD COLUMN transport
 // comment for the full rationale (own column, not a grv_lines row).
 export const GRV_DISCOUNT_EX_MIGRATION = `ALTER TABLE grvs ADD COLUMN discount_ex REAL NOT NULL DEFAULT 0;`;
 
+// 54 — allow GRVs and Credit Notes to be edited after posting instead of being permanently
+// immutable once saved. `version` is bumped on every edit; it exists so a later Xero re-sync
+// (pushing an UPDATE to the already-created Bill/Credit Note instead of silently leaving Xero
+// stale, or creating a duplicate) can tell a record has changed since it was last pushed —
+// see patchGoodsReceipt/patchCreditNote in routes.ts. grvs never had an updated_at column
+// because it was write-once; credit_notes already has one (its POST handler upserts).
+export const GRV_CREDIT_NOTE_EDIT_MIGRATION = `ALTER TABLE grvs ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE grvs ADD COLUMN updated_at TEXT;
+ALTER TABLE credit_notes ADD COLUMN version INTEGER NOT NULL DEFAULT 1;`;
+
 /**
  * Ordered per-tenant schema migrations, applied INSIDE each WorkspaceDO's own SQLite on first
  * access (and whenever new migrations are appended). The DO records the last-applied index in a
@@ -773,5 +783,7 @@ CREATE INDEX IF NOT EXISTS idx_stock_movements_workspace_effective_date
   // 52 — see XERO_V2_LOCATION_TRACKING_MIGRATION's doc comment (modules/xero-engine/migrations.ts).
   XERO_V2_LOCATION_TRACKING_MIGRATION,
   // 53 — see XERO_V2_WASTAGE_PUSH_MIGRATION's doc comment (modules/xero-engine/migrations.ts).
-  XERO_V2_WASTAGE_PUSH_MIGRATION
+  XERO_V2_WASTAGE_PUSH_MIGRATION,
+  // 54 — see GRV_CREDIT_NOTE_EDIT_MIGRATION's doc comment above.
+  GRV_CREDIT_NOTE_EDIT_MIGRATION
 ];

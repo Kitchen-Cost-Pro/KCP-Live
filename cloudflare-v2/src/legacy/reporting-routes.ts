@@ -40,6 +40,22 @@ type ReportWarning = {
 // truncation condition so an incomplete report can never be exported silently.
 const MAX_REPORT_ROWS = 1000000;
 
+// A GRV edit that fixes a mistaken cost after same-day sales already happened against it writes a
+// compensating 'cost_correction' stock_movements row (quantity_delta 0, only value_delta carries
+// the fix) keyed back to the original sale's id via metadata_json.correctedMovementId — see
+// buildSameDayCostCorrectionStatements in routes.ts. Append this column to any `sm`-aliased SELECT
+// whose rows feed signedMovementStockCost, so a corrected sale's true cost is reflected in
+// margin/GP reporting instead of silently staying wrong forever. The correlated subquery uses the
+// existing idx_stock_movements_workspace_movement_type index (migration 39) to narrow to the
+// (normally very few) cost_correction rows before matching by id, so it stays cheap even on a
+// large ledger.
+const COST_CORRECTION_VALUE_DELTA_SQL = `COALESCE((
+          SELECT SUM(c.value_delta) FROM stock_movements c
+           WHERE c.workspace_id = sm.workspace_id
+             AND c.movement_type = 'cost_correction'
+             AND json_extract(c.metadata_json, '$.correctedMovementId') = sm.id
+        ), 0) AS cost_correction_value_delta`;
+
 // stock_movements document types entered via a date-only picker (no time-of-day input), which
 // therefore always store `occurred_at` as literal UTC midnight for any backdated entry. Reporting
 // shows these as their real processing time (created_at) instead -- see standardizeMovementRow.
@@ -878,6 +894,7 @@ export async function getSaleStockUsageReport(
           NULLIF(json_extract(sm.metadata_json, '$.base_uom'), ''),
           NULLIF(json_extract(sm.metadata_json, '$.unit'), '')
         ) AS base_uom,
+        ${COST_CORRECTION_VALUE_DELTA_SQL},
         l.name AS location_name,
         l.display_name AS location_display_name,
         yo.id AS yoco_order_db_id,
@@ -1252,7 +1269,8 @@ export async function getModifierSalesReport(
           NULLIF(json_extract(sm.metadata_json, '$.baseUom'), ''),
           NULLIF(json_extract(sm.metadata_json, '$.base_uom'), ''),
           NULLIF(json_extract(sm.metadata_json, '$.unit'), '')
-        ) AS base_uom
+        ) AS base_uom,
+        ${COST_CORRECTION_VALUE_DELTA_SQL}
         ${modifierActionColumns}
        FROM stock_movements sm
        LEFT JOIN stock_items si ON si.id = sm.stock_item_id AND si.workspace_id = sm.workspace_id
@@ -1287,7 +1305,8 @@ export async function getModifierSalesReport(
           NULLIF(json_extract(sm.metadata_json, '$.baseUom'), ''),
           NULLIF(json_extract(sm.metadata_json, '$.base_uom'), ''),
           NULLIF(json_extract(sm.metadata_json, '$.unit'), '')
-        ) AS base_uom
+        ) AS base_uom,
+        ${COST_CORRECTION_VALUE_DELTA_SQL}
         ${modifierActionColumns}
        FROM stock_movements sm
        LEFT JOIN stock_items si ON si.id = sm.stock_item_id AND si.workspace_id = sm.workspace_id
@@ -5551,11 +5570,18 @@ function matchingMenuItemUsageRows(row: Row, selection: Row, index: Map<string, 
 
 function signedMovementStockCost(row: Row) {
   if (isAccountingOnlyRefundWastage(row)) return 0;
-  const amount = Math.abs(
-    hasMeaningfulValue(row.value_delta)
-      ? numberValue(row.value_delta, 0)
-      : numberValue(row.quantity_delta, 0) * numberValue(row.unit_cost, 0),
-  );
+  const baseValue = hasMeaningfulValue(row.value_delta)
+    ? numberValue(row.value_delta, 0)
+    : numberValue(row.quantity_delta, 0) * numberValue(row.unit_cost, 0);
+  // A GRV edit that fixed a mistaken cost after the fact (patchGoodsReceipt's same-day sale cost
+  // correction, routes.ts) writes a compensating 'cost_correction' stock_movements row keyed back
+  // to this sale's own id via metadata_json.correctedMovementId, rather than mutating this row in
+  // place — see buildSameDayCostCorrectionStatements. Callers must SELECT
+  // cost_correction_value_delta (COST_CORRECTION_VALUE_DELTA_SQL, a correlated subquery summing
+  // any such rows) alongside the usual movement columns for a corrected sale's true cost to show
+  // up here — it defaults to 0 (no-op) for any query that doesn't include that column.
+  const correctionValue = numberValue(row.cost_correction_value_delta, 0);
+  const amount = Math.abs(baseValue + correctionValue);
   return clean(row.movement_type).toLowerCase() === "sale_refund" ? -amount : amount;
 }
 
@@ -6365,7 +6391,9 @@ export const __modifierReportingInternals = {
   movementLineId,
   movementModifierId,
   movementModifierName,
+  signedMovementStockCost,
   standardizeModifierSalesRow,
+  COST_CORRECTION_VALUE_DELTA_SQL,
 };
 
 export const __menuHealthInternals = {

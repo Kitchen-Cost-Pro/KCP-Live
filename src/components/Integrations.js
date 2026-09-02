@@ -1,4 +1,5 @@
 import '../styles/integrations.css';
+import '../styles/fieldHelp.css';
 import gmailLogo from '../assets/integrations/gmail.svg';
 import yocoLogo from '../assets/integrations/yoco.svg';
 import xeroLogo from '../assets/integrations/xero.png';
@@ -24,6 +25,7 @@ import {
   syncYocoCatalogue
 } from '../services/integrationService.js';
 import { canManagePermissionSets } from '../services/roleService.js';
+import { bindFieldHelpTooltips, renderFieldHelpLabel } from './fieldHelp.js';
 
 const INTEGRATIONS = [
   {
@@ -591,6 +593,7 @@ export function renderIntegrations({ state } = {}) {
   `;
 
   bindIntegrationEvents(view);
+  bindFieldHelpTooltips(view);
   if (cachedYocoStatus) updateYocoStatus(view, cachedYocoStatus, { skipCache: true });
   if (cachedGmailStatus) updateGmailStatus(view, cachedGmailStatus, { skipCache: true });
   if (cachedXeroStatus) updateXeroStatus(view, cachedXeroStatus, { skipCache: true });
@@ -1421,9 +1424,8 @@ function renderXeroModal({ canManageXero = false } = {}) {
                   <span data-xero-tax-control="defaultTaxType">${renderXeroTaxTypeControl({ dataAttr: 'data-xero-tax-type', currentValue: settings.defaultTaxType, placeholder: 'e.g. OUTPUT2', taxRates: xeroDrawerState.taxRates, applicability: 'revenue' })}</span>
                 </label>
                 <label class="xeroFieldGrid--span2">
-                  <span>Exempt/zero-rated tax type <em>optional</em></span>
+                  <span>${renderFieldHelpLabel('Exempt/zero-rated tax type (optional)', 'Used for products marked zero-rated/VAT-exempt in Yoco, instead of the tax type above.')}</span>
                   <span data-xero-tax-control="salesExemptTaxType">${renderXeroTaxTypeControl({ dataAttr: 'data-xero-sales-exempt-tax-type', currentValue: settings.salesExemptTaxType, placeholder: 'e.g. EXEMPTOUTPUT', taxRates: xeroDrawerState.taxRates, applicability: 'revenue' })}</span>
-                  <small class="xeroFieldHint">Used for products marked zero-rated/VAT-exempt in Yoco, instead of the tax type above.</small>
                 </label>
                 <label class="xeroFieldGrid--span2">
                   <span>Item account <em>optional, defaults to sales account</em></span>
@@ -1454,28 +1456,24 @@ function renderXeroModal({ canManageXero = false } = {}) {
                   <span data-xero-tax-control="purchaseTaxType">${renderXeroTaxTypeControl({ dataAttr: 'data-xero-purchase-tax-type', currentValue: settings.purchaseTaxType, placeholder: 'e.g. INPUT2', taxRates: xeroDrawerState.taxRates, applicability: 'expenses' })}</span>
                 </label>
                 <label class="xeroFieldGrid--span2">
-                  <span>Exempt/zero-rated tax type <em>optional</em></span>
+                  <span>${renderFieldHelpLabel('Exempt/zero-rated tax type (optional)', 'Used for GRV lines on zero-rated stock items instead of the tax type above.')}</span>
                   <span data-xero-tax-control="purchaseExemptTaxType">${renderXeroTaxTypeControl({ dataAttr: 'data-xero-purchase-exempt-tax-type', currentValue: settings.purchaseExemptTaxType, placeholder: 'e.g. EXEMPTINPUT', taxRates: xeroDrawerState.taxRates, applicability: 'expenses' })}</span>
-                  <small class="xeroFieldHint">Used for GRV lines on zero-rated stock items instead of the tax type above.</small>
                 </label>
                 <label class="xeroFieldGrid--span2">
-                  <span>COD payment account <em>optional</em></span>
+                  <span>${renderFieldHelpLabel('COD payment account (optional)', 'Bank account COD supplier GRVs are marked paid from. Leave blank to push them Authorised without a payment.')}</span>
                   <span data-xero-account-control="codPaymentAccountCode">${renderXeroAccountCodeControl({ dataAttr: 'data-xero-cod-payment-account', currentValue: settings.codPaymentAccountCode, placeholder: 'e.g. 090', accounts: xeroDrawerState.accounts, filterClass: 'BANK' })}</span>
-                  <small class="xeroFieldHint">Bank account COD supplier GRVs are marked paid from. Leave blank to push them Authorised without a payment.</small>
                 </label>
                 <label class="xeroFieldGrid--span2">
-                  <span>Location tracking category <em>optional</em></span>
+                  <span>${renderFieldHelpLabel('Location tracking category (optional)', 'Tags GRVs, Credit Notes, and daily sales lines with a Xero Tracking Option matching the KCP location — lets Xero report P&L per location. Matched by name; a location with no matching option is pushed without tracking.')}</span>
                   <span data-xero-tax-control="locationTrackingCategoryId">${renderXeroTrackingCategoryControl({ currentValue: settings.locationTrackingCategoryId, trackingCategories: xeroDrawerState.trackingCategories })}</span>
-                  <small class="xeroFieldHint">Tags GRVs, Credit Notes, and daily sales lines with a Xero Tracking Option matching the KCP location — lets Xero report P&amp;L per location. Matched by name; a location with no matching option is pushed without tracking.</small>
                 </label>
                 <label>
                   <span>Wastage expense account</span>
                   <span data-xero-account-control="wastageExpenseAccountCode">${renderXeroAccountCodeControl({ dataAttr: 'data-xero-wastage-expense-account', currentValue: settings.wastageExpenseAccountCode, placeholder: 'e.g. 310', accounts: xeroDrawerState.accounts, filterClass: 'EXPENSE' })}</span>
                 </label>
                 <label>
-                  <span>Inventory asset account</span>
+                  <span>${renderFieldHelpLabel('Inventory asset account', "Wastage posts as a Manual Journal: debits the expense account above, credits this inventory account, for that day's stock write-offs.")}</span>
                   <span data-xero-account-control="wastageAssetAccountCode">${renderXeroAccountCodeControl({ dataAttr: 'data-xero-wastage-asset-account', currentValue: settings.wastageAssetAccountCode, placeholder: 'e.g. 630', accounts: xeroDrawerState.accounts, filterClass: 'ASSET' })}</span>
-                  <small class="xeroFieldHint">Wastage posts as a Manual Journal: debits the expense account above, credits this inventory account, for that day's stock write-offs.</small>
                 </label>
               </div>
               <label class="xeroToggleRow">

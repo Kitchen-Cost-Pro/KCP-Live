@@ -53,10 +53,13 @@ import {
   isSupplierVatRegistered,
   isWorkspaceVatRegistered,
   loadVatEnabledByStockItemId,
+  replaySameDayCostCorrections,
   resolveLocationUnitCost,
   sumVatAwareLineTotals,
   upsertLocationCostStatement,
 } from "./inventory-costing";
+import { getWorkspaceTradingDayStartHour } from "../modules/xero-engine/trading-day";
+import { businessDayUtcBounds, todayDateKey } from "../modules/xero-engine/invoice-sync";
 import {
   ensureTransactionReference,
   getTransactionReference,
@@ -9137,6 +9140,86 @@ function mergeGoodsReceiptIntoPurchaseOrder(
   };
 }
 
+/**
+ * The GRV header-level VAT context (which items/transport/discount are taxable, and the resulting
+ * VAT-aware totals) — shared by postGoodsReceipt and patchGoodsReceipt so a future VAT rule change
+ * (this codebase has had several: zero-rated items, non-registered suppliers, transport always
+ * being ex-VAT) only has to be made once instead of drifting between create and edit.
+ */
+async function computeGrvHeaderVatContext(
+  env: Env,
+  workspaceId: string,
+  payload: {
+    normalized: { items: Array<Record<string, unknown>> };
+    supplierId: unknown;
+    transportEx: unknown;
+    discountEx: unknown;
+  },
+  workspaceVatRate: number,
+) {
+  const grvVatEnabledByStockItemId = await loadVatEnabledByStockItemId(
+    env,
+    workspaceId,
+    payload.normalized.items.map((line) => text(line.stockItemId)),
+  );
+  // GRVEntry.js's finalizeReceivedCost already folds VAT into a VATable line's submitted cost when
+  // the workspace can't reclaim it (not VAT registered) — so on a non-registered workspace the
+  // ex-VAT/VAT split must be backed OUT of that already-inclusive figure, not added on top of it
+  // again (that would double the real VAT paid). See sumVatAwareLineTotals's doc comment.
+  const grvWorkspaceIsVatRegistered = await isWorkspaceVatRegistered(env, workspaceId);
+  // A non-VAT-registered supplier never charges VAT on anything, on top of vat_enabled — applies
+  // uniformly to stock lines AND the synthetic transport line below (transport charged by a
+  // non-VAT-registered supplier isn't VATable either).
+  const grvSupplierIsVatRegistered = await isSupplierVatRegistered(env, workspaceId, text(payload.supplierId));
+  // Transport and Discount ("Transport (Ex)"/"Discount (Ex)" on screen) are ALWAYS genuine ex-VAT
+  // figures regardless of workspace registration — unlike a stock item's unitCost, which switches
+  // to VAT-inclusive when the workspace can't reclaim VAT. VAT on transport is always added on
+  // top (see computeGrvTotals's own doc comment for the regression this fixes: transport used to
+  // be folded through the SAME inclusive-vs-exclusive flag as stock lines, silently dropping its
+  // own VAT amount for a non-registered workspace).
+  const transportEx = numberValue(payload.transportEx, 0);
+  const discountEx = numberValue(payload.discountEx, 0);
+  const totals = computeGrvTotals({
+    items: payload.normalized.items,
+    vatRate: workspaceVatRate,
+    vatEnabledByStockItemId: grvVatEnabledByStockItemId,
+    linesAreAlreadyVatInclusive: !grvWorkspaceIsVatRegistered,
+    supplierIsVatRegistered: grvSupplierIsVatRegistered,
+    transportEx,
+    discountEx,
+  });
+  return {
+    grvVatEnabledByStockItemId,
+    grvWorkspaceIsVatRegistered,
+    grvSupplierIsVatRegistered,
+    transportEx,
+    discountEx,
+    totals,
+  };
+}
+
+/**
+ * Per-line ex-VAT/VAT split for one GRV stock line — shared by postGoodsReceipt and
+ * patchGoodsReceipt. A zero-rated/exempt item, or a non-VAT-registered supplier, carries no VAT at
+ * all. Otherwise: a VAT-registered workspace adds VAT on top of the submitted ex-VAT figure; a
+ * non-registered workspace's submitted figure is already VAT-inclusive (see
+ * computeGrvHeaderVatContext's doc comment), so the true ex-VAT/VAT split is backed OUT of it
+ * instead of adding VAT a second time on top.
+ */
+function splitGrvLineVat(input: {
+  submittedTotalEx: number;
+  lineIsVatable: boolean;
+  workspaceIsVatRegistered: boolean;
+  vatRate: number;
+}): { totalEx: number; totalVat: number } {
+  if (!input.lineIsVatable) return { totalEx: input.submittedTotalEx, totalVat: 0 };
+  if (input.workspaceIsVatRegistered) {
+    return { totalEx: input.submittedTotalEx, totalVat: input.submittedTotalEx * input.vatRate };
+  }
+  const totalEx = input.submittedTotalEx / (1 + input.vatRate);
+  return { totalEx, totalVat: input.submittedTotalEx - totalEx };
+}
+
 export async function postGoodsReceipt(
   request: Request,
   env: Env,
@@ -9180,37 +9263,13 @@ export async function postGoodsReceipt(
   // The grvs INSERT has to be built with the correct totals up front (it must run before the
   // grv_lines inserts below, which reference it via a foreign key), so this is a small separate
   // lookup rather than folded into that per-line loop.
-  const grvVatEnabledByStockItemId = await loadVatEnabledByStockItemId(
-    env,
-    workspaceId,
-    payload.normalized.items.map((line) => text(line.stockItemId)),
-  );
-  // GRVEntry.js's finalizeReceivedCost already folds VAT into a VATable line's submitted cost when
-  // the workspace can't reclaim it (not VAT registered) — so on a non-registered workspace the
-  // ex-VAT/VAT split must be backed OUT of that already-inclusive figure, not added on top of it
-  // again (that would double the real VAT paid). See sumVatAwareLineTotals's doc comment.
-  const grvWorkspaceIsVatRegistered = await isWorkspaceVatRegistered(env, workspaceId);
-  // A non-VAT-registered supplier never charges VAT on anything, on top of vat_enabled — applies
-  // uniformly to stock lines AND the synthetic transport line below (transport charged by a
-  // non-VAT-registered supplier isn't VATable either).
-  const grvSupplierIsVatRegistered = await isSupplierVatRegistered(env, workspaceId, text(payload.supplierId));
-  // Transport and Discount ("Transport (Ex)"/"Discount (Ex)" on screen) are ALWAYS genuine ex-VAT
-  // figures regardless of workspace registration — unlike a stock item's unitCost, which switches
-  // to VAT-inclusive when the workspace can't reclaim VAT. VAT on transport is always added on
-  // top (see computeGrvTotals's own doc comment for the regression this fixes: transport used to
-  // be folded through the SAME inclusive-vs-exclusive flag as stock lines, silently dropping its
-  // own VAT amount for a non-registered workspace).
-  const transportEx = numberValue(payload.transportEx, 0);
-  const discountEx = numberValue(payload.discountEx, 0);
-  const grvVatAwareTotals = computeGrvTotals({
-    items: payload.normalized.items,
-    vatRate: workspaceVatRate,
-    vatEnabledByStockItemId: grvVatEnabledByStockItemId,
-    linesAreAlreadyVatInclusive: !grvWorkspaceIsVatRegistered,
-    supplierIsVatRegistered: grvSupplierIsVatRegistered,
+  const {
+    grvWorkspaceIsVatRegistered,
+    grvSupplierIsVatRegistered,
     transportEx,
     discountEx,
-  });
+    totals: grvVatAwareTotals,
+  } = await computeGrvHeaderVatContext(env, workspaceId, payload, workspaceVatRate);
   payload.totalEx = grvVatAwareTotals.totalEx;
   payload.totalVat = grvVatAwareTotals.totalVat;
   payload.totalInc = grvVatAwareTotals.totalInc;
@@ -9367,19 +9426,12 @@ export async function postGoodsReceipt(
     // non-VATable item's GRV total. A non-VAT-registered supplier (grvSupplierIsVatRegistered)
     // never charges VAT on anything, on top of that.
     const lineIsVatable = grvSupplierIsVatRegistered && numberValue(stockItem.vat_enabled, 1) !== 0;
-    let totalEx = submittedTotalEx;
-    let totalVat = 0;
-    if (lineIsVatable) {
-      if (grvWorkspaceIsVatRegistered) {
-        totalVat = submittedTotalEx * workspaceVatRate;
-      } else {
-        // finalizeReceivedCost (GRVEntry.js) already folded VAT into this line's cost since the
-        // workspace can't reclaim it — back the true ex-VAT/VAT split OUT of that already-
-        // inclusive figure instead of adding VAT again on top of it.
-        totalEx = submittedTotalEx / (1 + workspaceVatRate);
-        totalVat = submittedTotalEx - totalEx;
-      }
-    }
+    const { totalEx, totalVat } = splitGrvLineVat({
+      submittedTotalEx,
+      lineIsVatable,
+      workspaceIsVatRegistered: grvWorkspaceIsVatRegistered,
+      vatRate: workspaceVatRate,
+    });
     const metadata = JSON.stringify({
       before,
       after: before + quantity,
@@ -9536,6 +9588,673 @@ export async function postGoodsReceipt(
 
   await env.DB.batch(statements);
   return json(request, env, { ok: true, id: payload.id, transactionReference });
+}
+
+/**
+ * Edit an already-posted GRV. Unlike postGoodsReceipt (create-only, idempotent-on-retry), this
+ * reverses every original line's stock/ledger effect with a compensating 'grv_edit_reversal'
+ * movement, then re-applies the revised lines exactly like a fresh GRV post — so stock_movements
+ * stays an honest append-only ledger (nothing is overwritten in place) and stock_balances, being
+ * defined as the running sum of stock_movements, ends up correct automatically.
+ *
+ * Known Phase 1 limitations (discussed 2026-09-02, ahead of the Phase 2/3 work):
+ *  - Under weighted-average costing, stock_item_location_prices is NOT recomputed on edit — the
+ *    current WAC figure already blends the original (wrong) line with whatever else has moved
+ *    since, so a single unblend-and-reblend step here would silently produce a plausible-looking
+ *    but not-actually-correct number. That needs a real replay of the movements since this GRV,
+ *    which is Phase 2 (same-day sale-cost correction) work, not this endpoint. Under 'last'
+ *    costing it's exact and handled below.
+ *  - A GRV linked to a purchase order does not re-merge into that PO's received-quantity tracking
+ *    on edit (only on original create) — editing a PO-sourced GRV's quantities will not update
+ *    the PO's fulfilment status.
+ *  - Xero re-sync happens automatically via the `version` bump below — see grv-sync.ts's
+ *    grvPushEffectKey/findLatestAppliedGrvXeroBillId for how a later push finds and updates the
+ *    already-created Bill instead of creating a duplicate.
+ */
+export async function patchGoodsReceipt(
+  request: Request,
+  env: Env,
+  auth: AuthContext,
+  workspaceId: string,
+  grvId: string,
+) {
+  await scoped(request, env, auth, workspaceId);
+  await assertWorkspacePermission(env, auth, workspaceId, "nav-grv");
+  const idValue = text(grvId);
+
+  const existing = await env.DB.prepare(
+    `SELECT * FROM grvs WHERE workspace_id = ?1 AND id = ?2 LIMIT 1`,
+  )
+    .bind(workspaceId, idValue)
+    .first<Record<string, unknown>>();
+  if (!existing) return error(request, env, 404, "GRV could not be found.");
+
+  const existingLines =
+    (
+      await env.DB.prepare(
+        `SELECT * FROM grv_lines WHERE workspace_id = ?1 AND grv_id = ?2`,
+      )
+        .bind(workspaceId, idValue)
+        .all<Record<string, unknown>>()
+    ).results || [];
+
+  const body = await readJson<Record<string, unknown>>(request);
+  const workspaceVatRate = await getWorkspaceEffectiveVatRate(env, workspaceId);
+  const payload = normalizeGoodsReceiptPayload(
+    { ...body, receipt: { ...objectValue(body.receipt || body), id: idValue } },
+    workspaceVatRate,
+  );
+  if (!payload.normalized.items.length)
+    return error(request, env, 400, "Add at least one received stock item.");
+
+  const {
+    grvWorkspaceIsVatRegistered,
+    grvSupplierIsVatRegistered,
+    transportEx,
+    discountEx,
+    totals: grvVatAwareTotals,
+  } = await computeGrvHeaderVatContext(env, workspaceId, payload, workspaceVatRate);
+  payload.totalEx = grvVatAwareTotals.totalEx;
+  payload.totalVat = grvVatAwareTotals.totalVat;
+  payload.totalInc = grvVatAwareTotals.totalInc;
+  payload.normalized.totalEx = grvVatAwareTotals.totalEx;
+  payload.normalized.totalVat = grvVatAwareTotals.totalVat;
+  payload.normalized.totalInc = grvVatAwareTotals.totalInc;
+
+  const now = nowIso();
+  const costingMethod = await getWorkspaceInventoryCostingMethod(env, workspaceId);
+  const shouldOverrideCostPrice = payload.overrideCostPrice !== 0;
+  payload.normalized.costingMethod = costingMethod;
+  payload.normalized.overrideCostPrice = shouldOverrideCostPrice;
+
+  const receivingLocationId = await resolveActiveLocationId(
+    env,
+    workspaceId,
+    text(payload.normalized.locationId || payload.normalized.targetLocation),
+  );
+  const preserveLineLocations =
+    payload.normalized.splitByLocation === true || Boolean(payload.purchaseOrderId);
+  if (receivingLocationId)
+    await assertLocationAccess(env, auth, workspaceId, receivingLocationId, "grv");
+  if (receivingLocationId) {
+    payload.normalized.locationId = receivingLocationId;
+    payload.normalized.targetLocation = receivingLocationId;
+    payload.normalized.items = payload.normalized.items.map((line) => ({
+      ...line,
+      locationId: preserveLineLocations
+        ? text(line.locationId || line.targetLocation) || receivingLocationId
+        : receivingLocationId,
+      targetLocation: preserveLineLocations
+        ? text(line.targetLocation || line.locationId) || receivingLocationId
+        : receivingLocationId,
+    }));
+  }
+  payload.rawJson = JSON.stringify({
+    ...payload.normalized,
+    editedBy: auth.uid,
+    editedAt: now,
+  });
+
+  const keyOf = (stockItemId: string, locationId: string) => `${stockItemId}::${locationId}`;
+  // Net quantity delta across reversal (negative, original lines) + reapply (positive, revised
+  // lines) per stock_item+location — used only to guard against a negative resulting balance
+  // before any statement is queued.
+  const netDeltaByKey = new Map<string, number>();
+  // Original per-key quantity/cost, used to detect a real cost change (to trigger same-day sale
+  // cost correction below) and as the replay's pre-edit balance baseline. If a key has more than
+  // one original line (rare — normally one line per stock_item+location, but possible), the cost
+  // is the quantity-weighted average across them — the same basis originalQuantityByKey already
+  // uses (a sum, not "last wins") — so the two stay consistent instead of comparing a summed
+  // quantity against an arbitrarily-picked single line's cost.
+  const originalQuantityByKey = new Map<string, number>();
+  const originalCostValueByKey = new Map<string, number>();
+  for (const line of existingLines) {
+    const key = keyOf(text(line.stock_item_id), text(line.location_id));
+    const quantity = numberValue(line.quantity, 0);
+    const unitCost = numberValue(line.unit_price, 0);
+    netDeltaByKey.set(key, (netDeltaByKey.get(key) || 0) - quantity);
+    originalQuantityByKey.set(key, (originalQuantityByKey.get(key) || 0) + quantity);
+    originalCostValueByKey.set(key, (originalCostValueByKey.get(key) || 0) + quantity * unitCost);
+  }
+  const originalUnitCostByKey = new Map<string, number>(
+    Array.from(originalQuantityByKey.entries()).map(([key, quantity]) => [
+      key,
+      quantity > 0 ? (originalCostValueByKey.get(key) || 0) / quantity : 0,
+    ]),
+  );
+
+  const revisedLineInputs: Array<{
+    stockItemId: string;
+    locationId: string;
+    unit: string;
+    quantity: number;
+    unitCost: number;
+    totalEx: number;
+    totalVat: number;
+  }> = [];
+
+  for (const line of payload.normalized.items) {
+    const stockItemId = text(line.stockItemId);
+    const locationId = await resolveActiveLocationId(
+      env,
+      workspaceId,
+      text(line.locationId || line.targetLocation) || receivingLocationId,
+    );
+    if (!locationId)
+      return error(
+        request,
+        env,
+        400,
+        `${text(line.stockItemName || stockItemId)} needs a receiving location.`,
+      );
+    const stockItem = await env.DB.prepare(
+      `SELECT id, name, unit, unit_cost, vat_enabled, raw_json
+         FROM stock_items
+        WHERE workspace_id = ?1
+          AND id = ?2
+          AND active = 1
+          AND ${STOCKED_ITEM_SQL}
+        LIMIT 1`,
+    )
+      .bind(workspaceId, stockItemId)
+      .first<Record<string, unknown>>();
+    if (!stockItem)
+      return error(
+        request,
+        env,
+        404,
+        `${text(line.stockItemName || stockItemId)} could not be found.`,
+      );
+
+    const quantity = numberValue(line.baseQuantity, numberValue(line.receivedQty, 0));
+    const key = keyOf(stockItemId, locationId);
+    netDeltaByKey.set(key, (netDeltaByKey.get(key) || 0) + quantity);
+
+    const previousCost = (
+      await resolveLocationUnitCost(env, workspaceId, stockItemId, locationId, stockItem)
+    ).cost;
+    const unitCost = numberValue(line.unitCost ?? previousCost, previousCost);
+    const submittedTotalEx = numberValue(line.lineTotalEx, quantity * unitCost);
+    const lineIsVatable = grvSupplierIsVatRegistered && numberValue(stockItem.vat_enabled, 1) !== 0;
+    const { totalEx: lineTotalEx, totalVat: lineTotalVat } = splitGrvLineVat({
+      submittedTotalEx,
+      lineIsVatable,
+      workspaceIsVatRegistered: grvWorkspaceIsVatRegistered,
+      vatRate: workspaceVatRate,
+    });
+    revisedLineInputs.push({
+      stockItemId,
+      locationId,
+      unit: text(line.unit || stockItem.unit),
+      quantity,
+      unitCost,
+      totalEx: lineTotalEx,
+      totalVat: lineTotalVat,
+    });
+  }
+
+  // Guard: block the edit outright if the net reversal+reapply would take any stock_item/location
+  // balance below zero, rather than silently letting stock go negative. Consistent with the
+  // existing insufficient-stock guards on credit notes/adjustments/manufacturing elsewhere in
+  // this file. Batched into two queries (all balances, all item names) regardless of how many keys
+  // need checking, instead of one round-trip per key.
+  const negativeDeltaEntries = Array.from(netDeltaByKey.entries()).filter(([, delta]) => delta < 0);
+  if (negativeDeltaEntries.length) {
+    const stockItemIds = Array.from(
+      new Set(negativeDeltaEntries.map(([key]) => key.split("::")[0])),
+    );
+    const placeholders = stockItemIds.map((_, index) => `?${index + 2}`).join(", ");
+    const balanceRows =
+      (
+        await env.DB.prepare(
+          `SELECT stock_item_id, location_id, quantity FROM stock_balances
+            WHERE workspace_id = ?1 AND stock_item_id IN (${placeholders})`,
+        )
+          .bind(workspaceId, ...stockItemIds)
+          .all<{ stock_item_id: string; location_id: string; quantity: number }>()
+      ).results || [];
+    const balanceByKey = new Map<string, number>();
+    for (const row of balanceRows)
+      balanceByKey.set(keyOf(row.stock_item_id, row.location_id), numberValue(row.quantity, 0));
+    const stockItemRows =
+      (
+        await env.DB.prepare(
+          `SELECT id, name, unit FROM stock_items WHERE workspace_id = ?1 AND id IN (${placeholders})`,
+        )
+          .bind(workspaceId, ...stockItemIds)
+          .all<{ id: string; name: string; unit: string }>()
+      ).results || [];
+    const stockItemById = new Map(stockItemRows.map((row) => [row.id, row]));
+
+    for (const [key, netDelta] of negativeDeltaEntries) {
+      const [stockItemId] = key.split("::");
+      const before = balanceByKey.get(key) || 0;
+      if (before + netDelta < -0.000001) {
+        const item = stockItemById.get(stockItemId);
+        return error(
+          request,
+          env,
+          409,
+          `Editing this GRV would take ${text(item?.name || stockItemId)}'s stock below zero at this location (available: ${formatQuantity(before)} ${text(item?.unit || "")}). Stock has already moved since this GRV was received — resolve that first.`,
+        );
+      }
+    }
+  }
+
+  const statements: DbStatementLike[] = [];
+
+  // --- Reverse every original line ---
+  for (const line of existingLines) {
+    const stockItemId = text(line.stock_item_id);
+    const locationId = text(line.location_id);
+    const quantity = numberValue(line.quantity, 0);
+    const unitCost = numberValue(line.unit_price, 0);
+    const totalEx = numberValue(line.total_ex, 0);
+    statements.push(
+      env.DB.prepare(
+        `INSERT INTO stock_balances (workspace_id, stock_item_id, location_id, quantity, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(workspace_id, stock_item_id, location_id) DO UPDATE SET
+          quantity = stock_balances.quantity + ?4,
+          updated_at = excluded.updated_at`,
+      ).bind(workspaceId, stockItemId, locationId, -quantity, now),
+      env.DB.prepare(
+        `INSERT INTO stock_movements
+          (id, workspace_id, stock_item_id, location_id, movement_type, document_type, document_id,
+           destination_location_id, quantity_delta, unit_cost, value_delta, occurred_at, created_by, metadata_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, 'grv_edit_reversal', 'grv', ?5, ?4, ?6, ?7, ?8, ?9, ?10, ?11, ?12)`,
+      ).bind(
+        id("move"),
+        workspaceId,
+        stockItemId,
+        locationId,
+        idValue,
+        -quantity,
+        unitCost,
+        -totalEx,
+        text(existing.received_at),
+        auth.uid,
+        JSON.stringify({ reversedGrvLineId: text(line.id), reason: "grv_edit" }),
+        now,
+      ),
+    );
+  }
+
+  statements.push(
+    env.DB.prepare(`DELETE FROM grv_lines WHERE workspace_id = ?1 AND grv_id = ?2`).bind(
+      workspaceId,
+      idValue,
+    ),
+  );
+
+  // --- Reapply the revised lines ---
+  for (const revised of revisedLineInputs) {
+    const grvLineId = id("grvl");
+    statements.push(
+      env.DB.prepare(
+        `INSERT INTO stock_balances (workspace_id, stock_item_id, location_id, quantity, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(workspace_id, stock_item_id, location_id) DO UPDATE SET
+          quantity = stock_balances.quantity + ?4,
+          updated_at = excluded.updated_at`,
+      ).bind(workspaceId, revised.stockItemId, revised.locationId, revised.quantity, now),
+      env.DB.prepare(
+        `INSERT INTO grv_lines (id, workspace_id, grv_id, stock_item_id, location_id, quantity, unit, unit_price, total_ex, total_vat, total_inc)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`,
+      ).bind(
+        grvLineId,
+        workspaceId,
+        idValue,
+        revised.stockItemId,
+        revised.locationId,
+        revised.quantity,
+        revised.unit,
+        revised.unitCost,
+        revised.totalEx,
+        revised.totalVat,
+        revised.totalEx + revised.totalVat,
+      ),
+      env.DB.prepare(
+        `INSERT INTO stock_item_latest_purchase
+          (workspace_id, stock_item_id, location_id, supplier_id, unit, unit_price, received_at, grv_line_id, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(workspace_id, stock_item_id, location_id) DO UPDATE SET
+           supplier_id = excluded.supplier_id,
+           unit = excluded.unit,
+           unit_price = excluded.unit_price,
+           received_at = excluded.received_at,
+           grv_line_id = excluded.grv_line_id,
+           updated_at = excluded.updated_at
+         WHERE excluded.received_at > stock_item_latest_purchase.received_at
+            OR (excluded.received_at = stock_item_latest_purchase.received_at
+                AND excluded.updated_at >= stock_item_latest_purchase.updated_at)`,
+        // Tiebreak on updated_at (this edit's real, monotonically-ordered timestamp), not
+        // grv_line_id like postGoodsReceipt's create-path copy of this statement — grv_line_id is
+        // a fresh crypto.randomUUID() every time a line is reapplied (see id("grvl") above), so on
+        // an edit that doesn't change received_at (a same-day cost-only correction, the common
+        // case), the old grv_line_id-based tiebreak was an effective coin flip on whether the
+        // correction actually overwrote the Stock Control report's "latest purchase price".
+      ).bind(
+        workspaceId,
+        revised.stockItemId,
+        revised.locationId,
+        payload.supplierId,
+        revised.unit,
+        revised.unitCost,
+        payload.receivedAt,
+        grvLineId,
+        now,
+      ),
+      env.DB.prepare(
+        `INSERT INTO stock_movements
+          (id, workspace_id, stock_item_id, location_id, movement_type, document_type, document_id,
+           destination_location_id, quantity_delta, unit_cost, value_delta, occurred_at, created_by, metadata_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, 'grv_in', 'grv', ?5, ?4, ?6, ?7, ?8, ?9, ?10, ?11, ?12)`,
+      ).bind(
+        id("move"),
+        workspaceId,
+        revised.stockItemId,
+        revised.locationId,
+        idValue,
+        revised.quantity,
+        revised.unitCost,
+        revised.totalEx,
+        payload.receivedAt,
+        auth.uid,
+        JSON.stringify({ grvId: idValue, reason: "grv_edit", costingMethod }),
+        now,
+      ),
+    );
+
+    // Under 'last' costing this is exact (calculateIncomingLocationCost('last') just returns the
+    // revised unit cost). Under 'wac' it's deliberately skipped here — see this function's doc
+    // comment for why an approximate re-blend would be worse than leaving it alone.
+    if (shouldOverrideCostPrice && String(costingMethod).toLowerCase() === "last") {
+      statements.push(
+        upsertLocationCostStatement(
+          env,
+          workspaceId,
+          revised.stockItemId,
+          revised.locationId,
+          calculateIncomingLocationCost({
+            method: costingMethod,
+            previousQuantity: 0,
+            previousUnitCost: 0,
+            incomingQuantity: revised.quantity,
+            incomingUnitCost: revised.unitCost,
+          }),
+          now,
+        ),
+      );
+    }
+
+  }
+
+  // Same-day sale cost correction (Phase 2): if a stock_item+location's cost actually changed and
+  // it's meant to drive valuation, work out which sales made that same trading day were costed off
+  // the wrong figure and compensate them — see buildSameDayCostCorrectionStatements's doc comment.
+  // Runs for BOTH costing modes (the replay handles 'last' and 'wac' the same way); it's unrelated
+  // to the 'last'-only stock_item_location_prices upsert above, which is about the location's
+  // going-forward cost snapshot, not past sales.
+  //
+  // Aggregated by key OUTSIDE the reapply loop (not called once per revisedLineInputs entry) — a
+  // GRV can have more than one revised line for the same stock_item+location (e.g. a quantity
+  // split), and calling this per-line against the same still-uncommitted DB state would have each
+  // call independently find and compensate the same sale, double-applying the correction.
+  if (shouldOverrideCostPrice) {
+    const revisedQuantityByKey = new Map<string, number>();
+    const revisedCostValueByKey = new Map<string, number>();
+    for (const revised of revisedLineInputs) {
+      const key = keyOf(revised.stockItemId, revised.locationId);
+      revisedQuantityByKey.set(key, (revisedQuantityByKey.get(key) || 0) + revised.quantity);
+      revisedCostValueByKey.set(
+        key,
+        (revisedCostValueByKey.get(key) || 0) + revised.quantity * revised.unitCost,
+      );
+    }
+    // Normally just the OLD received_at's trading day — that's when the mistaken cost started
+    // being in effect, so that's where mis-costed sales are. But an edit can change received_at
+    // AND cost in the same request (e.g. correcting a backdated GRV's date along with a typo'd
+    // price) — sales made on the NEW date, before this edit lands, were also costed off the stale
+    // pre-edit figure, and they live in a different trading-day window the old-date scan alone
+    // would never look at. Scanning both windows when the dates differ covers that; scanning the
+    // same window twice when they don't would just be redundant work, not wrong, but the dedup
+    // below skips it for clarity.
+    const oldReceivedAt = text(existing.received_at);
+    const correctionWindows = Array.from(
+      new Set([oldReceivedAt, payload.receivedAt].filter(Boolean)),
+    );
+
+    for (const [key, revisedQuantity] of revisedQuantityByKey.entries()) {
+      const originalUnitCost = originalUnitCostByKey.get(key);
+      const revisedUnitCost =
+        revisedQuantity > 0 ? (revisedCostValueByKey.get(key) || 0) / revisedQuantity : 0;
+      if (originalUnitCost === undefined || Math.abs(originalUnitCost - revisedUnitCost) <= 0.0001)
+        continue;
+      const [stockItemId, locationId] = key.split("::");
+      // Shared across both windows for this key so an overlapping window can't double-correct the
+      // same sale — see buildSameDayCostCorrectionStatements's alreadyHandledMovementIds doc note.
+      const alreadyHandledMovementIds = new Set<string>();
+      for (const grvEffectiveAt of correctionWindows) {
+        const correctionStatements = await buildSameDayCostCorrectionStatements(
+          env,
+          auth,
+          workspaceId,
+          {
+            stockItemId,
+            locationId,
+            grvId: idValue,
+            grvEffectiveAt,
+            originalQuantity: originalQuantityByKey.get(key) || 0,
+            revisedQuantity,
+            revisedUnitCost,
+            costingMethod,
+            now,
+            alreadyHandledMovementIds,
+          },
+        );
+        statements.push(...correctionStatements);
+      }
+    }
+  }
+
+  statements.push(
+    env.DB.prepare(
+      `UPDATE grvs SET
+        supplier_id = ?3, purchase_order_id = ?4, invoice_number = ?5, received_at = ?6,
+        prices_include_vat = ?7, split_by_location = ?8, total_ex = ?9, total_vat = ?10,
+        total_inc = ?11, transport_ex = ?12, discount_ex = ?13, raw_json = ?14,
+        updated_at = ?15, version = version + 1
+       WHERE workspace_id = ?1 AND id = ?2`,
+    ).bind(
+      workspaceId,
+      idValue,
+      payload.supplierId,
+      payload.purchaseOrderId,
+      payload.invoiceNumber,
+      payload.receivedAt,
+      payload.pricesIncludeVat,
+      payload.splitByLocation,
+      payload.totalEx,
+      payload.totalVat,
+      payload.totalInc,
+      transportEx,
+      discountEx,
+      payload.rawJson,
+      now,
+    ),
+    env.DB.prepare(
+      `INSERT INTO audit_events (id, workspace_id, actor_uid, event_type, entity_type, entity_id, before_json, after_json, created_at)
+       VALUES (?1, ?2, ?3, 'grv_edited', 'grv', ?4, ?5, ?6, ?7)`,
+    ).bind(
+      id("audit"),
+      workspaceId,
+      auth.uid,
+      idValue,
+      text(existing.raw_json),
+      payload.rawJson,
+      now,
+    ),
+  );
+
+  await env.DB.batch(statements);
+  return json(request, env, { ok: true, id: idValue, version: numberValue(existing.version, 1) + 1 });
+}
+
+/**
+ * DB-wired wrapper around replaySameDayCostCorrections (see its doc comment in
+ * inventory-costing.ts for the replay logic itself): loads the trading-day window's movements
+ * for one stock_item+location, resolves each sale's current effective cost (folding in any prior
+ * correction from an earlier edit of this same GRV), runs the replay, and returns compensating
+ * 'cost_correction' INSERT statements — never UPDATEs — so stock_movements stays append-only, same
+ * design as patchGoodsReceipt's reversal/reapply. quantity_delta on a correction row is always 0
+ * (nothing about stock quantity changes here, only its recorded value), so stock_balances is
+ * untouched.
+ */
+async function buildSameDayCostCorrectionStatements(
+  env: Env,
+  auth: AuthContext,
+  workspaceId: string,
+  input: {
+    stockItemId: string;
+    locationId: string;
+    grvId: string;
+    grvEffectiveAt: string;
+    originalQuantity: number;
+    revisedQuantity: number;
+    revisedUnitCost: number;
+    costingMethod: unknown;
+    now: string;
+    // Mutated in place: movement ids already corrected earlier in THIS same request (e.g. by an
+    // overlapping trading-day window when both received_at and cost changed together — see
+    // patchGoodsReceipt's correctionWindows). Nothing queued this request has been committed yet,
+    // so a second window call can't see the first window's not-yet-executed INSERTs any other way;
+    // without this, two overlapping windows could each independently "discover" and correct the
+    // same sale, double-applying the value_delta adjustment exactly like the earlier per-line bug.
+    alreadyHandledMovementIds: Set<string>;
+  },
+): Promise<DbStatementLike[]> {
+  const startHour = await getWorkspaceTradingDayStartHour(env, workspaceId);
+  const dateKey = todayDateKey(startHour, new Date(input.grvEffectiveAt));
+  const { endIso } = businessDayUtcBounds(dateKey, startHour);
+
+  const windowMovements =
+    (
+      await env.DB.prepare(
+        `SELECT id, movement_type, document_type, document_id, quantity_delta, unit_cost, occurred_at, created_at
+           FROM stock_movements
+          WHERE workspace_id = ?1
+            AND stock_item_id = ?2
+            AND location_id = ?3
+            AND occurred_at >= ?4
+            AND occurred_at < ?5
+            AND movement_type <> 'cost_correction'
+            AND NOT (document_type = 'grv' AND document_id = ?6)
+          ORDER BY occurred_at ASC, created_at ASC`,
+      )
+        .bind(
+          workspaceId,
+          input.stockItemId,
+          input.locationId,
+          input.grvEffectiveAt,
+          endIso,
+          input.grvId,
+        )
+        .all<Record<string, unknown>>()
+    ).results || [];
+  if (!windowMovements.length) return [];
+
+  const priorCorrections =
+    (
+      await env.DB.prepare(
+        `SELECT metadata_json, created_at
+           FROM stock_movements
+          WHERE workspace_id = ?1
+            AND stock_item_id = ?2
+            AND location_id = ?3
+            AND movement_type = 'cost_correction'
+          ORDER BY created_at ASC`,
+      )
+        .bind(workspaceId, input.stockItemId, input.locationId)
+        .all<{ metadata_json: string; created_at: string }>()
+    ).results || [];
+  const effectiveCostByMovementId = new Map<string, number>();
+  for (const row of priorCorrections) {
+    const meta = objectValue(jsonParse(row.metadata_json));
+    const movementId = text(meta.correctedMovementId);
+    if (movementId) effectiveCostByMovementId.set(movementId, numberValue(meta.newUnitCost, 0));
+  }
+
+  const events = windowMovements.map((row) => ({
+    id: text(row.id),
+    quantityDelta: numberValue(row.quantity_delta, 0),
+    unitCost:
+      text(row.movement_type) === "sale_depletion" && effectiveCostByMovementId.has(text(row.id))
+        ? (effectiveCostByMovementId.get(text(row.id)) as number)
+        : numberValue(row.unit_cost, 0),
+    isSale: text(row.movement_type) === "sale_depletion",
+  }));
+
+  // The balance right before this GRV's own event = the current (pre-edit) balance, minus this
+  // GRV's original quantity contribution, minus everything that's moved since (the window events
+  // just loaded above) — all three are still netted into the current balance at this point,
+  // because patchGoodsReceipt's reversal/reapply statements haven't executed yet.
+  const currentBalanceRow = await env.DB.prepare(
+    `SELECT quantity FROM stock_balances WHERE workspace_id = ?1 AND stock_item_id = ?2 AND location_id = ?3 LIMIT 1`,
+  )
+    .bind(workspaceId, input.stockItemId, input.locationId)
+    .first<{ quantity: number }>();
+  const netWindowDelta = events.reduce((sum, event) => sum + event.quantityDelta, 0);
+  const balanceBeforeThisGrv =
+    numberValue(currentBalanceRow?.quantity, 0) - input.originalQuantity - netWindowDelta;
+
+  const corrections = replaySameDayCostCorrections({
+    costingMethod: input.costingMethod,
+    startingQuantity: balanceBeforeThisGrv + input.revisedQuantity,
+    startingUnitCost: input.revisedUnitCost,
+    events,
+  });
+  if (!corrections.length) return [];
+
+  const originalById = new Map(windowMovements.map((row) => [text(row.id), row]));
+  const statements: DbStatementLike[] = [];
+  for (const correction of corrections) {
+    if (input.alreadyHandledMovementIds.has(correction.id)) continue;
+    const original = originalById.get(correction.id);
+    if (!original) continue;
+    const quantityDelta = numberValue(original.quantity_delta, 0);
+    const previousEffectiveCost =
+      effectiveCostByMovementId.get(correction.id) ?? numberValue(original.unit_cost, 0);
+    if (Math.abs(previousEffectiveCost - correction.correctedUnitCost) <= 0.0001) continue;
+    input.alreadyHandledMovementIds.add(correction.id);
+    statements.push(
+      env.DB.prepare(
+        `INSERT INTO stock_movements
+          (id, workspace_id, stock_item_id, location_id, movement_type, document_type, document_id,
+           quantity_delta, unit_cost, value_delta, occurred_at, created_by, metadata_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, 'cost_correction', 'grv', ?5, 0, ?6, ?7, ?8, ?9, ?10, ?11)`,
+      ).bind(
+        id("move"),
+        workspaceId,
+        input.stockItemId,
+        input.locationId,
+        input.grvId,
+        correction.correctedUnitCost,
+        quantityDelta * (correction.correctedUnitCost - previousEffectiveCost),
+        text(original.occurred_at),
+        auth.uid,
+        JSON.stringify({
+          correctedMovementId: correction.id,
+          previousUnitCost: previousEffectiveCost,
+          newUnitCost: correction.correctedUnitCost,
+          grvId: input.grvId,
+          reason: "same_day_cost_correction",
+        }),
+        input.now,
+      ),
+    );
+  }
+  return statements;
 }
 
 function normalizeCreditNotePayload(raw: Record<string, unknown>) {
@@ -9771,6 +10490,134 @@ export async function getCreditNotes(
   return json(request, env, { ok: true, creditNotes });
 }
 
+/**
+ * Guards a credit note (create OR edit) against cumulatively returning more of a stock item than
+ * was ever ordered on its source purchase order — several smaller credit notes against the same PO
+ * must not sum past the PO's ordered quantity. Shared by postCreditNote and patchCreditNote so an
+ * edit can't silently bypass a check the create path enforces; excludes `excludeCreditNoteId` (the
+ * credit note being saved/edited) from the "already returned" sum so it never counts against
+ * itself, whether that's a create-time idempotent retry or an edit revising its own quantities.
+ */
+async function checkCreditNotePoReturnQuantity(
+  env: Env,
+  workspaceId: string,
+  excludeCreditNoteId: string,
+  normalized: { sourcePoId?: unknown; items: Array<Record<string, unknown>> },
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  const sourcePoId = text(normalized.sourcePoId);
+  if (!sourcePoId) return { ok: true };
+
+  const requestedByStockItem = new Map<
+    string,
+    { quantity: number; name: string; fallbackMaximum: number }
+  >();
+  for (const line of normalized.items) {
+    const stockItemId = text(line.stockItemId);
+    if (!stockItemId) continue;
+    const current = requestedByStockItem.get(stockItemId) || {
+      quantity: 0,
+      name: text(line.stockItemName || stockItemId),
+      fallbackMaximum: 0,
+    };
+    current.quantity += numberValue(line.returnedQty ?? line.packQty, 0);
+    current.fallbackMaximum += numberValue(
+      line.maxReturnQty ?? line.originalOrderQty,
+      0,
+    );
+    requestedByStockItem.set(stockItemId, current);
+  }
+
+  // Include earlier credit notes for this PO so several smaller returns cannot cumulatively
+  // exceed the original ordered quantity. The credit note being saved is excluded so a create-time
+  // retry and an edit revising its own quantities never count against themselves.
+  const priorCreditRows = await env.DB.prepare(
+    `SELECT raw_json
+       FROM credit_notes
+      WHERE workspace_id = ?1
+        AND id <> ?2
+        AND json_valid(raw_json) = 1
+        AND COALESCE(json_extract(raw_json, '$.sourcePoId'), '') = ?3`,
+  )
+    .bind(workspaceId, excludeCreditNoteId, sourcePoId)
+    .all<{ raw_json: string }>();
+  const previouslyReturnedByStockItem = new Map<string, number>();
+  for (const row of priorCreditRows.results || []) {
+    const prior = objectValue(jsonParse(row.raw_json));
+    for (const line of arrayValue(prior.items).map(objectValue)) {
+      const stockItemId = text(line.stockItemId || line.itemId || line.id);
+      if (!stockItemId) continue;
+      const quantity = numberValue(
+        line.returnedQty ?? line.packQty ?? line.quantity,
+        0,
+      );
+      previouslyReturnedByStockItem.set(
+        stockItemId,
+        (previouslyReturnedByStockItem.get(stockItemId) || 0) + quantity,
+      );
+    }
+  }
+
+  for (const [stockItemId, requested] of requestedByStockItem.entries()) {
+    const ordered = await env.DB.prepare(
+      `SELECT SUM(quantity) AS quantity
+         FROM purchase_order_lines
+        WHERE workspace_id = ?1
+          AND purchase_order_id = ?2
+          AND stock_item_id = ?3`,
+    )
+      .bind(workspaceId, sourcePoId, stockItemId)
+      .first<{ quantity: number }>();
+    const originalQuantity = numberValue(
+      ordered?.quantity,
+      requested.fallbackMaximum,
+    );
+    const previouslyReturned =
+      previouslyReturnedByStockItem.get(stockItemId) || 0;
+    const cumulativeReturn = previouslyReturned + requested.quantity;
+    if (
+      originalQuantity > 0 &&
+      cumulativeReturn > originalQuantity + 0.000001
+    ) {
+      const remainingQuantity = Math.max(
+        originalQuantity - previouslyReturned,
+        0,
+      );
+      return {
+        ok: false,
+        message: `${requested.name} cannot return more than the original purchase order quantity of ${formatQuantity(originalQuantity)}. ${formatQuantity(remainingQuantity)} remains available to return.`,
+      };
+    }
+  }
+  return { ok: true };
+}
+
+/**
+ * A credit note line's cost/total, honoring an explicit override if the client sent one and
+ * falling back to the location's resolved cost otherwise — shared by postCreditNote and
+ * patchCreditNote so the two fallback rules stay in sync.
+ */
+function resolveCreditNoteLineCost(input: {
+  line: Record<string, unknown>;
+  quantity: number;
+  fallbackCost: number;
+}): { unitCost: number; totalEx: number } {
+  const hasExplicitLineCost =
+    input.line.unitCost !== undefined &&
+    input.line.unitCost !== null &&
+    text(input.line.unitCost) !== "";
+  const unitCost = hasExplicitLineCost
+    ? numberValue(input.line.unitCost, input.fallbackCost)
+    : input.fallbackCost;
+  const hasLineTotalEx =
+    input.line.lineTotalEx !== undefined &&
+    input.line.lineTotalEx !== null &&
+    text(input.line.lineTotalEx) !== "";
+  const totalEx = hasLineTotalEx
+    ? numberValue(input.line.lineTotalEx, input.quantity * unitCost)
+    : input.quantity * unitCost;
+  return { unitCost, totalEx };
+}
+
 export async function postCreditNote(
   request: Request,
   env: Env,
@@ -9832,92 +10679,14 @@ export async function postCreditNote(
     });
   }
 
-  const sourcePoId = text(payload.normalized.sourcePoId);
-  if (sourcePoId) {
-    const requestedByStockItem = new Map<
-      string,
-      { quantity: number; name: string; fallbackMaximum: number }
-    >();
-    for (const line of payload.normalized.items) {
-      const stockItemId = text(line.stockItemId);
-      if (!stockItemId) continue;
-      const current = requestedByStockItem.get(stockItemId) || {
-        quantity: 0,
-        name: text(line.stockItemName || stockItemId),
-        fallbackMaximum: 0,
-      };
-      current.quantity += numberValue(line.returnedQty ?? line.packQty, 0);
-      current.fallbackMaximum += numberValue(
-        line.maxReturnQty ?? line.originalOrderQty,
-        0,
-      );
-      requestedByStockItem.set(stockItemId, current);
-    }
-
-    // Include earlier credit notes for this PO so several smaller returns cannot cumulatively
-    // exceed the original ordered quantity. The current credit note id is excluded so retries
-    // remain idempotent and do not count themselves twice.
-    const priorCreditRows = await env.DB.prepare(
-      `SELECT raw_json
-         FROM credit_notes
-        WHERE workspace_id = ?1
-          AND id <> ?2
-          AND json_valid(raw_json) = 1
-          AND COALESCE(json_extract(raw_json, '$.sourcePoId'), '') = ?3`,
-    )
-      .bind(workspaceId, payload.id, sourcePoId)
-      .all<{ raw_json: string }>();
-    const previouslyReturnedByStockItem = new Map<string, number>();
-    for (const row of priorCreditRows.results || []) {
-      const prior = objectValue(jsonParse(row.raw_json));
-      for (const line of arrayValue(prior.items).map(objectValue)) {
-        const stockItemId = text(line.stockItemId || line.itemId || line.id);
-        if (!stockItemId) continue;
-        const quantity = numberValue(
-          line.returnedQty ?? line.packQty ?? line.quantity,
-          0,
-        );
-        previouslyReturnedByStockItem.set(
-          stockItemId,
-          (previouslyReturnedByStockItem.get(stockItemId) || 0) + quantity,
-        );
-      }
-    }
-
-    for (const [stockItemId, requested] of requestedByStockItem.entries()) {
-      const ordered = await env.DB.prepare(
-        `SELECT SUM(quantity) AS quantity
-           FROM purchase_order_lines
-          WHERE workspace_id = ?1
-            AND purchase_order_id = ?2
-            AND stock_item_id = ?3`,
-      )
-        .bind(workspaceId, sourcePoId, stockItemId)
-        .first<{ quantity: number }>();
-      const originalQuantity = numberValue(
-        ordered?.quantity,
-        requested.fallbackMaximum,
-      );
-      const previouslyReturned =
-        previouslyReturnedByStockItem.get(stockItemId) || 0;
-      const cumulativeReturn = previouslyReturned + requested.quantity;
-      if (
-        originalQuantity > 0 &&
-        cumulativeReturn > originalQuantity + 0.000001
-      ) {
-        const remainingQuantity = Math.max(
-          originalQuantity - previouslyReturned,
-          0,
-        );
-        return error(
-          request,
-          env,
-          409,
-          `${requested.name} cannot return more than the original purchase order quantity of ${formatQuantity(originalQuantity)}. ${formatQuantity(remainingQuantity)} remains available to return.`,
-        );
-      }
-    }
-  }
+  const poReturnCheck = await checkCreditNotePoReturnQuantity(
+    env,
+    workspaceId,
+    payload.id,
+    payload.normalized,
+  );
+  if (!poReturnCheck.ok)
+    return error(request, env, 409, poReturnCheck.message);
 
   const transactionReference = await ensureTransactionReference(
     env,
@@ -10054,20 +10823,7 @@ export async function postCreditNote(
         stockItem,
       )
     ).cost;
-    const hasExplicitLineCost =
-      line.unitCost !== undefined &&
-      line.unitCost !== null &&
-      text(line.unitCost) !== "";
-    const unitCost = hasExplicitLineCost
-      ? numberValue(line.unitCost, fallbackCost)
-      : fallbackCost;
-    const hasLineTotalEx =
-      line.lineTotalEx !== undefined &&
-      line.lineTotalEx !== null &&
-      text(line.lineTotalEx) !== "";
-    const totalEx = hasLineTotalEx
-      ? numberValue(line.lineTotalEx, quantity * unitCost)
-      : quantity * unitCost;
+    const { unitCost, totalEx } = resolveCreditNoteLineCost({ line, quantity, fallbackCost });
     const after = before - quantity;
     // Zero-floor: a credit note returns stock to the supplier, so you cannot credit more than is
     // on hand at the location. Block rather than silently drive the balance negative (consistent
@@ -10146,6 +10902,330 @@ export async function postCreditNote(
 
   await env.DB.batch(statements);
   return json(request, env, { ok: true, id: payload.id, transactionReference });
+}
+
+/**
+ * Edit an already-posted credit note. Same reversal+reapply shape as patchGoodsReceipt: every
+ * original line's stock deduction is undone with a compensating 'credit_note_edit_reversal'
+ * movement, then the revised lines are deducted again exactly like a fresh credit note post.
+ * Credit notes have no per-location cost recompute to worry about (unlike GRVs) — a credit note
+ * only ever deducts stock at whatever unit_cost is passed/resolved per line, it never writes
+ * stock_item_location_prices — so there's no WAC-approximation limitation here.
+ *
+ * Also re-runs checkCreditNotePoReturnQuantity (shared with postCreditNote) so an edit can't
+ * cumulatively return more of a stock item than was ever ordered on the source PO, the same guard
+ * create-time enforces. Xero re-sync happens automatically via the version bump below — see
+ * credit-note-sync.ts's creditNotePushEffectKey/findLatestAppliedCreditNoteXeroId.
+ */
+export async function patchCreditNote(
+  request: Request,
+  env: Env,
+  auth: AuthContext,
+  workspaceId: string,
+  creditNoteId: string,
+) {
+  await scoped(request, env, auth, workspaceId);
+  await assertWorkspacePermission(env, auth, workspaceId, "nav-credit-note");
+  const idValue = text(creditNoteId);
+
+  const existing = await env.DB.prepare(
+    `SELECT * FROM credit_notes WHERE workspace_id = ?1 AND id = ?2 LIMIT 1`,
+  )
+    .bind(workspaceId, idValue)
+    .first<Record<string, unknown>>();
+  if (!existing) return error(request, env, 404, "Credit note could not be found.");
+
+  const existingLines =
+    (
+      await env.DB.prepare(
+        `SELECT * FROM credit_note_lines WHERE workspace_id = ?1 AND credit_note_id = ?2`,
+      )
+        .bind(workspaceId, idValue)
+        .all<Record<string, unknown>>()
+    ).results || [];
+
+  const body = await readJson<Record<string, unknown>>(request);
+  const payload = normalizeCreditNotePayload({
+    ...body,
+    id: idValue,
+    creditNote: { ...objectValue((body as Record<string, unknown>).creditNote || body), id: idValue },
+  });
+  if (!payload.normalized.items.length)
+    return error(request, env, 400, "Add at least one stock item to the credit note.");
+  if (!payload.normalized.supplierName)
+    return error(request, env, 400, "Supplier name is required.");
+  if (!payload.creditNoteNumber)
+    return error(request, env, 400, "Credit note number is required.");
+  if (!payload.reason)
+    return error(request, env, 400, "Reasoning is required before saving the credit note.");
+
+  const poReturnCheck = await checkCreditNotePoReturnQuantity(
+    env,
+    workspaceId,
+    idValue,
+    payload.normalized,
+  );
+  if (!poReturnCheck.ok)
+    return error(request, env, 409, poReturnCheck.message);
+
+  const now = nowIso();
+  const headerLocationId =
+    (await resolveActiveLocationId(env, workspaceId, payload.locationId || "")) || null;
+  if (headerLocationId)
+    await assertLocationAccess(env, auth, workspaceId, headerLocationId, "credit_note");
+  const actor = await env.CENTRAL_DB.prepare(
+    `SELECT display_name, email FROM workspace_members WHERE workspace_id = ?1 AND auth_uid = ?2 LIMIT 1`,
+  )
+    .bind(workspaceId, auth.uid)
+    .first<Record<string, unknown>>();
+  const actorName = text(actor?.display_name || actor?.email || auth.email || auth.uid);
+  const rawForStorage = JSON.stringify({
+    ...payload.normalized,
+    editedBy: auth.uid,
+    editedByName: actorName,
+    editedByEmail: text(actor?.email || auth.email),
+    editedAt: now,
+  });
+
+  const keyOf = (stockItemId: string, locationId: string) => `${stockItemId}::${locationId}`;
+  // Credit notes deduct stock (opposite sign to GRVs) — reversing an original line therefore ADDS
+  // that quantity back, and reapplying a revised line SUBTRACTS it again.
+  const netDeltaByKey = new Map<string, number>();
+  for (const line of existingLines) {
+    const key = keyOf(text(line.stock_item_id), text(line.location_id));
+    const quantity = numberValue(line.quantity, 0);
+    netDeltaByKey.set(key, (netDeltaByKey.get(key) || 0) + quantity);
+  }
+
+  const revisedLineInputs: Array<{
+    stockItemId: string;
+    locationId: string;
+    unit: string;
+    quantity: number;
+    unitCost: number;
+    totalEx: number;
+  }> = [];
+
+  for (const line of payload.normalized.items) {
+    const stockItemId = text(line.stockItemId);
+    const locationId = await resolveActiveLocationId(
+      env,
+      workspaceId,
+      text(line.locationId) || payload.normalized.locationId,
+    );
+    if (!locationId)
+      return error(request, env, 400, `${text(line.stockItemName || stockItemId)} needs a location.`);
+    const stockItem = await env.DB.prepare(
+      `SELECT id, name, unit, unit_cost, raw_json
+         FROM stock_items
+        WHERE workspace_id = ?1
+          AND id = ?2
+          AND active = 1
+          AND ${STOCKED_ITEM_SQL}
+        LIMIT 1`,
+    )
+      .bind(workspaceId, stockItemId)
+      .first<Record<string, unknown>>();
+    if (!stockItem)
+      return error(request, env, 404, `${text(line.stockItemName || stockItemId)} could not be found.`);
+
+    const quantity = numberValue(line.baseQuantity, 0);
+    const key = keyOf(stockItemId, locationId);
+    netDeltaByKey.set(key, (netDeltaByKey.get(key) || 0) - quantity);
+
+    const fallbackCost = (
+      await resolveLocationUnitCost(env, workspaceId, stockItemId, locationId, stockItem)
+    ).cost;
+    const { unitCost, totalEx } = resolveCreditNoteLineCost({ line, quantity, fallbackCost });
+
+    revisedLineInputs.push({
+      stockItemId,
+      locationId,
+      unit: text(line.unit || stockItem.unit),
+      quantity,
+      unitCost,
+      totalEx,
+    });
+  }
+
+  // Same zero-floor guard as postCreditNote's create path: block rather than let the net
+  // reversal+reapply drive a balance negative. Batched into two queries regardless of key count,
+  // same reasoning as patchGoodsReceipt's identical guard.
+  const negativeDeltaEntries = Array.from(netDeltaByKey.entries()).filter(([, delta]) => delta < 0);
+  if (negativeDeltaEntries.length) {
+    const stockItemIds = Array.from(
+      new Set(negativeDeltaEntries.map(([key]) => key.split("::")[0])),
+    );
+    const placeholders = stockItemIds.map((_, index) => `?${index + 2}`).join(", ");
+    const balanceRows =
+      (
+        await env.DB.prepare(
+          `SELECT stock_item_id, location_id, quantity FROM stock_balances
+            WHERE workspace_id = ?1 AND stock_item_id IN (${placeholders})`,
+        )
+          .bind(workspaceId, ...stockItemIds)
+          .all<{ stock_item_id: string; location_id: string; quantity: number }>()
+      ).results || [];
+    const balanceByKey = new Map<string, number>();
+    for (const row of balanceRows)
+      balanceByKey.set(keyOf(row.stock_item_id, row.location_id), numberValue(row.quantity, 0));
+    const stockItemRows =
+      (
+        await env.DB.prepare(
+          `SELECT id, name, unit FROM stock_items WHERE workspace_id = ?1 AND id IN (${placeholders})`,
+        )
+          .bind(workspaceId, ...stockItemIds)
+          .all<{ id: string; name: string; unit: string }>()
+      ).results || [];
+    const stockItemById = new Map(stockItemRows.map((row) => [row.id, row]));
+
+    for (const [key, netDelta] of negativeDeltaEntries) {
+      const [stockItemId] = key.split("::");
+      const before = balanceByKey.get(key) || 0;
+      if (before + netDelta < -0.000001) {
+        const item = stockItemById.get(stockItemId);
+        return error(
+          request,
+          env,
+          409,
+          `Editing this credit note would take ${text(item?.name || stockItemId)}'s stock below zero at this location (available: ${formatQuantity(before)} ${text(item?.unit || "")}).`,
+        );
+      }
+    }
+  }
+
+  const statements: DbStatementLike[] = [];
+
+  // --- Reverse every original line (add the credited quantity back) ---
+  for (const line of existingLines) {
+    const stockItemId = text(line.stock_item_id);
+    const locationId = text(line.location_id);
+    const quantity = numberValue(line.quantity, 0);
+    const unitCost = numberValue(line.unit_cost, 0);
+    const totalEx = numberValue(line.total_ex, 0);
+    statements.push(
+      env.DB.prepare(
+        `INSERT INTO stock_balances (workspace_id, stock_item_id, location_id, quantity, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(workspace_id, stock_item_id, location_id) DO UPDATE SET
+          quantity = stock_balances.quantity + ?4,
+          updated_at = excluded.updated_at`,
+      ).bind(workspaceId, stockItemId, locationId, quantity, now),
+      env.DB.prepare(
+        `INSERT INTO stock_movements
+          (id, workspace_id, stock_item_id, location_id, movement_type, document_type, document_id,
+           source_location_id, quantity_delta, unit_cost, value_delta, occurred_at, created_by, metadata_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, 'credit_note_edit_reversal', 'credit_note', ?5, ?4, ?6, ?7, ?8, ?9, ?10, ?11, ?12)`,
+      ).bind(
+        id("move"),
+        workspaceId,
+        stockItemId,
+        locationId,
+        idValue,
+        quantity,
+        unitCost,
+        totalEx,
+        text(existing.credited_at),
+        auth.uid,
+        JSON.stringify({ reversedCreditNoteLineId: text(line.id), reason: "credit_note_edit" }),
+        now,
+      ),
+    );
+  }
+
+  statements.push(
+    env.DB.prepare(`DELETE FROM credit_note_lines WHERE workspace_id = ?1 AND credit_note_id = ?2`).bind(
+      workspaceId,
+      idValue,
+    ),
+  );
+
+  // --- Reapply the revised lines (deduct again) ---
+  for (const [index, revised] of revisedLineInputs.entries()) {
+    const lineKey =
+      text(payload.normalized.items[index]?.id || revised.stockItemId || `line_${index}`)
+        .replace(/[^a-zA-Z0-9_-]+/g, "_")
+        .slice(0, 80) || `line_${index}`;
+    const creditNoteLineId = `${idValue}:line:${index}:${lineKey}:v${text(existing.version) || "1"}`;
+    statements.push(
+      env.DB.prepare(
+        `INSERT INTO stock_balances (workspace_id, stock_item_id, location_id, quantity, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(workspace_id, stock_item_id, location_id) DO UPDATE SET
+          quantity = stock_balances.quantity + ?4,
+          updated_at = excluded.updated_at`,
+      ).bind(workspaceId, revised.stockItemId, revised.locationId, -revised.quantity, now),
+      env.DB.prepare(
+        `INSERT INTO credit_note_lines (id, workspace_id, credit_note_id, stock_item_id, location_id, quantity, unit, unit_cost, total_ex)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`,
+      ).bind(
+        creditNoteLineId,
+        workspaceId,
+        idValue,
+        revised.stockItemId,
+        revised.locationId,
+        revised.quantity,
+        revised.unit,
+        revised.unitCost,
+        revised.totalEx,
+      ),
+      env.DB.prepare(
+        `INSERT INTO stock_movements
+          (id, workspace_id, stock_item_id, location_id, movement_type, document_type, document_id,
+           source_location_id, quantity_delta, unit_cost, value_delta, occurred_at, created_by, metadata_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, 'credit_note_out', 'credit_note', ?5, ?4, ?6, ?7, ?8, ?9, ?10, ?11, ?12)`,
+      ).bind(
+        id("move"),
+        workspaceId,
+        revised.stockItemId,
+        revised.locationId,
+        idValue,
+        -revised.quantity,
+        revised.unitCost,
+        -revised.totalEx,
+        payload.creditedAt,
+        auth.uid,
+        JSON.stringify({ creditNoteId: idValue, reason: "credit_note_edit" }),
+        now,
+      ),
+    );
+  }
+
+  statements.push(
+    env.DB.prepare(
+      `UPDATE credit_notes SET
+        supplier_id = ?3, credit_note_number = ?4, credited_at = ?5, location_id = ?6, reason = ?7,
+        total_ex = ?8, prices_include_vat = ?9, raw_json = ?10, updated_at = ?11, version = version + 1
+       WHERE workspace_id = ?1 AND id = ?2`,
+    ).bind(
+      workspaceId,
+      idValue,
+      payload.supplierId,
+      payload.creditNoteNumber,
+      payload.creditedAt,
+      headerLocationId,
+      payload.reason,
+      payload.totalEx,
+      payload.pricesIncludeVat,
+      rawForStorage,
+      now,
+    ),
+    env.DB.prepare(
+      `INSERT INTO audit_events (id, workspace_id, actor_uid, event_type, entity_type, entity_id, before_json, after_json, created_at)
+       VALUES (?1, ?2, ?3, 'credit_note_edited', 'credit_note', ?4, ?5, ?6, ?7)`,
+    ).bind(
+      id("audit"),
+      workspaceId,
+      auth.uid,
+      idValue,
+      text(existing.raw_json),
+      rawForStorage,
+      now,
+    ),
+  );
+
+  await env.DB.batch(statements);
+  return json(request, env, { ok: true, id: idValue, version: numberValue(existing.version, 1) + 1 });
 }
 
 function normalizeStockTakeTemplatePayload(raw: Record<string, unknown>) {

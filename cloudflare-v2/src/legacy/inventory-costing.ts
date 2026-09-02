@@ -400,6 +400,57 @@ export function calculateIncomingLocationCost(input: {
   return ((previousQuantity * previousCost) + (incomingQuantity * incomingCost)) / totalQuantity;
 }
 
+/**
+ * Pure WAC/last-cost replay used to work out which SAME-DAY sales got costed wrong because a GRV
+ * line's cost was entered incorrectly and has now been corrected on edit (e.g. R2 typed instead
+ * of R20) — see routes.ts's patchGoodsReceipt/buildSameDayCostCorrectionStatements for how the
+ * inputs are built and how the resulting corrections are turned into compensating ledger entries.
+ *
+ * Starts from the balance/cost immediately after the (now-revised) GRV line posts, then walks
+ * every later stock_item+location movement that trading day in order: an inbound movement blends
+ * into the running cost exactly like a fresh GRV would (calculateIncomingLocationCost — under
+ * 'last' costing this just resets to that movement's own cost, under 'wac' it blends); an outbound
+ * movement carries the current running cost forward, and if it's a sale whose recorded cost
+ * doesn't match what the replay says it should have been, it's flagged for a compensating entry.
+ * Non-sale outbound movements (credit notes, wastage, adjustments-out) still consume from the
+ * ledger correctly but are never "corrected" themselves — only sales feed margin/GP reporting.
+ *
+ * `events` must already be in chronological order (occurred_at, then created_at as a tiebreak),
+ * and unitCost for a sale event must be its CURRENT EFFECTIVE cost (i.e. after any earlier
+ * correction from a previous edit of this same GRV), not necessarily what's on the original row —
+ * the caller is responsible for resolving that before calling this. Lives here (rather than in
+ * routes.ts, where it's used) purely so it can be unit tested without pulling in routes.ts's
+ * Worker-runtime-only imports.
+ */
+export function replaySameDayCostCorrections(input: {
+  costingMethod: unknown;
+  startingQuantity: number;
+  startingUnitCost: number;
+  events: Array<{ id: string; quantityDelta: number; unitCost: number; isSale: boolean }>;
+}): Array<{ id: string; correctedUnitCost: number }> {
+  let quantity = Math.max(input.startingQuantity, 0);
+  let cost = input.startingUnitCost;
+  const corrections: Array<{ id: string; correctedUnitCost: number }> = [];
+  for (const event of input.events) {
+    if (event.quantityDelta > 0) {
+      cost = calculateIncomingLocationCost({
+        method: input.costingMethod,
+        previousQuantity: quantity,
+        previousUnitCost: cost,
+        incomingQuantity: event.quantityDelta,
+        incomingUnitCost: event.unitCost,
+      });
+      quantity += event.quantityDelta;
+    } else if (event.quantityDelta < 0) {
+      if (event.isSale && Math.abs(event.unitCost - cost) > 0.0001) {
+        corrections.push({ id: event.id, correctedUnitCost: cost });
+      }
+      quantity = Math.max(quantity + event.quantityDelta, 0);
+    }
+  }
+  return corrections;
+}
+
 export function upsertLocationCostStatement(
   env: Env,
   workspaceId: string,

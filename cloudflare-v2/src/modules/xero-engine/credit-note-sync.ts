@@ -14,6 +14,11 @@ import { autoSyncDueDateKey } from './invoice-sync';
 // recognises a GRV one.
 const NEEDS_SUPPLIER_MATCH_PREFIX = 'NEEDS_SUPPLIER_MATCH:';
 
+// Same reasoning/prefix convention as grv-sync.ts's NEEDS_MANUAL_XERO_FIX_PREFIX — a re-push after
+// a credit note edit that Xero rejects (the CreditNote is no longer editable there) surfaces as a
+// distinguishable failure to resolve by hand, not a silent retry loop.
+const NEEDS_MANUAL_XERO_FIX_PREFIX = 'NEEDS_MANUAL_XERO_FIX:';
+
 interface CreditNoteRow {
   id: string;
   supplier_id: string | null;
@@ -22,6 +27,31 @@ interface CreditNoteRow {
   supplier_raw_json: string | null;
   credit_note_number: string | null;
   credited_at: string;
+  version: number | null;
+}
+
+// Same reasoning as grv-sync.ts's grvPushEffectKey/findLatestAppliedGrvXeroBillId doc comments:
+// version 1 (never edited) keeps the ORIGINAL bare key so every credit note already pushed before
+// this versioned re-sync existed isn't treated as newly pending on this deploy; only an edit
+// (version >= 2) gets a version-suffixed key that's genuinely never been applied.
+function creditNotePushEffectKey(workspaceId: string, creditNoteId: string, version: number | null | undefined): string {
+  const v = Number(version) || 1;
+  return v > 1 ? `credit-note:${workspaceId}:${creditNoteId}:v${v}` : `credit-note:${workspaceId}:${creditNoteId}`;
+}
+
+/** The Xero CreditNote ID from the most recent successful push of this credit note, under any of
+ * its versions — see findLatestAppliedGrvXeroBillId in grv-sync.ts for the full reasoning. */
+export async function findLatestAppliedCreditNoteXeroId(env: Env, workspaceId: string, creditNoteId: string): Promise<string | null> {
+  const row = await env.DB.prepare(
+    `SELECT xero_object_id FROM xero_v2_effect_outbox
+      WHERE workspace_id = ?1 AND effect_type = 'CREDIT_NOTE_PUSH' AND status = 'APPLIED'
+        AND (effect_key = 'credit-note:' || ?1 || ':' || ?2 OR effect_key LIKE 'credit-note:' || ?1 || ':' || ?2 || ':v%')
+      ORDER BY updated_at DESC
+      LIMIT 1`
+  )
+    .bind(workspaceId, creditNoteId)
+    .first<{ xero_object_id: string | null }>();
+  return row?.xero_object_id || null;
 }
 
 interface CreditNoteLineRow {
@@ -72,14 +102,20 @@ export async function loadPendingCreditNotes(env: Env, workspaceId: string, limi
   const rows = await env.DB.prepare(
     `SELECT
        cn.id, cn.supplier_id, s.name AS supplier_name, s.xero_contact_id AS supplier_xero_contact_id, s.raw_json AS supplier_raw_json,
-       cn.credit_note_number, cn.credited_at
+       cn.credit_note_number, cn.credited_at, cn.version
      FROM credit_notes cn
      LEFT JOIN suppliers s ON s.id = cn.supplier_id AND s.workspace_id = cn.workspace_id
      WHERE cn.workspace_id = ?1
        AND NOT EXISTS (
          SELECT 1 FROM xero_v2_effect_outbox o
           WHERE o.workspace_id = cn.workspace_id AND o.effect_type = 'CREDIT_NOTE_PUSH'
-            AND o.effect_key = 'credit-note:' || cn.workspace_id || ':' || cn.id AND o.status = 'APPLIED'
+            AND o.effect_key = (
+              CASE WHEN COALESCE(cn.version, 1) > 1
+                THEN 'credit-note:' || cn.workspace_id || ':' || cn.id || ':v' || cn.version
+                ELSE 'credit-note:' || cn.workspace_id || ':' || cn.id
+              END
+            )
+            AND o.status = 'APPLIED'
        )
      ORDER BY cn.credited_at DESC
      LIMIT ?2`
@@ -101,11 +137,17 @@ export function buildCreditNoteXeroPayload(
   settings: { purchaseAccountCode: string; purchaseTaxType: string; purchaseExemptTaxType: string; locationTrackingCategoryId?: string },
   workspaceIsVatRegistered: boolean,
   vatRate: number,
-  supplierIsVatRegistered: boolean
+  supplierIsVatRegistered: boolean,
+  // Set on a re-push after a credit note edit (see creditNotePushEffectKey/
+  // findLatestAppliedCreditNoteXeroId) — carrying CreditNoteID makes this POST update the existing
+  // Xero Credit Note instead of creating a duplicate, same mechanism as buildGrvBillPayload's
+  // existingBillId.
+  existingCreditNoteId?: string
 ) {
   return {
     CreditNotes: [
       {
+        ...(existingCreditNoteId ? { CreditNoteID: existingCreditNoteId } : {}),
         Type: 'ACCPAYCREDIT',
         Contact: { ContactID: contactId },
         Date: text(creditNote.credited_at).slice(0, 10),
@@ -165,7 +207,7 @@ async function pushOneCreditNote(
   creditNote: CreditNoteRow,
   settings: { purchaseAccountCode: string; purchaseTaxType: string; purchaseExemptTaxType: string; locationTrackingCategoryId?: string }
 ): Promise<PushOneCreditNoteOutcome> {
-  const effectKey = `credit-note:${workspaceId}:${creditNote.id}`;
+  const effectKey = creditNotePushEffectKey(workspaceId, creditNote.id, creditNote.version);
   const claim = await claimXeroEffect(env, workspaceId, 'CREDIT_NOTE_PUSH', effectKey);
   if (claim.alreadyApplied) return { status: 'duplicate' };
 
@@ -188,6 +230,11 @@ async function pushOneCreditNote(
     return { status: 'needs_supplier_match' };
   }
 
+  // If this credit note was already pushed under an earlier version (a re-push after an edit),
+  // find that prior Xero Credit Note and update it instead of creating a duplicate. Null on a
+  // genuine first push.
+  const existingCreditNoteId = await findLatestAppliedCreditNoteXeroId(env, workspaceId, creditNote.id);
+
   let payload: ReturnType<typeof buildCreditNoteXeroPayload> | undefined;
   try {
     const lines = await loadCreditNoteLines(env, workspaceId, creditNote.id);
@@ -200,10 +247,10 @@ async function pushOneCreditNote(
     const linesWithTracking = await Promise.all(
       lines.map(async (line) => ({ ...line, tracking: await resolveLocationTracking(env, workspaceId, trackingContext, line.location_name) }))
     );
-    payload = buildCreditNoteXeroPayload(creditNote, linesWithTracking, contactId, settings, workspaceIsVatRegistered, vatRate, supplierIsVatRegistered);
+    payload = buildCreditNoteXeroPayload(creditNote, linesWithTracking, contactId, settings, workspaceIsVatRegistered, vatRate, supplierIsVatRegistered, existingCreditNoteId || undefined);
     const result = await executeXeroApiRequest(env, workspaceId, { method: 'POST', path: 'CreditNotes', body: payload });
     const creditNotes = (result.CreditNotes as Array<{ CreditNoteID?: string }> | undefined) || [];
-    const xeroCreditNoteId = text(creditNotes[0]?.CreditNoteID);
+    const xeroCreditNoteId = text(creditNotes[0]?.CreditNoteID) || existingCreditNoteId || '';
     await markXeroEffectApplied(env, claim.id, xeroCreditNoteId);
     return { status: 'applied' };
   } catch (cause) {
@@ -215,9 +262,9 @@ async function pushOneCreditNote(
     const lineSummary = sentLines?.length
       ? ` Sent: ${sentLines.map((line) => `${line.Description || '?'} [account=${line.AccountCode || '?'}, tax=${line.TaxType || '?'}]`).join(', ')}`
       : '';
-    const message = `${apiMessage}${lineSummary}`;
+    const message = `${existingCreditNoteId ? NEEDS_MANUAL_XERO_FIX_PREFIX : ''}${apiMessage}${lineSummary}`;
     await markXeroEffectFailed(env, claim.id, message);
-    await recordXeroDiagnosticIfNotable(env, workspaceId, { operation: 'xero-credit-note-push', status: 'failed', message, details: { creditNoteId: creditNote.id } });
+    await recordXeroDiagnosticIfNotable(env, workspaceId, { operation: 'xero-credit-note-push', status: 'failed', message, details: { creditNoteId: creditNote.id, existingCreditNoteId } });
     return { status: 'failed', message };
   }
 }

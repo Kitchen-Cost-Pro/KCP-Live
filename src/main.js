@@ -3158,10 +3158,19 @@ async function startGrvSubscription(workspaceId) {
           appState.workspace?.id !== workspaceId
         ) return;
 
-        const currentDraft = isGrvDraftDirty(appState.grv.draftReceipt)
-          ? appState.grv.draftReceipt
-          : loadPersistedDraft('grv', createEmptyGrvDraft);
+        const restoringFromStorage = !isGrvDraftDirty(appState.grv.draftReceipt);
+        const currentDraft = restoringFromStorage
+          ? loadPersistedDraft('grv', createEmptyGrvDraft)
+          : appState.grv.draftReceipt;
         const draftReceipt = reconcileGrvDraft(currentDraft, { orders, stockItems, locations });
+        // A persisted draft (localStorage) that's mid-edit still carries the real GRV's id (see
+        // persistGrvDraftSnapshot) but appState.grv.editingReceiptId itself does NOT survive a
+        // route navigation (createGrvState has no such field) — restore it from the same
+        // envelope here, or the next Save would silently take the create path against an id that
+        // already exists. See loadPersistedDraftEditingId's doc comment for the full failure mode.
+        const editingReceiptId = restoringFromStorage
+          ? loadPersistedDraftEditingId('grv')
+          : (appState.grv.editingReceiptId || '');
         appState.grv = {
           ...appState.grv,
           status,
@@ -3174,7 +3183,8 @@ async function startGrvSubscription(workspaceId) {
           source,
           updatedAt,
           loaded,
-          draftReceipt
+          draftReceipt,
+          editingReceiptId
         };
         renderApp();
         if (appState.grv.pendingSourcePoId && !appState.grv.actionStatus && loaded?.orders) {
@@ -3243,9 +3253,16 @@ async function startCreditNoteSubscription(workspaceId) {
           appState.workspace?.id !== workspaceId
         ) return;
 
-        const currentDraft = isCreditNoteDraftDirty(appState.creditNotes.draftNote)
-          ? appState.creditNotes.draftNote
-          : loadPersistedDraft('credit-note', createEmptyCreditNoteDraft);
+        const restoringFromStorage = !isCreditNoteDraftDirty(appState.creditNotes.draftNote);
+        const currentDraft = restoringFromStorage
+          ? loadPersistedDraft('credit-note', createEmptyCreditNoteDraft)
+          : appState.creditNotes.draftNote;
+        // See the GRV subscription's identical restore block for why this has to be re-derived
+        // from the persisted envelope here — createCreditNoteState has no editingNoteId field,
+        // so it doesn't survive a route navigation on its own.
+        const editingNoteId = restoringFromStorage
+          ? loadPersistedDraftEditingId('credit-note')
+          : (appState.creditNotes.editingNoteId || '');
         appState.creditNotes = {
           ...appState.creditNotes,
           status,
@@ -3258,7 +3275,8 @@ async function startCreditNoteSubscription(workspaceId) {
           source,
           updatedAt,
           loaded,
-          draftNote: reconcileCreditNoteDraft(currentDraft, { stockItems, locations, suppliers })
+          draftNote: reconcileCreditNoteDraft(currentDraft, { stockItems, locations, suppliers }),
+          editingNoteId
         };
         renderApp();
       },
@@ -9885,6 +9903,7 @@ function openManualGrvDraft() {
     lineDetailDraft: null,
     missingSupplierPrompt: null,
     draftReceipt: createEmptyGrvDraft(),
+    editingReceiptId: '',
     actionError: '',
     filters: {
       ...appState.grv.filters,
@@ -9901,6 +9920,44 @@ function openManualGrvDraft() {
   renderApp();
 }
 
+// Opens an already-saved GRV back into the same builder used for creating one, in edit mode.
+// `receipt` is one of the already-normalized rows from appState.grv.receipts (normalizeGoodsReceipt
+// in grvService.js), which already carries the full items array — no extra fetch needed. Edit mode
+// is tracked separately from draft.id (appState.grv.editingReceiptId) rather than inferred from
+// draft.id being non-empty, because a brand-new draft can also carry a stable id once
+// makeStableSubmitId has minted one for it (see saveGrvReceipt) — id presence alone can't
+// distinguish "this is a real, already-committed GRV" from "this is an in-progress new one".
+function openGrvEditDraft(receipt) {
+  if (!receipt || !receipt.id) return;
+  appState.grv = {
+    ...appState.grv,
+    pendingSourcePoId: '',
+    lineDetailDraft: null,
+    missingSupplierPrompt: null,
+    draftReceipt: createEmptyGrvDraft({
+      ...receipt,
+      invoiceDiscountEx: receipt.invoiceDiscountEx || receipt.discountEx || ''
+    }),
+    editingReceiptId: receipt.id,
+    actionError: '',
+    filters: {
+      ...appState.grv.filters,
+      lineQuery: '',
+      poQuery: '',
+      selectedStockIds: [],
+      selectedLineIndexes: [],
+      calendarCursor: '',
+      openDropdown: '',
+      overlay: ''
+    }
+  };
+  clearPersistedDraft('grv');
+  renderApp();
+}
+
+function cancelGrvEditDraft() {
+  openManualGrvDraft();
+}
 
 function normalizeSupplierLookupName(value = '') {
   return String(value || '').trim().toLowerCase();
@@ -10305,6 +10362,7 @@ async function openGrvFromPurchaseOrder(orderId) {
       splitByLocation: uniqueReceiptLocations.size > 1,
       items: receiptItems
     }),
+    editingReceiptId: '',
     actionError: '',
     filters: {
       ...appState.grv.filters,
@@ -10334,6 +10392,7 @@ function closeGrvDraft() {
     lineDetailDraft: null,
     missingSupplierPrompt: null,
     draftReceipt: createEmptyGrvDraft(),
+    editingReceiptId: '',
     actionStatus: '',
     actionError: '',
     filters: {
@@ -11065,7 +11124,7 @@ async function saveGrvReceipt(options = {}) {
   showGlobalSaving('Saving GRV');
 
   try {
-    const { saveGoodsReceipt } = await import('./services/grvService.js');
+    const { saveGoodsReceipt, updateGoodsReceipt } = await import('./services/grvService.js');
     const receiptPayload = {
       ...draft,
       supplierId: resolvedSupplier?.id || draft.supplierId || '',
@@ -11076,10 +11135,14 @@ async function saveGrvReceipt(options = {}) {
       costingMethod: String(appState.source?.settings?.costingMethod || appState.settings?.business?.costingMethod || 'last'),
       items: hydratedItems
     };
-    const savedReceipt = await saveGoodsReceipt(appState.workspace?.id, receiptPayload);
+    const editingReceiptId = appState.grv.editingReceiptId || '';
+    const savedReceipt = editingReceiptId
+      ? await updateGoodsReceipt(appState.workspace?.id, editingReceiptId, receiptPayload)
+      : await saveGoodsReceipt(appState.workspace?.id, receiptPayload);
 
     appState.grv = {
       ...appState.grv,
+      editingReceiptId: '',
       missingSupplierPrompt: null,
       lineDetailDraft: null,
       draftReceipt: createEmptyGrvDraft(),
@@ -11098,7 +11161,10 @@ async function saveGrvReceipt(options = {}) {
       }
     };
     clearPersistedDraft('grv');
-    showGrvToast('GRV saved and stock incremented.', 'success');
+    showGrvToast(
+      editingReceiptId ? 'GRV updated and stock adjusted.' : 'GRV saved and stock incremented.',
+      'success'
+    );
     // The data-version poll would eventually pick up this GRV's stock_movements row and refresh
     // the Stock Items tab (see refreshStockFromDataVersion), but only after its own throttle/poll
     // cadence (up to ~75s) and only while that tab is the active route. That left the submitting
@@ -11160,6 +11226,43 @@ function dismissGrvToast() {
     ...appState.grv,
     toast: null
   };
+  renderApp();
+}
+
+// Opens an already-committed credit note back into the same builder used for creating one, in
+// edit mode. `note` is one of the already-normalized rows from appState.creditNotes.creditNotes
+// (normalizeCreditNote in creditNoteService.js), which already carries the full items array.
+// Edit mode is tracked separately (appState.creditNotes.editingNoteId) rather than inferred from
+// draft.id, for the same reason as the GRV side (see openGrvEditDraft's doc comment) — a fresh
+// draft can also carry a stable id once makeStableSubmitId has minted one for it.
+function openCreditNoteEditDraft(note) {
+  if (!note || !note.id) return;
+  appState.creditNotes = {
+    ...appState.creditNotes,
+    lineDetailDraft: null,
+    draftNote: createEmptyCreditNoteDraft(note),
+    editingNoteId: note.id,
+    actionError: '',
+    filters: {
+      ...appState.creditNotes.filters,
+      selectedLineIndexes: [],
+      selectedStockIds: [],
+      overlay: ''
+    }
+  };
+  clearPersistedDraft('credit-note');
+  renderApp();
+}
+
+function cancelCreditNoteEditDraft() {
+  appState.creditNotes = {
+    ...appState.creditNotes,
+    lineDetailDraft: null,
+    draftNote: createEmptyCreditNoteDraft(),
+    editingNoteId: '',
+    actionError: ''
+  };
+  clearPersistedDraft('credit-note');
   renderApp();
 }
 
@@ -11738,8 +11841,13 @@ async function saveCreditNoteDraft() {
   showGlobalSaving('Committing Credit Note');
 
   try {
-    const { saveCreditNote } = await import('./services/creditNoteService.js');
-    await saveCreditNote(appState.workspace?.id, draft);
+    const { saveCreditNote, updateCreditNote } = await import('./services/creditNoteService.js');
+    const editingNoteId = appState.creditNotes.editingNoteId || '';
+    if (editingNoteId) {
+      await updateCreditNote(appState.workspace?.id, editingNoteId, draft);
+    } else {
+      await saveCreditNote(appState.workspace?.id, draft);
+    }
     const processedGrvs = filterProcessedCreditNoteSources(appState.creditNotes.processedGrvs || [], draft);
     appState.creditNotes = {
       ...appState.creditNotes,
@@ -11748,6 +11856,7 @@ async function saveCreditNoteDraft() {
       processedGrvs,
       lineDetailDraft: null,
       draftNote: createEmptyCreditNoteDraft(),
+      editingNoteId: '',
       filters: {
         ...appState.creditNotes.filters,
         selectedLineIndexes: [],
@@ -11756,7 +11865,7 @@ async function saveCreditNoteDraft() {
       }
     };
     clearPersistedDraft('credit-note');
-    showCreditNoteToast('Credit note committed.', 'success');
+    showCreditNoteToast(editingNoteId ? 'Credit note updated.' : 'Credit note committed.', 'success');
   } catch (error) {
     appState.creditNotes = {
       ...appState.creditNotes,
@@ -19938,6 +20047,8 @@ function renderApp() {
     onGrvFilterChange: updateGrvFilters,
     onGrvAction: {
       onManual: openManualGrvDraft,
+      onEditReceipt: openGrvEditDraft,
+      onCancelEdit: cancelGrvEditDraft,
       onEnsureDraft: ensureGrvDraft,
       onPreserveFocus: preserveFieldFocus,
       onLoadLastInvoice: loadLastGrvInvoice,
@@ -19993,6 +20104,8 @@ function renderApp() {
       onApplyLineDetail: applyCreditNoteLineDetail,
       onBackLineDetail: backCreditNoteLineDetail,
       onCloseLineDetail: closeCreditNoteLineDetail,
+      onEditNote: openCreditNoteEditDraft,
+      onCancelEdit: cancelCreditNoteEditDraft,
       onSave: saveCreditNoteDraft,
       onDismissToast: dismissCreditNoteToast
     },
@@ -21328,6 +21441,10 @@ function createGrvState(status, filters = {}, pendingSourcePoId = '') {
       invoiceTotalEx: '',
       items: []
     },
+    // Populated by openGrvEditDraft / restored from the persisted draft's envelope on a route
+    // navigation (see the onSnapshot handler in startGrvSubscription and
+    // loadPersistedDraftEditingId's doc comment) — never inferred from draftReceipt.id alone.
+    editingReceiptId: '',
     actionStatus: '',
     actionError: '',
     toast: null,
@@ -21362,6 +21479,8 @@ function createCreditNoteState(status, filters = {}) {
     error: '',
     lineDetailDraft: null,
     draftNote: createEmptyCreditNoteDraft(),
+    // See createGrvState's editingReceiptId doc comment — same reasoning, credit note side.
+    editingNoteId: '',
     actionStatus: '',
     actionError: '',
     toast: null,
@@ -22447,7 +22566,32 @@ function loadPersistedDraft(moduleKey, createFallback) {
   }
 }
 
-function persistDraft(moduleKey, draft, isDirty) {
+// Companion to loadPersistedDraft: the id of the already-committed GRV/credit note this
+// persisted draft is EDITING, if any — see persistDraft's editingId param. Read separately
+// (rather than folded into loadPersistedDraft's return shape) so existing callers of
+// loadPersistedDraft don't need to change. Without this, a route navigation away and back while
+// mid-edit restores the edited draft (still carrying the real record's id, from
+// persistGrvDraftSnapshot/persistCreditNoteDraftSnapshot) but loses track of the fact it's an
+// edit — appState.grv/creditNotes is fully rebuilt by createGrvState/createCreditNoteState on
+// every navigation, which has no editingReceiptId/editingNoteId field at all. Saving would then
+// silently take the POST/create path with an id that already exists: the backend's
+// duplicate-commit guard (postGoodsReceipt/postCreditNote) matches that id, returns
+// `{ok:true, duplicate:true}`, and the user's edits are silently discarded — they see a "saved"
+// toast on a GRV/credit note that was never actually updated.
+function loadPersistedDraftEditingId(moduleKey) {
+  const storageKey = getDraftStorageKey(moduleKey);
+  if (!storageKey) return '';
+  try {
+    const raw = localStorage.getItem(storageKey);
+    if (!raw) return '';
+    const parsed = JSON.parse(raw);
+    return String((parsed && typeof parsed === 'object' && parsed.editingId) || '');
+  } catch {
+    return '';
+  }
+}
+
+function persistDraft(moduleKey, draft, isDirty, editingId = '') {
   const storageKey = getDraftStorageKey(moduleKey);
   if (!storageKey) return;
 
@@ -22459,7 +22603,8 @@ function persistDraft(moduleKey, draft, isDirty) {
 
     localStorage.setItem(storageKey, JSON.stringify({
       savedAt: new Date().toISOString(),
-      draft: structuredCloneSafe(draft)
+      draft: structuredCloneSafe(draft),
+      editingId: String(editingId || '')
     }));
   } catch (error) {
     console.warn(`[Drafts] Could not persist ${moduleKey} draft:`, error);
@@ -22503,11 +22648,11 @@ function isCreditNoteDraftDirty(draft = {}) {
 }
 
 function persistGrvDraftSnapshot(draft = appState.grv.draftReceipt) {
-  persistDraft('grv', draft, isGrvDraftDirty(draft));
+  persistDraft('grv', draft, isGrvDraftDirty(draft), appState.grv.editingReceiptId || '');
 }
 
 function persistCreditNoteDraftSnapshot(draft = appState.creditNotes.draftNote) {
-  persistDraft('credit-note', draft, isCreditNoteDraftDirty(draft));
+  persistDraft('credit-note', draft, isCreditNoteDraftDirty(draft), appState.creditNotes.editingNoteId || '');
 }
 
 function parseMenuImportRows(text, fileName = '') {

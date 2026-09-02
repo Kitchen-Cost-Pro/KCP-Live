@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { TENANT_SCHEMA_SQL } from '../src/tenant-schema.generated';
 import type { DbLike, DbResult, DbStatementLike } from '../src/legacy/types';
 import { XERO_V2_FOUNDATION_MIGRATION, XERO_V2_GRV_PUSH_MIGRATION } from '../src/modules/xero-engine/migrations';
-import { GRV_TRANSPORT_EX_MIGRATION, GRV_DISCOUNT_EX_MIGRATION } from '../src/tenant-migrations';
+import { GRV_TRANSPORT_EX_MIGRATION, GRV_DISCOUNT_EX_MIGRATION, GRV_CREDIT_NOTE_EDIT_MIGRATION } from '../src/tenant-migrations';
 import { loadPendingGrvs } from '../src/modules/xero-engine/grv-sync';
 
 // Regression: "Sync GRVs now" (and the automatic daily job, which shares this same scan) used to
@@ -70,6 +70,7 @@ function createEnv() {
   DB.database.exec(XERO_V2_GRV_PUSH_MIGRATION);
   DB.database.exec(GRV_TRANSPORT_EX_MIGRATION);
   DB.database.exec(GRV_DISCOUNT_EX_MIGRATION);
+  DB.database.exec(GRV_CREDIT_NOTE_EDIT_MIGRATION);
   return { DB } as any;
 }
 

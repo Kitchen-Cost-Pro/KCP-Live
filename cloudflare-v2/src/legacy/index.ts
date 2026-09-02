@@ -151,7 +151,9 @@ import {
   postWastageAdjustment,
   postSalesAdjustment,
   postCreditNote,
+  patchCreditNote,
   postGoodsReceipt,
+  patchGoodsReceipt,
   postImportPreview,
   postInternalTransfer,
   postLocation,
@@ -1295,6 +1297,11 @@ export async function dispatchWorkspaceRoute(
     return postCreditNote(request, env, auth, workspaceId);
   }
 
+  const creditNoteMatch = resource.match(/^credit-notes\/([^/]+)$/);
+  if ((request.method === "PATCH" || request.method === "PUT") && creditNoteMatch) {
+    return patchCreditNote(request, env, auth, workspaceId, creditNoteMatch[1]);
+  }
+
   if (request.method === "GET" && resource === "stock-takes") {
     return getStockTakes(request, env, auth, workspaceId);
   }
@@ -1408,6 +1415,11 @@ export async function dispatchWorkspaceRoute(
 
   if (request.method === "POST" && resource === "grvs") {
     return postGoodsReceipt(request, env, auth, workspaceId);
+  }
+
+  const grvMatch = resource.match(/^grvs\/([^/]+)$/);
+  if ((request.method === "PATCH" || request.method === "PUT") && grvMatch) {
+    return patchGoodsReceipt(request, env, auth, workspaceId, grvMatch[1]);
   }
 
   if (request.method === "POST" && resource === "transfers/internal") {
