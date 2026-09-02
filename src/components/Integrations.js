@@ -249,22 +249,36 @@ function refreshXeroTrackingCategoryControl(view) {
 }
 
 async function loadXeroTaxRatesIfNeeded(view) {
+  console.log('[KCP-XERO-DIAG] loadXeroTaxRatesIfNeeded called', {
+    taxRatesAlready: xeroDrawerState.taxRates,
+    taxRatesLoading: xeroDrawerState.taxRatesLoading,
+    connectionActive: xeroDrawerState.status?.connectionActive
+  });
   if (xeroDrawerState.taxRates !== null || xeroDrawerState.taxRatesLoading) return;
   if (xeroDrawerState.status?.connectionActive !== true) return;
   xeroDrawerState.taxRatesLoading = true;
   try {
     xeroDrawerState.taxRates = await fetchXeroTaxRates(view.dataset.workspaceId || '');
-  } catch {
+  } catch (err) {
+    console.log('[KCP-XERO-DIAG] fetchXeroTaxRates threw', err);
     // See loadXeroTrackingCategoriesIfNeeded's identical comment: null (not []) on failure so a
     // later retry isn't permanently blocked by one transient/pre-deploy failure.
     xeroDrawerState.taxRates = null;
   } finally {
     xeroDrawerState.taxRatesLoading = false;
   }
+  console.log('[KCP-XERO-DIAG] fetch settled, taxRates length =', xeroDrawerState.taxRates?.length);
   // Deliberately OUTSIDE the try/catch above — see loadXeroTrackingCategoriesIfNeeded's identical
   // comment: a rendering bug must never be misattributed to "the fetch failed" and silently discard
   // perfectly good already-fetched data.
-  if (xeroDrawerState.taxRates?.length) refreshXeroTaxTypeControls(view);
+  if (xeroDrawerState.taxRates?.length) {
+    try {
+      refreshXeroTaxTypeControls(view);
+      console.log('[KCP-XERO-DIAG] refreshXeroTaxTypeControls completed without throwing');
+    } catch (err) {
+      console.log('[KCP-XERO-DIAG] refreshXeroTaxTypeControls THREW', err);
+    }
+  }
 }
 
 // Runs once, right after the fetch resolves — swaps the three plain text inputs for the live
