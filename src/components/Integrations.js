@@ -292,8 +292,10 @@ function refreshXeroTaxTypeControls(view) {
     { wrapper: 'purchaseTaxType', dataAttr: 'data-xero-purchase-tax-type', currentValue: settings.purchaseTaxType, placeholder: 'e.g. INPUT2', applicability: 'expenses' },
     { wrapper: 'purchaseExemptTaxType', dataAttr: 'data-xero-purchase-exempt-tax-type', currentValue: settings.purchaseExemptTaxType, placeholder: 'e.g. EXEMPTINPUT', applicability: 'expenses' }
   ];
+  console.log('[KCP-XERO-DIAG] refreshXeroTaxTypeControls: view attached to document?', document.body.contains(view));
   fields.forEach((field) => {
     const wrapper = view.querySelector(`[data-xero-tax-control="${field.wrapper}"]`);
+    console.log('[KCP-XERO-DIAG] field', field.wrapper, 'wrapper found?', Boolean(wrapper), 'wrapper attached?', wrapper ? document.body.contains(wrapper) : null);
     if (!wrapper) return;
     wrapper.innerHTML = renderXeroTaxTypeControl({
       dataAttr: field.dataAttr,
@@ -302,6 +304,7 @@ function refreshXeroTaxTypeControls(view) {
       taxRates: xeroDrawerState.taxRates,
       applicability: field.applicability
     });
+    console.log('[KCP-XERO-DIAG] field', field.wrapper, 'after innerHTML swap, wrapper.innerHTML starts with:', wrapper.innerHTML.slice(0, 40));
   });
 }
 
