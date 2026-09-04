@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { __modifierReportingInternals } from '../src/legacy/reporting-routes';
 
-const { signedMovementStockCost, COST_CORRECTION_VALUE_DELTA_SQL } = __modifierReportingInternals;
+const { signedMovementStockCost, standardizeSaleStockUsageRow, COST_CORRECTION_VALUE_DELTA_SQL } = __modifierReportingInternals;
 
 // Regression: buildSameDayCostCorrectionStatements (routes.ts) correctly writes a compensating
 // 'cost_correction' stock_movements row when a GRV edit fixes a mistaken cost that a same-day sale
@@ -48,6 +48,51 @@ test('signedMovementStockCost: a sale_refund row folds in its correction and kee
 test('signedMovementStockCost: a zero correction (never edited) is a true no-op', () => {
   const row = { movement_type: 'sale_depletion', quantity_delta: -3, unit_cost: 2, value_delta: -6, cost_correction_value_delta: 0 };
   assert.equal(signedMovementStockCost(row), 6);
+});
+
+// Regression: the Sale Stock Usage report ("Total Stock Value Used" / "Gross Profit" / "GP %" on
+// the sales-by-item breakdowns) computed stockValueUsed purely from a movement row's own
+// value_delta and never read cost_correction_value_delta at all — even though the SQL query
+// correctly SELECTs it (COST_CORRECTION_VALUE_DELTA_SQL) and signedMovementStockCost correctly
+// folds it in for every OTHER report. A GRV cost fixed after the fact never showed up here.
+test('standardizeSaleStockUsageRow: folds cost_correction_value_delta into stockValueUsed', () => {
+  const row = {
+    id: 'mv_sale_1',
+    workspace_id: 'ws_1',
+    location_id: 'loc_1',
+    movement_type: 'sale_depletion',
+    document_type: 'yoco_order',
+    document_id: 'order_1',
+    quantity_delta: -3,
+    unit_cost: 2,
+    value_delta: -6,
+    cost_correction_value_delta: -54,
+    occurred_at: '2026-09-04T12:00:00.000Z',
+    created_at: '2026-09-04T12:00:00.000Z',
+    metadata_json: '{}',
+  };
+  const standardized = standardizeSaleStockUsageRow(row, [], 'UTC', 0);
+  // Base cost 6 (3 units @ R2), correction fixed it to R20/unit (value_delta -54) -> true cost 60.
+  assert.equal(standardized.stockValueUsed, 60);
+});
+
+test('standardizeSaleStockUsageRow: an uncorrected sale is unaffected', () => {
+  const row = {
+    id: 'mv_sale_2',
+    workspace_id: 'ws_1',
+    location_id: 'loc_1',
+    movement_type: 'sale_depletion',
+    document_type: 'yoco_order',
+    document_id: 'order_2',
+    quantity_delta: -3,
+    unit_cost: 2,
+    value_delta: -6,
+    occurred_at: '2026-09-04T12:00:00.000Z',
+    created_at: '2026-09-04T12:00:00.000Z',
+    metadata_json: '{}',
+  };
+  const standardized = standardizeSaleStockUsageRow(row, [], 'UTC', 0);
+  assert.equal(standardized.stockValueUsed, 6);
 });
 
 // End-to-end: run the ACTUAL correlated subquery SQL against real SQLite, proving it resolves the
