@@ -1097,13 +1097,18 @@ function renderInventory(view, ui, context) {
 
   const categories = ['All', ...new Set(scopedItems.map((item) => item.category).filter(Boolean))];
   if (!categories.includes(ui.category)) ui.category = 'All';
-  categoriesRoot.innerHTML = categories.map((category) => `<button type="button" class="${styles.categoryButton} ${ui.category === category ? styles.categoryButtonActive : ''}" data-category="${escapeAttribute(category)}">${escapeHtml(category)}</button>`).join('');
-  categoriesRoot.querySelectorAll('[data-category]').forEach((button) => {
-    button.addEventListener('click', () => {
-      ui.category = button.dataset.category || 'All';
-      ui.currentPage = 1;
-      renderInventory(view, ui, context);
-    });
+  categoriesRoot.innerHTML = `
+    <label class="${styles.pageSizeSelect}">
+      <span>Category</span>
+      <select data-dashboard-category>
+        ${categories.map((category) => `<option value="${escapeAttribute(category)}" ${ui.category === category ? 'selected' : ''}>${escapeHtml(category)}</option>`).join('')}
+      </select>
+    </label>
+  `;
+  categoriesRoot.querySelector('[data-dashboard-category]')?.addEventListener('change', (event) => {
+    ui.category = event.target.value || 'All';
+    ui.currentPage = 1;
+    renderInventory(view, ui, context);
   });
 
   const needle = ui.search.toLowerCase().trim();
