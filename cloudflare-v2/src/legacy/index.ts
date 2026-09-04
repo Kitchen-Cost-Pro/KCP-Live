@@ -774,6 +774,24 @@ export async function dispatchWorkspaceRoute(
     );
   if (request.method === "POST" && resource === "reports/send-test-email")
     return postReportTestEmail(request, env, auth, workspaceId);
+  // TEMP DEBUG (remove after diagnosing the backdated-cost-correction issue): dumps every
+  // stock_movements row tied to one GRV — including any cost_correction rows the edit-time replay
+  // produced — so it can be inspected from the browser console without direct DB access.
+  if (request.method === "GET" && resource === "debug/grv-movements") {
+    const url = new URL(request.url);
+    const grvId = url.searchParams.get("grvId") || "";
+    if (!grvId) return error(request, env, 400, "grvId query param is required");
+    const rows = await env.DB.prepare(
+      `SELECT id, stock_item_id, location_id, movement_type, document_type, document_id,
+              quantity_delta, unit_cost, value_delta, occurred_at, created_at, metadata_json
+         FROM stock_movements
+        WHERE workspace_id = ?1 AND document_type = 'grv' AND document_id = ?2
+        ORDER BY occurred_at ASC, created_at ASC`,
+    )
+      .bind(workspaceId, grvId)
+      .all<Record<string, unknown>>();
+    return json(request, env, { ok: true, rows: rows.results || [] });
+  }
   if (
     request.method === "POST" &&
     resource === "admin-action/report-schedules-due"
