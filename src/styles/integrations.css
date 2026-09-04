@@ -183,26 +183,6 @@
 }
 
 .integrationsGrid {
-  display: flex;
-  flex-direction: column;
-  gap: 28px;
-  margin-top: 22px;
-}
-
-.integrationsCategoryGroup {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.integrationsCategoryTitle {
-  margin: 0;
-  font-size: 0.95rem;
-  font-weight: 600;
-  color: var(--text-main);
-}
-
-.integrationsCategoryCards {
   display: grid;
   /* auto-fit sizes columns off the CONTAINER's actual width, not the viewport's — the page has a
      persistent sidebar eating into that width, so a viewport-width media query (the old 3/2/1
@@ -211,6 +191,7 @@
      column" instead of reflowing. This adapts to whatever width the container really has. */
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: 16px;
+  margin-top: 22px;
 }
 
 .integrationCard {
@@ -223,6 +204,14 @@
   background: var(--surface-primary);
   padding: 18px;
   box-shadow: var(--shadow-soft);
+}
+
+/* The plain class rule above ties with the UA default `[hidden] { display: none }` in specificity,
+   and author styles always win that tie regardless of source order — so a filtered-out card's
+   `hidden` attribute was being silently ignored and it kept rendering. This attribute+class
+   selector outranks the plain class rule, so hiding actually takes effect. */
+.integrationCard[hidden] {
+  display: none;
 }
 
 .integrationCard--featured {
@@ -1246,7 +1235,7 @@
     justify-self: start;
   }
 
-  .integrationsCategoryCards,
+  .integrationsGrid,
   .integrationsFilters {
     grid-template-columns: 1fr;
   }
