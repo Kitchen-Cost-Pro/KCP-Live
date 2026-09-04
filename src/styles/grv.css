@@ -637,14 +637,18 @@
   height: 14px;
 }
 
-#view-grv .grv-table thead {
+#view-grv .grv-table th {
+  /* Sticky goes on the <th> cells themselves, not the <thead> — Chrome/Safari don't reliably
+     stick a table-header-group, only individual cells/rows, so a sticky thead can silently fail to
+     stick and just scroll with the body instead. The background was also only 45% opaque, which
+     let scrolled-past rows show straight through the "stuck" header — reads as the header
+     overlapping the table rather than sitting above them. A near-opaque background fixes that. */
   position: sticky;
   top: 0;
   z-index: 5;
-  background: rgba(10, 16, 30, 0.45);
-}
-
-#view-grv .grv-table th {
+  background: rgba(8, 13, 24, 0.92);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
   padding: 18px 18px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   color: rgba(255, 255, 255, 0.35);

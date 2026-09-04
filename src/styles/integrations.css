@@ -204,7 +204,12 @@
 
 .integrationsCategoryCards {
   display: grid;
-  grid-template-columns: repeat(3, minmax(260px, 1fr));
+  /* auto-fit sizes columns off the CONTAINER's actual width, not the viewport's — the page has a
+     persistent sidebar eating into that width, so a viewport-width media query (the old 3/2/1
+     breakpoints) could still claim 3 columns' worth of viewport while the sidebar left the
+     container too narrow to actually fit them, forcing an overflow that read as "stuck in one
+     column" instead of reflowing. This adapts to whatever width the container really has. */
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: 16px;
 }
 
@@ -1225,12 +1230,6 @@
 .yocoResult strong {
   margin-right: 6px;
   color: var(--text-main);
-}
-
-@media (max-width: 1180px) {
-  .integrationsCategoryCards {
-    grid-template-columns: repeat(2, minmax(260px, 1fr));
-  }
 }
 
 @media (max-width: 760px) {
