@@ -114,11 +114,40 @@ function bindStockTakeEvents(view, onStockTakeFilterChange, onStockTakeAction, f
     button.addEventListener('click', () => onStockTakeAction.onDiscardSpecificDraft?.(button.dataset.stocktakeDiscardDraft || ''));
   });
   view.querySelector('[data-stocktake-cancel]')?.addEventListener('click', () => onStockTakeAction.onCancelSession?.());
-  view.querySelector('[data-stocktake-save]')?.addEventListener('click', () => onStockTakeAction.onSave?.());
+  view.querySelector('[data-stocktake-save]')?.addEventListener('click', () => onStockTakeAction.onRequestCommit?.());
   view.querySelector('[data-stocktake-save-draft]')?.addEventListener('click', () => onStockTakeAction.onSaveDraftSession?.());
   view.querySelector('[data-stocktake-scan-count]')?.addEventListener('click', () => onStockTakeAction.onScanCount?.());
   view.querySelectorAll('[data-stocktake-overlay-close]').forEach((button) => {
     button.addEventListener('click', () => onStockTakeAction.onCloseOverlay?.());
+  });
+  view.querySelector('[data-stocktake-commit-yes]')?.addEventListener('click', () => onStockTakeAction.onCommitUploadImage?.());
+  view.querySelector('[data-stocktake-commit-no]')?.addEventListener('click', () => onStockTakeAction.onCommitSkipImage?.());
+  view.querySelector('[data-stocktake-commit-back]')?.addEventListener('click', () => onStockTakeAction.onCommitBack?.());
+  view.querySelector('[data-stocktake-commit-confirm]')?.addEventListener('click', () => onStockTakeAction.onCommitConfirm?.());
+  view.querySelector('[data-stocktake-commit-remove-file]')?.addEventListener('click', () => onStockTakeAction.onCommitRemoveFile?.());
+  view.querySelector('[data-stocktake-commit-trigger]')?.addEventListener('click', () => {
+    view.querySelector('[data-stocktake-commit-input]')?.click();
+  });
+  view.querySelector('[data-stocktake-commit-input]')?.addEventListener('change', (event) => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = '';
+    if (file) onStockTakeAction.onCommitFileSelected?.(file);
+  });
+  const stockTakeCommitDropzone = view.querySelector('[data-stocktake-commit-dropzone]');
+  stockTakeCommitDropzone?.addEventListener('dragover', (event) => {
+    event.preventDefault();
+    stockTakeCommitDropzone.classList.add('is-dragging');
+  });
+  stockTakeCommitDropzone?.addEventListener('dragleave', (event) => {
+    if (!stockTakeCommitDropzone.contains(event.relatedTarget)) {
+      stockTakeCommitDropzone.classList.remove('is-dragging');
+    }
+  });
+  stockTakeCommitDropzone?.addEventListener('drop', (event) => {
+    event.preventDefault();
+    stockTakeCommitDropzone.classList.remove('is-dragging');
+    const file = event.dataTransfer?.files?.[0];
+    if (file) onStockTakeAction.onCommitFileSelected?.(file);
   });
 
   view.querySelector('[data-stocktake-count-template-confirm]')?.addEventListener('click', (event) => {
@@ -598,6 +627,9 @@ function renderOverlay({ stockTake, filters, scanCount, sessionSetup, templateDr
   if (filters.overlay === 'scan-count') {
     return renderScanCountOverlay(scanCount);
   }
+  if (filters.overlay === 'commit') {
+    return renderStockTakeCommitOverlay(stockTake.commit || {}, stockTake.driveConnected === true);
+  }
   if (filters.overlay === 'start-session') {
     const templateOptions = (stockTake.templates || []).map((template) => ({ value: template.id, label: template.name }));
     const selectedTemplate = (stockTake.templates || []).find((template) => String(template.id) === String(sessionSetup.templateId || ''));
@@ -1017,6 +1049,99 @@ function renderOverlay({ stockTake, filters, scanCount, sessionSetup, templateDr
   }
 
   return '';
+}
+
+function renderStockTakeCommitOverlay(commit = {}, driveConnected) {
+  const step = commit.step || (driveConnected ? 'ask' : 'confirm');
+
+  if (step === 'ask') {
+    return `
+      <div class="stockTakeOverlayBackdrop">
+        <section class="stockTakeOverlayCard stockTakeOverlayCard--compact">
+          <header class="stockTakeOverlayHead">
+            <div>
+              <p>Stock Take</p>
+              <h3>Attach a photo of the count sheet?</h3>
+            </div>
+          </header>
+          <div class="stockTakeOverlayBody stockTakeOverlayBody--compact">
+            <p class="stockTakeMuted">Upload a photo or PDF of the physical count sheet to keep alongside this stock take in Google Drive.</p>
+          </div>
+          <footer class="stockTakeOverlayFooter stockTakeOverlayFooter--compact">
+            <button type="button" class="stockTakePrimary" data-stocktake-commit-yes>${icon('upload')} Yes, upload one</button>
+            <button type="button" class="stockTakeGhost" data-stocktake-commit-no>No, skip</button>
+          </footer>
+        </section>
+      </div>
+    `;
+  }
+
+  if (step === 'upload') {
+    const hasFile = Boolean(commit.fileName);
+    return `
+      <div class="stockTakeOverlayBackdrop">
+        <section class="stockTakeOverlayCard stockTakeOverlayCard--compact">
+          <header class="stockTakeOverlayHead">
+            <div>
+              <p>Stock Take</p>
+              <h3>Upload count sheet image</h3>
+            </div>
+          </header>
+          <div class="stockTakeOverlayBody stockTakeOverlayBody--compact">
+            ${commit.error ? renderNotice(commit.error, 'error') : ''}
+            <input type="file" accept="image/*,application/pdf" hidden data-stocktake-commit-input />
+            ${hasFile ? `
+              <div class="stockTakeCommitFilePicked">
+                ${icon('file')}
+                <span>${escapeHtml(commit.fileName)}</span>
+                <button type="button" class="stockTakeMiniButton" data-stocktake-commit-remove-file aria-label="Remove file" ${commit.uploading ? 'disabled' : ''}>${icon('x')}</button>
+              </div>
+            ` : `
+              <div class="stockTakeCommitDropzone" data-stocktake-commit-dropzone>
+                ${icon('upload')}
+                <p>Drop a photo or PDF here</p>
+                <button type="button" class="stockTakePrimary stockTakePrimary--slim" data-stocktake-commit-trigger>Choose File</button>
+              </div>
+            `}
+          </div>
+          <footer class="stockTakeOverlayFooter stockTakeOverlayFooter--compact">
+            <button type="button" class="stockTakePrimary" data-stocktake-commit-confirm ${hasFile && !commit.uploading ? '' : 'disabled'}>
+              ${commit.uploading ? 'Uploading…' : 'Upload & Commit'}
+            </button>
+            <button type="button" class="stockTakeGhost" data-stocktake-commit-back ${commit.uploading ? 'disabled' : ''}>Back</button>
+          </footer>
+        </section>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="stockTakeOverlayBackdrop">
+      <section class="stockTakeOverlayCard stockTakeOverlayCard--compact">
+        <header class="stockTakeOverlayHead">
+          <div>
+            <p>Stock Take</p>
+            <h3>Confirm this stock take?</h3>
+          </div>
+        </header>
+        <div class="stockTakeOverlayBody stockTakeOverlayBody--compact">
+          <p class="stockTakeMuted">Stock levels will update as soon as you commit.</p>
+          ${!driveConnected ? `
+            <div class="stockTakeCommitDriveTip">
+              ${icon('info')}
+              <span>Connect Google Drive in Integrations to automatically store a copy of your count sheets.</span>
+            </div>
+          ` : ''}
+        </div>
+        <footer class="stockTakeOverlayFooter stockTakeOverlayFooter--compact">
+          <button type="button" class="stockTakePrimary" data-stocktake-commit-confirm>Confirm & Commit</button>
+          ${driveConnected
+            ? '<button type="button" class="stockTakeGhost" data-stocktake-commit-back>Back</button>'
+            : '<button type="button" class="stockTakeGhost" data-stocktake-overlay-close>Cancel</button>'}
+        </footer>
+      </section>
+    </div>
+  `;
 }
 
 function renderScanCountOverlay(scanCount = createEmptyScanCountDraft()) {
@@ -1550,7 +1675,9 @@ function icon(name) {
     upload: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21V9"/><path d="m7 14 5-5 5 5"/><path d="M5 3h14"/></svg>',
     folder: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h6l2 2h10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M3 7V5a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v2"/></svg>',
     edit: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5Z"/></svg>',
-    trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/></svg>'
+    trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/></svg>',
+    info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/></svg>',
+    file: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/></svg>'
   };
   return icons[name] || icons.x;
 }
