@@ -1011,7 +1011,7 @@ function renderTrendChart(view, ui) {
     }
   }
 
-  const totalSeries = trend.map((bucket) => roundMoney(activeSeries.reduce((sum, series) => sum + number(bucket[series.key]), 0)));
+  const totalSeries = trend.map((bucket) => Math.round(activeSeries.reduce((sum, series) => sum + number(bucket[series.key]), 0) * 100) / 100);
 
   chart.setOption({
     animationDuration: 420,
