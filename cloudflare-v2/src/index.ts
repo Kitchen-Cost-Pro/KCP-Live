@@ -262,6 +262,25 @@ async function dispatchCentral(request: Request, env: Env, url: URL): Promise<Re
     return json(request, env, { ok: true, configured: true, dailyCap, ...(state?.state || { dateKey: '', used: 0 }) });
   }
 
+  // Manually catch up a single workspace's pending migration backlog in one call, instead of
+  // relying on that tenant's own incoming traffic to advance it one migration per request (see
+  // WorkspaceDO.ensureFullyMigrated()'s own comment). For a workspace that's stuck mid-catch-up —
+  // e.g. onboarded before ensureFullyMigrated() started running automatically at provisioning —
+  // this is the fix; postAdminWorkspaceMigrationRetry only clears a stuck backoff, it doesn't
+  // itself advance anything.
+  const migrationCatchupMatch = url.pathname.match(/^\/api\/admin\/workspaces\/([^/]+)\/migration-catchup$/);
+  if (request.method === 'POST' && migrationCatchupMatch) {
+    await requireAdmin(request, lenv);
+    const workspaceId = decodeURIComponent(migrationCatchupMatch[1]);
+    const result = await callWorkspaceDO(
+      env,
+      workspaceId,
+      'admin-migrate-full-catchup',
+      { uid: 'admin', email: '', systemRole: 'admin' }
+    );
+    return json(request, env, { ok: true, workspaceId, ...(result || {}) });
+  }
+
   // Diagnostic (2026-08-28): which workspace(s) actually account for the account's total SQL
   // storage. Queries EVERY workspace regardless of status — a workspace marked inactive/deleted
   // in CENTRAL_DB doesn't necessarily mean its Durable Object storage was ever purged (that's a
