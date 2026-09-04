@@ -1210,7 +1210,7 @@ export async function dispatchWorkspaceRoute(
 
   const stockLevelMatch = resource.match(/^stock-items\/([^/]+)\/stock-level$/);
   if (request.method === "PATCH" && stockLevelMatch) {
-    return patchStockLevel(request, env, auth, workspaceId, stockLevelMatch[1]);
+    return patchStockLevel(request, env, auth, workspaceId, decodeURIComponent(stockLevelMatch[1]));
   }
 
   const stockItemLocationCostsMatch = resource.match(
@@ -1222,7 +1222,7 @@ export async function dispatchWorkspaceRoute(
       env,
       auth,
       workspaceId,
-      stockItemLocationCostsMatch[1],
+      decodeURIComponent(stockItemLocationCostsMatch[1]),
     );
   }
   if (request.method === "POST" && stockItemLocationCostsMatch) {
@@ -1231,16 +1231,24 @@ export async function dispatchWorkspaceRoute(
       env,
       auth,
       workspaceId,
-      stockItemLocationCostsMatch[1],
+      decodeURIComponent(stockItemLocationCostsMatch[1]),
     );
   }
 
+  // Stock item ids are sometimes legacy, name-derived strings (e.g. "Fitch_&_Leeds_-_Pink_Tonic")
+  // rather than opaque "stock-XXXX" ids, so a URL-special character forces the frontend to
+  // percent-encode the segment (e.g. "Fitch_%26_Leeds_-_Pink_Tonic"). Every match above/below must
+  // decode it back before using it as a lookup key — otherwise `WHERE id = ?` compares the raw,
+  // still-encoded string against the plain-text id stored in the DB and never matches, producing a
+  // 404 for exactly the items whose id happens to need encoding while plain alphanumeric ids work
+  // fine. Matches the decodeURIComponent(...) pattern already used by savedViewMatch/scheduleMatch/
+  // transactionDetailMatch/roleMatch elsewhere in this file.
   const stockItemMatch = resource.match(/^stock-items\/([^/]+)$/);
   if (
     (request.method === "PATCH" || request.method === "PUT") &&
     stockItemMatch
   ) {
-    return patchStockItem(request, env, auth, workspaceId, stockItemMatch[1]);
+    return patchStockItem(request, env, auth, workspaceId, decodeURIComponent(stockItemMatch[1]));
   }
 
   if (request.method === "DELETE" && stockItemMatch) {
@@ -1249,7 +1257,7 @@ export async function dispatchWorkspaceRoute(
       env,
       auth,
       workspaceId,
-      stockItemMatch[1],
+      decodeURIComponent(stockItemMatch[1]),
     );
   }
 
