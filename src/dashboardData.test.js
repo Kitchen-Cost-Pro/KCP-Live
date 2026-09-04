@@ -60,6 +60,29 @@ test('a date-only sales row (no time-of-day) still counts toward today when the 
   assert.equal(model.metrics.netSales, 1000);
 });
 
+test('hourly buckets use a row\'s separate date+time fields, the real shape movement_ledger and transaction_detail rows carry', () => {
+  const range = getDashboardDateRange(new Date(2026, 8, 4), {
+    from: '2026-09-04',
+    to: '2026-09-04',
+    tradingDayStartHour: 5
+  });
+
+  const model = buildDashboardModel({
+    now: new Date(2026, 8, 4),
+    range,
+    ledgerRows: [
+      { date: '2026-09-04', time: '06:30:00', source: 'Sale Usage', movementValue: -150 }
+    ],
+    salesRows: [
+      { date: '2026-09-04', time: '06:45:00', netSales: 200, grossSales: 230 }
+    ]
+  });
+
+  const sixAm = model.trend.find((bucket) => bucket.label === '06:00');
+  assert.equal(sixAm.cos, 150);
+  assert.equal(sixAm.netSales, 200);
+});
+
 test('inventory rows stay split by location so stock status is never based on cumulative quantity', () => {
   const rows = aggregateInventoryRows([
     { itemId: 'a', itemName: 'Milk', currentStock: 25, parLevel: 20, unitCostExVat: 10, status: 'Healthy', locationId: 'bar', locationName: 'Bar' },

@@ -32,7 +32,10 @@ export async function loadDashboardReportingModel({
     }),
     runPagedReport('payment_sales_financial', {
       workspaceId,
-      view: 'daily_summary',
+      // daily_summary rows are aggregated per calendar day with no time-of-day at all, so an
+      // hour-bucketed "today" view needs the per-transaction view instead to actually plot a
+      // sales curve across the day.
+      view: range.granularity === 'hour' ? 'transaction_detail' : 'daily_summary',
       filters: { from: range.queryFrom, to: range.to, locationId },
       pageSize: SALES_PAGE_SIZE,
       services
@@ -606,14 +609,28 @@ function toBucketKey(row, dateKey, granularity = 'month') {
 // whose `date` is just "2026-09-04") — defaulting those to midnight would misattribute them to
 // the wrong side of a trading day that doesn't start at midnight. Callers fall back to a
 // calendar-date comparison for rows this returns null for.
+//
+// Ledger and per-transaction sales rows carry the date and time-of-day as two separate fields
+// (`date` is always truncated to "YYYY-MM-DD"; the real clock time lives in `time`/`saleTime`),
+// so those are checked first. `timestamp`/`createdAt` are a fallback for rows that only carry a
+// single combined field.
 function getDateTimeValue(row = {}) {
-  const value = text(
-    row.date || row.saleDate || row.sale_date || row.movementDate || row.movement_date ||
-    row.timestamp || row.createdAt || row.created_at
-  );
-  if (!value || !/\d{2}:\d{2}/.test(value)) return null;
-  const date = new Date(value.replace(' ', 'T'));
-  return validDate(date) ? date : null;
+  const datePart = text(row.date || row.saleDate || row.sale_date || row.movementDate || row.movement_date);
+  const timePart = text(row.time || row.saleTime || row.sale_time);
+  if (datePart && /^\d{2}:\d{2}/.test(timePart)) {
+    const date = new Date(`${datePart.slice(0, 10)}T${timePart}`);
+    if (validDate(date)) return date;
+  }
+  if (/\d{2}:\d{2}/.test(datePart)) {
+    const date = new Date(datePart.replace(' ', 'T'));
+    if (validDate(date)) return date;
+  }
+  const stamp = text(row.timestamp || row.createdAt || row.created_at);
+  if (stamp && /\d{2}:\d{2}/.test(stamp)) {
+    const date = new Date(stamp.replace(' ', 'T'));
+    if (validDate(date)) return date;
+  }
+  return null;
 }
 
 function formatHourKey(date) {

@@ -508,7 +508,10 @@ function renderModel(view, ui, context) {
               </div>
               <div class="${styles.seriesToggles}" data-dashboard-series-toggles></div>
             </div>
-            <div class="${styles.chartStage}" data-dashboard-trend-chart></div>
+            <div class="${styles.chartStage}">
+              <div class="${styles.chartCanvas}" data-dashboard-trend-chart></div>
+              <div class="${styles.trendInfoPanel}" data-dashboard-trend-info></div>
+            </div>
           </article>
 
           <article class="${styles.panel} ${styles.supplierPanel}">
@@ -972,7 +975,8 @@ function reviewDashboardStock(view, ui, context) {
 function renderTrendChart(view, ui) {
   const toggleRoot = view.querySelector('[data-dashboard-series-toggles]');
   const chartRoot = view.querySelector('[data-dashboard-trend-chart]');
-  if (!toggleRoot || !chartRoot) return;
+  const infoPanel = view.querySelector('[data-dashboard-trend-info]');
+  if (!toggleRoot || !chartRoot || !infoPanel) return;
 
   toggleRoot.innerHTML = SERIES.map((series) => {
     const active = ui.activeSeries.has(series.key);
@@ -1043,27 +1047,15 @@ function renderTrendChart(view, ui) {
       borderWidth: 0,
       padding: 0,
       extraCssText: 'box-shadow:none;',
-      confine: true,
-      position: (point, params, dom, rect, size) => [
-        Math.max(size.viewSize[0] - size.contentSize[0] - 4, 4),
-        4
-      ],
+      // The formatter always returns '', so ECharts' own floating tooltip box renders with zero
+      // content, padding and border — effectively invisible. It's used purely as a hook to
+      // update the dedicated info panel beside the chart instead, which can never overlap the
+      // plotted data because it lives in its own flex column rather than floating over the canvas.
       formatter: (params) => {
         const items = Array.isArray(params) ? params.filter((entry) => entry.seriesName !== 'Total') : [];
         const index = items[0]?.dataIndex ?? 0;
-        const bucket = trend[index];
-        if (!bucket) return '';
-        const rows = activeSeries.map((series) => `
-          <span><i style="background:${series.color}"></i>${escapeHtml(series.label)}</span>
-          <b>${money(bucket[series.key])}</b>
-        `).join('');
-        return `
-          <div class="${styles.trendTooltip}">
-            <strong>${escapeHtml(bucket.label)}</strong>
-            <div class="${styles.trendTooltipRows}">${rows}</div>
-            <footer><span>TOTAL COST</span><b>${money(totalSeries[index])}</b></footer>
-          </div>
-        `;
+        renderTrendInfoPanel(infoPanel, trend[index], activeSeries, totalSeries[index]);
+        return '';
       }
     },
     series: [
@@ -1071,7 +1063,6 @@ function renderTrendChart(view, ui) {
         name: series.label,
         type: 'line',
         stack: 'total',
-        smooth: 0.35,
         symbol: 'none',
         lineStyle: { width: 1, color: series.color, opacity: 0.9 },
         areaStyle: {
@@ -1086,7 +1077,6 @@ function renderTrendChart(view, ui) {
       {
         name: 'Total',
         type: 'line',
-        smooth: 0.35,
         symbol: 'circle',
         symbolSize: 6,
         showSymbol: false,
@@ -1103,6 +1093,11 @@ function renderTrendChart(view, ui) {
       }
     ]
   }, { notMerge: true });
+  // The flex layout (chart + info panel side by side) can still be settling when echarts first
+  // measures its container, sizing the canvas off a stale/too-narrow width. The ResizeObserver
+  // set up above self-corrects once it fires, but that can lag a frame behind the initial paint
+  // — resizing once more right after setOption closes that gap so the chart never flashes blank.
+  chart.resize();
 
   chartRoot.querySelector(`.${styles.chartEmpty}`)?.remove();
   if (!hasValues) {
@@ -1111,6 +1106,25 @@ function renderTrendChart(view, ui) {
     empty.textContent = 'No movement values recorded for this period.';
     chartRoot.appendChild(empty);
   }
+
+  const lastIndex = trend.length - 1;
+  renderTrendInfoPanel(infoPanel, trend[lastIndex], activeSeries, totalSeries[lastIndex]);
+  if (chart.__dashboardResetInfoPanel) chart.getZr().off('globalout', chart.__dashboardResetInfoPanel);
+  chart.__dashboardResetInfoPanel = () => renderTrendInfoPanel(infoPanel, trend[lastIndex], activeSeries, totalSeries[lastIndex]);
+  chart.getZr().on('globalout', chart.__dashboardResetInfoPanel);
+}
+
+function renderTrendInfoPanel(panel, bucket, activeSeries, total) {
+  if (!panel || !bucket) return;
+  const rows = activeSeries.map((series) => `
+    <span><i style="background:${series.color}"></i>${escapeHtml(series.label)}</span>
+    <b>${money(bucket[series.key])}</b>
+  `).join('');
+  panel.innerHTML = `
+    <strong>${escapeHtml(bucket.label)}</strong>
+    <div class="${styles.trendTooltipRows}">${rows}</div>
+    <footer><span>TOTAL COST</span><b>${money(total)}</b></footer>
+  `;
 }
 
 function resolveCssVar(el, name, fallback) {
