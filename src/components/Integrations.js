@@ -1063,11 +1063,6 @@ function applyIntegrationFilters(view) {
     if (visible) visibleCount += 1;
   });
 
-  view.querySelectorAll('[data-integrations-category-group]').forEach((group) => {
-    const hasVisibleCard = group.querySelector('[data-integration-card]:not([hidden])');
-    group.hidden = !hasVisibleCard;
-  });
-
   const count = view.querySelector('[data-integrations-count]');
   if (count) count.textContent = `Showing ${visibleCount} of ${INTEGRATIONS.length} integrations`;
   const empty = view.querySelector('[data-integrations-empty]');
@@ -1107,23 +1102,7 @@ function renderDropdown(field, options, selectedValue) {
 }
 
 function renderIntegrationGroups(integrations) {
-  const orderedCategories = CATEGORY_OPTIONS
-    .map((option) => option.value)
-    .filter((value) => value !== 'all');
-  return orderedCategories
-    .map((category) => {
-      const items = integrations.filter((item) => item.category === category);
-      if (!items.length) return '';
-      return `
-        <div class="integrationsCategoryGroup" data-integrations-category-group="${escapeAttribute(category)}">
-          <h3 class="integrationsCategoryTitle">${escapeHtml(category)}</h3>
-          <div class="integrationsCategoryCards">
-            ${items.map(renderIntegrationCard).join('')}
-          </div>
-        </div>
-      `;
-    })
-    .join('');
+  return integrations.map(renderIntegrationCard).join('');
 }
 
 function renderIntegrationCard(item) {
