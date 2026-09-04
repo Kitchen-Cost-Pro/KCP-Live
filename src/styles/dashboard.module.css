@@ -1685,6 +1685,41 @@
   font-size: 0.6rem;
 }
 
+.paginationControls {
+  flex-wrap: wrap;
+}
+
+.paginationControls button[aria-label="Previous page"],
+.paginationControls button[aria-label="Next page"] {
+  padding: 0;
+  width: 30px;
+}
+
+.pageSizeSelect {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--dash-muted);
+  font-size: 0.6rem;
+}
+
+.pageSizeSelect select {
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--dash-border);
+  border-radius: 6px;
+  background: var(--dash-elev);
+  color: var(--dash-text);
+  font-family: var(--font-main);
+  font-size: 0.6rem;
+  cursor: pointer;
+}
+
+.pageSizeSelect select:focus-visible {
+  outline: none;
+  border-color: color-mix(in srgb, var(--dash-green) 45%, var(--dash-border));
+}
+
 .tableEmpty {
   min-height: 230px;
   gap: 8px;
