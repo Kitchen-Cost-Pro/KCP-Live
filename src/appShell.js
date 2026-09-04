@@ -140,7 +140,6 @@ export function renderAuthenticatedApp({
   onSignOut,
   onWorkspaceSelect,
   onAutoLoginToggle,
-  onThemeToggle,
   onMenuFilterChange,
   onMenuAction,
   onRecipeFilterChange,
@@ -202,7 +201,6 @@ export function renderAuthenticatedApp({
     onNavigate,
     onRequestGrvEdit,
     onRequestCreditNoteEdit,
-    onThemeToggle,
         onMenuFilterChange,
     onMenuAction,
     onRecipeFilterChange,
@@ -512,7 +510,6 @@ function renderActiveSection({
   onNavigate,
   onRequestGrvEdit,
   onRequestCreditNoteEdit,
-  onThemeToggle,
   onMenuFilterChange,
   onMenuAction,
   onRecipeFilterChange,
@@ -564,8 +561,7 @@ function renderActiveSection({
     return renderDashboard({
       state,
       onNavigate,
-      onStockFilterChange,
-      onThemeToggle
+      onStockFilterChange
     });
   }
 

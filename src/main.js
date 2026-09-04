@@ -92,7 +92,6 @@ import { deriveStockItemType } from './utils/stockItemType.js';
 import { getLocationStock as resolveLocationStock } from './utils/stockBalances.js';
 
 const app = document.querySelector('#app');
-const THEME_STORAGE_KEY = 'kcp-live-theme';
 const ROUTE_STORAGE_KEY = 'kcp-live-route';
 const AUTO_LOGIN_STORAGE_PREFIX = 'kcp:auto-login-workspace:v1';
 const DRAFT_STORAGE_PREFIX = 'kcp:drafts:v1';
@@ -219,7 +218,7 @@ export const appState = {
   route: {
     active: getInitialRoute()
   },
-  theme: getInitialTheme(),
+  theme: 'dark',
   source: null,
   menu: createMenuState('idle'),
   recipes: createRecipeState('idle'),
@@ -20032,7 +20031,6 @@ function renderApp() {
     onSignOut: () => signOutAndStop(),
     onWorkspaceSelect: (workspace) => selectWorkspace(workspace),
     onAutoLoginToggle: toggleAutoLoginPreference,
-    onThemeToggle: toggleTheme,
     onMenuFilterChange: updateMenuFilters,
     onMenuAction: {
       onSelect: updateMenuSelection,
@@ -23674,35 +23672,6 @@ function loadImageForCanvas(src = '') {
     image.onerror = () => reject(new Error('Could not load that background image.'));
     image.src = src;
   });
-}
-
-function toggleTheme() {
-  setTheme(appState.theme === 'dark' ? 'light' : 'dark');
-}
-
-function setTheme(theme) {
-  appState.theme = theme === 'dark' ? 'dark' : 'light';
-  applyTheme(appState.theme);
-  applyRestaurantTheme(appState.settings?.draft || appState.settings?.values || {});
-
-  try {
-    localStorage.setItem(THEME_STORAGE_KEY, appState.theme);
-  } catch (error) {
-    console.warn('[Theme] Could not persist theme preference:', error);
-  }
-
-  renderApp();
-}
-
-function getInitialTheme() {
-  try {
-    const storedTheme = localStorage.getItem(THEME_STORAGE_KEY);
-    if (storedTheme === 'dark' || storedTheme === 'light') return storedTheme;
-  } catch (error) {
-    console.warn('[Theme] Could not read theme preference:', error);
-  }
-
-  return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
 }
 
 function applyTheme(theme) {
