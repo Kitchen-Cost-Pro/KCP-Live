@@ -38,6 +38,28 @@ test('a single-day dashboard range buckets the trend by hour, honouring the trad
   assert.equal(twoAmNextDay.cos, 50);
 });
 
+test('a date-only sales row (no time-of-day) still counts toward today when the trading day starts mid-morning', () => {
+  // payment_sales_financial's daily_summary view reports one row per calendar day with no
+  // time-of-day at all — defaulting that to midnight would put "today" before the 05:00 trading
+  // day boundary and misattribute the whole day's sales to the prior period.
+  const range = getDashboardDateRange(new Date(2026, 8, 4), {
+    from: '2026-09-04',
+    to: '2026-09-04',
+    tradingDayStartHour: 5
+  });
+
+  const model = buildDashboardModel({
+    now: new Date(2026, 8, 4),
+    range,
+    salesRows: [
+      { date: '2026-09-04', netSales: 1000, grossSales: 1150 },
+      { date: '2026-09-03', netSales: 400, grossSales: 460 }
+    ]
+  });
+
+  assert.equal(model.metrics.netSales, 1000);
+});
+
 test('inventory rows stay split by location so stock status is never based on cumulative quantity', () => {
   const rows = aggregateInventoryRows([
     { itemId: 'a', itemName: 'Milk', currentStock: 25, parLevel: 20, unitCostExVat: 10, status: 'Healthy', locationId: 'bar', locationName: 'Bar' },

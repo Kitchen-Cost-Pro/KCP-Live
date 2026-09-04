@@ -502,13 +502,9 @@ function renderModel(view, ui, context) {
                 <h2>${escapeHtml((model.trendTitle || '').toUpperCase())}</h2>
                 <p>${escapeHtml(model.trendRangeLabel)}</p>
               </div>
-              <div class="${styles.trendHeaderTotal}">
-                <span>Total Cost</span>
-                <div>
-                  <strong>${money(model.metrics.totalCost)}</strong>
-                  ${Number.isFinite(model.metrics.totalCostDelta) ? `<em class="${model.metrics.totalCostDelta >= 0 ? styles.trendDeltaBad : styles.trendDeltaGood}">${icon(model.metrics.totalCostDelta >= 0 ? 'arrowUp' : 'arrowDown', 11)}${decimal(Math.abs(model.metrics.totalCostDelta))}%</em>` : ''}
-                </div>
-                <small>vs prior period</small>
+              <div class="${styles.trendHeaderStats}">
+                ${trendHeaderStat({ label: 'Total Cost', value: model.metrics.totalCost, delta: model.metrics.totalCostDelta, invert: true })}
+                ${trendHeaderStat({ label: 'Total Sales', value: model.metrics.netSales, delta: model.metrics.netSalesDelta, invert: false })}
               </div>
               <div class="${styles.seriesToggles}" data-dashboard-series-toggles></div>
             </div>
@@ -1013,6 +1009,12 @@ function renderTrendChart(view, ui) {
 
   const totalSeries = trend.map((bucket) => Math.round(activeSeries.reduce((sum, series) => sum + number(bucket[series.key]), 0) * 100) / 100);
 
+  // ECharts draws axis text on a <canvas>, which never resolves CSS custom properties — passing
+  // "var(--dash-muted)" as a fillStyle silently fails and canvas falls back to black text, which
+  // is invisible on this dark theme. Resolve the real computed values first.
+  const mutedColor = resolveCssVar(chartRoot, '--dash-muted', '#8b93a3');
+  const chartFontFamily = resolveCssVar(chartRoot, '--font-main', 'system-ui, sans-serif');
+
   chart.setOption({
     animationDuration: 420,
     animationEasing: 'cubicOut',
@@ -1023,12 +1025,12 @@ function renderTrendChart(view, ui) {
       boundaryGap: false,
       axisLine: { lineStyle: { color: 'rgba(255,255,255,0.08)' } },
       axisTick: { show: false },
-      axisLabel: { color: 'var(--dash-muted)', fontSize: 10, fontFamily: 'var(--font-main)' }
+      axisLabel: { color: mutedColor, fontSize: 10, fontFamily: chartFontFamily }
     },
     yAxis: {
       type: 'value',
       splitLine: { lineStyle: { color: 'rgba(255,255,255,0.06)', type: 'dashed' } },
-      axisLabel: { color: 'var(--dash-muted)', fontSize: 10, fontFamily: 'var(--font-main)', formatter: (value) => axisMoney(value) }
+      axisLabel: { color: mutedColor, fontSize: 10, fontFamily: chartFontFamily, formatter: (value) => axisMoney(value) }
     },
     axisPointer: {
       type: 'line',
@@ -1109,6 +1111,11 @@ function renderTrendChart(view, ui) {
     empty.textContent = 'No movement values recorded for this period.';
     chartRoot.appendChild(empty);
   }
+}
+
+function resolveCssVar(el, name, fallback) {
+  const value = getComputedStyle(el).getPropertyValue(name).trim();
+  return value || fallback;
 }
 
 function colorWithAlpha(hex, alpha) {
@@ -1423,6 +1430,22 @@ function kpiCard({ label, value, sub = '', delta = null, iconName, accent, inver
         ${hasDelta ? icon(positiveDirection ? 'arrowUp' : 'arrowDown', 12) : icon('minus', 12)} ${escapeHtml(deltaText)}
       </footer>
     </article>
+  `;
+}
+
+function trendHeaderStat({ label, value, delta, invert = false }) {
+  const hasDelta = Number.isFinite(delta);
+  const positiveDirection = hasDelta && delta >= 0;
+  const favourable = hasDelta ? (invert ? !positiveDirection : positiveDirection) : null;
+  return `
+    <div class="${styles.trendHeaderTotal}">
+      <span>${escapeHtml(label)}</span>
+      <div>
+        <strong>${money(value)}</strong>
+        ${hasDelta ? `<em class="${favourable ? styles.trendDeltaGood : styles.trendDeltaBad}">${icon(positiveDirection ? 'arrowUp' : 'arrowDown', 11)}${decimal(Math.abs(delta))}%</em>` : ''}
+      </div>
+      <small>${hasDelta ? 'vs prior period' : 'No prior-period comparison'}</small>
+    </div>
   `;
 }
 

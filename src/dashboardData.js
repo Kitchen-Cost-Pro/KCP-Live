@@ -231,6 +231,7 @@ export function buildDashboardModel({
       grossMargin,
       grossMarginDelta: grossMargin === null || previousGrossMargin === null ? null : grossMargin - previousGrossMargin,
       netSales: selectedTotals.netSales,
+      netSalesDelta: percentageChange(selectedTotals.netSales, comparisonTotals.netSales),
       totalCost: currentTotalCost,
       totalCostDelta: percentageChange(currentTotalCost, previousTotalCost)
     },
@@ -523,7 +524,10 @@ function dateInRange(value = '', from = '', to = '') {
 function inSelectedWindow(row, rowDate, range) {
   if (range.granularity === 'hour') {
     const dateTime = getDateTimeValue(row);
-    return Boolean(dateTime && dateTime >= range.hourWindowStart && dateTime < range.hourWindowEnd);
+    if (dateTime) return dateTime >= range.hourWindowStart && dateTime < range.hourWindowEnd;
+    // No time-of-day on this row (e.g. a daily sales aggregate) — the best we can do is
+    // attribute it to its calendar day, same as the pre-hour-granularity behaviour.
+    return rowDate === range.from;
   }
   return dateInRange(rowDate, range.from, range.to);
 }
@@ -531,7 +535,8 @@ function inSelectedWindow(row, rowDate, range) {
 function inComparisonWindow(row, rowDate, range) {
   if (range.granularity === 'hour') {
     const dateTime = getDateTimeValue(row);
-    return Boolean(dateTime && dateTime >= range.comparisonHourWindowStart && dateTime < range.comparisonHourWindowEnd);
+    if (dateTime) return dateTime >= range.comparisonHourWindowStart && dateTime < range.comparisonHourWindowEnd;
+    return rowDate === range.comparisonTo;
   }
   return dateInRange(rowDate, range.comparisonFrom, range.comparisonTo);
 }
@@ -597,14 +602,17 @@ function toBucketKey(row, dateKey, granularity = 'month') {
   return formatMonthKey(date);
 }
 
+// Returns null when the row carries no real time-of-day (e.g. a daily-aggregate sales row
+// whose `date` is just "2026-09-04") — defaulting those to midnight would misattribute them to
+// the wrong side of a trading day that doesn't start at midnight. Callers fall back to a
+// calendar-date comparison for rows this returns null for.
 function getDateTimeValue(row = {}) {
   const value = text(
     row.date || row.saleDate || row.sale_date || row.movementDate || row.movement_date ||
     row.timestamp || row.createdAt || row.created_at
   );
-  if (!value) return null;
-  const isoValue = /\d{2}:\d{2}/.test(value) ? value.replace(' ', 'T') : `${value}T00:00:00`;
-  const date = new Date(isoValue);
+  if (!value || !/\d{2}:\d{2}/.test(value)) return null;
+  const date = new Date(value.replace(' ', 'T'));
   return validDate(date) ? date : null;
 }
 

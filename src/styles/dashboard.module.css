@@ -1238,12 +1238,24 @@
   color: var(--dash-muted);
 }
 
+.trendHeaderStats {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 22px;
+  margin-right: auto;
+}
+
 .trendHeaderTotal {
   display: grid;
   gap: 2px;
-  margin-right: auto;
   padding-left: 16px;
   border-left: 1px solid var(--dash-border);
+}
+
+.trendHeaderTotal:first-child {
+  padding-left: 0;
+  border-left: none;
 }
 
 .trendHeaderTotal span {
@@ -1338,7 +1350,8 @@
 .trendTooltip {
   display: grid;
   gap: 6px;
-  min-width: 168px;
+  width: 210px;
+  box-sizing: border-box;
   padding: 10px 12px;
   border: 1px solid var(--dash-border);
   border-radius: 8px;
@@ -1960,10 +1973,8 @@
     align-items: flex-start;
     flex-direction: column;
   }
-  .trendHeaderTotal {
+  .trendHeaderStats {
     margin-right: 0;
-    padding-left: 0;
-    border-left: none;
   }
   .seriesToggles,
   .locationPills,
