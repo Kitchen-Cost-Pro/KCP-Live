@@ -1500,6 +1500,87 @@
   grid-template-rows: auto auto;
 }
 
+#view-grv .grv-commitDropzone {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  margin: 4px 0 8px;
+  border: 1px dashed rgba(16, 185, 129, 0.4);
+  border-radius: 10px;
+  padding: 26px 20px;
+  background: linear-gradient(180deg, rgba(16, 185, 129, 0.08), rgba(255, 255, 255, 0.02));
+  text-align: center;
+  color: rgba(255, 255, 255, 0.7);
+  transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+}
+
+#view-grv .grv-commitDropzone.is-dragging {
+  border-color: rgba(16, 185, 129, 0.85);
+  background: linear-gradient(180deg, rgba(16, 185, 129, 0.18), rgba(255, 255, 255, 0.03));
+  box-shadow: 0 16px 34px rgba(16, 185, 129, 0.16);
+}
+
+#view-grv .grv-commitDropzone svg {
+  width: 26px;
+  height: 26px;
+  color: rgba(16, 185, 129, 0.85);
+}
+
+#view-grv .grv-commitDropzone p {
+  margin: 0;
+  font-size: 0.78rem;
+}
+
+#view-grv .grv-commitFilePicked {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 4px 0 8px;
+  padding: 12px 14px;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  border-radius: 8px;
+  background: rgba(16, 185, 129, 0.08);
+  color: rgba(255, 255, 255, 0.9);
+}
+
+#view-grv .grv-commitFilePicked svg {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  color: rgba(16, 185, 129, 0.85);
+}
+
+#view-grv .grv-commitFilePicked span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.82rem;
+}
+
+#view-grv .grv-commitDriveTip {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 4px 0 8px;
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+#view-grv .grv-commitDriveTip svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  margin-top: 1px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
 #view-grv .grv-lineDetailList {
   max-height: min(50vh, 520px);
   display: grid;

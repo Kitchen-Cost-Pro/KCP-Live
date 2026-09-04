@@ -121,6 +121,39 @@ export async function processInvoicePhoto(
   return { extract, driveFileId };
 }
 
+/**
+ * Archives an invoice photo/PDF to that location's Drive "Invoices" folder without running it
+ * through Gemini extraction — the GRV commit modal offers this once the GRV is already filled in,
+ * so there's nothing to extract into; staff just want the paper invoice kept alongside the record.
+ * Unlike processInvoicePhoto, a failed upload here IS thrown back to the caller (there's no
+ * extraction result to protect the user's wait on) so the modal can show a real error instead of
+ * silently pretending the upload worked.
+ */
+export async function uploadInvoiceDocument(
+  env: Env,
+  workspaceId: string,
+  locationId: string,
+  locationName: string,
+  input: { mimeType: string; imageBase64: string }
+): Promise<{ driveFileId: string }> {
+  if (!input.mimeType.startsWith('image/') && input.mimeType !== 'application/pdf') {
+    throw new Error('Only a photo or PDF of the invoice can be uploaded.');
+  }
+  const { invoicesFolderId } = await ensureLocationFolders(env, workspaceId, locationId, locationName);
+  const uploaded = await uploadFile(env, workspaceId, {
+    name: `Invoice ${nowIso().slice(0, 19).replace(/[:T]/g, '-')}.${input.mimeType === 'application/pdf' ? 'pdf' : 'jpg'}`,
+    parentId: invoicesFolderId,
+    bytes: base64ToBytes(input.imageBase64),
+    mimeType: input.mimeType,
+    appProperties: { kcp_entity_type: 'invoice_photo' }
+  });
+  await env.DB.prepare(
+    `INSERT INTO drive_documents (id, workspace_id, entity_type, drive_file_id, drive_folder_id, mime_type, source, uploaded_at)
+     VALUES (?1, ?2, 'invoice_photo', ?3, ?4, ?5, 'staff_upload', ?6)`
+  ).bind(crypto.randomUUID(), workspaceId, uploaded.id, invoicesFolderId, input.mimeType, nowIso()).run();
+  return { driveFileId: uploaded.id };
+}
+
 /** Tags the archived invoice photo with the GRV it ended up creating, once that GRV is actually
  * saved — best-effort, called fire-and-forget from the frontend after a successful save. */
 export async function tagDriveInvoiceWithGrv(env: Env, workspaceId: string, fileId: string, grvId: string): Promise<void> {
