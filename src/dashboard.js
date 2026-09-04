@@ -51,8 +51,14 @@ const SERIES = [
   { key: 'cos', label: 'Cost of Sales', color: '#00e5a0' },
   { key: 'adjustments', label: 'Adjustments', color: '#f5a623' },
   { key: 'wastage', label: 'Wastage', color: '#ff4455' },
-  { key: 'mfgWastage', label: 'Manufacture Wastage', color: '#7b61ff' }
+  { key: 'mfgWastage', label: 'Manufacture Wastage', color: '#7b61ff' },
+  // Sales value is deliberately NOT a cost — it must never be stacked with, or added into, the
+  // cost series above (that's what "Total Cost" / the white Total line mean). isSales marks it so
+  // renderTrendChart and updateTrendTotalCostStat can exclude it from that stacking/summing while
+  // still letting it be toggled on/off like any other series, drawn as its own overlay line.
+  { key: 'netSales', label: 'Sales Value', color: '#38bdf8', isSales: true }
 ];
+const COST_SERIES = SERIES.filter((series) => !series.isSales);
 const SUPPLIER_COLORS = ['#00e5a0', '#f5a623', '#7b61ff', '#00b3ff', '#ff4455'];
 const RANGE_PRESETS = [
   ['today', 'Today'],
@@ -81,7 +87,10 @@ export function renderDashboard({ state = {}, onNavigate, onStockFilterChange } 
     categorySelectOpen: false,
     sortCol: 'status',
     sortDir: 'desc',
-    activeSeries: new Set(SERIES.map((series) => series.key)),
+    // Sales Value defaults OFF — it's usually a much larger figure than any cost category, so
+    // showing it by default would visually flatten the cost lines most people open this chart to
+    // read. It's still one click away via its own toggle.
+    activeSeries: new Set(COST_SERIES.map((series) => series.key)),
     pageSize: 25,
     currentPage: 1,
     model: null,
@@ -1009,8 +1018,13 @@ function renderTrendChart(view, ui) {
 
   const trend = ui.model.trend;
   const activeSeries = SERIES.filter((series) => ui.activeSeries.has(series.key));
+  // Sales Value is plotted as its own overlay line (see below) — it must never join the stacked
+  // cost area or the white "Total" line, and never feed the header stat, or a sales figure would
+  // get silently added into what's supposed to be a cost total.
+  const activeCostSeries = activeSeries.filter((series) => !series.isSales);
+  const activeSalesSeries = activeSeries.filter((series) => series.isSales);
   const hasValues = trend.some((bucket) => activeSeries.some((series) => number(bucket[series.key]) > 0));
-  updateTrendTotalCostStat(view, ui.model, activeSeries);
+  updateTrendTotalCostStat(view, ui.model, activeCostSeries);
 
   let chart = trendChartInstances.get(view);
   if (!chart || chart.getDom() !== chartRoot) {
@@ -1024,7 +1038,7 @@ function renderTrendChart(view, ui) {
     }
   }
 
-  const totalSeries = trend.map((bucket) => Math.round(activeSeries.reduce((sum, series) => sum + number(bucket[series.key]), 0) * 100) / 100);
+  const totalSeries = trend.map((bucket) => Math.round(activeCostSeries.reduce((sum, series) => sum + number(bucket[series.key]), 0) * 100) / 100);
 
   // ECharts draws axis text on a <canvas>, which never resolves CSS custom properties — passing
   // "var(--dash-muted)" as a fillStyle silently fails and canvas falls back to black text, which
@@ -1072,7 +1086,7 @@ function renderTrendChart(view, ui) {
       }
     },
     series: [
-      ...activeSeries.map((series) => ({
+      ...activeCostSeries.map((series) => ({
         name: series.label,
         type: 'line',
         stack: 'total',
@@ -1103,7 +1117,19 @@ function renderTrendChart(view, ui) {
         itemStyle: { color: '#eafff5', borderColor: '#00e5a0', borderWidth: 2 },
         tooltip: { show: false },
         data: totalSeries
-      }
+      },
+      // Sales Value is revenue, not a cost — deliberately NOT stacked with the cost series above
+      // (stacking it would add a sales figure into what's supposed to be a cost total) and drawn
+      // with no area fill so it reads as a comparison overlay rather than part of the cost stack.
+      ...activeSalesSeries.map((series) => ({
+        name: series.label,
+        type: 'line',
+        symbol: 'none',
+        z: 9,
+        lineStyle: { width: 1.6, color: series.color, opacity: 0.95, type: 'dashed' },
+        emphasis: { focus: 'series' },
+        data: trend.map((bucket) => number(bucket[series.key]))
+      }))
     ]
   }, { notMerge: true });
   // The flex layout (chart + info panel side by side) can still be settling when echarts first
