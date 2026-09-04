@@ -3564,6 +3564,12 @@ async function startStockTakeSubscription(workspaceId) {
 
   appState.stockTake = createStockTakeState('loading', appState.stockTake.filters, appState.stockTake.sessionActive);
 
+  import('./services/driveService.js').then(({ fetchDriveStatusSummary }) => fetchDriveStatusSummary(workspaceId)).then(({ connected }) => {
+    if (subscriptionToken !== stockTakeSubscriptionToken || appState.route.active !== 'stock-count' || appState.workspace?.id !== workspaceId) return;
+    appState.stockTake = { ...appState.stockTake, driveConnected: connected };
+    renderApp();
+  }).catch(() => {});
+
   try {
     const { subscribeStockTakeWorkspace } = await import('./services/stockTakeService.js');
 
@@ -18806,6 +18812,115 @@ function updateStockTakeCount(stockItemId, value, uomKey = 'base') {
   renderApp();
 }
 
+// The synchronous checks a stock take draft must pass before it can be committed — same
+// share-between-the-modal-gate-and-the-actual-save shape as GRV's getGrvCommitValidationError.
+function getStockTakeCommitValidationError(commitDraft) {
+  if (!commitDraft.locationId) return 'Choose a stock take location before committing.';
+  if (!(commitDraft.items || []).length) return 'Enter at least one shelf count before committing.';
+  return '';
+}
+
+// "Commit" no longer saves immediately — it first offers to attach a photo of the physical count
+// sheet (or, without Drive connected, just a tip that connecting it would archive one
+// automatically), then confirms before the actual save runs (see confirmStockTakeCommit).
+function requestStockTakeCommit() {
+  const draft = hydrateStockTakeDraft(appState.stockTake.draftSession, appState.stockTake.locations || []);
+  const commitDraft = normalizeStockTakeCommitDraft(draft);
+  const validationError = getStockTakeCommitValidationError(commitDraft);
+  if (validationError) {
+    appState.stockTake = { ...appState.stockTake, actionError: validationError };
+    renderApp();
+    return;
+  }
+  appState.stockTake = {
+    ...appState.stockTake,
+    actionError: '',
+    filters: { ...appState.stockTake.filters, overlay: 'commit' },
+    commit: {
+      step: appState.stockTake.driveConnected ? 'ask' : 'confirm',
+      uploading: false,
+      error: '',
+      file: null,
+      fileName: '',
+      locationId: commitDraft.locationId,
+      locationName: commitDraft.locationName
+    }
+  };
+  renderApp();
+}
+
+function chooseStockTakeCommitUploadImage() {
+  if (!appState.stockTake.commit) return;
+  appState.stockTake = { ...appState.stockTake, commit: { ...appState.stockTake.commit, step: 'upload' } };
+  renderApp();
+}
+
+function chooseStockTakeCommitSkipImage() {
+  if (!appState.stockTake.commit) return;
+  appState.stockTake = { ...appState.stockTake, commit: { ...appState.stockTake.commit, step: 'confirm' } };
+  renderApp();
+}
+
+function setStockTakeCommitFile(file) {
+  if (!file || !appState.stockTake.commit) return;
+  appState.stockTake = { ...appState.stockTake, commit: { ...appState.stockTake.commit, file, fileName: file.name, error: '' } };
+  renderApp();
+}
+
+function clearStockTakeCommitFile() {
+  if (!appState.stockTake.commit) return;
+  appState.stockTake = { ...appState.stockTake, commit: { ...appState.stockTake.commit, file: null, fileName: '' } };
+  renderApp();
+}
+
+function backStockTakeCommitToAsk() {
+  if (!appState.stockTake.commit) return;
+  appState.stockTake = { ...appState.stockTake, commit: { ...appState.stockTake.commit, step: 'ask', error: '' } };
+  renderApp();
+}
+
+function cancelStockTakeCommit() {
+  appState.stockTake = {
+    ...appState.stockTake,
+    commit: null,
+    filters: { ...appState.stockTake.filters, overlay: '' }
+  };
+  renderApp();
+}
+
+async function confirmStockTakeCommit() {
+  const commit = appState.stockTake.commit;
+  if (!commit || commit.uploading) return;
+  const file = commit.file;
+  if (file) {
+    appState.stockTake = { ...appState.stockTake, commit: { ...commit, uploading: true, error: '' } };
+    renderApp();
+    try {
+      const imageBase64 = await readInvoicePhotoAsBase64(file);
+      if (!imageBase64) throw new Error('Could not read the selected file.');
+      const { uploadInvoiceToDrive } = await import('./services/driveService.js');
+      await uploadInvoiceToDrive(appState.workspace?.id, {
+        mimeType: file.type || 'application/octet-stream',
+        imageBase64,
+        locationId: commit.locationId || ''
+      });
+    } catch (error) {
+      appState.stockTake = {
+        ...appState.stockTake,
+        commit: { ...appState.stockTake.commit, uploading: false, error: error.message || 'Could not upload the count sheet image.' }
+      };
+      renderApp();
+      return;
+    }
+  }
+  appState.stockTake = {
+    ...appState.stockTake,
+    commit: null,
+    filters: { ...appState.stockTake.filters, overlay: '' }
+  };
+  await saveStockTakeDraft();
+}
+
 async function saveStockTakeDraft() {
   const activeElement = document.activeElement;
   if (activeElement && (activeElement.tagName === 'INPUT' || activeElement.tagName === 'TEXTAREA')) {
@@ -18814,18 +18929,11 @@ async function saveStockTakeDraft() {
 
   const draft = hydrateStockTakeDraft(appState.stockTake.draftSession, appState.stockTake.locations || []);
   const commitDraft = normalizeStockTakeCommitDraft(draft);
-  if (!commitDraft.locationId) {
+  const validationError = getStockTakeCommitValidationError(commitDraft);
+  if (validationError) {
     appState.stockTake = {
       ...appState.stockTake,
-      actionError: 'Choose a stock take location before committing.'
-    };
-    renderApp();
-    return;
-  }
-  if (!(commitDraft.items || []).length) {
-    appState.stockTake = {
-      ...appState.stockTake,
-      actionError: 'Enter at least one shelf count before committing.'
+      actionError: validationError
     };
     renderApp();
     return;
@@ -20509,6 +20617,14 @@ function renderApp() {
       onDeleteTemplate: withPermission('stockTake', ACTION_PERMISSION_MAP.deleteRecords, deleteStockTakeTemplateEntry, 'You do not have permission to delete stock take templates.'),
       onCountChange: updateStockTakeCount,
       onSave: saveStockTakeDraft,
+      onRequestCommit: requestStockTakeCommit,
+      onCommitUploadImage: chooseStockTakeCommitUploadImage,
+      onCommitSkipImage: chooseStockTakeCommitSkipImage,
+      onCommitBack: backStockTakeCommitToAsk,
+      onCommitFileSelected: setStockTakeCommitFile,
+      onCommitRemoveFile: clearStockTakeCommitFile,
+      onCommitConfirm: confirmStockTakeCommit,
+      onCommitCancel: cancelStockTakeCommit,
       onDismissToast: dismissStockTakeToast
     },
     onLocationFilterChange: updateLocationFilters,
@@ -21951,6 +22067,10 @@ function createStockTakeState(status, filters = {}, sessionActive = false) {
     actionStatus: '',
     actionError: '',
     toast: null,
+    // Same refresh cadence/reasoning and commit-modal shape as GRV's driveConnected/commit (see
+    // requestGrvCommit) — whether Drive is connected gates the commit modal's photo-upload offer.
+    driveConnected: false,
+    commit: null,
     filters: {
       query: '',
       templateListQuery: '',
