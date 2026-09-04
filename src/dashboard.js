@@ -50,7 +50,7 @@ const RANGE_PRESETS = [
   ['custom', 'Custom range']
 ];
 
-export function renderDashboard({ state = {}, onNavigate, onStockFilterChange, onThemeToggle } = {}) {
+export function renderDashboard({ state = {}, onNavigate, onStockFilterChange } = {}) {
   const workspaceId = String(state.workspace?.id || '');
   const workspaceName = state.workspace?.siteName || state.source?.settings?.siteName || 'Workspace';
   const initialRange = getPresetRange('today');
@@ -99,7 +99,7 @@ export function renderDashboard({ state = {}, onNavigate, onStockFilterChange, o
     ui.locationOptions = mergeLocationOptions(ui.locationOptions, cached.model.locations);
     syncInventoryLocation(ui, cached.model);
     ui.loading = false;
-    renderModel(view, ui, { workspaceName, onNavigate, onStockFilterChange, onThemeToggle, workspaceId });
+    renderModel(view, ui, { workspaceName, onNavigate, onStockFilterChange, workspaceId });
   } else {
     loadModel(false);
   }
@@ -119,7 +119,7 @@ export function renderDashboard({ state = {}, onNavigate, onStockFilterChange, o
       syncInventoryLocation(ui, model);
       ui.loading = false;
       ui.visibleRows = 75;
-      renderModel(view, ui, { workspaceName, onNavigate, onStockFilterChange, onThemeToggle, workspaceId });
+      renderModel(view, ui, { workspaceName, onNavigate, onStockFilterChange, workspaceId });
     } catch (error) {
       if (!document.contains(view) || requestId !== ui.requestId) return;
       ui.loading = false;
@@ -405,7 +405,6 @@ function renderModel(view, ui, context) {
   const criticalCount = inventoryAlerts.criticalCount;
   const attentionCount = inventoryAlerts.criticalCount + inventoryAlerts.lowCount;
   const alertNames = inventoryAlerts.criticalNames.join(', ');
-  const currentTheme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
   const selectedLocation = ui.locationOptions.find((location) => location.id === ui.locationId);
 
   view.innerHTML = `
@@ -427,7 +426,6 @@ function renderModel(view, ui, context) {
             </button>
             <div id="dashboard-stock-notifications" class="${styles.notificationMenu}" data-dashboard-notification-menu ${ui.notificationsOpen ? '' : 'hidden'}></div>
           </div>
-          <button type="button" class="${styles.iconButton}" aria-label="Switch to ${currentTheme === 'dark' ? 'light' : 'dark'} mode" title="Switch to ${currentTheme === 'dark' ? 'light' : 'dark'} mode" data-dashboard-theme-toggle>${icon(currentTheme === 'dark' ? 'sun' : 'moon', 15)}</button>
           <button type="button" class="${styles.iconButton}" aria-label="Open business settings" title="Open business settings" data-dashboard-settings>${icon('settings', 15)}</button>
         </div>
       </header>
@@ -636,15 +634,6 @@ function bindDashboardEvents(view, ui, context) {
   }, { signal });
 
   view.querySelector('[data-dashboard-refresh]')?.addEventListener('click', () => view.__dashboardRefresh?.(), { signal });
-  view.querySelector('[data-dashboard-theme-toggle]')?.addEventListener('click', (event) => {
-    context.onThemeToggle?.();
-    const button = event.currentTarget;
-    const theme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
-    const nextTheme = theme === 'dark' ? 'light' : 'dark';
-    button.innerHTML = icon(theme === 'dark' ? 'sun' : 'moon', 15);
-    button.setAttribute('aria-label', `Switch to ${nextTheme} mode`);
-    button.setAttribute('title', `Switch to ${nextTheme} mode`);
-  }, { signal });
   view.querySelector('[data-dashboard-settings]')?.addEventListener('click', () => context.onNavigate?.('settings-business'), { signal });
   view.querySelector('[data-dashboard-alert-button]')?.addEventListener('click', (event) => {
     event.preventDefault();
