@@ -1460,6 +1460,12 @@
   display: none;
 }
 
+.categoryDropdownWrap {
+  position: relative;
+  min-width: 190px;
+  max-width: 100%;
+}
+
 .locationPill {
   flex: 0 0 auto;
   min-height: 30px;

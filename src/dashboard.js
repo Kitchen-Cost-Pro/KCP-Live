@@ -62,6 +62,7 @@ export function renderDashboard({ state = {}, onNavigate, onStockFilterChange } 
   const ui = {
     search: '',
     category: 'All',
+    categorySelectOpen: false,
     sortCol: 'status',
     sortDir: 'desc',
     activeSeries: new Set(SERIES.map((series) => series.key)),
@@ -504,7 +505,7 @@ function renderModel(view, ui, context) {
             </div>
             <div class="${styles.inventoryFilters}">
               <div class="${styles.locationPills}" data-dashboard-inventory-locations aria-label="Inventory location"></div>
-              <div class="${styles.categoryStrip}" data-dashboard-categories aria-label="Inventory category"></div>
+              <div class="${styles.categoryDropdownWrap}" data-dashboard-categories aria-label="Inventory category"></div>
             </div>
           </div>
           <div class="${styles.tableActions}" data-dashboard-table-actions></div>
@@ -665,6 +666,7 @@ function bindDashboardEvents(view, ui, context) {
     }
     if (event.target.closest('[data-dashboard-custom-select]')) return;
     if (event.target.closest('[data-dashboard-notification-wrap]')) return;
+    if (event.target.closest('[data-dashboard-category-select]')) return;
     closeMenus('');
     if (ui.notificationsOpen) {
       ui.notificationsOpen = false;
@@ -674,6 +676,10 @@ function bindDashboardEvents(view, ui, context) {
       ui.calendarOpen = false;
       ui.pendingRangeStart = '';
       view.querySelector('[data-dashboard-date-calendar]')?.remove();
+    }
+    if (ui.categorySelectOpen) {
+      ui.categorySelectOpen = false;
+      renderInventory(view, ui, context);
     }
   }, { signal });
   document.addEventListener('keydown', (event) => {
@@ -687,6 +693,10 @@ function bindDashboardEvents(view, ui, context) {
       ui.calendarOpen = false;
       ui.pendingRangeStart = '';
       view.querySelector('[data-dashboard-date-calendar]')?.remove();
+    }
+    if (ui.categorySelectOpen) {
+      ui.categorySelectOpen = false;
+      renderInventory(view, ui, context);
     }
   }, { signal });
 }
@@ -1087,17 +1097,35 @@ function renderInventory(view, ui, context) {
   const categories = ['All', ...new Set(scopedItems.map((item) => item.category).filter(Boolean))];
   if (!categories.includes(ui.category)) ui.category = 'All';
   categoriesRoot.innerHTML = `
-    <label class="${styles.pageSizeSelect}">
-      <span>Category</span>
-      <select data-dashboard-category>
-        ${categories.map((category) => `<option value="${escapeAttribute(category)}" ${ui.category === category ? 'selected' : ''}>${escapeHtml(category)}</option>`).join('')}
-      </select>
-    </label>
+    <div class="${styles.customField}" data-dashboard-category-select>
+      <span class="${styles.customFieldLabel}">Category</span>
+      <button type="button" class="${styles.customSelectButton}" aria-haspopup="listbox" aria-expanded="${ui.categorySelectOpen}" data-dashboard-category-button>
+        <span>${escapeHtml(ui.category)}</span>
+        ${icon('chevronDown', 14)}
+      </button>
+      <div class="${styles.customSelectMenu} ${ui.categorySelectOpen ? styles.customSelectMenuOpen : ''}" role="listbox" aria-label="Category" ${ui.categorySelectOpen ? '' : 'hidden'}>
+        ${categories.map((category) => `
+          <button type="button" role="option" aria-selected="${category === ui.category}" class="${styles.customSelectOption} ${category === ui.category ? styles.customSelectOptionSelected : ''}" data-dashboard-category-option data-value="${escapeAttribute(category)}">
+            <span>${escapeHtml(category)}</span>
+            ${category === ui.category ? icon('check', 13) : ''}
+          </button>
+        `).join('')}
+      </div>
+    </div>
   `;
-  categoriesRoot.querySelector('[data-dashboard-category]')?.addEventListener('change', (event) => {
-    ui.category = event.target.value || 'All';
-    ui.currentPage = 1;
+  categoriesRoot.querySelector('[data-dashboard-category-button]')?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    ui.categorySelectOpen = !ui.categorySelectOpen;
     renderInventory(view, ui, context);
+  });
+  categoriesRoot.querySelectorAll('[data-dashboard-category-option]').forEach((option) => {
+    option.addEventListener('click', (event) => {
+      event.stopPropagation();
+      ui.category = option.dataset.value || 'All';
+      ui.categorySelectOpen = false;
+      ui.currentPage = 1;
+      renderInventory(view, ui, context);
+    });
   });
 
   const needle = ui.search.toLowerCase().trim();
