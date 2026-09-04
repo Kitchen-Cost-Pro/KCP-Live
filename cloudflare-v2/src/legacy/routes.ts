@@ -4728,7 +4728,13 @@ export async function postWorkspaceMemberRoute(
       .bind(resetToken, userId, email, expiresAt, now)
       .run();
 
-    const emailConfig = await getEmailDeliveryConfig(env);
+    // admin_system_settings (which holds the configured sender — Resend or Gmail app password) is
+    // a CENTRAL-only table; this handler otherwise runs against the workspace's own env.DB, so
+    // getEmailDeliveryConfig's readAdminSetting() silently found no row there and fell back to the
+    // unconfigured-Resend default — even though the Gmail sender IS configured, just in the other
+    // database. Same fix as low-stock-email.ts's sendWorkspaceLowStockSummary. Swap DB to
+    // CENTRAL_DB for this call only.
+    const emailConfig = await getEmailDeliveryConfig({ ...env, DB: env.CENTRAL_DB } as Env);
     const appUrl = text(
       emailConfig.appBaseUrl ||
         env.APP_BASE_URL ||
@@ -4829,7 +4835,13 @@ export async function resendWorkspaceMemberInvite(
       .bind(resetToken, userId, email, expiresAt, now)
       .run();
 
-    const emailConfig = await getEmailDeliveryConfig(env);
+    // admin_system_settings (which holds the configured sender — Resend or Gmail app password) is
+    // a CENTRAL-only table; this handler otherwise runs against the workspace's own env.DB, so
+    // getEmailDeliveryConfig's readAdminSetting() silently found no row there and fell back to the
+    // unconfigured-Resend default — even though the Gmail sender IS configured, just in the other
+    // database. Same fix as low-stock-email.ts's sendWorkspaceLowStockSummary. Swap DB to
+    // CENTRAL_DB for this call only.
+    const emailConfig = await getEmailDeliveryConfig({ ...env, DB: env.CENTRAL_DB } as Env);
     const appUrl = text(
       emailConfig.appBaseUrl ||
         env.APP_BASE_URL ||
