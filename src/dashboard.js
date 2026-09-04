@@ -71,7 +71,6 @@ export function renderDashboard({ state = {}, onNavigate, onStockFilterChange, o
     notificationDispatchTime: '08:00',
     notificationRecipientIds: new Set(),
     notificationWorkspaceUsers: [],
-    statusFilter: 'all',
     ackPendingKeys: new Set(),
     ackAllPending: false
   };
@@ -482,12 +481,11 @@ function renderModel(view, ui, context) {
         <section class="${styles.inventoryPanel}" data-dashboard-inventory-panel>
           <div class="${styles.inventoryHeader}">
             <div>
-              <h2>Inventory — Stock Levels</h2>
+              <h2>Inventory — Low &amp; Critical Stock</h2>
               <p data-dashboard-row-count></p>
             </div>
             <div class="${styles.inventoryFilters}">
               <div class="${styles.locationPills}" data-dashboard-inventory-locations aria-label="Inventory location"></div>
-              <div class="${styles.categoryStrip}" data-dashboard-status-filter aria-label="Stock status filter"></div>
               <div class="${styles.categoryStrip}" data-dashboard-categories aria-label="Inventory category"></div>
             </div>
           </div>
@@ -702,7 +700,7 @@ function renderInventoryAlert(view, ui, context) {
     ${criticalCount ? '<button type="button" data-dashboard-review-stock>Review stock</button>' : ''}
   `;
   root.querySelector('[data-dashboard-review-stock]')?.addEventListener('click', () => {
-    reviewDashboardStock(view, ui, context, { criticalOnly: true });
+    reviewDashboardStock(view, ui, context);
   });
   renderNotificationCenter(view, ui, context);
 }
@@ -791,7 +789,7 @@ function renderNotificationCenter(view, ui, context) {
   menu.querySelector('[data-dashboard-notification-review]')?.addEventListener('click', () => {
     ui.notificationsOpen = false;
     renderNotificationCenter(view, ui, context);
-    reviewDashboardStock(view, ui, context, { criticalOnly: true });
+    reviewDashboardStock(view, ui, context);
   });
   menu.querySelector('[data-dashboard-notification-open-stock]')?.addEventListener('click', () => {
     ui.notificationsOpen = false;
@@ -925,17 +923,15 @@ function notificationItem(item = {}, ui) {
   `;
 }
 
-function reviewDashboardStock(view, ui, context, { criticalOnly = false } = {}) {
+function reviewDashboardStock(view, ui, context) {
   const panel = view.querySelector('[data-dashboard-inventory-panel]');
   ui.search = '';
   ui.category = 'All';
   ui.sortCol = 'status';
   ui.sortDir = 'desc';
   ui.visibleRows = 75;
-  if (criticalOnly) ui.statusFilter = 'attention';
   renderInventory(view, ui, context);
   panel?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  if (criticalOnly) panel?.setAttribute('data-dashboard-reviewing', 'critical');
 }
 
 function renderTrendChart(view, ui) {
@@ -1049,13 +1045,12 @@ function renderSupplierChart(view, model) {
 function renderInventory(view, ui, context) {
   const model = ui.model;
   const locationsRoot = view.querySelector('[data-dashboard-inventory-locations]');
-  const statusFilterRoot = view.querySelector('[data-dashboard-status-filter]');
   const categoriesRoot = view.querySelector('[data-dashboard-categories]');
   const actionsRoot = view.querySelector('[data-dashboard-table-actions]');
   const tableRoot = view.querySelector('[data-dashboard-table-wrap]');
   const countRoot = view.querySelector('[data-dashboard-row-count]');
   const footerRoot = view.querySelector('[data-dashboard-table-footer]');
-  if (!locationsRoot || !statusFilterRoot || !categoriesRoot || !actionsRoot || !tableRoot || !countRoot || !footerRoot) return;
+  if (!locationsRoot || !categoriesRoot || !actionsRoot || !tableRoot || !countRoot || !footerRoot) return;
 
   const inventoryLocations = getInventoryLocationOptions(model);
   syncInventoryLocation(ui, model);
@@ -1074,21 +1069,11 @@ function renderInventory(view, ui, context) {
     });
   });
 
-  const scopedItems = getScopedInventoryItems(ui);
+  // This panel is a low/critical stock worklist, not a general inventory browser — it always
+  // shows only items needing attention. Browse everything (including healthy stock) from the
+  // full Stock Items screen via the "Open Stock Items" link below.
+  const scopedItems = getScopedInventoryItems(ui).filter((item) => isAttentionStatus(item.status));
   const selectedInventoryLocation = inventoryLocations.find((location) => location.id === ui.inventoryLocationId);
-  const attentionCount = scopedItems.filter((item) => isAttentionStatus(item.status)).length;
-
-  statusFilterRoot.innerHTML = [
-    { key: 'all', label: 'All items' },
-    { key: 'attention', label: `Low & Critical (${attentionCount})` }
-  ].map(({ key, label }) => `<button type="button" class="${styles.categoryButton} ${ui.statusFilter === key ? styles.categoryButtonActive : ''}" data-status-filter="${key}">${escapeHtml(label)}</button>`).join('');
-  statusFilterRoot.querySelectorAll('[data-status-filter]').forEach((button) => {
-    button.addEventListener('click', () => {
-      ui.statusFilter = button.dataset.statusFilter || 'all';
-      ui.visibleRows = 75;
-      renderInventory(view, ui, context);
-    });
-  });
 
   const categories = ['All', ...new Set(scopedItems.map((item) => item.category).filter(Boolean))];
   if (!categories.includes(ui.category)) ui.category = 'All';
@@ -1103,12 +1088,11 @@ function renderInventory(view, ui, context) {
 
   const needle = ui.search.toLowerCase().trim();
   const filtered = scopedItems
-    .filter((item) => ui.statusFilter !== 'attention' || isAttentionStatus(item.status))
     .filter((item) => ui.category === 'All' || item.category === ui.category)
     .filter((item) => !needle || [item.name, item.sku, item.category, item.supplier, item.locationName, ...item.locations].join(' ').toLowerCase().includes(needle))
     .sort((left, right) => compareInventory(left, right, ui.sortCol, ui.sortDir));
   const visible = filtered.slice(0, ui.visibleRows);
-  countRoot.textContent = `${filtered.length.toLocaleString('en-ZA')} item${filtered.length === 1 ? '' : 's'} shown${selectedInventoryLocation ? ` · ${selectedInventoryLocation.name}` : ''}`;
+  countRoot.textContent = `${filtered.length.toLocaleString('en-ZA')} item${filtered.length === 1 ? '' : 's'} needing attention${selectedInventoryLocation ? ` · ${selectedInventoryLocation.name}` : ''}`;
 
   const mutableAttentionItems = filtered.filter((item) => isAttentionStatus(item.status) && !item.acknowledged);
   actionsRoot.innerHTML = mutableAttentionItems.length ? `
@@ -1122,7 +1106,10 @@ function renderInventory(view, ui, context) {
   });
 
   if (!visible.length) {
-    tableRoot.innerHTML = `<div class="${styles.tableEmpty}">${icon('search', 20)}<strong>No stock items match this location</strong><span>Change the location or category filter.</span></div>`;
+    const hasAnyAttentionItem = getScopedInventoryItems(ui).some((item) => isAttentionStatus(item.status));
+    tableRoot.innerHTML = hasAnyAttentionItem
+      ? `<div class="${styles.tableEmpty}">${icon('search', 20)}<strong>No matching items</strong><span>Change the category or location filter.</span></div>`
+      : `<div class="${styles.tableEmpty}">${icon('check', 20)}<strong>Stock control is clear</strong><span>No items are currently low or critical at this location.</span></div>`;
     footerRoot.innerHTML = `<button type="button" data-dashboard-open-stock>Open Stock Items</button>`;
   } else {
     const columns = [
