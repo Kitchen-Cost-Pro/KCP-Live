@@ -88,6 +88,8 @@ import {
   postDashboardLowStockEmail,
   getLowStockNotificationSettingsRoute,
   putLowStockNotificationSettingsRoute,
+  postLowStockAckRoute,
+  postLowStockAckAllRoute,
   migrateImport,
   getLocations,
   getManufacturingBatches,
@@ -946,6 +948,20 @@ export async function dispatchWorkspaceRoute(
     resource === "notifications/low-stock-email"
   ) {
     return postDashboardLowStockEmail(request, env, auth, workspaceId);
+  }
+
+  if (
+    request.method === "POST" &&
+    resource === "notifications/low-stock-ack"
+  ) {
+    return postLowStockAckRoute(request, env, auth, workspaceId);
+  }
+
+  if (
+    request.method === "POST" &&
+    resource === "notifications/low-stock-ack-all"
+  ) {
+    return postLowStockAckAllRoute(request, env, auth, workspaceId);
   }
 
   if (request.method === "GET" && resource === "settings") {

@@ -1833,12 +1833,15 @@ export async function getStockControlReport(
         lp.supplier_name,
         lp.last_purchase_uom,
         lp.last_purchase_cost,
-        lp.last_purchased_date
+        lp.last_purchased_date,
+        lsa.acknowledged AS low_stock_acknowledged,
+        lsa.acknowledged_at AS low_stock_acknowledged_at
        FROM stock_items si
        JOIN locations l ON l.workspace_id = si.workspace_id AND COALESCE(l.active, 1) = 1
        LEFT JOIN latest_balance sb ON sb.workspace_id = si.workspace_id AND sb.stock_item_id = si.id AND sb.location_id = l.id
        LEFT JOIN latest_location_cost silp ON silp.workspace_id = si.workspace_id AND silp.stock_item_id = si.id AND silp.location_id = l.id
        LEFT JOIN latest_purchase lp ON lp.workspace_id = si.workspace_id AND lp.stock_item_id = si.id AND lp.location_id = l.id
+       LEFT JOIN low_stock_alert_state lsa ON lsa.workspace_id = si.workspace_id AND lsa.stock_item_id = si.id AND lsa.location_id = l.id
       WHERE ${whereSql}
       ORDER BY l.name, si.category, si.name
       LIMIT ${MAX_REPORT_ROWS + 1}`,
@@ -2043,6 +2046,8 @@ function standardizeStockControlRow(
     status,
     stockStatus: status,
     suggestedAction,
+    lowStockAcknowledged: numberValue(row.low_stock_acknowledged, 0) === 1,
+    lowStockAcknowledgedAt: clean(row.low_stock_acknowledged_at),
     lastUpdated: clean(row.balance_updated_at),
     sourceId: clean(row.stock_item_id),
     raw: { stockItem: row, purchase },

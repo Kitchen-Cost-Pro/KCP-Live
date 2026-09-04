@@ -332,7 +332,8 @@ async function syncLowStockAlertState(
   );
   const existingRows = await env.DB.prepare(
     `SELECT stock_item_id AS itemId, location_id AS locationId, is_active AS isActive,
-            first_low_at AS firstLowAt, last_notified_at AS lastNotifiedAt
+            first_low_at AS firstLowAt, last_notified_at AS lastNotifiedAt,
+            acknowledged AS acknowledged
        FROM low_stock_alert_state
       WHERE workspace_id = ?1`,
   ).bind(workspaceId).all<Record<string, any>>();
@@ -346,16 +347,20 @@ async function syncLowStockAlertState(
   for (const [key, row] of currentByKey) {
     const existing = existingByKey.get(key);
     const active = Number(existing?.isActive || 0) === 1;
+    // A mute only survives while the item stays continuously low — see the acknowledged reset
+    // in the ON CONFLICT branch below, which clears it the moment a row transitions back to
+    // active (i.e. it was restocked above threshold and has now fallen low again).
+    const acknowledged = active && Number(existing?.acknowledged || 0) === 1;
     const lastNotifiedAt = Date.parse(clean(existing?.lastNotifiedAt));
-    if (!active || !Number.isFinite(lastNotifiedAt) || lastNotifiedAt <= reminderCutoff) {
+    if (!acknowledged && (!active || !Number.isFinite(lastNotifiedAt) || lastNotifiedAt <= reminderCutoff)) {
       dueRows.push(row);
     }
     statements.push(
       env.DB.prepare(
         `INSERT INTO low_stock_alert_state
            (workspace_id, stock_item_id, location_id, is_active, first_low_at,
-            last_notified_at, cleared_at, updated_at)
-         VALUES (?1, ?2, ?3, 1, ?4, NULL, NULL, ?4)
+            last_notified_at, cleared_at, acknowledged, acknowledged_at, acknowledged_by, updated_at)
+         VALUES (?1, ?2, ?3, 1, ?4, NULL, NULL, 0, NULL, NULL, ?4)
          ON CONFLICT(workspace_id, stock_item_id, location_id) DO UPDATE SET
            is_active = 1,
            first_low_at = CASE
@@ -366,6 +371,18 @@ async function syncLowStockAlertState(
            last_notified_at = CASE
              WHEN low_stock_alert_state.is_active = 1
                THEN low_stock_alert_state.last_notified_at
+             ELSE NULL
+           END,
+           acknowledged = CASE
+             WHEN low_stock_alert_state.is_active = 1 THEN low_stock_alert_state.acknowledged
+             ELSE 0
+           END,
+           acknowledged_at = CASE
+             WHEN low_stock_alert_state.is_active = 1 THEN low_stock_alert_state.acknowledged_at
+             ELSE NULL
+           END,
+           acknowledged_by = CASE
+             WHEN low_stock_alert_state.is_active = 1 THEN low_stock_alert_state.acknowledged_by
              ELSE NULL
            END,
            cleared_at = NULL,
@@ -410,6 +427,64 @@ async function markLowStockRowsNotified(
         WHERE workspace_id = ?1 AND stock_item_id = ?2 AND location_id = ?3 AND is_active = 1`,
     ).bind(workspaceId, clean(row.itemId), clean(row.locationId), notifiedAt),
   ));
+}
+
+// Mutes a single low-stock item/location so it's excluded from the daily summary email until it
+// clears (restocks above threshold) and later falls low again — syncLowStockAlertState() resets
+// `acknowledged` back to 0 the moment that transition happens (see the ON CONFLICT branch there).
+// Upserts rather than a plain UPDATE, since the caller may be acknowledging an item the cron
+// hasn't synced into low_stock_alert_state yet (the row is created here with is_active = 1, which
+// the next sync will confirm or correct).
+export async function acknowledgeLowStockItem(
+  env: Env,
+  workspaceId: string,
+  itemId: string,
+  locationId: string,
+  actorEmail: string,
+) {
+  const now = nowIso();
+  await env.DB.prepare(
+    `INSERT INTO low_stock_alert_state
+       (workspace_id, stock_item_id, location_id, is_active, first_low_at,
+        last_notified_at, cleared_at, acknowledged, acknowledged_at, acknowledged_by, updated_at)
+     VALUES (?1, ?2, ?3, 1, ?4, NULL, NULL, 1, ?4, ?5, ?4)
+     ON CONFLICT(workspace_id, stock_item_id, location_id) DO UPDATE SET
+       acknowledged = 1,
+       acknowledged_at = ?4,
+       acknowledged_by = ?5,
+       updated_at = ?4`,
+  ).bind(workspaceId, clean(itemId), clean(locationId), now, clean(actorEmail)).run();
+  return { itemId: clean(itemId), locationId: clean(locationId), acknowledged: true, acknowledgedAt: now };
+}
+
+export async function acknowledgeAllLowStockItems(
+  env: Env,
+  workspaceId: string,
+  items: Array<{ itemId: string; locationId: string }>,
+  actorEmail: string,
+) {
+  const uniqueItems = [...new Map(
+    items
+      .map((item) => ({ itemId: clean(item?.itemId), locationId: clean(item?.locationId) }))
+      .filter((item) => item.itemId && item.locationId)
+      .map((item) => [`${item.itemId}:${item.locationId}`, item]),
+  ).values()];
+  if (!uniqueItems.length) return { acknowledgedCount: 0 };
+  const now = nowIso();
+  await env.DB.batch(uniqueItems.map((item) =>
+    env.DB.prepare(
+      `INSERT INTO low_stock_alert_state
+         (workspace_id, stock_item_id, location_id, is_active, first_low_at,
+          last_notified_at, cleared_at, acknowledged, acknowledged_at, acknowledged_by, updated_at)
+       VALUES (?1, ?2, ?3, 1, ?4, NULL, NULL, 1, ?4, ?5, ?4)
+       ON CONFLICT(workspace_id, stock_item_id, location_id) DO UPDATE SET
+         acknowledged = 1,
+         acknowledged_at = ?4,
+         acknowledged_by = ?5,
+         updated_at = ?4`,
+    ).bind(workspaceId, item.itemId, item.locationId, now, clean(actorEmail)),
+  ));
+  return { acknowledgedCount: uniqueItems.length, acknowledgedAt: now };
 }
 
 function groupLowStockByLocation(rows: Record<string, any>[]) {
