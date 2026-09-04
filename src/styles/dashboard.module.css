@@ -1183,6 +1183,15 @@
   padding: 18px;
 }
 
+.trendPanel {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--dash-card) 96%, transparent), color-mix(in srgb, var(--dash-bg) 70%, transparent));
+  backdrop-filter: blur(22px);
+  -webkit-backdrop-filter: blur(22px);
+  border-color: color-mix(in srgb, var(--dash-green) 14%, var(--dash-border));
+}
+
 .panelHeader {
   min-height: 42px;
   justify-content: space-between;
@@ -1202,6 +1211,94 @@
   letter-spacing: 0.11em;
 }
 
+.trendHeader {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.trendHeaderTitle {
+  display: grid;
+  gap: 4px;
+}
+
+.trendHeaderTitle h2 {
+  font-size: 0.66rem;
+  letter-spacing: 0.11em;
+  color: var(--dash-text);
+}
+
+.trendHeaderTitle p {
+  font-size: 0.68rem;
+  color: var(--dash-muted);
+}
+
+.trendHeaderStats {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 22px;
+  margin-right: auto;
+}
+
+.trendHeaderTotal {
+  display: grid;
+  gap: 2px;
+  padding-left: 16px;
+  border-left: 1px solid var(--dash-border);
+}
+
+.trendHeaderTotal:first-child {
+  padding-left: 0;
+  border-left: none;
+}
+
+.trendHeaderTotal span {
+  font-size: 0.58rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--dash-muted);
+}
+
+.trendHeaderTotal > div {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.trendHeaderTotal strong {
+  font-size: 1.35rem;
+  font-weight: 650;
+  color: var(--dash-text);
+}
+
+.trendHeaderTotal em {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-style: normal;
+  font-size: 0.62rem;
+  font-weight: 600;
+}
+
+.trendHeaderTotal small {
+  font-size: 0.58rem;
+  color: var(--dash-muted);
+}
+
+.trendDeltaGood {
+  color: var(--dash-green);
+}
+
+.trendDeltaBad {
+  color: var(--dash-red);
+}
+
 .seriesToggles {
   justify-content: flex-end;
   flex-wrap: wrap;
@@ -1212,8 +1309,11 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 5px 8px;
+  padding: 5px 10px;
   font-size: 0.59rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--dash-card) 60%, transparent);
+  backdrop-filter: blur(8px);
 }
 
 .seriesToggle span {
@@ -1228,77 +1328,104 @@
   border-color: color-mix(in srgb, var(--series-color) 42%, transparent);
   background: color-mix(in srgb, var(--series-color) 9%, transparent);
   color: var(--series-color);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--series-color) 18%, transparent);
 }
 
 .seriesToggleActive span {
   opacity: 1;
+  box-shadow: 0 0 6px var(--series-color);
 }
 
 .chartStage {
   position: relative;
-  min-height: 238px;
-}
-
-.chartStage svg {
-  width: 100%;
+  z-index: 1;
+  display: flex;
+  align-items: stretch;
+  gap: 14px;
   height: 238px;
-  display: block;
-  overflow: visible;
 }
 
-.gridLine {
-  stroke: var(--dash-grid);
-  stroke-dasharray: 2 5;
+.chartCanvas {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
 }
 
-.axisText {
-  fill: var(--dash-muted);
-  font-family: var(--font-main);
-  font-size: 10px;
+.chartCanvas > div {
+  width: 100% !important;
+  height: 100% !important;
 }
 
-.chartLine {
-  filter: drop-shadow(0 0 6px color-mix(in srgb, currentColor 18%, transparent));
-}
-
-.chartDot {
-  pointer-events: none;
-}
-
-.chartTooltip {
-  position: absolute;
-  z-index: 8;
-  width: 170px;
+/* A static panel beside the chart (not a floating tooltip) — it updates on hover but can never
+   cover the plotted data since it lives in its own flex column instead of overlaying the canvas. */
+.trendInfoPanel {
+  flex: none;
+  width: 190px;
   display: grid;
-  gap: 5px;
-  padding: 9px 10px;
+  align-content: start;
+  gap: 6px;
+  box-sizing: border-box;
+  padding: 10px 12px;
   border: 1px solid var(--dash-border);
-  border-radius: 7px;
+  border-radius: 8px;
   background: var(--dash-tooltip);
-  box-shadow: var(--shadow-hover);
-  pointer-events: none;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   font-family: var(--font-main);
   font-size: 0.61rem;
-}
-
-.chartTooltip[hidden] {
-  display: none;
-}
-
-.chartTooltip strong {
-  margin-bottom: 2px;
   color: var(--dash-text);
 }
 
-.chartTooltip span {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
+.trendInfoPanel strong {
+  color: var(--dash-green);
+  font-size: 0.66rem;
 }
 
-.chartTooltip b {
-  color: inherit;
+.trendTooltipRows {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  row-gap: 4px;
+  column-gap: 10px;
+}
+
+.trendTooltipRows span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--dash-muted);
+}
+
+.trendTooltipRows span i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.trendTooltipRows b {
+  text-align: right;
   font-weight: 650;
+}
+
+.trendInfoPanel footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 2px;
+  padding-top: 6px;
+  border-top: 1px solid var(--dash-border);
+}
+
+.trendInfoPanel footer span {
+  font-size: 0.56rem;
+  letter-spacing: 0.08em;
+  color: var(--dash-muted);
+}
+
+.trendInfoPanel footer b {
+  color: var(--dash-green);
+  font-size: 0.68rem;
 }
 
 .chartEmpty {
@@ -1895,14 +2022,21 @@
   .body { padding: 16px; }
   .kpiGrid { grid-template-columns: 1fr; }
   .panelHeader,
+  .trendHeader,
   .inventoryHeader {
     align-items: flex-start;
     flex-direction: column;
+  }
+  .trendHeaderStats {
+    margin-right: 0;
   }
   .seriesToggles,
   .locationPills,
   .categoryStrip { justify-content: flex-start; width: 100%; }
   .inventoryFilters { width: 100%; justify-items: start; }
+  .chartStage { flex-direction: column; height: auto; }
+  .chartCanvas { height: 220px; }
+  .trendInfoPanel { width: 100%; }
   .supplierChartWrap { flex-direction: column; }
   .tableFooter { align-items: flex-start; flex-direction: column; }
   .loadingWrap { padding: 16px; }

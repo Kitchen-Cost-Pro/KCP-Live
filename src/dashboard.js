@@ -1,3 +1,7 @@
+import * as echarts from 'echarts/core';
+import { LineChart } from 'echarts/charts';
+import { GridComponent, TooltipComponent } from 'echarts/components';
+import { CanvasRenderer } from 'echarts/renderers';
 import styles from './styles/dashboard.module.css';
 import {
   loadDashboardReportingModel,
@@ -13,6 +17,17 @@ import {
   acknowledgeAllLowStockItems,
   unacknowledgeLowStockItem
 } from './services/notificationService.js';
+
+echarts.use([LineChart, GridComponent, TooltipComponent, CanvasRenderer]);
+const trendChartInstances = new WeakMap();
+
+function disposeTrendChart(view) {
+  const instance = trendChartInstances.get(view);
+  if (instance) {
+    instance.dispose();
+    trendChartInstances.delete(view);
+  }
+}
 
 const DASHBOARD_CACHE_TTL = 60_000;
 const dashboardCache = new Map();
@@ -144,7 +159,8 @@ export function renderDashboard({ state = {}, onNavigate, onStockFilterChange } 
         filters: {
           from: dashboardUi.from,
           to: dashboardUi.to,
-          locationId: dashboardUi.locationId
+          locationId: dashboardUi.locationId,
+          tradingDayStartHour: getTradingDayStartHour(state)
         },
         services: { reporting: {} }
       }),
@@ -185,6 +201,11 @@ function getKnownStateLocations(state = {}) {
 
 function getDashboardCacheKey(workspaceId, ui = {}) {
   return [workspaceId, ui.from || '', ui.to || '', ui.locationId || 'all'].join('::');
+}
+
+function getTradingDayStartHour(state = {}) {
+  const hour = Number(state.settings?.values?.tradingDayStartHour ?? state.settings?.draft?.tradingDayStartHour ?? 0);
+  return Number.isFinite(hour) ? Math.min(23, Math.max(0, hour)) : 0;
 }
 
 function mergeLocationOptions(existing = [], incoming = []) {
@@ -409,6 +430,8 @@ function renderModel(view, ui, context) {
   const alertNames = inventoryAlerts.criticalNames.join(', ');
   const selectedLocation = ui.locationOptions.find((location) => location.id === ui.locationId);
 
+  disposeTrendChart(view);
+
   view.innerHTML = `
     <div class="${styles.frame}">
       <header class="${styles.topbar}">
@@ -476,14 +499,21 @@ function renderModel(view, ui, context) {
 
         <section class="${styles.chartGrid}">
           <article class="${styles.panel} ${styles.trendPanel}">
-            <div class="${styles.panelHeader}">
-              <div>
-                <h2>${escapeHtml(model.trendTitle)}</h2>
+            <div class="${styles.trendHeader}">
+              <div class="${styles.trendHeaderTitle}">
+                <h2>${escapeHtml((model.trendTitle || '').toUpperCase())}</h2>
                 <p>${escapeHtml(model.trendRangeLabel)}</p>
+              </div>
+              <div class="${styles.trendHeaderStats}">
+                ${trendHeaderStat({ label: 'Total Cost', value: model.metrics.totalCost, delta: model.metrics.totalCostDelta, invert: true })}
+                ${trendHeaderStat({ label: 'Total Sales', value: model.metrics.netSales, delta: model.metrics.netSalesDelta, invert: false })}
               </div>
               <div class="${styles.seriesToggles}" data-dashboard-series-toggles></div>
             </div>
-            <div class="${styles.chartStage}" data-dashboard-trend-chart></div>
+            <div class="${styles.chartStage}">
+              <div class="${styles.chartCanvas}" data-dashboard-trend-chart></div>
+              <div class="${styles.trendInfoPanel}" data-dashboard-trend-info></div>
+            </div>
           </article>
 
           <article class="${styles.panel} ${styles.supplierPanel}">
@@ -956,7 +986,8 @@ function reviewDashboardStock(view, ui, context) {
 function renderTrendChart(view, ui) {
   const toggleRoot = view.querySelector('[data-dashboard-series-toggles]');
   const chartRoot = view.querySelector('[data-dashboard-trend-chart]');
-  if (!toggleRoot || !chartRoot) return;
+  const infoPanel = view.querySelector('[data-dashboard-trend-info]');
+  if (!toggleRoot || !chartRoot || !infoPanel) return;
 
   toggleRoot.innerHTML = SERIES.map((series) => {
     const active = ui.activeSeries.has(series.key);
@@ -975,63 +1006,148 @@ function renderTrendChart(view, ui) {
     });
   });
 
-  const width = 800;
-  const height = 240;
-  const pad = { top: 18, right: 18, bottom: 34, left: 66 };
-  const chartWidth = width - pad.left - pad.right;
-  const chartHeight = height - pad.top - pad.bottom;
+  const trend = ui.model.trend;
   const activeSeries = SERIES.filter((series) => ui.activeSeries.has(series.key));
-  const values = ui.model.trend.flatMap((month) => activeSeries.map((series) => number(month[series.key])));
-  const rawMax = Math.max(...values, 0);
-  const maxY = niceMax(rawMax || 1);
-  const xAt = (index) => pad.left + (ui.model.trend.length === 1 ? chartWidth / 2 : (index / (ui.model.trend.length - 1)) * chartWidth);
-  const yAt = (value) => pad.top + chartHeight - (number(value) / maxY) * chartHeight;
+  const hasValues = trend.some((bucket) => activeSeries.some((series) => number(bucket[series.key]) > 0));
 
-  const grids = Array.from({ length: 5 }, (_, index) => {
-    const value = maxY - (index * maxY / 4);
-    const y = pad.top + index * chartHeight / 4;
-    return `<line x1="${pad.left}" y1="${y}" x2="${width - pad.right}" y2="${y}" class="${styles.gridLine}"/><text x="${pad.left - 10}" y="${y + 4}" text-anchor="end" class="${styles.axisText}">${escapeHtml(axisMoney(value))}</text>`;
-  }).join('');
+  let chart = trendChartInstances.get(view);
+  if (!chart || chart.getDom() !== chartRoot) {
+    if (chart) chart.dispose();
+    chart = echarts.init(chartRoot, null, { renderer: 'canvas' });
+    trendChartInstances.set(view, chart);
+    if (typeof ResizeObserver !== 'undefined' && !chartRoot.__dashboardResizeObserver) {
+      const observer = new ResizeObserver(() => chart.resize());
+      observer.observe(chartRoot);
+      chartRoot.__dashboardResizeObserver = observer;
+    }
+  }
 
-  const paths = activeSeries.map((series) => {
-    const points = ui.model.trend.map((month, index) => `${xAt(index)},${yAt(month[series.key])}`).join(' ');
-    const dots = ui.model.trend.map((month, index) => `<circle cx="${xAt(index)}" cy="${yAt(month[series.key])}" r="3.2" fill="${series.color}" class="${styles.chartDot}"/>`).join('');
-    return `<polyline points="${points}" fill="none" stroke="${series.color}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="${styles.chartLine}"/>${dots}`;
-  }).join('');
+  const totalSeries = trend.map((bucket) => Math.round(activeSeries.reduce((sum, series) => sum + number(bucket[series.key]), 0) * 100) / 100);
 
-  const xLabels = ui.model.trend.map((month, index) => `<text x="${xAt(index)}" y="${height - 10}" text-anchor="middle" class="${styles.axisText}">${escapeHtml(month.label)}</text>`).join('');
-  const hoverWidth = chartWidth / Math.max(ui.model.trend.length, 1);
-  const hitZones = ui.model.trend.map((month, index) => `<rect x="${xAt(index) - hoverWidth / 2}" y="${pad.top}" width="${hoverWidth}" height="${chartHeight}" fill="transparent" data-trend-index="${index}" tabindex="0" aria-label="${escapeAttribute(month.label)} trend values"/>`).join('');
+  // ECharts draws axis text on a <canvas>, which never resolves CSS custom properties — passing
+  // "var(--dash-muted)" as a fillStyle silently fails and canvas falls back to black text, which
+  // is invisible on this dark theme. Resolve the real computed values first.
+  const mutedColor = resolveCssVar(chartRoot, '--dash-muted', '#8b93a3');
+  const chartFontFamily = resolveCssVar(chartRoot, '--font-main', 'system-ui, sans-serif');
 
-  chartRoot.innerHTML = `
-    <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Cost and stock movement trend for ${escapeAttribute(ui.model.trendRangeLabel)}">
-      ${grids}${paths}${xLabels}${hitZones}
-    </svg>
-    <div class="${styles.chartTooltip}" data-dashboard-chart-tooltip hidden></div>
-    ${rawMax <= 0 ? `<div class="${styles.chartEmpty}">No movement values recorded for this period.</div>` : ''}
+  chart.setOption({
+    animationDuration: 420,
+    animationEasing: 'cubicOut',
+    grid: { top: 14, right: 14, bottom: 26, left: 54 },
+    xAxis: {
+      type: 'category',
+      data: trend.map((bucket) => bucket.label),
+      boundaryGap: false,
+      axisLine: { lineStyle: { color: 'rgba(255,255,255,0.08)' } },
+      axisTick: { show: false },
+      axisLabel: { color: mutedColor, fontSize: 10, fontFamily: chartFontFamily }
+    },
+    yAxis: {
+      type: 'value',
+      splitLine: { lineStyle: { color: 'rgba(255,255,255,0.06)', type: 'dashed' } },
+      axisLabel: { color: mutedColor, fontSize: 10, fontFamily: chartFontFamily, formatter: (value) => axisMoney(value) }
+    },
+    axisPointer: {
+      type: 'line',
+      lineStyle: { color: 'rgba(255,255,255,0.32)', type: 'dashed', width: 1 },
+      z: 1
+    },
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: 'transparent',
+      borderWidth: 0,
+      padding: 0,
+      extraCssText: 'box-shadow:none;',
+      // The formatter always returns '', so ECharts' own floating tooltip box renders with zero
+      // content, padding and border — effectively invisible. It's used purely as a hook to
+      // update the dedicated info panel beside the chart instead, which can never overlap the
+      // plotted data because it lives in its own flex column rather than floating over the canvas.
+      formatter: (params) => {
+        const items = Array.isArray(params) ? params.filter((entry) => entry.seriesName !== 'Total') : [];
+        const index = items[0]?.dataIndex ?? 0;
+        renderTrendInfoPanel(infoPanel, trend[index], activeSeries, totalSeries[index]);
+        return '';
+      }
+    },
+    series: [
+      ...activeSeries.map((series) => ({
+        name: series.label,
+        type: 'line',
+        stack: 'total',
+        symbol: 'none',
+        lineStyle: { width: 1, color: series.color, opacity: 0.9 },
+        areaStyle: {
+          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+            { offset: 0, color: colorWithAlpha(series.color, 0.55) },
+            { offset: 1, color: colorWithAlpha(series.color, 0.04) }
+          ])
+        },
+        emphasis: { focus: 'series' },
+        data: trend.map((bucket) => number(bucket[series.key]))
+      })),
+      {
+        name: 'Total',
+        type: 'line',
+        symbol: 'circle',
+        symbolSize: 6,
+        showSymbol: false,
+        z: 10,
+        lineStyle: {
+          width: 2.4,
+          color: '#eafff5',
+          shadowColor: 'rgba(0, 229, 160, 0.65)',
+          shadowBlur: 12
+        },
+        itemStyle: { color: '#eafff5', borderColor: '#00e5a0', borderWidth: 2 },
+        tooltip: { show: false },
+        data: totalSeries
+      }
+    ]
+  }, { notMerge: true });
+  // The flex layout (chart + info panel side by side) can still be settling when echarts first
+  // measures its container, sizing the canvas off a stale/too-narrow width. The ResizeObserver
+  // set up above self-corrects once it fires, but that can lag a frame behind the initial paint
+  // — resizing once more right after setOption closes that gap so the chart never flashes blank.
+  chart.resize();
+
+  chartRoot.querySelector(`.${styles.chartEmpty}`)?.remove();
+  if (!hasValues) {
+    const empty = document.createElement('div');
+    empty.className = styles.chartEmpty;
+    empty.textContent = 'No movement values recorded for this period.';
+    chartRoot.appendChild(empty);
+  }
+
+  const lastIndex = trend.length - 1;
+  renderTrendInfoPanel(infoPanel, trend[lastIndex], activeSeries, totalSeries[lastIndex]);
+  if (chart.__dashboardResetInfoPanel) chart.getZr().off('globalout', chart.__dashboardResetInfoPanel);
+  chart.__dashboardResetInfoPanel = () => renderTrendInfoPanel(infoPanel, trend[lastIndex], activeSeries, totalSeries[lastIndex]);
+  chart.getZr().on('globalout', chart.__dashboardResetInfoPanel);
+}
+
+function renderTrendInfoPanel(panel, bucket, activeSeries, total) {
+  if (!panel || !bucket) return;
+  const rows = activeSeries.map((series) => `
+    <span><i style="background:${series.color}"></i>${escapeHtml(series.label)}</span>
+    <b>${money(bucket[series.key])}</b>
+  `).join('');
+  panel.innerHTML = `
+    <strong>${escapeHtml(bucket.label)}</strong>
+    <div class="${styles.trendTooltipRows}">${rows}</div>
+    <footer><span>TOTAL COST</span><b>${money(total)}</b></footer>
   `;
+}
 
-  const tooltip = chartRoot.querySelector('[data-dashboard-chart-tooltip]');
-  const show = (target, event) => {
-    const index = number(target.dataset.trendIndex);
-    const month = ui.model.trend[index];
-    if (!month || !tooltip) return;
-    tooltip.innerHTML = `<strong>${escapeHtml(month.label)}</strong>${activeSeries.map((series) => `<span style="color:${series.color}">${escapeHtml(series.label)} <b>${money(month[series.key])}</b></span>`).join('')}`;
-    tooltip.hidden = false;
-    const bounds = chartRoot.getBoundingClientRect();
-    const clientX = event?.clientX || bounds.left + (xAt(index) / width) * bounds.width;
-    const left = Math.min(Math.max(clientX - bounds.left + 10, 8), Math.max(bounds.width - 180, 8));
-    tooltip.style.left = `${left}px`;
-    tooltip.style.top = '18px';
-  };
-  chartRoot.querySelectorAll('[data-trend-index]').forEach((target) => {
-    target.addEventListener('pointerenter', (event) => show(target, event));
-    target.addEventListener('pointermove', (event) => show(target, event));
-    target.addEventListener('focus', (event) => show(target, event));
-    target.addEventListener('blur', () => hideChartTooltip(view));
-  });
-  chartRoot.addEventListener('pointerleave', () => hideChartTooltip(view));
-  chartRoot.addEventListener('pointercancel', () => hideChartTooltip(view));
+function resolveCssVar(el, name, fallback) {
+  const value = getComputedStyle(el).getPropertyValue(name).trim();
+  return value || fallback;
+}
+
+function colorWithAlpha(hex, alpha) {
+  const match = String(hex || '').replace('#', '').match(/^([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
+  if (!match) return hex;
+  const [, r, g, b] = match;
+  return `rgba(${parseInt(r, 16)}, ${parseInt(g, 16)}, ${parseInt(b, 16)}, ${alpha})`;
 }
 
 function renderSupplierChart(view, model) {
@@ -1388,6 +1504,22 @@ function kpiCard({ label, value, sub = '', delta = null, iconName, accent, inver
   `;
 }
 
+function trendHeaderStat({ label, value, delta, invert = false }) {
+  const hasDelta = Number.isFinite(delta);
+  const positiveDirection = hasDelta && delta >= 0;
+  const favourable = hasDelta ? (invert ? !positiveDirection : positiveDirection) : null;
+  return `
+    <div class="${styles.trendHeaderTotal}">
+      <span>${escapeHtml(label)}</span>
+      <div>
+        <strong>${money(value)}</strong>
+        ${hasDelta ? `<em class="${favourable ? styles.trendDeltaGood : styles.trendDeltaBad}">${icon(positiveDirection ? 'arrowUp' : 'arrowDown', 11)}${decimal(Math.abs(delta))}%</em>` : ''}
+      </div>
+      <small>${hasDelta ? 'vs prior period' : 'No prior-period comparison'}</small>
+    </div>
+  `;
+}
+
 function compareInventory(left, right, col, dir) {
   let a = left[col];
   let b = right[col];
@@ -1417,8 +1549,7 @@ function statusRank(status) {
 }
 
 function hideChartTooltip(view) {
-  const tooltip = view.querySelector('[data-dashboard-chart-tooltip]');
-  if (tooltip) tooltip.hidden = true;
+  trendChartInstances.get(view)?.dispatchAction({ type: 'hideTip' });
 }
 
 function setRefreshing(view, refreshing) {
@@ -1426,13 +1557,6 @@ function setRefreshing(view, refreshing) {
   if (!button) return;
   button.disabled = refreshing;
   button.classList.toggle(styles.refreshing, refreshing);
-}
-
-function niceMax(value) {
-  const exponent = Math.floor(Math.log10(value));
-  const fraction = value / (10 ** exponent);
-  const niceFraction = fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 5 ? 5 : 10;
-  return niceFraction * (10 ** exponent);
 }
 
 function axisMoney(value) {

@@ -9,6 +9,80 @@ test('dashboard date range defaults to the current day', () => {
   assert.equal(range.dayCount, 1);
 });
 
+test('a single-day dashboard range buckets the trend by hour, honouring the trading day start hour', () => {
+  const range = getDashboardDateRange(new Date(2026, 8, 4), {
+    from: '2026-09-04',
+    to: '2026-09-04',
+    tradingDayStartHour: 5
+  });
+  assert.equal(range.granularity, 'hour');
+  assert.equal(range.buckets.length, 24);
+  assert.equal(range.buckets[0].label, '05:00');
+  assert.equal(range.buckets[0].key, '2026-09-04T05');
+  assert.equal(range.buckets.at(-1).label, '04:00');
+  assert.equal(range.buckets.at(-1).key, '2026-09-05T04');
+  assert.equal(range.label, '05:00 – 05:00 · 04 Sept 2026');
+
+  const model = buildDashboardModel({
+    now: new Date(2026, 8, 4),
+    range,
+    ledgerRows: [
+      { date: '2026-09-04 06:30:00', source: 'Sale Usage', movementValue: -150 },
+      { date: '2026-09-05 02:15:00', source: 'Sale Usage', movementValue: -50 }
+    ]
+  });
+
+  const sixAm = model.trend.find((bucket) => bucket.label === '06:00');
+  const twoAmNextDay = model.trend.find((bucket) => bucket.label === '02:00');
+  assert.equal(sixAm.cos, 150);
+  assert.equal(twoAmNextDay.cos, 50);
+});
+
+test('a date-only sales row (no time-of-day) still counts toward today when the trading day starts mid-morning', () => {
+  // payment_sales_financial's daily_summary view reports one row per calendar day with no
+  // time-of-day at all — defaulting that to midnight would put "today" before the 05:00 trading
+  // day boundary and misattribute the whole day's sales to the prior period.
+  const range = getDashboardDateRange(new Date(2026, 8, 4), {
+    from: '2026-09-04',
+    to: '2026-09-04',
+    tradingDayStartHour: 5
+  });
+
+  const model = buildDashboardModel({
+    now: new Date(2026, 8, 4),
+    range,
+    salesRows: [
+      { date: '2026-09-04', netSales: 1000, grossSales: 1150 },
+      { date: '2026-09-03', netSales: 400, grossSales: 460 }
+    ]
+  });
+
+  assert.equal(model.metrics.netSales, 1000);
+});
+
+test('hourly buckets use a row\'s separate date+time fields, the real shape movement_ledger and transaction_detail rows carry', () => {
+  const range = getDashboardDateRange(new Date(2026, 8, 4), {
+    from: '2026-09-04',
+    to: '2026-09-04',
+    tradingDayStartHour: 5
+  });
+
+  const model = buildDashboardModel({
+    now: new Date(2026, 8, 4),
+    range,
+    ledgerRows: [
+      { date: '2026-09-04', time: '06:30:00', source: 'Sale Usage', movementValue: -150 }
+    ],
+    salesRows: [
+      { date: '2026-09-04', time: '06:45:00', netSales: 200, grossSales: 230 }
+    ]
+  });
+
+  const sixAm = model.trend.find((bucket) => bucket.label === '06:00');
+  assert.equal(sixAm.cos, 150);
+  assert.equal(sixAm.netSales, 200);
+});
+
 test('inventory rows stay split by location so stock status is never based on cumulative quantity', () => {
   const rows = aggregateInventoryRows([
     { itemId: 'a', itemName: 'Milk', currentStock: 25, parLevel: 20, unitCostExVat: 10, status: 'Healthy', locationId: 'bar', locationName: 'Bar' },
