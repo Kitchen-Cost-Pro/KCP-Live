@@ -40,6 +40,8 @@ import {
   sendWorkspaceLowStockNow,
   sendWorkspaceLowStockDue,
   sendWorkspaceLowStockToUser,
+  acknowledgeLowStockItem,
+  acknowledgeAllLowStockItems,
 } from "./low-stock-email";
 import { lowStockLocationRelevantSql } from "./low-stock-policy";
 import { sendEmail } from "./email";
@@ -3293,6 +3295,68 @@ export async function postDashboardLowStockEmail(
     console.error(`[low-stock-email] ws=${workspaceId} failed: ${message}`);
     return error(request, env, status, message);
   }
+}
+
+export async function postLowStockAckRoute(
+  request: Request,
+  env: Env,
+  auth: AuthContext,
+  workspaceId: string,
+) {
+  await scoped(request, env, auth, workspaceId);
+  const payload = await readJson<Record<string, unknown>>(request);
+  const itemId = text(payload.itemId);
+  const locationId = text(payload.locationId);
+  if (!itemId || !locationId) {
+    return error(request, env, 400, "itemId and locationId are required.");
+  }
+  await assertLocationAccess(
+    env,
+    auth,
+    workspaceId,
+    locationId,
+    "low-stock acknowledgement",
+  );
+  const result = await acknowledgeLowStockItem(
+    env,
+    workspaceId,
+    itemId,
+    locationId,
+    auth.email,
+  );
+  return json(request, env, { ok: true, ...result });
+}
+
+export async function postLowStockAckAllRoute(
+  request: Request,
+  env: Env,
+  auth: AuthContext,
+  workspaceId: string,
+) {
+  await scoped(request, env, auth, workspaceId);
+  const payload = await readJson<Record<string, unknown>>(request);
+  const rawItems = Array.isArray(payload.items) ? payload.items : [];
+  const items = rawItems
+    .map((entry) => {
+      const record = objectValue(entry);
+      return { itemId: text(record.itemId), locationId: text(record.locationId) };
+    })
+    .filter((item) => item.itemId && item.locationId);
+  if (!items.length) {
+    return error(request, env, 400, "At least one item with itemId and locationId is required.");
+  }
+  const locationIds = Array.from(new Set(items.map((item) => item.locationId)));
+  for (const locationId of locationIds) {
+    await assertLocationAccess(
+      env,
+      auth,
+      workspaceId,
+      locationId,
+      "low-stock acknowledgement",
+    );
+  }
+  const result = await acknowledgeAllLowStockItems(env, workspaceId, items, auth.email);
+  return json(request, env, { ok: true, ...result });
 }
 
 export async function adminYocoStatusDO(

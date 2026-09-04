@@ -790,5 +790,15 @@ CREATE INDEX IF NOT EXISTS idx_stock_movements_workspace_effective_date
   // 55 — KCP -> Google Drive integration: per-workspace Drive OAuth connection, a local record of
   // documents pushed/read (drive_documents), and Drive's own idempotent effect outbox. See
   // modules/drive-engine/migrations.ts's DRIVE_FOUNDATION_MIGRATION doc comment.
-  DRIVE_FOUNDATION_MIGRATION
+  DRIVE_FOUNDATION_MIGRATION,
+  // 56 — low-stock alert acknowledgement (mute). Adds a user-driven "acknowledged" flag onto the
+  // existing low_stock_alert_state row (migration 31), separate from the automated is_active/
+  // last_notified_at notification-cadence fields. syncLowStockAlertState() (low-stock-email.ts)
+  // resets acknowledged back to 0 in the same ON CONFLICT branch that already resets
+  // last_notified_at whenever a row transitions inactive -> active, so acknowledging an item only
+  // mutes it until it clears (restocks above threshold) and later falls low again — the dynamic
+  // reset requested for the restock-and-deplete cycle comes for free from that existing transition.
+  `ALTER TABLE low_stock_alert_state ADD COLUMN acknowledged INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE low_stock_alert_state ADD COLUMN acknowledged_at TEXT;
+ALTER TABLE low_stock_alert_state ADD COLUMN acknowledged_by TEXT;`
 ];

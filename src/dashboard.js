@@ -8,7 +8,9 @@ import { mergeCanonicalLocations } from './utils/locationDisplayName.js';
 import { positionDashboardSelectMenu } from './utils/dashboardDropdown.js';
 import {
   loadLowStockNotificationSettings,
-  saveLowStockNotificationSettings
+  saveLowStockNotificationSettings,
+  acknowledgeLowStockItem,
+  acknowledgeAllLowStockItems
 } from './services/notificationService.js';
 
 const DASHBOARD_CACHE_TTL = 60_000;
@@ -68,7 +70,10 @@ export function renderDashboard({ state = {}, onNavigate, onStockFilterChange, o
     notificationSettingsMessage: '',
     notificationDispatchTime: '08:00',
     notificationRecipientIds: new Set(),
-    notificationWorkspaceUsers: []
+    notificationWorkspaceUsers: [],
+    statusFilter: 'all',
+    ackPendingKeys: new Set(),
+    ackAllPending: false
   };
 
   renderLoading(view, workspaceName);
@@ -482,9 +487,11 @@ function renderModel(view, ui, context) {
             </div>
             <div class="${styles.inventoryFilters}">
               <div class="${styles.locationPills}" data-dashboard-inventory-locations aria-label="Inventory location"></div>
+              <div class="${styles.categoryStrip}" data-dashboard-status-filter aria-label="Stock status filter"></div>
               <div class="${styles.categoryStrip}" data-dashboard-categories aria-label="Inventory category"></div>
             </div>
           </div>
+          <div class="${styles.tableActions}" data-dashboard-table-actions></div>
           <div class="${styles.tableWrap}" data-dashboard-table-wrap></div>
           <div class="${styles.tableFooter}" data-dashboard-table-footer></div>
         </section>
@@ -709,8 +716,13 @@ function renderNotificationCenter(view, ui, context) {
   const scopedItems = getNotificationInventoryItems(ui);
   const criticalItems = scopedItems.filter((item) => item.status === 'critical');
   const lowItems = scopedItems.filter((item) => item.status === 'low');
-  const attentionItems = [...criticalItems, ...lowItems].slice(0, 8);
-  const count = criticalItems.length + lowItems.length;
+  const attentionItems = [...criticalItems, ...lowItems]
+    .sort((left, right) => Number(Boolean(left.acknowledged)) - Number(Boolean(right.acknowledged)))
+    .slice(0, 8);
+  // Muted items still show in the list (so a user can confirm/undo a mute) but don't count toward
+  // the badge — the badge should reflect items that still need attention, same as an "unread" count.
+  const count = criticalItems.filter((item) => !item.acknowledged).length
+    + lowItems.filter((item) => !item.acknowledged).length;
   const locationName = getNotificationInventoryAlerts(ui).locationName;
 
   bell.classList.toggle(styles.iconButtonActive, ui.notificationsOpen);
@@ -731,7 +743,7 @@ function renderNotificationCenter(view, ui, context) {
         <button type="button" class="${styles.notificationClose}" aria-label="Close stock notifications" data-dashboard-notification-close>${icon('x', 14)}</button>
       </div>
     </div>
-    ${ui.notificationSettingsOpen ? renderLowStockNotificationSettings(ui) : renderStockNotificationList({ count, criticalItems, lowItems, attentionItems })}
+    ${ui.notificationSettingsOpen ? renderLowStockNotificationSettings(ui) : renderStockNotificationList({ count, criticalItems, lowItems, attentionItems }, ui)}
   `;
 
   menu.querySelector('[data-dashboard-notification-close]')?.addEventListener('click', (event) => {
@@ -779,7 +791,7 @@ function renderNotificationCenter(view, ui, context) {
   menu.querySelector('[data-dashboard-notification-review]')?.addEventListener('click', () => {
     ui.notificationsOpen = false;
     renderNotificationCenter(view, ui, context);
-    reviewDashboardStock(view, ui, context);
+    reviewDashboardStock(view, ui, context, { criticalOnly: true });
   });
   menu.querySelector('[data-dashboard-notification-open-stock]')?.addEventListener('click', () => {
     ui.notificationsOpen = false;
@@ -794,10 +806,20 @@ function renderNotificationCenter(view, ui, context) {
       context.onNavigate?.('ingredients');
     });
   });
+  menu.querySelectorAll('[data-ack-item]').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const key = button.dataset.ackItem || '';
+      const item = attentionItems.find((row) => itemAckKey(row) === key);
+      if (item) handleAcknowledgeItem(view, ui, context, item);
+    });
+  });
 }
 
-function renderStockNotificationList({ count, criticalItems, lowItems, attentionItems }) {
-  if (!count) {
+function renderStockNotificationList({ count, criticalItems, lowItems, attentionItems }, ui) {
+  const totalAttention = criticalItems.length + lowItems.length;
+  if (!totalAttention) {
     return `
       <div class="${styles.notificationEmpty}">
         ${icon('check', 20)}
@@ -813,11 +835,12 @@ function renderStockNotificationList({ count, criticalItems, lowItems, attention
     <div class="${styles.notificationSummary}">
       <span class="${styles.notificationSummaryCritical}">${criticalItems.length} critical</span>
       <span class="${styles.notificationSummaryLow}">${lowItems.length} low stock</span>
+      ${count < totalAttention ? `<span>${totalAttention - count} muted</span>` : ''}
     </div>
     <div class="${styles.notificationList}">
-      ${attentionItems.map((item) => notificationItem(item)).join('')}
+      ${attentionItems.map((item) => notificationItem(item, ui)).join('')}
     </div>
-    ${count > attentionItems.length ? `<p class="${styles.notificationMore}">+${count - attentionItems.length} more item${count - attentionItems.length === 1 ? '' : 's'}</p>` : ''}
+    ${totalAttention > attentionItems.length ? `<p class="${styles.notificationMore}">+${totalAttention - attentionItems.length} more item${totalAttention - attentionItems.length === 1 ? '' : 's'}</p>` : ''}
     <div class="${styles.notificationActions}">
       <button type="button" data-dashboard-notification-review>Review on dashboard</button>
       <button type="button" data-dashboard-notification-open-stock>Open Stock Items ${icon('arrowRight', 12)}</button>
@@ -882,18 +905,23 @@ function applyLowStockNotificationSettings(ui, result = {}) {
   ui.notificationRecipientIds = new Set(selected.map(String));
 }
 
-function notificationItem(item = {}) {
+function notificationItem(item = {}, ui) {
   const status = statusPresentation(item.status);
   const stockText = `${quantity(item.qty)} / ${quantity(item.reorder)} ${item.baseUom || ''}`.trim();
+  const key = itemAckKey(item);
+  const pending = ui?.ackPendingKeys?.has(key);
   return `
-    <button type="button" class="${styles.notificationItem}" data-dashboard-notification-item data-item-name="${escapeAttribute(item.name)}">
-      <span class="${styles.notificationItemIcon}" style="--notification-tone:${status.color}">${icon(item.status === 'critical' ? 'alert' : 'trendDown', 13)}</span>
-      <span class="${styles.notificationItemCopy}">
-        <strong>${escapeHtml(item.name)}</strong>
-        <small>${escapeHtml(stockText)}${item.supplier ? ` · ${escapeHtml(item.supplier)}` : ''}</small>
-      </span>
+    <div class="${styles.notificationItem} ${item.acknowledged ? styles.notificationItemAcked : ''}">
+      <button type="button" class="${styles.notificationItemBody}" data-dashboard-notification-item data-item-name="${escapeAttribute(item.name)}">
+        <span class="${styles.notificationItemIcon}" style="--notification-tone:${status.color}">${icon(item.status === 'critical' ? 'alert' : 'trendDown', 13)}</span>
+        <span class="${styles.notificationItemCopy}">
+          <strong>${escapeHtml(item.name)}</strong>
+          <small>${escapeHtml(stockText)}${item.supplier ? ` · ${escapeHtml(item.supplier)}` : ''}</small>
+        </span>
+      </button>
       <span class="${styles.notificationItemStatus}" style="--notification-tone:${status.color}">${escapeHtml(status.label)}</span>
-    </button>
+      <button type="button" class="${styles.iconButton} ${styles.notificationItemAck} ${item.acknowledged ? styles.iconButtonActive : ''}" data-ack-item="${escapeAttribute(key)}" ${pending || item.acknowledged ? 'disabled' : ''} title="${item.acknowledged ? 'Daily low-stock email muted for this item' : 'Mute daily low-stock email for this item'}" aria-label="${item.acknowledged ? 'Muted' : 'Mute low-stock email'}">${pending ? icon('refresh', 12) : icon(item.acknowledged ? 'bellOff' : 'bell', 12)}</button>
+    </div>
   `;
 }
 
@@ -904,6 +932,7 @@ function reviewDashboardStock(view, ui, context, { criticalOnly = false } = {}) 
   ui.sortCol = 'status';
   ui.sortDir = 'desc';
   ui.visibleRows = 75;
+  if (criticalOnly) ui.statusFilter = 'attention';
   renderInventory(view, ui, context);
   panel?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   if (criticalOnly) panel?.setAttribute('data-dashboard-reviewing', 'critical');
@@ -1020,11 +1049,13 @@ function renderSupplierChart(view, model) {
 function renderInventory(view, ui, context) {
   const model = ui.model;
   const locationsRoot = view.querySelector('[data-dashboard-inventory-locations]');
+  const statusFilterRoot = view.querySelector('[data-dashboard-status-filter]');
   const categoriesRoot = view.querySelector('[data-dashboard-categories]');
+  const actionsRoot = view.querySelector('[data-dashboard-table-actions]');
   const tableRoot = view.querySelector('[data-dashboard-table-wrap]');
   const countRoot = view.querySelector('[data-dashboard-row-count]');
   const footerRoot = view.querySelector('[data-dashboard-table-footer]');
-  if (!locationsRoot || !categoriesRoot || !tableRoot || !countRoot || !footerRoot) return;
+  if (!locationsRoot || !statusFilterRoot || !categoriesRoot || !actionsRoot || !tableRoot || !countRoot || !footerRoot) return;
 
   const inventoryLocations = getInventoryLocationOptions(model);
   syncInventoryLocation(ui, model);
@@ -1045,6 +1076,20 @@ function renderInventory(view, ui, context) {
 
   const scopedItems = getScopedInventoryItems(ui);
   const selectedInventoryLocation = inventoryLocations.find((location) => location.id === ui.inventoryLocationId);
+  const attentionCount = scopedItems.filter((item) => isAttentionStatus(item.status)).length;
+
+  statusFilterRoot.innerHTML = [
+    { key: 'all', label: 'All items' },
+    { key: 'attention', label: `Low & Critical (${attentionCount})` }
+  ].map(({ key, label }) => `<button type="button" class="${styles.categoryButton} ${ui.statusFilter === key ? styles.categoryButtonActive : ''}" data-status-filter="${key}">${escapeHtml(label)}</button>`).join('');
+  statusFilterRoot.querySelectorAll('[data-status-filter]').forEach((button) => {
+    button.addEventListener('click', () => {
+      ui.statusFilter = button.dataset.statusFilter || 'all';
+      ui.visibleRows = 75;
+      renderInventory(view, ui, context);
+    });
+  });
+
   const categories = ['All', ...new Set(scopedItems.map((item) => item.category).filter(Boolean))];
   if (!categories.includes(ui.category)) ui.category = 'All';
   categoriesRoot.innerHTML = categories.map((category) => `<button type="button" class="${styles.categoryButton} ${ui.category === category ? styles.categoryButtonActive : ''}" data-category="${escapeAttribute(category)}">${escapeHtml(category)}</button>`).join('');
@@ -1058,23 +1103,35 @@ function renderInventory(view, ui, context) {
 
   const needle = ui.search.toLowerCase().trim();
   const filtered = scopedItems
+    .filter((item) => ui.statusFilter !== 'attention' || isAttentionStatus(item.status))
     .filter((item) => ui.category === 'All' || item.category === ui.category)
     .filter((item) => !needle || [item.name, item.sku, item.category, item.supplier, item.locationName, ...item.locations].join(' ').toLowerCase().includes(needle))
     .sort((left, right) => compareInventory(left, right, ui.sortCol, ui.sortDir));
   const visible = filtered.slice(0, ui.visibleRows);
   countRoot.textContent = `${filtered.length.toLocaleString('en-ZA')} item${filtered.length === 1 ? '' : 's'} shown${selectedInventoryLocation ? ` · ${selectedInventoryLocation.name}` : ''}`;
 
+  const mutableAttentionItems = filtered.filter((item) => isAttentionStatus(item.status) && !item.acknowledged);
+  actionsRoot.innerHTML = mutableAttentionItems.length ? `
+    <button type="button" class="${styles.categoryButton}" data-dashboard-ack-all ${ui.ackAllPending ? 'disabled' : ''}>
+      ${ui.ackAllPending ? `${icon('refresh', 12)} Muting…` : `${icon('bellOff', 12)}Acknowledge all (${mutableAttentionItems.length})`}
+    </button>
+    <span>Mutes today's low-stock email for these items until they restock and fall low again.</span>
+  ` : '';
+  actionsRoot.querySelector('[data-dashboard-ack-all]')?.addEventListener('click', () => {
+    handleAcknowledgeAllItems(view, ui, context, mutableAttentionItems);
+  });
+
   if (!visible.length) {
     tableRoot.innerHTML = `<div class="${styles.tableEmpty}">${icon('search', 20)}<strong>No stock items match this location</strong><span>Change the location or category filter.</span></div>`;
     footerRoot.innerHTML = `<button type="button" data-dashboard-open-stock>Open Stock Items</button>`;
   } else {
     const columns = [
-      ['sku', 'SKU'], ['name', 'Item Name'], ['category', 'Category'], ['qty', 'Qty'], ['unitCost', 'Unit Cost'], ['totalValue', 'Total Value'], ['status', 'Status'], ['supplier', 'Supplier']
+      ['sku', 'SKU'], ['name', 'Item Name'], ['category', 'Category'], ['qty', 'Qty'], ['unitCost', 'Unit Cost'], ['totalValue', 'Total Value'], ['status', 'Status'], ['supplier', 'Supplier'], [null, 'Alerts']
     ];
     tableRoot.innerHTML = `
       <table class="${styles.inventoryTable}">
-        <thead><tr>${columns.map(([key, label]) => `<th><button type="button" data-sort="${key}">${escapeHtml(label)} ${sortIcon(ui, key)}</button></th>`).join('')}</tr></thead>
-        <tbody>${visible.map((item) => inventoryRow(item)).join('')}</tbody>
+        <thead><tr>${columns.map(([key, label]) => key ? `<th><button type="button" data-sort="${key}">${escapeHtml(label)} ${sortIcon(ui, key)}</button></th>` : `<th>${escapeHtml(label)}</th>`).join('')}</tr></thead>
+        <tbody>${visible.map((item) => inventoryRow(item, ui)).join('')}</tbody>
       </table>
     `;
     tableRoot.querySelectorAll('[data-sort]').forEach((button) => {
@@ -1094,6 +1151,14 @@ function renderInventory(view, ui, context) {
         }
       });
     });
+    tableRoot.querySelectorAll('[data-ack-item]').forEach((button) => {
+      button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        const key = button.dataset.ackItem || '';
+        const item = visible.find((row) => itemAckKey(row) === key);
+        if (item) handleAcknowledgeItem(view, ui, context, item);
+      });
+    });
 
     footerRoot.innerHTML = `
       <span>Showing ${visible.length.toLocaleString('en-ZA')} of ${filtered.length.toLocaleString('en-ZA')}</span>
@@ -1110,9 +1175,53 @@ function renderInventory(view, ui, context) {
   footerRoot.querySelector('[data-dashboard-open-stock]')?.addEventListener('click', () => context.onNavigate?.('ingredients'));
 }
 
-function inventoryRow(item) {
+function isAttentionStatus(status) {
+  return status === 'low' || status === 'critical';
+}
+
+function itemAckKey(item) {
+  return `${item.itemId || item.id || ''}::${item.locationId || ''}`;
+}
+
+async function handleAcknowledgeItem(view, ui, context, item) {
+  const key = itemAckKey(item);
+  if (ui.ackPendingKeys.has(key)) return;
+  ui.ackPendingKeys.add(key);
+  renderInventory(view, ui, context);
+  try {
+    await acknowledgeLowStockItem(context.workspaceId, { itemId: item.itemId, locationId: item.locationId });
+    item.acknowledged = true;
+  } catch (cause) {
+    console.error('[dashboard] low-stock acknowledge failed:', cause?.message || cause);
+  }
+  ui.ackPendingKeys.delete(key);
+  renderInventory(view, ui, context);
+  renderNotificationCenter(view, ui, context);
+}
+
+async function handleAcknowledgeAllItems(view, ui, context, items) {
+  if (!items.length || ui.ackAllPending) return;
+  ui.ackAllPending = true;
+  renderInventory(view, ui, context);
+  try {
+    await acknowledgeAllLowStockItems(context.workspaceId, items.map((item) => ({ itemId: item.itemId, locationId: item.locationId })));
+    items.forEach((item) => { item.acknowledged = true; });
+  } catch (cause) {
+    console.error('[dashboard] low-stock acknowledge-all failed:', cause?.message || cause);
+  }
+  ui.ackAllPending = false;
+  renderInventory(view, ui, context);
+  renderNotificationCenter(view, ui, context);
+}
+
+function inventoryRow(item, ui) {
   const status = statusPresentation(item.status);
   const qtyClass = item.status === 'critical' ? styles.qtyCritical : item.status === 'low' ? styles.qtyLow : '';
+  const key = itemAckKey(item);
+  const pending = ui.ackPendingKeys.has(key);
+  const ackCell = isAttentionStatus(item.status)
+    ? `<button type="button" class="${styles.iconButton} ${item.acknowledged ? styles.iconButtonActive : ''}" data-ack-item="${escapeAttribute(key)}" ${pending || item.acknowledged ? 'disabled' : ''} title="${item.acknowledged ? 'Daily low-stock email muted for this item' : 'Mute daily low-stock email for this item'}" aria-label="${item.acknowledged ? 'Muted' : 'Mute low-stock email'}">${pending ? icon('refresh', 13) : icon(item.acknowledged ? 'bellOff' : 'bell', 13)}</button>`
+    : '—';
   return `
     <tr tabindex="0" role="button" data-stock-item data-item-name="${escapeAttribute(item.name)}" title="Open ${escapeAttribute(item.name)} in Stock Items">
       <td>${escapeHtml(item.sku || '—')}</td>
@@ -1123,6 +1232,7 @@ function inventoryRow(item) {
       <td>${money(item.totalValue)}</td>
       <td><span class="${styles.statusBadge}" style="--status-color:${status.color}">${status.label}</span></td>
       <td>${escapeHtml(item.supplier || 'Not assigned')}</td>
+      <td>${ackCell}</td>
     </tr>
   `;
 }
@@ -1247,6 +1357,7 @@ function icon(name, size = 16) {
     filter: '<path d="M4 5h16"/><path d="M7 12h10"/><path d="M10 19h4"/>',
     refresh: '<path d="M20 6v6h-6"/><path d="M4 18v-6h6"/><path d="M18.5 9a7 7 0 0 0-11.8-2.6L4 9"/><path d="M5.5 15a7 7 0 0 0 11.8 2.6L20 15"/>',
     bell: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/>',
+    bellOff: '<path d="M8.7 3A6 6 0 0 1 18 8a21.3 21.3 0 0 0 .6 5"/><path d="M17 17H3s3-2 3-9a4.7 4.7 0 0 1 .3-1.7"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/><line x1="2" x2="22" y1="2" y2="22"/>',
     mail: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/>',
     sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
     moon: '<path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z"/>',
