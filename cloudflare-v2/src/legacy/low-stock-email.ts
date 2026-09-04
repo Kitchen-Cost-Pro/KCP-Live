@@ -487,6 +487,23 @@ export async function acknowledgeAllLowStockItems(
   return { acknowledgedCount: uniqueItems.length, acknowledgedAt: now };
 }
 
+// Reverses acknowledgeLowStockItem — a plain UPDATE (not an upsert) is correct here: unmuting a
+// row that was never muted, or doesn't exist yet, is a no-op, not something to create.
+export async function unacknowledgeLowStockItem(
+  env: Env,
+  workspaceId: string,
+  itemId: string,
+  locationId: string,
+) {
+  const now = nowIso();
+  await env.DB.prepare(
+    `UPDATE low_stock_alert_state
+        SET acknowledged = 0, acknowledged_at = NULL, acknowledged_by = NULL, updated_at = ?4
+      WHERE workspace_id = ?1 AND stock_item_id = ?2 AND location_id = ?3`,
+  ).bind(workspaceId, clean(itemId), clean(locationId), now).run();
+  return { itemId: clean(itemId), locationId: clean(locationId), acknowledged: false };
+}
+
 function groupLowStockByLocation(rows: Record<string, any>[]) {
   const map = new Map<string, Record<string, any>[]>();
   for (const row of rows) {

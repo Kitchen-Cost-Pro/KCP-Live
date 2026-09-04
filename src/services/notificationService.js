@@ -36,3 +36,13 @@ export function acknowledgeAllLowStockItems(workspaceId, items = []) {
     }
   });
 }
+
+export function unacknowledgeLowStockItem(workspaceId, { itemId, locationId } = {}) {
+  return callCloudflareWorkspaceRoute(workspaceId, 'notifications/low-stock-unack', {
+    method: 'POST',
+    payload: {
+      itemId: String(itemId || ''),
+      locationId: String(locationId || '')
+    }
+  });
+}

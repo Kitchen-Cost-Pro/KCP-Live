@@ -42,6 +42,7 @@ import {
   sendWorkspaceLowStockToUser,
   acknowledgeLowStockItem,
   acknowledgeAllLowStockItems,
+  unacknowledgeLowStockItem,
 } from "./low-stock-email";
 import { lowStockLocationRelevantSql } from "./low-stock-policy";
 import { sendEmail } from "./email";
@@ -3369,6 +3370,37 @@ export async function postLowStockAckAllRoute(
     const message = cause instanceof Error ? cause.message : "Low-stock items could not be acknowledged.";
     const status = /permission|denied/i.test(message) ? 403 : 502;
     console.error(`[low-stock-ack-all] ws=${workspaceId} failed: ${message}`);
+    return error(request, env, status, message);
+  }
+}
+
+export async function postLowStockUnackRoute(
+  request: Request,
+  env: Env,
+  auth: AuthContext,
+  workspaceId: string,
+) {
+  try {
+    await scoped(request, env, auth, workspaceId);
+    const payload = await readJson<Record<string, unknown>>(request);
+    const itemId = text(payload.itemId);
+    const locationId = text(payload.locationId);
+    if (!itemId || !locationId) {
+      return error(request, env, 400, "itemId and locationId are required.");
+    }
+    await assertLocationAccess(
+      env,
+      auth,
+      workspaceId,
+      locationId,
+      "low-stock acknowledgement",
+    );
+    const result = await unacknowledgeLowStockItem(env, workspaceId, itemId, locationId);
+    return json(request, env, { ok: true, ...result });
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : "Low-stock item could not be unmuted.";
+    const status = /permission|denied/i.test(message) ? 403 : 502;
+    console.error(`[low-stock-unack] ws=${workspaceId} failed: ${message}`);
     return error(request, env, status, message);
   }
 }

@@ -90,6 +90,7 @@ import {
   putLowStockNotificationSettingsRoute,
   postLowStockAckRoute,
   postLowStockAckAllRoute,
+  postLowStockUnackRoute,
   migrateImport,
   getLocations,
   getManufacturingBatches,
@@ -962,6 +963,13 @@ export async function dispatchWorkspaceRoute(
     resource === "notifications/low-stock-ack-all"
   ) {
     return postLowStockAckAllRoute(request, env, auth, workspaceId);
+  }
+
+  if (
+    request.method === "POST" &&
+    resource === "notifications/low-stock-unack"
+  ) {
+    return postLowStockUnackRoute(request, env, auth, workspaceId);
   }
 
   if (request.method === "GET" && resource === "settings") {

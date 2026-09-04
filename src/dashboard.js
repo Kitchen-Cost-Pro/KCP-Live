@@ -10,11 +10,27 @@ import {
   loadLowStockNotificationSettings,
   saveLowStockNotificationSettings,
   acknowledgeLowStockItem,
-  acknowledgeAllLowStockItems
+  acknowledgeAllLowStockItems,
+  unacknowledgeLowStockItem
 } from './services/notificationService.js';
 
 const DASHBOARD_CACHE_TTL = 60_000;
 const dashboardCache = new Map();
+// A background data-version poll can silently trigger a full renderDashboard() remount (a fresh
+// `ui` object + DOM tree) while the user is mid-interaction with the mute/unmute checkboxes — see
+// renderActiveSection in appShell.js, which calls renderDashboard() fresh on every app re-render,
+// not just on navigation. Keying these two Sets by workspace and reusing the same instances across
+// remounts means a checkbox selection or an in-flight mute/unmute request survives a remount
+// instead of silently resetting (which looked like "clicking does nothing" / a stuck spinner).
+const dashboardAckStateByWorkspace = new Map();
+function getDashboardAckState(workspaceId) {
+  let state = dashboardAckStateByWorkspace.get(workspaceId);
+  if (!state) {
+    state = { ackPendingKeys: new Set(), selectedAckKeys: new Set() };
+    dashboardAckStateByWorkspace.set(workspaceId, state);
+  }
+  return state;
+}
 const SERIES = [
   { key: 'cos', label: 'Cost of Sales', color: '#00e5a0' },
   { key: 'adjustments', label: 'Adjustments', color: '#f5a623' },
@@ -71,9 +87,8 @@ export function renderDashboard({ state = {}, onNavigate, onStockFilterChange, o
     notificationDispatchTime: '08:00',
     notificationRecipientIds: new Set(),
     notificationWorkspaceUsers: [],
-    ackPendingKeys: new Set(),
     ackAllPending: false,
-    selectedAckKeys: new Set()
+    ...getDashboardAckState(workspaceId)
   };
 
   renderLoading(view, workspaceName);
@@ -814,7 +829,7 @@ function renderNotificationCenter(view, ui, context) {
       event.stopPropagation();
       const key = button.dataset.ackItem || '';
       const item = attentionItems.find((row) => itemAckKey(row) === key);
-      if (item) handleAcknowledgeItem(view, ui, context, item);
+      if (item) handleToggleAcknowledgeItem(view, ui, context, item);
     });
   });
 }
@@ -922,7 +937,7 @@ function notificationItem(item = {}, ui) {
         </span>
       </button>
       <span class="${styles.notificationItemStatus}" style="--notification-tone:${status.color}">${escapeHtml(status.label)}</span>
-      <button type="button" class="${styles.iconButton} ${styles.notificationItemAck} ${item.acknowledged ? styles.iconButtonActive : ''}" data-ack-item="${escapeAttribute(key)}" ${pending || item.acknowledged ? 'disabled' : ''} title="${item.acknowledged ? 'Daily low-stock email muted for this item' : 'Mute daily low-stock email for this item'}" aria-label="${item.acknowledged ? 'Muted' : 'Mute low-stock email'}">${pending ? icon('refresh', 12) : icon(item.acknowledged ? 'bellOff' : 'bell', 12)}</button>
+      <button type="button" class="${styles.iconButton} ${styles.notificationItemAck} ${item.acknowledged ? styles.iconButtonActive : ''}" data-ack-item="${escapeAttribute(key)}" ${pending ? 'disabled' : ''} title="${item.acknowledged ? 'Muted — click to unmute' : 'Mute daily low-stock email for this item'}" aria-label="${item.acknowledged ? 'Unmute low-stock email' : 'Mute low-stock email'}">${pending ? icon('refresh', 12) : icon(item.acknowledged ? 'bellOff' : 'bell', 12)}</button>
     </div>
   `;
 }
@@ -1199,7 +1214,7 @@ function renderInventory(view, ui, context) {
         event.stopPropagation();
         const key = button.dataset.ackItem || '';
         const item = visible.find((row) => itemAckKey(row) === key);
-        if (item) handleAcknowledgeItem(view, ui, context, item);
+        if (item) handleToggleAcknowledgeItem(view, ui, context, item);
       });
     });
 
@@ -1226,20 +1241,37 @@ function itemAckKey(item) {
   return `${item.itemId || item.id || ''}::${item.locationId || ''}`;
 }
 
-async function handleAcknowledgeItem(view, ui, context, item) {
+// A background remount (see dashboardAckStateByWorkspace's comment) can detach `view` from the
+// document while a mute/unmute request is still in flight. Re-rendering a detached node is
+// harmless but invisible — the user is looking at whatever view replaced it. Resolving the
+// currently-attached view by workspace right before each post-request render keeps the visible
+// DOM in sync instead of leaving a spinner stuck on a node nobody can see anymore.
+function resolveLiveDashboardView(view, context) {
+  if (view.isConnected) return view;
+  return document.querySelector(`[data-dashboard-workspace="${context.workspaceId}"]`) || view;
+}
+
+async function handleToggleAcknowledgeItem(view, ui, context, item) {
   const key = itemAckKey(item);
   if (ui.ackPendingKeys.has(key)) return;
+  const wasAcknowledged = Boolean(item.acknowledged);
   ui.ackPendingKeys.add(key);
   renderInventory(view, ui, context);
   try {
-    await acknowledgeLowStockItem(context.workspaceId, { itemId: item.itemId, locationId: item.locationId });
-    item.acknowledged = true;
+    if (wasAcknowledged) {
+      await unacknowledgeLowStockItem(context.workspaceId, { itemId: item.itemId, locationId: item.locationId });
+      item.acknowledged = false;
+    } else {
+      await acknowledgeLowStockItem(context.workspaceId, { itemId: item.itemId, locationId: item.locationId });
+      item.acknowledged = true;
+    }
   } catch (cause) {
-    console.error('[dashboard] low-stock acknowledge failed:', cause?.message || cause);
+    console.error(`[dashboard] low-stock ${wasAcknowledged ? 'unmute' : 'mute'} failed:`, cause?.message || cause);
   }
   ui.ackPendingKeys.delete(key);
-  renderInventory(view, ui, context);
-  renderInventoryAlert(view, ui, context);
+  const liveView = resolveLiveDashboardView(view, context);
+  renderInventory(liveView, ui, context);
+  renderInventoryAlert(liveView, ui, context);
 }
 
 async function handleAcknowledgeAllItems(view, ui, context, items) {
@@ -1253,8 +1285,9 @@ async function handleAcknowledgeAllItems(view, ui, context, items) {
     console.error('[dashboard] low-stock acknowledge-all failed:', cause?.message || cause);
   }
   ui.ackAllPending = false;
-  renderInventory(view, ui, context);
-  renderInventoryAlert(view, ui, context);
+  const liveView = resolveLiveDashboardView(view, context);
+  renderInventory(liveView, ui, context);
+  renderInventoryAlert(liveView, ui, context);
 }
 
 function inventoryRow(item, ui) {
@@ -1263,7 +1296,7 @@ function inventoryRow(item, ui) {
   const key = itemAckKey(item);
   const pending = ui.ackPendingKeys.has(key);
   const ackCell = isAttentionStatus(item.status)
-    ? `<button type="button" class="${styles.iconButton} ${item.acknowledged ? styles.iconButtonActive : ''}" data-ack-item="${escapeAttribute(key)}" ${pending || item.acknowledged ? 'disabled' : ''} title="${item.acknowledged ? 'Daily low-stock email muted for this item' : 'Mute daily low-stock email for this item'}" aria-label="${item.acknowledged ? 'Muted' : 'Mute low-stock email'}">${pending ? icon('refresh', 13) : icon(item.acknowledged ? 'bellOff' : 'bell', 13)}</button>`
+    ? `<button type="button" class="${styles.iconButton} ${item.acknowledged ? styles.iconButtonActive : ''}" data-ack-item="${escapeAttribute(key)}" ${pending ? 'disabled' : ''} title="${item.acknowledged ? 'Muted — click to unmute' : 'Mute daily low-stock email for this item'}" aria-label="${item.acknowledged ? 'Unmute low-stock email' : 'Mute low-stock email'}">${pending ? icon('refresh', 13) : icon(item.acknowledged ? 'bellOff' : 'bell', 13)}</button>`
     : '—';
   const selectable = isAttentionStatus(item.status) && !item.acknowledged;
   const selected = ui.selectedAckKeys.has(key);
