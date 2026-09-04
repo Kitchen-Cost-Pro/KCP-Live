@@ -22,6 +22,8 @@ import { consumeYocoV2QueueBatch } from './modules/yoco-engine-v2/queue-consumer
 import type { YocoV2QueueDispatchResult, YocoV2QueueMessage } from './modules/yoco-engine-v2/contracts';
 import { permissionsForAdminRole } from './modules/yoco-engine-v2/admin-permissions';
 import { normalizeYocoV2AdminActionPath } from './modules/yoco-engine-v2/admin-route-path';
+import { xeroWorkspaceIdFromOauthState } from './modules/xero-engine/oauth';
+import { driveWorkspaceIdFromOauthState } from './modules/drive-engine/oauth';
 
 export { WorkspaceDO } from './workspace-do';
 export { YocoV2RateGateDO } from './yoco-v2-rate-gate-do';
@@ -258,6 +260,25 @@ async function dispatchCentral(request: Request, env: Env, url: URL): Promise<Re
     const state = await stateResponse.json<{ ok: boolean; state?: { dateKey: string; used: number } }>().catch(() => null);
     const dailyCap = Math.max(1000, Math.min(100_000, Number(env.YOCO_V2_WRITE_BUDGET_DAILY_CAP) || 90_000));
     return json(request, env, { ok: true, configured: true, dailyCap, ...(state?.state || { dateKey: '', used: 0 }) });
+  }
+
+  // Manually catch up a single workspace's pending migration backlog in one call, instead of
+  // relying on that tenant's own incoming traffic to advance it one migration per request (see
+  // WorkspaceDO.ensureFullyMigrated()'s own comment). For a workspace that's stuck mid-catch-up —
+  // e.g. onboarded before ensureFullyMigrated() started running automatically at provisioning —
+  // this is the fix; postAdminWorkspaceMigrationRetry only clears a stuck backoff, it doesn't
+  // itself advance anything.
+  const migrationCatchupMatch = url.pathname.match(/^\/api\/admin\/workspaces\/([^/]+)\/migration-catchup$/);
+  if (request.method === 'POST' && migrationCatchupMatch) {
+    await requireAdmin(request, lenv);
+    const workspaceId = decodeURIComponent(migrationCatchupMatch[1]);
+    const result = await callWorkspaceDO(
+      env,
+      workspaceId,
+      'admin-migrate-full-catchup',
+      { uid: 'admin', email: '', systemRole: 'admin' }
+    );
+    return json(request, env, { ok: true, workspaceId, ...(result || {}) });
   }
 
   // Diagnostic (2026-08-28): which workspace(s) actually account for the account's total SQL
@@ -1372,6 +1393,43 @@ async function handle(request: Request, env: Env): Promise<Response> {
     }
   }
 
+  // Xero OAuth returns to a global callback URL, same constraint and same fix as the Gmail
+  // callback above: decode only the signed state's routing hint here, let the tenant handler
+  // verify the HMAC before touching the workspace's Xero connection.
+  if (request.method === 'GET' && url.pathname === '/api/xero/oauth/callback') {
+    const workspaceId = xeroWorkspaceIdFromOauthState(text(url.searchParams.get('state')));
+    if (workspaceId) {
+      const response = await forwardToWorkspaceDO(
+        request,
+        env,
+        workspaceId,
+        'xero-oauth-callback',
+        { uid: 'xero-oauth-callback', email: '' }
+      );
+      const headers = new Headers(response.headers);
+      for (const [k, v] of Object.entries(corsHeaders(request, env))) headers.set(k, v);
+      return new Response(response.body, { status: response.status, headers });
+    }
+  }
+
+  // Google Drive OAuth returns to a global callback URL too — same decode-only-then-verify-in-the-
+  // tenant-handler pattern as Xero/Gmail above.
+  if (request.method === 'GET' && url.pathname === '/api/gdrive/oauth/callback') {
+    const workspaceId = driveWorkspaceIdFromOauthState(text(url.searchParams.get('state')));
+    if (workspaceId) {
+      const response = await forwardToWorkspaceDO(
+        request,
+        env,
+        workspaceId,
+        'drive-oauth-callback',
+        { uid: 'drive-oauth-callback', email: '' }
+      );
+      const headers = new Headers(response.headers);
+      for (const [k, v] of Object.entries(corsHeaders(request, env))) headers.set(k, v);
+      return new Response(response.body, { status: response.status, headers });
+    }
+  }
+
   // Central plane — all /api/auth/* + /api/admin/* + security-config etc. run in the front Worker
   // against CENTRAL_DB (via the shared legacy dispatcher).
   const centralResponse = await dispatchCentral(request, env, url);
@@ -1471,6 +1529,11 @@ export default {
     // trigger (the previous `*/45 * * * *` pair double-ran the other three jobs whenever both
     // triggers landed on the same minute; see CRON_BACKUP_RESTORE.md).
     const isCatalogueSyncTick = new Date(_event.scheduledTime).getUTCMinutes() % 45 === 0;
+    // Xero's daily invoice push only needs to run once a day; claimDailyInvoiceSyncIfDue (inside
+    // the DO) is the actual due-check against xero_sync_settings.last_invoice_sync_date, so firing
+    // this hourly (rather than adding a new cron trigger) just gives it enough chances to catch up
+    // if an earlier attempt failed, same wall-clock-gate trick as isCatalogueSyncTick above.
+    const isXeroDueCheckTick = new Date(_event.scheduledTime).getUTCMinutes() === 0;
     const jobs = ids.flatMap((id) => [
       () => callWorkspaceDO(env, id, 'admin-action/low-stock-due', { uid: 'system', email: '' }, 'POST', {})
         .catch((cause) => { console.error(`[low-stock-cron] ws=${id} failed: ${cause}`); return null; }),
@@ -1483,6 +1546,10 @@ export default {
       isCatalogueSyncTick
         ? () => callWorkspaceDO(env, id, 'admin-action/catalogue-sync-due', { uid: 'system', email: '' }, 'POST', {})
             .catch((cause) => { console.error(`[catalogue-sync-cron] ws=${id} failed: ${cause}`); return null; })
+        : () => Promise.resolve(null),
+      isXeroDueCheckTick
+        ? () => callWorkspaceDO(env, id, 'xero/due-check', { uid: 'system', email: '' }, 'POST', {})
+            .catch((cause) => { console.error(`[xero-due-check-cron] ws=${id} failed: ${cause}`); return null; })
         : () => Promise.resolve(null)
     ]);
     // Unbounded Promise.all across every active workspace (each firing up to 4 jobs, including a

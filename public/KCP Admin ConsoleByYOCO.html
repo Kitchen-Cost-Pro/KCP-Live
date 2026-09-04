@@ -6191,6 +6191,24 @@ function showWsDetail(wsId){
                 </div>
             </div>
 
+            <div class="mt-5 workspace-panel p-5">
+                <div class="flex items-center justify-between gap-4">
+                    <div class="flex items-center gap-4">
+                        <div class="w-10 h-10 rounded-xl bg-emerald-500/15 text-emerald-300 flex items-center justify-center"><i class="fa-solid fa-camera-retro"></i></div>
+                        <div>
+                            <h4 class="text-base font-black text-white">GRV Invoice Assistant (OCR)</h4>
+                            <p class="text-sm text-slate-400 font-semibold mt-0.5">Lets this workspace's GRV screen turn a photographed supplier invoice from Google Drive into a pre-filled draft. Requires Google Drive to be connected first (Integrations).</p>
+                        </div>
+                    </div>
+                    <button id="ocr-toggle-btn-${adminEscapeHtml(wsId)}"
+                        onclick="toggleWorkspaceOcrAssistant(${adminInlineString(wsId)})"
+                        class="relative inline-flex h-7 w-12 items-center rounded-full transition-colors focus:outline-none ${s.ocr_enabled === true ? 'bg-emerald-500' : 'bg-slate-700'}"
+                        title="${s.ocr_enabled === true ? 'Disable GRV Invoice Assistant' : 'Enable GRV Invoice Assistant'}">
+                        <span class="inline-block h-5 w-5 rounded-full bg-white shadow-md transform transition-transform ${s.ocr_enabled === true ? 'translate-x-6' : 'translate-x-1'}"></span>
+                    </button>
+                </div>
+            </div>
+
             ${renderWorkspaceVisualIntegrationSections(wsId)}
 
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-5 mt-5">
@@ -6553,6 +6571,30 @@ async function toggleWorkspaceAssistant(wsId) {
         showToast(`KCP Assistant ${nowEnabled ? 'enabled' : 'disabled'} for this workspace`, 'success');
     } catch (e) {
         showToast('Failed to update assistant setting', 'error');
+    }
+}
+
+async function toggleWorkspaceOcrAssistant(wsId) {
+    const ws = allWorkspaces[wsId];
+    if (!ws) return;
+    const current = ws.data?.settings?.ocr_enabled;
+    // Default is off (disabled), only on when explicitly true
+    const nowEnabled = current !== true;
+    try {
+        await callAdminApi('PATCH', `/api/admin/workspaces/${encodeURIComponent(wsId)}/settings`, { ocr_enabled: nowEnabled });
+        if (!ws.data) ws.data = {};
+        if (!ws.data.settings) ws.data.settings = {};
+        ws.data.settings.ocr_enabled = nowEnabled;
+        const btn = document.getElementById(`ocr-toggle-btn-${wsId}`);
+        if (btn) {
+            btn.className = `relative inline-flex h-7 w-12 items-center rounded-full transition-colors focus:outline-none ${nowEnabled ? 'bg-emerald-500' : 'bg-slate-700'}`;
+            btn.title = nowEnabled ? 'Disable GRV Invoice Assistant' : 'Enable GRV Invoice Assistant';
+            const knob = btn.querySelector('span');
+            if (knob) knob.className = `inline-block h-5 w-5 rounded-full bg-white shadow-md transform transition-transform ${nowEnabled ? 'translate-x-6' : 'translate-x-1'}`;
+        }
+        showToast(`GRV Invoice Assistant ${nowEnabled ? 'enabled' : 'disabled'} for this workspace`, 'success');
+    } catch (e) {
+        showToast('Failed to update GRV Invoice Assistant setting', 'error');
     }
 }
 

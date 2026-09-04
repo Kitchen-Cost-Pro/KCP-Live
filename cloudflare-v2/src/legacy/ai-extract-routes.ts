@@ -115,9 +115,13 @@ function buildReaskPrompt(kind: string, foundNames: string[]): string {
 Only return items you're genuinely confident are present on the page and missing from the list above — do not return anything already in that list, and do not invent items. If you're confident the list above is already complete, return an empty array [].`;
 }
 
-class GeminiBusyError extends Error {}
+export class GeminiBusyError extends Error {}
 
-async function callGeminiExtract(
+// Exported so modules/drive-engine/assistant.ts (the "Process GRV with KCP Assistant" invoice-photo
+// extraction) can reuse the exact same Gemini call machinery — request shape, structured
+// responseSchema, and the 429/503 "busy" classification — with its own GRV-shaped schema, instead
+// of duplicating this against the same API.
+export async function callGeminiExtract(
   env: Env,
   mimeType: string,
   imageBase64: string,

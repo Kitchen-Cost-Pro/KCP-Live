@@ -1,6 +1,31 @@
 import { TENANT_SCHEMA_SQL } from './tenant-schema.generated';
 import { YOCO_V2_FOUNDATION_MIGRATION, YOCO_V2_SALE_SHADOW_MIGRATION, YOCO_V2_REFUND_RECONCILIATION_MIGRATION, YOCO_V2_CONTROLLED_CUTOVER_MIGRATION, YOCO_V2_REFUND_CONTROLLED_CUTOVER_MIGRATION, YOCO_V2_LEGACY_SHUTDOWN_MIGRATION, YOCO_V2_ADMIN_CONTROL_CENTRE_MIGRATION, YOCO_V2_RECONCILIATION_BACKOFF_MIGRATION, YOCO_V2_EFFECT_GATE_MIGRATION } from './modules/yoco-engine-v2/migrations';
 import { MODIFIER_ENGINE_CORE_ACTIONS_MIGRATION, MODIFIER_ENGINE_REFUNDS_RELIABILITY_NOTES_MIGRATION } from './modules/modifier-engine/migrations';
+import { XERO_V2_FOUNDATION_MIGRATION, XERO_V2_GRV_PUSH_MIGRATION, XERO_V2_GRV_COD_PAYMENT_MIGRATION, XERO_V2_SALES_VAT_MIGRATION, XERO_V2_CREDIT_NOTE_PUSH_MIGRATION, XERO_V2_LOCATION_TRACKING_MIGRATION, XERO_V2_WASTAGE_PUSH_MIGRATION } from './modules/xero-engine/migrations';
+import { DRIVE_FOUNDATION_MIGRATION } from './modules/drive-engine/migrations';
+
+// 47 — persist the GRV Transport cost. It previously only lived in the frontend draft/preview
+// total (GRVEntry.js's transportEx) and was silently dropped before saving — never reached the
+// saved GRV total, the PDF, or Xero. Stored as its own column (not a grv_lines row) because
+// grv_lines.stock_item_id is a NOT NULL FK to a real stock item. Exported (rather than inlined in
+// TENANT_MIGRATIONS below) so tests that build a tenant schema from TENANT_SCHEMA_SQL +
+// individually-named migrations, without running the full numbered chain, can apply it too.
+export const GRV_TRANSPORT_EX_MIGRATION = `ALTER TABLE grvs ADD COLUMN transport_ex REAL NOT NULL DEFAULT 0;`;
+
+// 48 — same fix as migration 47, for the GRV Discount field (GRVEntry.js's invoiceDiscountEx),
+// which was dropped by the same normalizeReceiptPayload whitelist gap. See GRV_TRANSPORT_EX_MIGRATION's
+// comment for the full rationale (own column, not a grv_lines row).
+export const GRV_DISCOUNT_EX_MIGRATION = `ALTER TABLE grvs ADD COLUMN discount_ex REAL NOT NULL DEFAULT 0;`;
+
+// 54 — allow GRVs and Credit Notes to be edited after posting instead of being permanently
+// immutable once saved. `version` is bumped on every edit; it exists so a later Xero re-sync
+// (pushing an UPDATE to the already-created Bill/Credit Note instead of silently leaving Xero
+// stale, or creating a duplicate) can tell a record has changed since it was last pushed —
+// see patchGoodsReceipt/patchCreditNote in routes.ts. grvs never had an updated_at column
+// because it was write-once; credit_notes already has one (its POST handler upserts).
+export const GRV_CREDIT_NOTE_EDIT_MIGRATION = `ALTER TABLE grvs ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE grvs ADD COLUMN updated_at TEXT;
+ALTER TABLE credit_notes ADD COLUMN version INTEGER NOT NULL DEFAULT 1;`;
 
 /**
  * Ordered per-tenant schema migrations, applied INSIDE each WorkspaceDO's own SQLite on first
@@ -738,5 +763,42 @@ CREATE INDEX IF NOT EXISTS idx_stock_movements_workspace_effective_date
   ON stock_movements(
     workspace_id,
     (CASE WHEN document_type IN ('grv', 'credit_note', 'adjustment', 'wastage_adjustment', 'sale_adjustment', 'manufacturing_batch') THEN created_at ELSE occurred_at END)
-  );`
+  );`,
+  // 45 — KCP -> Xero outbound integration (lean MVP): per-workspace Xero OAuth connection,
+  // account-code/tax mapping settings, and the idempotent effect-outbox + rate-state tables the
+  // item/invoice push jobs rely on. See modules/xero-engine/.
+  XERO_V2_FOUNDATION_MIGRATION,
+  // 46 — GRV -> Xero Bill (ACCPAY) push + Supplier -> Xero Contact mapping. See
+  // modules/xero-engine/migrations.ts's XERO_V2_GRV_PUSH_MIGRATION doc comment and grv-sync.ts.
+  XERO_V2_GRV_PUSH_MIGRATION,
+  // 47 — see GRV_TRANSPORT_EX_MIGRATION's doc comment above.
+  GRV_TRANSPORT_EX_MIGRATION,
+  // 48 — see GRV_DISCOUNT_EX_MIGRATION's doc comment above.
+  GRV_DISCOUNT_EX_MIGRATION,
+  // 49 — see XERO_V2_GRV_COD_PAYMENT_MIGRATION's doc comment (modules/xero-engine/migrations.ts).
+  XERO_V2_GRV_COD_PAYMENT_MIGRATION,
+  // 50 — see XERO_V2_SALES_VAT_MIGRATION's doc comment (modules/xero-engine/migrations.ts).
+  XERO_V2_SALES_VAT_MIGRATION,
+  // 51 — see XERO_V2_CREDIT_NOTE_PUSH_MIGRATION's doc comment (modules/xero-engine/migrations.ts).
+  XERO_V2_CREDIT_NOTE_PUSH_MIGRATION,
+  // 52 — see XERO_V2_LOCATION_TRACKING_MIGRATION's doc comment (modules/xero-engine/migrations.ts).
+  XERO_V2_LOCATION_TRACKING_MIGRATION,
+  // 53 — see XERO_V2_WASTAGE_PUSH_MIGRATION's doc comment (modules/xero-engine/migrations.ts).
+  XERO_V2_WASTAGE_PUSH_MIGRATION,
+  // 54 — see GRV_CREDIT_NOTE_EDIT_MIGRATION's doc comment above.
+  GRV_CREDIT_NOTE_EDIT_MIGRATION,
+  // 55 — KCP -> Google Drive integration: per-workspace Drive OAuth connection, a local record of
+  // documents pushed/read (drive_documents), and Drive's own idempotent effect outbox. See
+  // modules/drive-engine/migrations.ts's DRIVE_FOUNDATION_MIGRATION doc comment.
+  DRIVE_FOUNDATION_MIGRATION,
+  // 56 — low-stock alert acknowledgement (mute). Adds a user-driven "acknowledged" flag onto the
+  // existing low_stock_alert_state row (migration 31), separate from the automated is_active/
+  // last_notified_at notification-cadence fields. syncLowStockAlertState() (low-stock-email.ts)
+  // resets acknowledged back to 0 in the same ON CONFLICT branch that already resets
+  // last_notified_at whenever a row transitions inactive -> active, so acknowledging an item only
+  // mutes it until it clears (restocks above threshold) and later falls low again — the dynamic
+  // reset requested for the restock-and-deplete cycle comes for free from that existing transition.
+  `ALTER TABLE low_stock_alert_state ADD COLUMN acknowledged INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE low_stock_alert_state ADD COLUMN acknowledged_at TEXT;
+ALTER TABLE low_stock_alert_state ADD COLUMN acknowledged_by TEXT;`
 ];

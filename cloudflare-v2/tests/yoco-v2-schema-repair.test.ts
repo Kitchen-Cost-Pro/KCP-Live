@@ -146,19 +146,26 @@ test('WorkspaceDO runs the V2 schema repair once per tenant and retries failed r
   // assertion itself go stale the last two times the id was bumped for a real production fix.
   assert.match(YOCO_V2_RUNTIME_SCHEMA_REPAIR_ID, /^yoco-v2-connect-schema-v\d+$/);
   assert.match(workspaceSource, /CREATE TABLE IF NOT EXISTS _kcp_runtime_repairs/);
-  assert.match(workspaceSource, /if \(!repairApplied\)/);
-  assert.match(workspaceSource, /this\.db\.execScript\(YOCO_V2_RUNTIME_SCHEMA_REPAIR\)/);
+  // Each repair (this one included) runs through the shared runRepair() helper: it looks up
+  // `repair_id` in _kcp_runtime_repairs, execScript()s the SQL, and INSERT OR REPLACEs the marker
+  // — all inside a try/catch, so one repair failing (e.g. its own prerequisite table/column not
+  // existing yet on a tenant that hasn't organically migrated far enough) no longer prevents every
+  // LATER repair in the list from running too (live incident 2026-09-04).
+  assert.match(workspaceSource, /const runRepair = \(repairId: string, repairSql: string\)/);
+  assert.match(workspaceSource, /this\.db\.execScript\(repairSql\)/);
   assert.match(workspaceSource, /INSERT OR REPLACE INTO _kcp_runtime_repairs/);
+  assert.match(workspaceSource, /runRepair\(YOCO_V2_RUNTIME_SCHEMA_REPAIR_ID, YOCO_V2_RUNTIME_SCHEMA_REPAIR\)/);
   // The vat-snapshot repair is wired the same way but as an independent block/id, precisely so it
   // does not force a re-run of the big repair above (see its own schema-repair.ts comment for why
   // that distinction matters — it's what a real production CPU-limit incident was traced to).
-  assert.match(workspaceSource, /if \(!vatSnapshotRepairApplied\)/);
-  assert.match(workspaceSource, /this\.db\.execScript\(YOCO_V2_VAT_SNAPSHOT_SCHEMA_REPAIR\)/);
+  assert.match(workspaceSource, /runRepair\(YOCO_V2_VAT_SNAPSHOT_SCHEMA_REPAIR_ID, YOCO_V2_VAT_SNAPSHOT_SCHEMA_REPAIR\)/);
   // Same wiring, for the findings-table follow-up repair — see its own schema-repair.ts comment
   // for the live 2026-08-31 incident (a drifted tenant's reconciliation run failing outright on
   // its first finding) this closes.
-  assert.match(workspaceSource, /if \(!reconciliationFindingsColumnsRepairApplied\)/);
-  assert.match(workspaceSource, /this\.db\.execScript\(YOCO_V2_RECONCILIATION_FINDINGS_COLUMNS_SCHEMA_REPAIR\)/);
+  assert.match(
+    workspaceSource,
+    /runRepair\(YOCO_V2_RECONCILIATION_FINDINGS_COLUMNS_SCHEMA_REPAIR_ID, YOCO_V2_RECONCILIATION_FINDINGS_COLUMNS_SCHEMA_REPAIR\)/,
+  );
 });
 
 test('reconciliation-findings-columns repair backfills a drifted tenant and is safe to run repeatedly', () => {

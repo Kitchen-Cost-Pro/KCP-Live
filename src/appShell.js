@@ -135,10 +135,11 @@ const moduleContracts = {
 export function renderAuthenticatedApp({
   state,
   onNavigate,
+  onRequestGrvEdit,
+  onRequestCreditNoteEdit,
   onSignOut,
   onWorkspaceSelect,
   onAutoLoginToggle,
-  onThemeToggle,
   onMenuFilterChange,
   onMenuAction,
   onRecipeFilterChange,
@@ -198,7 +199,8 @@ export function renderAuthenticatedApp({
   main.appendChild(renderActiveSection({
     state,
     onNavigate,
-    onThemeToggle,
+    onRequestGrvEdit,
+    onRequestCreditNoteEdit,
         onMenuFilterChange,
     onMenuAction,
     onRecipeFilterChange,
@@ -506,7 +508,8 @@ function readReportingDeepLinkReportId() {
 function renderActiveSection({
   state,
   onNavigate,
-  onThemeToggle,
+  onRequestGrvEdit,
+  onRequestCreditNoteEdit,
   onMenuFilterChange,
   onMenuAction,
   onRecipeFilterChange,
@@ -558,8 +561,7 @@ function renderActiveSection({
     return renderDashboard({
       state,
       onNavigate,
-      onStockFilterChange,
-      onThemeToggle
+      onStockFilterChange
     });
   }
 
@@ -644,7 +646,9 @@ function renderActiveSection({
           openSuppliers: (payload = {}) => {
             onSupplierFilterChange?.({ query: payload.supplierName || payload.itemName || '' });
             onNavigate?.('suppliers');
-          }
+          },
+          editGrv: (grvId) => onRequestGrvEdit?.(grvId),
+          editCreditNote: (creditNoteId) => onRequestCreditNoteEdit?.(creditNoteId)
         }
       },
       onRefresh: () => {}

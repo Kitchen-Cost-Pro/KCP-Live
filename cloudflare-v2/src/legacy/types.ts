@@ -86,6 +86,25 @@ export interface Env {
   YOCO_V2_RATE_LIMIT_PAUSE_FALLBACK_MS?: string;
   YOCO_V2_RECONCILIATION_OVERLAP_MINUTES?: string;
   YOCO_V2_RECONCILIATION_LOOKBACK_HOURS?: string;
+
+  XERO_CLIENT_ID?: string;
+  XERO_CLIENT_SECRET?: string;
+  XERO_OAUTH_REDIRECT_URI?: string;
+  XERO_OAUTH_STATE_SECRET?: string;
+  XERO_TOKEN_ENCRYPTION_SECRET?: string;
+  XERO_API_BASE_URL?: string;
+  XERO_DAILY_CALL_CAP?: string;
+  XERO_PER_MINUTE_CALL_CAP?: string;
+  XERO_OAUTH_SCOPES?: string;
+
+  // GDRIVE_* (not GOOGLE_DRIVE_*) to match the naming already reserved in src/types.ts's
+  // front-Worker Env and wrangler.toml/wrangler.dev.toml's pre-existing GDRIVE_OAUTH_REDIRECT_URI.
+  GDRIVE_CLIENT_ID?: string;
+  GDRIVE_CLIENT_SECRET?: string;
+  GDRIVE_OAUTH_REDIRECT_URI?: string;
+  GDRIVE_OAUTH_STATE_SECRET?: string;
+  GDRIVE_TOKEN_ENCRYPTION_SECRET?: string;
+  GDRIVE_OAUTH_SCOPES?: string;
 }
 
 export interface AuthContext {

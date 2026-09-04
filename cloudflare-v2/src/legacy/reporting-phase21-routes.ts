@@ -841,7 +841,7 @@ export async function getCreditNotesReport(
     : "";
   const rows = await env.DB.prepare(
     `SELECT cnl.id,cn.id credit_note_id,cn.credit_note_number,cn.credited_at,cn.reason,cn.created_by,cn.created_at,cn.raw_json credit_raw_json,cn.supplier_id,cn.location_id header_location_id,
-    ${tables.suppliers ? "s.name" : "''"} supplier_name,cnl.location_id,${tables.locations ? "COALESCE(l.display_name,l.name,l.external_name,l.id)" : "''"} location_name,cnl.stock_item_id,${tables.stock_items ? "si.name" : "''"} item_name,${tables.stock_items ? "si.category" : "'General'"} category,${tables.stock_items ? "si.unit" : "cnl.unit"} base_uom,${tables.stock_items ? "si.vat_enabled" : "1"} vat_enabled,
+    ${tables.suppliers ? "s.name" : "''"} supplier_name,cnl.location_id,${tables.locations ? "COALESCE(l.display_name,l.name,l.external_name,l.id)" : "''"} location_name,cnl.stock_item_id,${tables.stock_items ? "si.name" : "''"} item_name,${tables.stock_items ? "si.category" : "'General'"} category,${tables.stock_items ? "si.unit" : "cnl.unit"} base_uom,${tables.stock_items ? "si.vat_enabled" : "1"} vat_enabled,${tables.suppliers ? "COALESCE(json_extract(s.raw_json,'$.vatRegistered'),1)" : "1"} supplier_vat_registered,
     cnl.quantity qty_credited,cnl.unit_cost,cnl.total_ex line_total_ex,${tables.stock_movements ? "COALESCE(sm.ledger_qty,0)" : "0"} ledger_qty,${tables.stock_movements ? "COALESCE(sm.ledger_value,0)" : "0"} ledger_value,${tables.stock_movements ? "COALESCE(sm.ledger_rows,0)" : "0"} ledger_rows
     FROM credit_notes cn JOIN credit_note_lines cnl ON cnl.credit_note_id=cn.id AND cnl.workspace_id=cn.workspace_id
     ${tables.suppliers ? "LEFT JOIN suppliers s ON s.id=cn.supplier_id AND s.workspace_id=cn.workspace_id" : ""} ${tables.locations ? "LEFT JOIN locations l ON l.id=cnl.location_id AND l.workspace_id=cnl.workspace_id" : ""} ${tables.stock_items ? "LEFT JOIN stock_items si ON si.id=cnl.stock_item_id AND si.workspace_id=cnl.workspace_id" : ""} ${ledgerJoin}
@@ -886,7 +886,10 @@ export async function getCreditNotesReport(
               : "Stock Removed"
           : "Stock Removed");
     const ex = money(row.line_total_ex);
-    const vat = number(row.vat_enabled, 1) === 0 ? 0 : money(ex * vatRate);
+    // A non-VAT-registered supplier never charges VAT on anything, regardless of the item's own
+    // vat_enabled — a second, independent gate on top of it.
+    const isVatable = number(row.vat_enabled, 1) !== 0 && number(row.supplier_vat_registered, 1) !== 0;
+    const vat = isVatable ? money(ex * vatRate) : 0;
     return {
       id: clean(row.id) || `credit-line:${index}`,
       creditNoteId: clean(row.credit_note_id),

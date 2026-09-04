@@ -411,6 +411,12 @@ function bindStockEvents(view, stock, onStockFilterChange, onStockAction) {
     const itemType = String(formData.get('itemType') ?? getStockItemType(currentItem) ?? 'standard');
     const recipe = readStockRecipeLinesFromForm(form, currentItem);
     const uomConfigurations = readStockUomConfigurationsFromForm(form, currentItem, selectedUnit);
+    // An UNCHECKED checkbox is never included in FormData at all — formData.has('vatEnabled')
+    // being false doesn't mean "the field wasn't touched", it's indistinguishable from "the user
+    // just unchecked it". That made unchecking VAT silently fall back to currentItem's OLD value
+    // (still VAT-enabled) instead of ever saving the uncheck. Read the checkbox's live DOM state
+    // directly instead, which has no such ambiguity.
+    const vatEnabledField = form.querySelector('[name="vatEnabled"]');
     onStockAction.onSave?.({
       id: form.dataset.stockItemId || undefined,
       name: formData.get('name') ?? currentItem.name ?? '',
@@ -423,7 +429,7 @@ function bindStockEvents(view, stock, onStockFilterChange, onStockAction) {
       yieldFactor: formData.has('yieldFactor') ? (parseNumber(formData.get('yieldFactor')) || 100) : (Number(currentItem.yieldFactor || 100) || 100),
       yieldBatch: formData.has('yieldBatch') ? (parseNumber(formData.get('yieldBatch')) || 1) : (Number(currentItem.yieldBatch || 1) || 1),
       barcodes: formData.has('barcodes') ? formData.get('barcodes') : (currentItem.barcodes || []),
-      vatEnabled: formData.has('vatEnabled') ? formData.get('vatEnabled') === 'on' : currentItem.vatEnabled !== false,
+      vatEnabled: vatEnabledField ? vatEnabledField.checked : currentItem.vatEnabled !== false,
 	      itemType,
 	      isSubRecipe: itemType === 'sub_recipe',
 	      isManufactured: itemType === 'manufactured',
@@ -1058,9 +1064,9 @@ function renderStockModal(stock, categories = [], uoms = [], locations = [], sto
                 </div>
               </label>
               <div class="stockModule__quickSettings stockModule__span2">
-                <label class="stockModule__toggle" title="${vatRegistered ? 'This item carries VAT on the workspace\'s configured rate.' : 'The workspace is not VAT registered, so no VAT is applied regardless of this setting.'}">
+                <label class="stockModule__toggle" title="${vatRegistered ? 'This item carries VAT on the workspace\'s configured rate.' : 'This item still carries VAT on GRVs/POs/credit notes (you pay it to your VAT-registered supplier), even though the workspace can\'t reclaim it as not VAT registered.'}">
                   <input name="vatEnabled" type="checkbox" ${item.vatEnabled === false ? '' : 'checked'} data-stock-draft-field="vatEnabled" />
-                  <span>VAT Enabled${vatRegistered ? '' : ' (workspace not VAT registered — no VAT applied)'}</span>
+                  <span>VAT Enabled${vatRegistered ? '' : ' (workspace not VAT registered — cannot reclaim, but still applied)'}</span>
                 </label>
                 <div class="stockModule__typeControl" aria-label="Item type">
                   <span>Item Type</span>

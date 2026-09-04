@@ -91,6 +91,129 @@ export async function sendSupplierEmailWithGmail(workspaceId, payload = {}) {
   return callCloudflareGmailRoute(workspaceId, 'send-supplier-email', payload);
 }
 
+export function subscribeXeroIntegration(workspaceId, callback) {
+  let cancelled = false;
+  const load = async () => {
+    try {
+      const status = await callCloudflareXeroRoute(workspaceId, 'status', {}, { method: 'GET' });
+      if (!cancelled) callback?.(normalizeXeroStatus(status));
+    } catch (error) {
+      if (!cancelled) {
+        callback?.(normalizeXeroStatus({
+          status: 'error',
+          configured: false,
+          lastError: error.message || 'Could not load Xero status.'
+        }));
+      }
+    }
+  };
+  load();
+  return () => {
+    cancelled = true;
+  };
+}
+
+export async function startXeroConnection(workspaceId) {
+  return callCloudflareXeroRoute(workspaceId, 'connect-start');
+}
+
+export async function disconnectXeroIntegration(workspaceId) {
+  return callCloudflareXeroRoute(workspaceId, 'disconnect');
+}
+
+export async function saveXeroSettings(workspaceId, settings = {}) {
+  return callCloudflareXeroRoute(workspaceId, 'settings', settings);
+}
+
+export async function syncXeroNow(workspaceId, kind) {
+  return callCloudflareWorkspaceRoute(workspaceId, `xero/sync-now?kind=${encodeURIComponent(kind)}`, { method: 'POST' });
+}
+
+/** Real tax rate codes from the connected Xero organisation (name, code, Active/Archived status) —
+ * lets the settings form offer a picker instead of a free-text field a person has to guess a raw
+ * code into, which is exactly how a live GRV push outage happened (a plausible-looking code that
+ * was actually Archived for this org, with no way to see that from inside KCP). */
+export async function fetchXeroTaxRates(workspaceId) {
+  const result = await callCloudflareWorkspaceRoute(workspaceId, 'xero/tax-rates', { method: 'GET' });
+  return Array.isArray(result?.taxRates) ? result.taxRates : [];
+}
+
+/** Real Tracking Categories/Options from the connected Xero organisation — same "never guess, show
+ * the real thing" reasoning as fetchXeroTaxRates: Xero silently drops an unmatched tracking option
+ * on a document rather than rejecting it, so a free-text field would fail invisibly. */
+export async function fetchXeroTrackingCategories(workspaceId) {
+  const result = await callCloudflareWorkspaceRoute(workspaceId, 'xero/tracking-categories', { method: 'GET' });
+  return Array.isArray(result?.trackingCategories) ? result.trackingCategories : [];
+}
+
+/** Real Chart of Accounts codes from the connected Xero organisation — same "never guess, show the
+ * real thing" reasoning as fetchXeroTaxRates: every account-code field used to be free text a
+ * person had to know the raw Xero GL code for. */
+export async function fetchXeroAccounts(workspaceId) {
+  const result = await callCloudflareWorkspaceRoute(workspaceId, 'xero/accounts', { method: 'GET' });
+  return Array.isArray(result?.accounts) ? result.accounts : [];
+}
+
+/** Resolves one pending "needs a supplier match" entry: pass either { xeroContactId } to map to a
+ * Xero contact the user already picked, or { createNew: true } to create a new one — the daily
+ * background sync never creates a Xero contact on its own, only this explicit user action does. */
+export async function resolveXeroSupplierMatch(workspaceId, supplierId, { xeroContactId, createNew } = {}) {
+  return callCloudflareXeroRoute(workspaceId, 'resolve-supplier-match', { supplierId, xeroContactId, createNew });
+}
+
+async function callCloudflareXeroRoute(workspaceId, action, payload = {}, options = {}) {
+  const method = String(options.method || 'POST').toUpperCase();
+  return callCloudflareWorkspaceRoute(workspaceId, `xero/${action}`, {
+    method,
+    payload
+  });
+}
+
+function normalizeXeroStatus(value = {}) {
+  const status = value && typeof value === 'object' ? value : {};
+  const rawStatus = String(status.status || '').trim().toLowerCase();
+  const settings = status.settings && typeof status.settings === 'object' ? status.settings : {};
+  const pendingSupplierMatches = Array.isArray(status.pendingSupplierMatches) ? status.pendingSupplierMatches : [];
+  return {
+    status: rawStatus || 'disconnected',
+    configured: status.configured !== false,
+    connectionActive: rawStatus === 'connected',
+    tenantName: status.tenantName || '',
+    lastError: status.lastError || '',
+    settings: {
+      salesAccountCode: settings.salesAccountCode || '',
+      defaultTaxType: settings.defaultTaxType || '',
+      // salesExemptTaxType/codPaymentAccountCode/creditNoteSyncEnabled/lastCreditNoteSyncDate were
+      // missing here even though admin-routes.ts's getStatus already returned them — every reopen
+      // of the settings drawer silently showed these as blank/off regardless of what was actually
+      // saved. locationTrackingCategoryId is new, added alongside this fix.
+      salesExemptTaxType: settings.salesExemptTaxType || '',
+      itemAccountCode: settings.itemAccountCode || '',
+      purchaseAccountCode: settings.purchaseAccountCode || '',
+      purchaseTaxType: settings.purchaseTaxType || '',
+      purchaseExemptTaxType: settings.purchaseExemptTaxType || '',
+      codPaymentAccountCode: settings.codPaymentAccountCode || '',
+      locationTrackingCategoryId: settings.locationTrackingCategoryId || '',
+      wastageExpenseAccountCode: settings.wastageExpenseAccountCode || '',
+      wastageAssetAccountCode: settings.wastageAssetAccountCode || '',
+      enabled: settings.enabled === true,
+      grvSyncEnabled: settings.grvSyncEnabled === true,
+      creditNoteSyncEnabled: settings.creditNoteSyncEnabled === true,
+      wastageSyncEnabled: settings.wastageSyncEnabled === true,
+      lastItemSyncAt: settings.lastItemSyncAt || '',
+      lastInvoiceSyncDate: settings.lastInvoiceSyncDate || '',
+      lastGrvSyncDate: settings.lastGrvSyncDate || '',
+      lastCreditNoteSyncDate: settings.lastCreditNoteSyncDate || '',
+      lastWastageSyncDate: settings.lastWastageSyncDate || ''
+    },
+    pendingSupplierMatches: pendingSupplierMatches.map((match) => ({
+      supplierId: match.supplierId || '',
+      supplierName: match.supplierName || 'Unknown supplier',
+      grvCount: Number(match.grvCount) || 0
+    }))
+  };
+}
+
 async function callCloudflareYocoRoute(workspaceId, action, payload = {}, options = {}) {
   const method = String(options.method || 'POST').toUpperCase();
   return callCloudflareWorkspaceRoute(workspaceId, `yoco/${action}`, {

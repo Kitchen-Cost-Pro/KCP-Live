@@ -340,7 +340,8 @@ export function aggregateInventoryRows(stockRows = []) {
       locationCount: 1,
       locations: [location.name],
       sourceRowCount: 0,
-      lastUpdated: ''
+      lastUpdated: '',
+      acknowledged: false
     };
 
     existing.qty += currentStock;
@@ -355,6 +356,7 @@ export function aggregateInventoryRows(stockRows = []) {
     existing.estimatedReorderValue += number(row.estimatedReorderValue);
     existing.sourceRowCount += 1;
     existing.lastUpdated = latestDate(existing.lastUpdated, row.lastUpdated);
+    existing.acknowledged = existing.acknowledged || Boolean(row.lowStockAcknowledged);
     if (!existing.sku) existing.sku = resolveSku(row);
     groups.set(key, existing);
   }

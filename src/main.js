@@ -92,7 +92,6 @@ import { deriveStockItemType } from './utils/stockItemType.js';
 import { getLocationStock as resolveLocationStock } from './utils/stockBalances.js';
 
 const app = document.querySelector('#app');
-const THEME_STORAGE_KEY = 'kcp-live-theme';
 const ROUTE_STORAGE_KEY = 'kcp-live-route';
 const AUTO_LOGIN_STORAGE_PREFIX = 'kcp:auto-login-workspace:v1';
 const DRAFT_STORAGE_PREFIX = 'kcp:drafts:v1';
@@ -219,7 +218,7 @@ export const appState = {
   route: {
     active: getInitialRoute()
   },
-  theme: getInitialTheme(),
+  theme: 'dark',
   source: null,
   menu: createMenuState('idle'),
   recipes: createRecipeState('idle'),
@@ -2080,7 +2079,7 @@ function navigateTo(sectionId) {
     cleanupStockTakeSubscription();
     cleanupLocationSubscription();
     cleanupManufacturingSubscription();
-    appState.grv = createGrvState('loading', appState.grv.filters, appState.grv.pendingSourcePoId);
+    appState.grv = createGrvState('loading', appState.grv.filters, appState.grv.pendingSourcePoId, appState.grv.pendingEditReceiptId);
     renderApp();
     startGrvSubscription(appState.workspace?.id);
     return;
@@ -2098,7 +2097,7 @@ function navigateTo(sectionId) {
     cleanupStockTakeSubscription();
     cleanupLocationSubscription();
     cleanupManufacturingSubscription();
-    appState.creditNotes = createCreditNoteState('loading', appState.creditNotes.filters);
+    appState.creditNotes = createCreditNoteState('loading', appState.creditNotes.filters, appState.creditNotes.pendingEditNoteId);
     renderApp();
     startCreditNoteSubscription(appState.workspace?.id);
     return;
@@ -3135,11 +3134,17 @@ async function startGrvSubscription(workspaceId) {
   const subscriptionToken = ++grvSubscriptionToken;
 
   if (!workspaceId) {
-    appState.grv = createGrvState('idle', appState.grv.filters, appState.grv.pendingSourcePoId);
+    appState.grv = createGrvState('idle', appState.grv.filters, appState.grv.pendingSourcePoId, appState.grv.pendingEditReceiptId);
     return;
   }
 
-  appState.grv = createGrvState('loading', appState.grv.filters, appState.grv.pendingSourcePoId);
+  appState.grv = createGrvState('loading', appState.grv.filters, appState.grv.pendingSourcePoId, appState.grv.pendingEditReceiptId);
+
+  import('./services/driveService.js').then(({ fetchDriveOcrEnabled }) => fetchDriveOcrEnabled(workspaceId)).then((enabled) => {
+    if (subscriptionToken !== grvSubscriptionToken || appState.route.active !== 'grv' || appState.workspace?.id !== workspaceId) return;
+    appState.grv = { ...appState.grv, driveOcrEnabled: enabled };
+    renderApp();
+  }).catch(() => {});
 
   try {
     const { subscribeGrvWorkspace } = await import('./services/grvService.js');
@@ -3158,10 +3163,19 @@ async function startGrvSubscription(workspaceId) {
           appState.workspace?.id !== workspaceId
         ) return;
 
-        const currentDraft = isGrvDraftDirty(appState.grv.draftReceipt)
-          ? appState.grv.draftReceipt
-          : loadPersistedDraft('grv', createEmptyGrvDraft);
+        const restoringFromStorage = !isGrvDraftDirty(appState.grv.draftReceipt);
+        const currentDraft = restoringFromStorage
+          ? loadPersistedDraft('grv', createEmptyGrvDraft)
+          : appState.grv.draftReceipt;
         const draftReceipt = reconcileGrvDraft(currentDraft, { orders, stockItems, locations });
+        // A persisted draft (localStorage) that's mid-edit still carries the real GRV's id (see
+        // persistGrvDraftSnapshot) but appState.grv.editingReceiptId itself does NOT survive a
+        // route navigation (createGrvState has no such field) — restore it from the same
+        // envelope here, or the next Save would silently take the create path against an id that
+        // already exists. See loadPersistedDraftEditingId's doc comment for the full failure mode.
+        const editingReceiptId = restoringFromStorage
+          ? loadPersistedDraftEditingId('grv')
+          : (appState.grv.editingReceiptId || '');
         appState.grv = {
           ...appState.grv,
           status,
@@ -3174,13 +3188,28 @@ async function startGrvSubscription(workspaceId) {
           source,
           updatedAt,
           loaded,
-          draftReceipt
+          draftReceipt,
+          editingReceiptId
         };
         renderApp();
         if (appState.grv.pendingSourcePoId && !appState.grv.actionStatus && loaded?.orders) {
           queueMicrotask(() => {
             if (appState.route.active !== 'grv' || !appState.grv.pendingSourcePoId) return;
             openGrvFromPurchaseOrder(appState.grv.pendingSourcePoId);
+          });
+        }
+        if (appState.grv.pendingEditReceiptId && !appState.grv.actionStatus && loaded?.receipts) {
+          queueMicrotask(() => {
+            const pendingId = appState.grv.pendingEditReceiptId;
+            if (appState.route.active !== 'grv' || !pendingId) return;
+            const target = (appState.grv.receipts || []).find((entry) => String(entry.id) === pendingId);
+            appState.grv = { ...appState.grv, pendingEditReceiptId: '' };
+            if (target) {
+              openGrvEditDraft(target);
+            } else {
+              showGrvToast('That GRV could not be found — it may have been removed.', 'error');
+              renderApp();
+            }
           });
         }
       },
@@ -3220,11 +3249,11 @@ async function startCreditNoteSubscription(workspaceId) {
   const subscriptionToken = ++creditNoteSubscriptionToken;
 
   if (!workspaceId) {
-    appState.creditNotes = createCreditNoteState('idle', appState.creditNotes.filters);
+    appState.creditNotes = createCreditNoteState('idle', appState.creditNotes.filters, appState.creditNotes.pendingEditNoteId);
     return;
   }
 
-  appState.creditNotes = createCreditNoteState('loading', appState.creditNotes.filters);
+  appState.creditNotes = createCreditNoteState('loading', appState.creditNotes.filters, appState.creditNotes.pendingEditNoteId);
 
   try {
     const { subscribeCreditNotesWorkspace } = await import('./services/creditNoteService.js');
@@ -3243,9 +3272,16 @@ async function startCreditNoteSubscription(workspaceId) {
           appState.workspace?.id !== workspaceId
         ) return;
 
-        const currentDraft = isCreditNoteDraftDirty(appState.creditNotes.draftNote)
-          ? appState.creditNotes.draftNote
-          : loadPersistedDraft('credit-note', createEmptyCreditNoteDraft);
+        const restoringFromStorage = !isCreditNoteDraftDirty(appState.creditNotes.draftNote);
+        const currentDraft = restoringFromStorage
+          ? loadPersistedDraft('credit-note', createEmptyCreditNoteDraft)
+          : appState.creditNotes.draftNote;
+        // See the GRV subscription's identical restore block for why this has to be re-derived
+        // from the persisted envelope here — createCreditNoteState has no editingNoteId field,
+        // so it doesn't survive a route navigation on its own.
+        const editingNoteId = restoringFromStorage
+          ? loadPersistedDraftEditingId('credit-note')
+          : (appState.creditNotes.editingNoteId || '');
         appState.creditNotes = {
           ...appState.creditNotes,
           status,
@@ -3258,9 +3294,24 @@ async function startCreditNoteSubscription(workspaceId) {
           source,
           updatedAt,
           loaded,
-          draftNote: reconcileCreditNoteDraft(currentDraft, { stockItems, locations, suppliers })
+          draftNote: reconcileCreditNoteDraft(currentDraft, { stockItems, locations, suppliers }),
+          editingNoteId
         };
         renderApp();
+        if (appState.creditNotes.pendingEditNoteId && !appState.creditNotes.actionStatus && loaded?.creditNotes) {
+          queueMicrotask(() => {
+            const pendingId = appState.creditNotes.pendingEditNoteId;
+            if (appState.route.active !== 'credit-note' || !pendingId) return;
+            const target = (appState.creditNotes.creditNotes || []).find((entry) => String(entry.id) === pendingId);
+            appState.creditNotes = { ...appState.creditNotes, pendingEditNoteId: '' };
+            if (target) {
+              openCreditNoteEditDraft(target);
+            } else {
+              showCreditNoteToast('That credit note could not be found — it may have been removed.', 'error');
+              renderApp();
+            }
+          });
+        }
       },
       onError: (error) => {
         if (
@@ -8990,6 +9041,7 @@ function addPurchaseOrderLine(stockItemId) {
 	      unit: stockItem.unit || 'ea',
 	      selectedUom: uomSelection.selectedUom,
 	      uomConfigurations: normalizeLineUomConfigurations(stockItem.uomConfigurations || stockItem.uomConfig || stockItem.uomConversions),
+	      vatEnabled: stockItem.vatEnabled !== false,
 	      locationId,
 	      targetLocation: locationId,
 	      locationName,
@@ -9238,6 +9290,25 @@ async function sendPurchaseOrder(orderId) {
     };
     renderApp();
   }
+}
+
+// Entry point for "Edit" from the GRV Log report's transaction detail drawer (see appShell.js's
+// reportingActions.editGrv). Queues the id and navigates — resolved into an actual
+// openGrvEditDraft call once the GRV section's own receipts list has loaded, same pattern as
+// redirectPurchaseOrderToGrv/pendingSourcePoId below.
+function requestGrvEditFromReport(grvId) {
+  const id = String(grvId || '').trim();
+  if (!id) return;
+  appState.grv = { ...appState.grv, pendingEditReceiptId: id, actionError: '' };
+  navigateTo('grv');
+}
+
+// See requestGrvEditFromReport's doc comment — same flow, Credit Notes side.
+function requestCreditNoteEditFromReport(creditNoteId) {
+  const id = String(creditNoteId || '').trim();
+  if (!id) return;
+  appState.creditNotes = { ...appState.creditNotes, pendingEditNoteId: id, actionError: '' };
+  navigateTo('credit-note');
 }
 
 function redirectPurchaseOrderToGrv(orderId) {
@@ -9884,6 +9955,7 @@ function openManualGrvDraft() {
     lineDetailDraft: null,
     missingSupplierPrompt: null,
     draftReceipt: createEmptyGrvDraft(),
+    editingReceiptId: '',
     actionError: '',
     filters: {
       ...appState.grv.filters,
@@ -9900,6 +9972,45 @@ function openManualGrvDraft() {
   renderApp();
 }
 
+// Opens an already-saved GRV back into the same builder used for creating one, in edit mode.
+// `receipt` is one of the already-normalized rows from appState.grv.receipts (normalizeGoodsReceipt
+// in grvService.js), which already carries the full items array — no extra fetch needed. Edit mode
+// is tracked separately from draft.id (appState.grv.editingReceiptId) rather than inferred from
+// draft.id being non-empty, because a brand-new draft can also carry a stable id once
+// makeStableSubmitId has minted one for it (see saveGrvReceipt) — id presence alone can't
+// distinguish "this is a real, already-committed GRV" from "this is an in-progress new one".
+function openGrvEditDraft(receipt) {
+  if (!receipt || !receipt.id) return;
+  appState.grv = {
+    ...appState.grv,
+    pendingSourcePoId: '',
+    pendingEditReceiptId: '',
+    lineDetailDraft: null,
+    missingSupplierPrompt: null,
+    draftReceipt: createEmptyGrvDraft({
+      ...receipt,
+      invoiceDiscountEx: receipt.invoiceDiscountEx || receipt.discountEx || ''
+    }),
+    editingReceiptId: receipt.id,
+    actionError: '',
+    filters: {
+      ...appState.grv.filters,
+      lineQuery: '',
+      poQuery: '',
+      selectedStockIds: [],
+      selectedLineIndexes: [],
+      calendarCursor: '',
+      openDropdown: '',
+      overlay: ''
+    }
+  };
+  clearPersistedDraft('grv');
+  renderApp();
+}
+
+function cancelGrvEditDraft() {
+  openManualGrvDraft();
+}
 
 function normalizeSupplierLookupName(value = '') {
   return String(value || '').trim().toLowerCase();
@@ -10304,6 +10415,7 @@ async function openGrvFromPurchaseOrder(orderId) {
       splitByLocation: uniqueReceiptLocations.size > 1,
       items: receiptItems
     }),
+    editingReceiptId: '',
     actionError: '',
     filters: {
       ...appState.grv.filters,
@@ -10326,6 +10438,120 @@ async function openGrvFromPurchaseOrder(orderId) {
   });
 }
 
+// "Process Invoice with KCP" (see the header button in GRVEntry.js, gated on
+// appState.grv.driveOcrEnabled): opens the overlay where staff capture/choose a photo of a
+// supplier invoice — no Drive interaction needed on their end, the photo is uploaded here and
+// archived to Drive server-side (see processGrvInvoicePhoto below).
+function openGrvAssistant() {
+  appState.grv = {
+    ...appState.grv,
+    filters: { ...appState.grv.filters, overlay: 'assistant' },
+    assistant: { status: 'idle', error: '' }
+  };
+  renderApp();
+}
+
+function readInvoicePhotoAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener('load', () => {
+      const dataUrl = String(reader.result || '');
+      const commaIndex = dataUrl.indexOf(',');
+      resolve(commaIndex === -1 ? '' : dataUrl.slice(commaIndex + 1));
+    });
+    reader.addEventListener('error', () => reject(new Error('Could not read the selected photo.')));
+    reader.readAsDataURL(file);
+  });
+}
+
+// Sends the captured photo to the Worker for Gemini extraction + Drive archiving, then merges
+// whatever it found into the current draft: header fields only fill in if still blank (so a
+// supplier/date already typed in by hand is never clobbered), and line items are matched by name
+// against this workspace's own stock items — an item KCP doesn't recognise is listed in the toast
+// rather than silently added, since grv_lines requires a real stock_item_id and a made-up one
+// would fail to save anyway.
+async function processGrvInvoicePhoto(file) {
+  if (!file || appState.grv.assistant?.extracting) return;
+  appState.grv = { ...appState.grv, assistant: { status: 'processing', error: '', extracting: true } };
+  renderApp();
+  try {
+    const imageBase64 = await readInvoicePhotoAsBase64(file);
+    if (!imageBase64) throw new Error('Could not read the selected photo.');
+
+    const draft = appState.grv.draftReceipt || createEmptyGrvDraft();
+    const { processDriveInvoicePhoto } = await import('./services/driveService.js');
+    const { extract, driveFileId, locationId: resolvedLocationId } = await processDriveInvoicePhoto(appState.workspace?.id, {
+      mimeType: file.type || 'image/jpeg',
+      imageBase64,
+      locationId: draft.locationId || ''
+    });
+    if (!extract) throw new Error('KCP Assistant did not return anything usable from that invoice.');
+
+    const stockItems = appState.grv.stockItems || [];
+    const matchStockItem = (name) => {
+      const needle = String(name || '').trim().toLowerCase();
+      if (!needle) return null;
+      return stockItems.find((item) => String(item.name || '').trim().toLowerCase() === needle)
+        || stockItems.find((item) => String(item.name || '').trim().toLowerCase().includes(needle) || needle.includes(String(item.name || '').trim().toLowerCase()))
+        || null;
+    };
+
+    const locationId = draft.locationId || resolvedLocationId || '';
+    const locationName = draft.locationName || '';
+    const unmatchedNames = [];
+    const matchedItems = (extract.items || []).flatMap((row) => {
+      const stockItem = matchStockItem(row.name);
+      if (!stockItem) {
+        if (String(row.name || '').trim()) unmatchedNames.push(row.name.trim());
+        return [];
+      }
+      const qty = Number(row.quantity) || 0;
+      return [{
+        id: stockItem.id,
+        stockItemId: stockItem.id,
+        stockItemName: stockItem.name,
+        unit: row.unit || stockItem.unit || 'ea',
+        selectedUom: row.unit || stockItem.unit || 'ea',
+        uomConfigurations: normalizeLineUomConfigurations(stockItem.uomConfigurations || stockItem.uomConfig || stockItem.uomConversions),
+        receivedQty: qty > 0 ? qty : 1,
+        unitCost: Number(row.unitCost) || Number(stockItem.unitCost) || 0,
+        vatEnabled: stockItem.vatEnabled !== false,
+        locationId,
+        targetLocation: locationId,
+        locationName,
+        targetLocationName: locationName
+      }];
+    });
+
+    appState.grv = {
+      ...appState.grv,
+      draftReceipt: {
+        ...draft,
+        supplierName: draft.supplierName || extract.supplierName || draft.supplierName,
+        grvNumber: draft.grvNumber || extract.invoiceNumber || draft.grvNumber,
+        date: draft.date || extract.invoiceDate || draft.date,
+        items: [...(draft.items || []), ...matchedItems]
+      },
+      assistantSource: driveFileId ? { fileId: driveFileId } : null,
+      assistant: { status: 'idle', error: '', extracting: false },
+      filters: { ...appState.grv.filters, overlay: '' }
+    };
+    persistGrvDraftSnapshot(appState.grv.draftReceipt);
+    if (unmatchedNames.length) {
+      showGrvToast(`Added ${matchedItems.length} matched line${matchedItems.length === 1 ? '' : 's'}. Could not match: ${unmatchedNames.join(', ')} — add ${unmatchedNames.length === 1 ? 'it' : 'them'} manually.`, 'error');
+    } else if (matchedItems.length) {
+      showGrvToast(`Added ${matchedItems.length} line${matchedItems.length === 1 ? '' : 's'} from the invoice. Review quantities and costs before saving.`, 'success');
+    } else {
+      showGrvToast('KCP Assistant could not match any line items on that invoice to your stock items.', 'error');
+    }
+  } catch (error) {
+    appState.grv = { ...appState.grv, assistant: { status: 'error', error: error.message || 'KCP Assistant could not read that invoice.', extracting: false } };
+    renderApp();
+    return;
+  }
+  renderApp();
+}
+
 function closeGrvDraft() {
   appState.grv = {
     ...appState.grv,
@@ -10333,6 +10559,7 @@ function closeGrvDraft() {
     lineDetailDraft: null,
     missingSupplierPrompt: null,
     draftReceipt: createEmptyGrvDraft(),
+    editingReceiptId: '',
     actionStatus: '',
     actionError: '',
     filters: {
@@ -11064,7 +11291,7 @@ async function saveGrvReceipt(options = {}) {
   showGlobalSaving('Saving GRV');
 
   try {
-    const { saveGoodsReceipt } = await import('./services/grvService.js');
+    const { saveGoodsReceipt, updateGoodsReceipt } = await import('./services/grvService.js');
     const receiptPayload = {
       ...draft,
       supplierId: resolvedSupplier?.id || draft.supplierId || '',
@@ -11075,13 +11302,31 @@ async function saveGrvReceipt(options = {}) {
       costingMethod: String(appState.source?.settings?.costingMethod || appState.settings?.business?.costingMethod || 'last'),
       items: hydratedItems
     };
-    const savedReceipt = await saveGoodsReceipt(appState.workspace?.id, receiptPayload);
+    const editingReceiptId = appState.grv.editingReceiptId || '';
+    const savedReceipt = editingReceiptId
+      ? await updateGoodsReceipt(appState.workspace?.id, editingReceiptId, receiptPayload)
+      : await saveGoodsReceipt(appState.workspace?.id, receiptPayload);
+
+    // If this GRV was drafted from a photo captured via "Process Invoice with KCP", tag the copy
+    // already archived in Drive with the GRV it produced. Best-effort and fire-and-forget — a
+    // failure here should never block the GRV save the user is actually waiting on.
+    const assistantSource = appState.grv.assistantSource;
+    if (assistantSource?.fileId && savedReceipt?.id) {
+      import('./services/driveService.js')
+        .then(({ tagDriveInvoiceWithGrv }) => tagDriveInvoiceWithGrv(appState.workspace?.id, {
+          fileId: assistantSource.fileId,
+          grvId: savedReceipt.id
+        }))
+        .catch(() => {});
+    }
 
     appState.grv = {
       ...appState.grv,
+      editingReceiptId: '',
       missingSupplierPrompt: null,
       lineDetailDraft: null,
       draftReceipt: createEmptyGrvDraft(),
+      assistantSource: null,
       actionStatus: '',
       actionError: '',
       filters: {
@@ -11097,7 +11342,10 @@ async function saveGrvReceipt(options = {}) {
       }
     };
     clearPersistedDraft('grv');
-    showGrvToast('GRV saved and stock incremented.', 'success');
+    showGrvToast(
+      editingReceiptId ? 'GRV updated and stock adjusted.' : 'GRV saved and stock incremented.',
+      'success'
+    );
     // The data-version poll would eventually pick up this GRV's stock_movements row and refresh
     // the Stock Items tab (see refreshStockFromDataVersion), but only after its own throttle/poll
     // cadence (up to ~75s) and only while that tab is the active route. That left the submitting
@@ -11159,6 +11407,45 @@ function dismissGrvToast() {
     ...appState.grv,
     toast: null
   };
+  renderApp();
+}
+
+// Opens an already-committed credit note back into the same builder used for creating one, in
+// edit mode. `note` is one of the already-normalized rows from appState.creditNotes.creditNotes
+// (normalizeCreditNote in creditNoteService.js), which already carries the full items array.
+// Edit mode is tracked separately (appState.creditNotes.editingNoteId) rather than inferred from
+// draft.id, for the same reason as the GRV side (see openGrvEditDraft's doc comment) — a fresh
+// draft can also carry a stable id once makeStableSubmitId has minted one for it.
+function openCreditNoteEditDraft(note) {
+  if (!note || !note.id) return;
+  appState.creditNotes = {
+    ...appState.creditNotes,
+    pendingEditNoteId: '',
+    lineDetailDraft: null,
+    draftNote: createEmptyCreditNoteDraft(note),
+    editingNoteId: note.id,
+    actionError: '',
+    filters: {
+      ...appState.creditNotes.filters,
+      selectedLineIndexes: [],
+      selectedStockIds: [],
+      overlay: '',
+      openDropdown: ''
+    }
+  };
+  clearPersistedDraft('credit-note');
+  renderApp();
+}
+
+function cancelCreditNoteEditDraft() {
+  appState.creditNotes = {
+    ...appState.creditNotes,
+    lineDetailDraft: null,
+    draftNote: createEmptyCreditNoteDraft(),
+    editingNoteId: '',
+    actionError: ''
+  };
+  clearPersistedDraft('credit-note');
   renderApp();
 }
 
@@ -11737,8 +12024,13 @@ async function saveCreditNoteDraft() {
   showGlobalSaving('Committing Credit Note');
 
   try {
-    const { saveCreditNote } = await import('./services/creditNoteService.js');
-    await saveCreditNote(appState.workspace?.id, draft);
+    const { saveCreditNote, updateCreditNote } = await import('./services/creditNoteService.js');
+    const editingNoteId = appState.creditNotes.editingNoteId || '';
+    if (editingNoteId) {
+      await updateCreditNote(appState.workspace?.id, editingNoteId, draft);
+    } else {
+      await saveCreditNote(appState.workspace?.id, draft);
+    }
     const processedGrvs = filterProcessedCreditNoteSources(appState.creditNotes.processedGrvs || [], draft);
     appState.creditNotes = {
       ...appState.creditNotes,
@@ -11747,6 +12039,7 @@ async function saveCreditNoteDraft() {
       processedGrvs,
       lineDetailDraft: null,
       draftNote: createEmptyCreditNoteDraft(),
+      editingNoteId: '',
       filters: {
         ...appState.creditNotes.filters,
         selectedLineIndexes: [],
@@ -11755,7 +12048,7 @@ async function saveCreditNoteDraft() {
       }
     };
     clearPersistedDraft('credit-note');
-    showCreditNoteToast('Credit note committed.', 'success');
+    showCreditNoteToast(editingNoteId ? 'Credit note updated.' : 'Credit note committed.', 'success');
   } catch (error) {
     appState.creditNotes = {
       ...appState.creditNotes,
@@ -12743,9 +13036,14 @@ async function requestVatRegisteredToggle(nextValue) {
   if (currentlyRegistered === nextValue) return;
 
   const vatRate = Number(draft.vatRate ?? 15) || 15;
+  // GRV/PO/Credit Note VAT always follows each stock item's own VAT-enabled flag (e.g. bread never
+  // carries VAT, beer always does) regardless of this toggle — a non-registered business still
+  // pays real VAT to a VAT-registered supplier, it just can't reclaim it. Only sales (output VAT
+  // charged to customers) genuinely goes to R0 when not registered, since charging VAT without
+  // being registered isn't legal.
   const message = nextValue
-    ? `Switching to VAT Registered will recalculate recipe costs and stock item costs to be ex-VAT (removing ${vatRate}% VAT from currently VAT-inclusive costs). Reports will start showing real VAT values instead of R0.`
-    : `Switching to Not VAT Registered will recalculate recipe costs and stock item costs to be VAT-inclusive (adding ${vatRate}% VAT back into currently ex-VAT costs, since it can no longer be reclaimed). Reports will show R0 VAT going forward.`;
+    ? `Switching to VAT Registered will recalculate recipe costs and stock item costs to be ex-VAT (removing ${vatRate}% VAT from currently VAT-inclusive costs).`
+    : `Switching to Not VAT Registered will recalculate recipe costs and stock item costs to be VAT-inclusive (adding ${vatRate}% VAT back into currently ex-VAT costs, since it can no longer be reclaimed). GRVs, purchase orders, and credit notes will keep showing real VAT on VAT-enabled stock items — only sales VAT (charged to customers) will show R0, since a non-registered business cannot charge VAT.`;
 
   const confirmed = await showBrandConfirmDialog({
     eyebrow: 'VAT Registration',
@@ -18657,9 +18955,13 @@ async function resendUserManagementInvite(memberKey) {
   if (!member) return;
   try {
     showGlobalSaving('Resending invite...');
-    await resendWorkspaceMemberInvite(appState.workspace.id, memberKey);
+    const result = await resendWorkspaceMemberInvite(appState.workspace.id, memberKey);
     hideGlobalSaving();
-    showUserManagementToast(`Invite resent to ${member.email}.`, 'success');
+    if (result?.emailSent === false) {
+      showUserManagementToast(`Could not send the invite email to ${member.email}: ${result.emailError || 'delivery failed'}.`, 'error');
+    } else {
+      showUserManagementToast(`Invite resent to ${member.email}.`, 'success');
+    }
   } catch (error) {
     hideGlobalSaving();
     showUserManagementToast(error.message || 'Could not resend invite.', 'error');
@@ -18836,11 +19138,11 @@ async function createUserManagementMember() {
         openDropdown: ''
       }
     };
-    const messages = {
-      created: 'Employee account created. An invite email has been sent.',
-      'linked-existing': 'Existing employee account linked to the workspace.'
-    };
-    showUserManagementToast(messages[result.mode] || 'Employee saved.', 'success');
+    if (result?.emailSent === false) {
+      showUserManagementToast(`Employee saved, but the invite email could not be sent: ${result.emailError || 'delivery failed'}. Use "Resend invite" once this is fixed.`, 'error');
+    } else {
+      showUserManagementToast('Employee saved. An invite email has been sent.', 'success');
+    }
   } catch (error) {
     appState.userManagement = {
       ...appState.userManagement,
@@ -19724,10 +20026,11 @@ function renderApp() {
   replaceApp(renderAuthenticatedApp({
     state: appState,
     onNavigate: navigateTo,
+    onRequestGrvEdit: requestGrvEditFromReport,
+    onRequestCreditNoteEdit: requestCreditNoteEditFromReport,
     onSignOut: () => signOutAndStop(),
     onWorkspaceSelect: (workspace) => selectWorkspace(workspace),
     onAutoLoginToggle: toggleAutoLoginPreference,
-    onThemeToggle: toggleTheme,
     onMenuFilterChange: updateMenuFilters,
     onMenuAction: {
       onSelect: updateMenuSelection,
@@ -19932,10 +20235,14 @@ function renderApp() {
     onGrvFilterChange: updateGrvFilters,
     onGrvAction: {
       onManual: openManualGrvDraft,
+      onEditReceipt: openGrvEditDraft,
+      onCancelEdit: cancelGrvEditDraft,
       onEnsureDraft: ensureGrvDraft,
       onPreserveFocus: preserveFieldFocus,
       onLoadLastInvoice: loadLastGrvInvoice,
       onConvertPo: openGrvFromPurchaseOrder,
+      onOpenAssistant: openGrvAssistant,
+      onProcessInvoicePhoto: processGrvInvoicePhoto,
       onOpenLineDetail: openGrvLineDetail,
       onUpdateLineDetailDraft: updateGrvLineDetailDraft,
       onUpdateLineDetailLocationAll: updateGrvLineDetailLocationAll,
@@ -19987,6 +20294,8 @@ function renderApp() {
       onApplyLineDetail: applyCreditNoteLineDetail,
       onBackLineDetail: backCreditNoteLineDetail,
       onCloseLineDetail: closeCreditNoteLineDetail,
+      onEditNote: openCreditNoteEditDraft,
+      onCancelEdit: cancelCreditNoteEditDraft,
       onSave: saveCreditNoteDraft,
       onDismissToast: dismissCreditNoteToast
     },
@@ -21288,7 +21597,7 @@ function createPurchaseOrderState(status, filters = {}) {
   };
 }
 
-function createGrvState(status, filters = {}, pendingSourcePoId = '') {
+function createGrvState(status, filters = {}, pendingSourcePoId = '', pendingEditReceiptId = '') {
   return {
     status,
     receipts: [],
@@ -21302,6 +21611,11 @@ function createGrvState(status, filters = {}, pendingSourcePoId = '') {
     updatedAt: '',
     error: '',
     pendingSourcePoId: String(pendingSourcePoId || '').trim(),
+    // Set by requestGrvEditFromReport (clicked "Edit" from the GRV Log report's transaction
+    // detail drawer) before navigating here — resolved into an actual openGrvEditDraft call once
+    // this section's own receipts list has loaded (see startGrvSubscription's onSnapshot), same
+    // "queue it, resolve once loaded" pattern pendingSourcePoId already uses.
+    pendingEditReceiptId: String(pendingEditReceiptId || '').trim(),
     lineDetailDraft: null,
     missingSupplierPrompt: null,
     draftReceipt: {
@@ -21322,9 +21636,25 @@ function createGrvState(status, filters = {}, pendingSourcePoId = '') {
       invoiceTotalEx: '',
       items: []
     },
+    // Populated by openGrvEditDraft / restored from the persisted draft's envelope on a route
+    // navigation (see the onSnapshot handler in startGrvSubscription and
+    // loadPersistedDraftEditingId's doc comment) — never inferred from draftReceipt.id alone.
+    editingReceiptId: '',
     actionStatus: '',
     actionError: '',
     toast: null,
+    // "Process Invoice with KCP" (see openGrvAssistant/processGrvInvoicePhoto in this file): the
+    // upload-in-progress status/error for the captured photo, and — once processed into line items
+    // — which Drive file (the archived copy) this draft came from, so saving can tag it with the
+    // resulting GRV. assistantSource survives draftReceipt being reset by closeGrvDraft/
+    // saveGrvReceipt (it's cleared explicitly once tagDriveInvoiceWithGrv is called).
+    assistant: { status: 'idle', error: '' },
+    assistantSource: null,
+    // Refreshed once per GRV section load by startGrvSubscription (fetchDriveOcrEnabled) — an
+    // admin-console-only flag, same "workspace users can't turn this on themselves" shape as
+    // aiOnboardingEnabled, so it's read fresh from the backend rather than trusted from
+    // appState.settings.values (which is only populated once the Settings route itself has loaded).
+    driveOcrEnabled: false,
     filters: {
       query: '',
       source: '',
@@ -21341,7 +21671,7 @@ function createGrvState(status, filters = {}, pendingSourcePoId = '') {
   };
 }
 
-function createCreditNoteState(status, filters = {}) {
+function createCreditNoteState(status, filters = {}, pendingEditNoteId = '') {
   return {
     status,
     creditNotes: [],
@@ -21354,8 +21684,13 @@ function createCreditNoteState(status, filters = {}) {
     source: '',
     updatedAt: '',
     error: '',
+    // See createGrvState's pendingEditReceiptId doc comment — same "Edit" flow from the Credit
+    // Notes report's transaction detail drawer.
+    pendingEditNoteId: String(pendingEditNoteId || '').trim(),
     lineDetailDraft: null,
     draftNote: createEmptyCreditNoteDraft(),
+    // See createGrvState's editingReceiptId doc comment — same reasoning, credit note side.
+    editingNoteId: '',
     actionStatus: '',
     actionError: '',
     toast: null,
@@ -22080,10 +22415,15 @@ function getVatRate() {
   // NOTE: this previously read appState.source?.settings, but appState.source is never assigned
   // anywhere (it stays null for the app's entire lifetime) — so this was silently, permanently
   // hardcoded to 15% regardless of the workspace's actual configured VAT rate. Read the real,
-  // live settings instead, and respect VAT-registration status: a non-registered workspace never
-  // shows VAT on any live entry-form preview.
+  // live settings instead.
+  //
+  // Deliberately independent of vatRegistered: this rate feeds GRV/PO/Credit Note stock costing
+  // previews (GRVEntry.js, CreditNotes.js, StockItems.js), where VAT is about what's actually paid
+  // to a VAT-registered supplier on a VATable item (e.g. beer) — real money paid regardless of
+  // whether THIS business can reclaim it. Per-item taxability (e.g. bread never carries VAT) is
+  // handled separately via each line's own vatEnabled flag, not by zeroing the rate here for every
+  // item at once. vat_registered legitimately still gates OUTPUT VAT on sales elsewhere in the app.
   const settings = appState.settings?.draft || appState.settings?.values || {};
-  if (settings.vatRegistered === false) return 0;
   return Number(settings.vatRate ?? settings.vatPercentage ?? 15) || 15;
 }
 
@@ -22436,7 +22776,32 @@ function loadPersistedDraft(moduleKey, createFallback) {
   }
 }
 
-function persistDraft(moduleKey, draft, isDirty) {
+// Companion to loadPersistedDraft: the id of the already-committed GRV/credit note this
+// persisted draft is EDITING, if any — see persistDraft's editingId param. Read separately
+// (rather than folded into loadPersistedDraft's return shape) so existing callers of
+// loadPersistedDraft don't need to change. Without this, a route navigation away and back while
+// mid-edit restores the edited draft (still carrying the real record's id, from
+// persistGrvDraftSnapshot/persistCreditNoteDraftSnapshot) but loses track of the fact it's an
+// edit — appState.grv/creditNotes is fully rebuilt by createGrvState/createCreditNoteState on
+// every navigation, which has no editingReceiptId/editingNoteId field at all. Saving would then
+// silently take the POST/create path with an id that already exists: the backend's
+// duplicate-commit guard (postGoodsReceipt/postCreditNote) matches that id, returns
+// `{ok:true, duplicate:true}`, and the user's edits are silently discarded — they see a "saved"
+// toast on a GRV/credit note that was never actually updated.
+function loadPersistedDraftEditingId(moduleKey) {
+  const storageKey = getDraftStorageKey(moduleKey);
+  if (!storageKey) return '';
+  try {
+    const raw = localStorage.getItem(storageKey);
+    if (!raw) return '';
+    const parsed = JSON.parse(raw);
+    return String((parsed && typeof parsed === 'object' && parsed.editingId) || '');
+  } catch {
+    return '';
+  }
+}
+
+function persistDraft(moduleKey, draft, isDirty, editingId = '') {
   const storageKey = getDraftStorageKey(moduleKey);
   if (!storageKey) return;
 
@@ -22448,7 +22813,8 @@ function persistDraft(moduleKey, draft, isDirty) {
 
     localStorage.setItem(storageKey, JSON.stringify({
       savedAt: new Date().toISOString(),
-      draft: structuredCloneSafe(draft)
+      draft: structuredCloneSafe(draft),
+      editingId: String(editingId || '')
     }));
   } catch (error) {
     console.warn(`[Drafts] Could not persist ${moduleKey} draft:`, error);
@@ -22492,11 +22858,11 @@ function isCreditNoteDraftDirty(draft = {}) {
 }
 
 function persistGrvDraftSnapshot(draft = appState.grv.draftReceipt) {
-  persistDraft('grv', draft, isGrvDraftDirty(draft));
+  persistDraft('grv', draft, isGrvDraftDirty(draft), appState.grv.editingReceiptId || '');
 }
 
 function persistCreditNoteDraftSnapshot(draft = appState.creditNotes.draftNote) {
-  persistDraft('credit-note', draft, isCreditNoteDraftDirty(draft));
+  persistDraft('credit-note', draft, isCreditNoteDraftDirty(draft), appState.creditNotes.editingNoteId || '');
 }
 
 function parseMenuImportRows(text, fileName = '') {
@@ -23306,35 +23672,6 @@ function loadImageForCanvas(src = '') {
     image.onerror = () => reject(new Error('Could not load that background image.'));
     image.src = src;
   });
-}
-
-function toggleTheme() {
-  setTheme(appState.theme === 'dark' ? 'light' : 'dark');
-}
-
-function setTheme(theme) {
-  appState.theme = theme === 'dark' ? 'dark' : 'light';
-  applyTheme(appState.theme);
-  applyRestaurantTheme(appState.settings?.draft || appState.settings?.values || {});
-
-  try {
-    localStorage.setItem(THEME_STORAGE_KEY, appState.theme);
-  } catch (error) {
-    console.warn('[Theme] Could not persist theme preference:', error);
-  }
-
-  renderApp();
-}
-
-function getInitialTheme() {
-  try {
-    const storedTheme = localStorage.getItem(THEME_STORAGE_KEY);
-    if (storedTheme === 'dark' || storedTheme === 'light') return storedTheme;
-  } catch (error) {
-    console.warn('[Theme] Could not read theme preference:', error);
-  }
-
-  return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
 }
 
 function applyTheme(theme) {

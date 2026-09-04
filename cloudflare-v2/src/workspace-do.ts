@@ -12,6 +12,8 @@ import {
 import type { Env } from './types';
 import { dispatchWorkspaceRoute } from './legacy/index';
 import { dispatchYocoV2WorkspaceRoute } from './modules/yoco-engine-v2/route-dispatch';
+import { dispatchXeroWorkspaceRoute } from './modules/xero-engine/route-dispatch';
+import { dispatchDriveWorkspaceRoute } from './modules/drive-engine/route-dispatch';
 import { getEffectRuntime } from './modules/yoco-engine-v2/effect-gate';
 import {
   ADJUSTMENT_LINES_INDEX_SCHEMA_REPAIR,
@@ -27,6 +29,14 @@ import {
   YOCO_V2_VAT_SNAPSHOT_SCHEMA_REPAIR,
   YOCO_V2_VAT_SNAPSHOT_SCHEMA_REPAIR_ID,
 } from './modules/yoco-engine-v2/schema-repair';
+import {
+  XERO_V2_SETTINGS_SCHEMA_REPAIR,
+  XERO_V2_SETTINGS_SCHEMA_REPAIR_ID,
+} from './modules/xero-engine/schema-repair';
+import {
+  LOW_STOCK_ALERT_STATE_SCHEMA_REPAIR,
+  LOW_STOCK_ALERT_STATE_SCHEMA_REPAIR_ID,
+} from './legacy/low-stock-schema-repair';
 import type { Env as LegacyEnv, AuthContext as LegacyAuth } from './legacy/types';
 
 // Backfill for stock_items.name_key (see migration 38's own comment in tenant-migrations.ts for
@@ -157,6 +167,36 @@ export class WorkspaceDO extends DurableObject<Env> {
     } catch (cause) {
       console.error('[WorkspaceDO] migrate() threw despite its own internal handling — swallowing to keep the DO serving', cause);
     }
+  }
+
+  // Only ever called for resource === 'migrate-import' — the one-time provisioning request fired
+  // by provisionWorkspaceTenant (index.ts) right after a brand-new workspace is created. migrate()
+  // deliberately applies at most one pending migration per invocation everywhere else (see its own
+  // comment: a DORMANT tenant with ACCUMULATED DATA catching up on a long backlog at once is what
+  // exhausted a workspace's daily Durable Objects row-read quota in the 2026-08-27 incident). A
+  // just-created workspace has no data yet, so even running its entire migration backlog here is
+  // cheap DDL with nothing to scan — but leaving it to that same one-per-request throttle meant a
+  // newly onboarded client's very first dashboard load 500'd on every report that happened to touch
+  // a table/column past whatever migration index their first handful of requests had reached.
+  // Observed live, 2026-09-04: WS-sausage-saloon-eastgate-00c479's very first reports/stock-control
+  // and reports/sales-financial calls both failed this way. Looping migrate() itself (rather than
+  // duplicating its logic) is safe because it's idempotent per call and its in-memory
+  // migrationSettledInMemory/migrationSuspendedUntilMs flags naturally end the loop the moment the
+  // tenant is fully caught up or a step fails and backs off.
+  private ensureFullyMigrated(): void {
+    for (let i = 0; i < TENANT_MIGRATIONS.length + 5; i++) {
+      const before = this.readSchemaVersion();
+      this.ensureMigrated();
+      const after = this.readSchemaVersion();
+      if (after <= before) break;
+    }
+  }
+
+  private readSchemaVersion(): number {
+    const row = this.state.storage.sql.exec(`SELECT version FROM _kcp_schema WHERE id = 1`).toArray()[0] as
+      | { version?: number }
+      | undefined;
+    return Number(row?.version || 0);
   }
 
   private migrate(storage: DurableObjectStorage): void {
@@ -340,21 +380,36 @@ export class WorkspaceDO extends DurableObject<Env> {
            applied_at TEXT NOT NULL
          )`
       );
-      const repairApplied = sql.exec(
-        `SELECT repair_id FROM _kcp_runtime_repairs WHERE repair_id = ?1`,
-        YOCO_V2_RUNTIME_SCHEMA_REPAIR_ID,
-      ).toArray()[0];
-      if (!repairApplied) {
-        markInProgress();
-        storage.transactionSync(() => {
-          this.db.execScript(YOCO_V2_RUNTIME_SCHEMA_REPAIR);
-          sql.exec(
-            `INSERT OR REPLACE INTO _kcp_runtime_repairs (repair_id, applied_at)
-             VALUES (?1, datetime('now'))`,
-            YOCO_V2_RUNTIME_SCHEMA_REPAIR_ID,
-          );
-        });
-      }
+      // Each repair below used to run unguarded: if one threw (typically "no such table"/"no such
+      // column" because a tenant hasn't organically migrated far enough yet for THAT repair's own
+      // prerequisite to exist — e.g. a brand-new workspace still early in the TENANT_MIGRATIONS
+      // catch-up), migrate()'s outer try/catch swallowed it, but that also skipped every LATER
+      // repair in this list for the rest of THIS invocation. Live incident 2026-09-04: a newly
+      // onboarded workspace 500'd on reports/stock-control ("no such table: low_stock_alert_state")
+      // because an earlier repair in this list threw first, never reaching that one. Running each
+      // through this helper isolates failures per-repair — one repair not being ready yet no longer
+      // blocks the others, and the failed one simply retries on the tenant's next request (its
+      // marker is only recorded on success).
+      const runRepair = (repairId: string, repairSql: string) => {
+        const applied = sql.exec(
+          `SELECT repair_id FROM _kcp_runtime_repairs WHERE repair_id = ?1`,
+          repairId,
+        ).toArray()[0];
+        if (applied) return;
+        try {
+          markInProgress();
+          storage.transactionSync(() => {
+            this.db.execScript(repairSql);
+            sql.exec(
+              `INSERT OR REPLACE INTO _kcp_runtime_repairs (repair_id, applied_at) VALUES (?1, datetime('now'))`,
+              repairId,
+            );
+          });
+        } catch (cause) {
+          console.error(`[WorkspaceDO] runtime repair ${repairId} failed — will retry next request`, cause);
+        }
+      };
+      runRepair(YOCO_V2_RUNTIME_SCHEMA_REPAIR_ID, YOCO_V2_RUNTIME_SCHEMA_REPAIR);
 
       // Kept as a SEPARATE, small, independently-tracked repair from the block above rather than
       // appended to it — applying it must not require re-running that entire historical blob
@@ -362,21 +417,7 @@ export class WorkspaceDO extends DurableObject<Env> {
       // Object's CPU time limit in production for a tenant with several days of accumulated data,
       // putting it into a repeating crash loop. See YOCO_V2_VAT_SNAPSHOT_SCHEMA_REPAIR's own
       // comment for the incident this fixes.
-      const vatSnapshotRepairApplied = sql.exec(
-        `SELECT repair_id FROM _kcp_runtime_repairs WHERE repair_id = ?1`,
-        YOCO_V2_VAT_SNAPSHOT_SCHEMA_REPAIR_ID,
-      ).toArray()[0];
-      if (!vatSnapshotRepairApplied) {
-        markInProgress();
-        storage.transactionSync(() => {
-          this.db.execScript(YOCO_V2_VAT_SNAPSHOT_SCHEMA_REPAIR);
-          sql.exec(
-            `INSERT OR REPLACE INTO _kcp_runtime_repairs (repair_id, applied_at)
-             VALUES (?1, datetime('now'))`,
-            YOCO_V2_VAT_SNAPSHOT_SCHEMA_REPAIR_ID,
-          );
-        });
-      }
+      runRepair(YOCO_V2_VAT_SNAPSHOT_SCHEMA_REPAIR_ID, YOCO_V2_VAT_SNAPSHOT_SCHEMA_REPAIR);
 
       // Hot-path indexes + stock_items.name_key. Applied as a repair, NOT left to migrations 37-39,
       // because a tenant whose _kcp_schema.version drifted ahead of TENANT_MIGRATIONS.length skips
@@ -384,54 +425,15 @@ export class WorkspaceDO extends DurableObject<Env> {
       // WS-lellos-trattoria-bee300 workspace is on version 44 against 40 migrations. Without this,
       // saveStockItem's `WHERE name_key = ?` would fail with "no such column" on every save there.
       // Must run BEFORE the name_key backfill below, which no-ops while the column is absent.
-      const hotPathRepairApplied = sql.exec(
-        `SELECT repair_id FROM _kcp_runtime_repairs WHERE repair_id = ?1`,
-        HOT_PATH_INDEX_SCHEMA_REPAIR_ID,
-      ).toArray()[0];
-      if (!hotPathRepairApplied) {
-        markInProgress();
-        storage.transactionSync(() => {
-          this.db.execScript(HOT_PATH_INDEX_SCHEMA_REPAIR);
-          sql.exec(
-            `INSERT OR REPLACE INTO _kcp_runtime_repairs (repair_id, applied_at) VALUES (?1, datetime('now'))`,
-            HOT_PATH_INDEX_SCHEMA_REPAIR_ID,
-          );
-        });
-      }
+      runRepair(HOT_PATH_INDEX_SCHEMA_REPAIR_ID, HOT_PATH_INDEX_SCHEMA_REPAIR);
 
       // Same drift problem, for the reconciliation index (migration 40) and the
       // stock_item_latest_purchase table (migration 41), both added 2026-08-28. Must run BEFORE
       // the stock_item_latest_purchase backfill below, which no-ops while the table is absent.
-      const reconciliationAndPurchaseSummaryRepairApplied = sql.exec(
-        `SELECT repair_id FROM _kcp_runtime_repairs WHERE repair_id = ?1`,
-        RECONCILIATION_AND_PURCHASE_SUMMARY_SCHEMA_REPAIR_ID,
-      ).toArray()[0];
-      if (!reconciliationAndPurchaseSummaryRepairApplied) {
-        markInProgress();
-        storage.transactionSync(() => {
-          this.db.execScript(RECONCILIATION_AND_PURCHASE_SUMMARY_SCHEMA_REPAIR);
-          sql.exec(
-            `INSERT OR REPLACE INTO _kcp_runtime_repairs (repair_id, applied_at) VALUES (?1, datetime('now'))`,
-            RECONCILIATION_AND_PURCHASE_SUMMARY_SCHEMA_REPAIR_ID,
-          );
-        });
-      }
+      runRepair(RECONCILIATION_AND_PURCHASE_SUMMARY_SCHEMA_REPAIR_ID, RECONCILIATION_AND_PURCHASE_SUMMARY_SCHEMA_REPAIR);
 
       // Same drift problem, for the adjustment_lines/adjustments indexes (migration 42, 2026-08-28).
-      const adjustmentLinesIndexRepairApplied = sql.exec(
-        `SELECT repair_id FROM _kcp_runtime_repairs WHERE repair_id = ?1`,
-        ADJUSTMENT_LINES_INDEX_SCHEMA_REPAIR_ID,
-      ).toArray()[0];
-      if (!adjustmentLinesIndexRepairApplied) {
-        markInProgress();
-        storage.transactionSync(() => {
-          this.db.execScript(ADJUSTMENT_LINES_INDEX_SCHEMA_REPAIR);
-          sql.exec(
-            `INSERT OR REPLACE INTO _kcp_runtime_repairs (repair_id, applied_at) VALUES (?1, datetime('now'))`,
-            ADJUSTMENT_LINES_INDEX_SCHEMA_REPAIR_ID,
-          );
-        });
-      }
+      runRepair(ADJUSTMENT_LINES_INDEX_SCHEMA_REPAIR_ID, ADJUSTMENT_LINES_INDEX_SCHEMA_REPAIR);
 
       // Same drift problem, for the second half of migration 33 that YOCO_V2_VAT_SNAPSHOT_SCHEMA_REPAIR
       // deliberately left out (yoco_v2_reconciliation_findings.last_seen_at/last_run_id/occurrence_count
@@ -439,20 +441,18 @@ export class WorkspaceDO extends DurableObject<Env> {
       // closes. Without it, a drifted tenant's reconciliation run fails outright on its first finding,
       // silently disabling the backstop that resolves an order left unwritten by the
       // order.updated/order.completed "not final yet" skip path.
-      const reconciliationFindingsColumnsRepairApplied = sql.exec(
-        `SELECT repair_id FROM _kcp_runtime_repairs WHERE repair_id = ?1`,
-        YOCO_V2_RECONCILIATION_FINDINGS_COLUMNS_SCHEMA_REPAIR_ID,
-      ).toArray()[0];
-      if (!reconciliationFindingsColumnsRepairApplied) {
-        markInProgress();
-        storage.transactionSync(() => {
-          this.db.execScript(YOCO_V2_RECONCILIATION_FINDINGS_COLUMNS_SCHEMA_REPAIR);
-          sql.exec(
-            `INSERT OR REPLACE INTO _kcp_runtime_repairs (repair_id, applied_at) VALUES (?1, datetime('now'))`,
-            YOCO_V2_RECONCILIATION_FINDINGS_COLUMNS_SCHEMA_REPAIR_ID,
-          );
-        });
-      }
+      runRepair(YOCO_V2_RECONCILIATION_FINDINGS_COLUMNS_SCHEMA_REPAIR_ID, YOCO_V2_RECONCILIATION_FINDINGS_COLUMNS_SCHEMA_REPAIR);
+
+      // Same drift problem again, for the xero_sync_settings/suppliers columns added by Xero
+      // migrations 46 and 49 (2026-09-01) — see XERO_V2_SETTINGS_SCHEMA_REPAIR's own comment for
+      // the live "no such column" 500 on POST xero/settings this fixes.
+      runRepair(XERO_V2_SETTINGS_SCHEMA_REPAIR_ID, XERO_V2_SETTINGS_SCHEMA_REPAIR);
+
+      // Same drift problem again, for low_stock_alert_state (migration 31, plus its acknowledged/
+      // acknowledged_at/acknowledged_by columns from migration 56) — see
+      // LOW_STOCK_ALERT_STATE_SCHEMA_REPAIR's own comment for the live "no such column: is_active"
+      // 500 on POST notifications/low-stock-ack(-all) this fixes.
+      runRepair(LOW_STOCK_ALERT_STATE_SCHEMA_REPAIR_ID, LOW_STOCK_ALERT_STATE_SCHEMA_REPAIR);
 
       // Bounded, resumable backfill for stock_items.name_key — see its own constants' comment
       // above for the 2026-08-28 incident this replaced. Guarded by a persisted repair marker
@@ -590,6 +590,28 @@ export class WorkspaceDO extends DurableObject<Env> {
     this.ensureMigrated();
     const workspaceId = request.headers.get('x-kcp-workspace') || '';
     const resource = request.headers.get('x-kcp-resource') || new URL(request.url).pathname;
+
+    // provisionWorkspaceTenant's one-time bootstrap call for a brand-new workspace — see
+    // ensureFullyMigrated()'s own comment for why this gets the full backlog instead of the usual
+    // one-migration-per-request throttle.
+    if (resource === 'migrate-import') this.ensureFullyMigrated();
+
+    // Manual escape hatch for a workspace that's ALREADY stuck mid-catch-up (e.g. one onboarded
+    // before ensureFullyMigrated() existed, or one whose migrate-import call landed before a
+    // migration was appended). postAdminWorkspaceMigrationRetry (routes.ts) only clears a stuck
+    // backoff — it doesn't itself advance anything — so an admin still needed to trigger dozens of
+    // ordinary requests to walk the tenant through its backlog one migration at a time. This runs
+    // the same full-catchup loop on demand instead. Safe to call on a tenant with real data too:
+    // each step is still exactly one migration (identical cost to the normal lazy path), just
+    // requested back-to-back instead of spread across a user's incoming traffic.
+    if (resource === 'admin-migrate-full-catchup') {
+      const before = this.readSchemaVersion();
+      this.ensureFullyMigrated();
+      const after = this.readSchemaVersion();
+      return new Response(JSON.stringify({ ok: true, versionBefore: before, versionAfter: after, target: TENANT_MIGRATIONS.length }), {
+        headers: { 'content-type': 'application/json' }
+      });
+    }
 
     // Diagnostic (2026-08-28): which workspace(s) actually account for the account's total SQL
     // storage. `databaseSize` is a real, cheap, synchronous property of this DO's own SQLite
@@ -745,8 +767,40 @@ export class WorkspaceDO extends DurableObject<Env> {
     const v2Response = await dispatchYocoV2WorkspaceRoute(request, tenantEnv, auth, workspaceId, resource);
     if (v2Response) return v2Response;
 
-    // Non-Yoco workspace routes still use the shared tenant dispatcher. Yoco webhook, queue,
-    // reconciliation, sale, and refund effects are handled exclusively by the V2 dispatcher above.
+    // Xero routes (connection/OAuth, settings, item/invoice push) are likewise isolated from the
+    // legacy dispatcher — see modules/xero-engine/route-dispatch.ts. Wrapped in its own try/catch
+    // (unlike the V2/legacy dispatchers above/below) because a tenant whose migrations have
+    // drifted can still throw a raw "no such column" SQLite error here even after
+    // XERO_V2_SETTINGS_SCHEMA_REPAIR — e.g. a table this repair doesn't cover, or a repair that
+    // hasn't run yet on this exact request. Surface it as a real JSON error instead of a bare,
+    // bodyless 500 that the frontend can't explain to the user.
+    try {
+      const xeroResponse = await dispatchXeroWorkspaceRoute(request, tenantEnv, auth, workspaceId, resource);
+      if (xeroResponse) return xeroResponse;
+    } catch (err) {
+      return new Response(
+        JSON.stringify({ ok: false, error: 'Xero request failed. If this persists, contact support.', detail: String((err as Error)?.message || err) }),
+        { status: 500, headers: { 'content-type': 'application/json' } },
+      );
+    }
+
+    // Google Drive routes (connection/OAuth, settings, GRV/Credit Note PDF push, KCP Assistant
+    // OCR) are likewise isolated from the legacy dispatcher — see
+    // modules/drive-engine/route-dispatch.ts. Same defensive try/catch as the Xero dispatch above,
+    // for the same reason (a drifted tenant migration can still throw a raw SQLite error here).
+    try {
+      const driveResponse = await dispatchDriveWorkspaceRoute(request, tenantEnv, auth, workspaceId, resource);
+      if (driveResponse) return driveResponse;
+    } catch (err) {
+      return new Response(
+        JSON.stringify({ ok: false, error: 'Google Drive request failed. If this persists, contact support.', detail: String((err as Error)?.message || err) }),
+        { status: 500, headers: { 'content-type': 'application/json' } },
+      );
+    }
+
+    // Non-Yoco/Xero/Drive workspace routes still use the shared tenant dispatcher. Yoco webhook,
+    // queue, reconciliation, sale, and refund effects are handled exclusively by the V2 dispatcher
+    // above.
     return dispatchWorkspaceRoute(request, tenantEnv, auth, workspaceId, resource);
   }
 }

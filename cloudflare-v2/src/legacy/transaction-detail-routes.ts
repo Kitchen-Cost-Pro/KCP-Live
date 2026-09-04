@@ -13,6 +13,7 @@ import {
   type TransactionEntityType,
 } from "./transaction-references";
 import { buildGrvRawLinePool, takeGrvRawLine } from "./reporting-phase21-routes";
+import { getWorkspaceEffectiveVatRate, isSupplierVatRegistered, applyGrvTransportAndDiscount } from "./inventory-costing";
 
 type Row = Record<string, unknown>;
 
@@ -319,7 +320,7 @@ export async function loadGrvDetail(env: Env, workspaceId: string, entityId: str
   // always reported the converted base quantity as "Received Qty" instead of what was actually
   // purchased).
   const rawLinePool = buildGrvRawLinePool(row.raw_json);
-  const lineItems = (linesResult.results || []).map((line) => {
+  const stockLineItems = (linesResult.results || []).map((line) => {
     const quantity = numberValue(line.quantity);
     const rawLine = takeGrvRawLine(rawLinePool, text(line.stock_item_id), text(line.location_id), quantity);
     const packSize = rawNumber(rawLine, ["packSize", "pack_size"], 1) || 1;
@@ -336,10 +337,61 @@ export async function loadGrvDetail(env: Env, workspaceId: string, entityId: str
       baseQuantity: quantity,
       baseUom: text(line.unit),
       conversionFactor: packSize,
-      unitCostExVat: numberValue(line.unit_price), totalExVat, vat,
+      // grv_lines.unit_price is VAT-INCLUSIVE for a non-registered workspace (finalizeReceivedCost
+      // folds the non-reclaimable VAT into it — see GRVEntry.js), not ex-VAT — deriving from the
+      // already-correct total_ex/quantity avoids showing an inclusive figure under an "Ex VAT"
+      // column header (previously a confirmed, confusing display bug: unit_price and total_ex
+      // visibly disagreed on the same row for a VATable item on a non-registered workspace).
+      unitCostExVat: quantity > 0 ? totalExVat / quantity : numberValue(line.unit_price), totalExVat, vat,
       totalInclVat: numberValue(line.total_inc, totalExVat + vat),
     };
   });
+
+  // Transport/discount are GRV-header fields, not their own grv_lines rows, so they were
+  // previously invisible in this drawer entirely — the Line Items list silently omitted real money
+  // that the header summary cards' total DID include, making the two disagree with no explanation.
+  // Recomputed here (not read from a stored column, since only the pre-discount subtotal columns
+  // exist) using the exact same VAT-aware helpers postGoodsReceipt itself uses, so these synthetic
+  // rows reconcile exactly with the stored header totals.
+  const transportEx = numberValue(row.transport_ex);
+  const discountEx = numberValue(row.discount_ex);
+  const extraLineItems: typeof stockLineItems = [];
+  if (transportEx > 0 || discountEx > 0) {
+    const [supplierRegistered, vatRate] = await Promise.all([
+      isSupplierVatRegistered(env, workspaceId, text(row.supplier_id)),
+      getWorkspaceEffectiveVatRate(env, workspaceId),
+    ]);
+    // The stock lines' own totalExVat/vat are already correct as saved (postGoodsReceipt already
+    // resolved the item/workspace/supplier VAT gates at save time) — no need to reconstruct or
+    // re-derive them, just sum what's already trusted as the "pre transport/discount" base.
+    const itemTotals = stockLineItems.reduce(
+      (sum, line) => ({
+        totalEx: sum.totalEx + line.totalExVat,
+        totalVat: sum.totalVat + line.vat,
+        taxableEx: sum.taxableEx + (line.vat > 0 ? line.totalExVat : 0),
+        totalInc: sum.totalInc + line.totalInclVat,
+      }),
+      { totalEx: 0, totalVat: 0, taxableEx: 0, totalInc: 0 },
+    );
+    const combined = applyGrvTransportAndDiscount(itemTotals, { vatRate, supplierIsVatRegistered: supplierRegistered, transportEx, discountEx });
+    if (transportEx > 0) {
+      extraLineItems.push({
+        id: "transport", itemId: "", itemName: "Transport", category: "Transport", locationId: "", locationName: "",
+        receivedUomQuantity: 1, receivedUom: "", baseQuantity: 1, baseUom: "", conversionFactor: 1,
+        unitCostExVat: combined.transportEx, totalExVat: combined.transportEx, vat: combined.transportVat,
+        totalInclVat: combined.transportInc,
+      });
+    }
+    if (discountEx > 0) {
+      extraLineItems.push({
+        id: "discount", itemId: "", itemName: "Discount", category: "Discount", locationId: "", locationName: "",
+        receivedUomQuantity: 1, receivedUom: "", baseQuantity: 1, baseUom: "", conversionFactor: 1,
+        unitCostExVat: combined.discountExImpact, totalExVat: combined.discountExImpact,
+        vat: combined.discountVatImpact, totalInclVat: combined.discountIncImpact,
+      });
+    }
+  }
+  const lineItems = [...stockLineItems, ...extraLineItems];
   const actor = await attachActor(env, workspaceId, text(row.created_by));
   const purchaseOrderId = text(row.purchase_order_id);
   return {
@@ -382,10 +434,16 @@ async function loadCreditNoteDetail(env: Env, workspaceId: string, entityId: str
   if (!row) return null;
   const raw = objectValue(jsonParse(row.raw_json));
   const rawLines = arrayValue(raw.lines || raw.items).map(objectValue);
-  const vatRate = rawNumber(raw, ["vatRate", "vat_rate"], 15);
+  // Must match getCreditNotesReport's VAT gate exactly (reporting-phase21-routes.ts): the
+  // credit_notes/credit_note_lines tables never store a VAT amount, so the old
+  // rawLine.vat ?? totalExVat*vatRate/100 fallback was ALWAYS taken (never actually a fallback),
+  // applying a flat 15% to every line regardless of the item's vat_enabled or the supplier's
+  // VAT-registration status. Recompute the same way the report does instead of trusting raw_json.
+  const vatRate = await getWorkspaceEffectiveVatRate(env, workspaceId);
+  const supplierIsVatRegistered = await isSupplierVatRegistered(env, workspaceId, text(row.supplier_id));
   const financialOnly = raw.financialOnly === true || raw.financial_only === true;
   const linesResult = await env.DB.prepare(
-    `SELECT cnl.id, cnl.stock_item_id, si.name AS item_name, si.category, cnl.location_id,
+    `SELECT cnl.id, cnl.stock_item_id, si.name AS item_name, si.category, si.vat_enabled, cnl.location_id,
             COALESCE(l.display_name, l.name) AS location_name,
             cnl.quantity, cnl.unit, cnl.unit_cost, cnl.total_ex
        FROM credit_note_lines cnl
@@ -397,7 +455,8 @@ async function loadCreditNoteDetail(env: Env, workspaceId: string, entityId: str
     const rawLine = rawLines.find((entry) => text(entry.id || entry.lineId) === text(line.id)
       || text(entry.stockItemId || entry.itemId) === text(line.stock_item_id)) || {};
     const totalExVat = numberValue(line.total_ex, numberValue(line.quantity) * numberValue(line.unit_cost));
-    const vat = rawNumber(rawLine, ["vat", "totalVat", "total_vat"], totalExVat * vatRate / 100);
+    const lineIsVatable = supplierIsVatRegistered && numberValue(line.vat_enabled, 1) !== 0;
+    const vat = lineIsVatable ? totalExVat * vatRate : 0;
     const explicitImpact = rawText(rawLine, ["stockImpact", "stock_impact"]);
     const stockImpact = financialOnly ? "Financial Only"
       : explicitImpact.toLowerCase().includes("remove") ? "Stock Removed"

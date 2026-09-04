@@ -106,7 +106,8 @@ export async function removeWorkspaceMember(workspaceId, member) {
 export async function resendWorkspaceMemberInvite(workspaceId, memberId) {
   const mid = String(memberId || '').trim();
   if (!mid) throw new Error('Member id is required.');
-  await callCloudflareWorkspaceRoute(workspaceId, `members/${encodeURIComponent(mid)}/resend-invite`, { method: 'POST' });
+  const result = await callCloudflareWorkspaceRoute(workspaceId, `members/${encodeURIComponent(mid)}/resend-invite`, { method: 'POST' });
+  return result || { emailSent: true };
 }
 
 export async function saveWorkspaceRole(workspaceId, payload = {}) {

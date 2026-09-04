@@ -15,6 +15,7 @@ export function renderGRVEntry({ state, onGrvFilterChange, onGrvAction = {} } = 
     openDropdown: '',
     overlay: '',
     poQuery: '',
+    receiptQuery: '',
     selectedStockIds: [],
     calendarCursor: '',
     ...grv.filters
@@ -22,7 +23,7 @@ export function renderGRVEntry({ state, onGrvFilterChange, onGrvAction = {} } = 
   const draft = getDraft(grv);
   const vatRate = getVatRate(state);
   const vatRegistered = isWorkspaceVatRegistered(state);
-  const supplierVatRate = getSupplierVatRate(state);
+  const supplierVatRate = getSupplierVatRate(state, draft.supplierId);
   const supplierMatches = getSupplierMatches(state, grv, draft.supplierName || '');
   const convertibleOrders = filterConvertibleOrders(grv.orders || [], filters.poQuery || filters.query || '');
   const stockMatches = getStockMatches(grv.stockItems || [], filters.lineQuery || '', draft.items || []);
@@ -49,6 +50,20 @@ export function renderGRVEntry({ state, onGrvFilterChange, onGrvAction = {} } = 
   }
   view.innerHTML = `
     ${grv.actionError ? renderNotice(grv.actionError, 'error') : ''}
+    ${grv.editingReceiptId ? renderEditingBanner(draft) : ''}
+
+    <div class="grv-pageHeader">
+      <h2 class="grv-pageHeader__title">Goods Received</h2>
+      ${grv.driveOcrEnabled ? `
+      <button type="button" class="grv-recentTrigger" data-grv-open-assistant>
+        ${icon('camera')}
+        <span>Process Invoice with KCP</span>
+      </button>` : ''}
+      <button type="button" class="grv-recentTrigger" data-grv-open-recent>
+        ${icon('history')}
+        <span>Recent GRVs</span>
+      </button>
+    </div>
 
     <div class="grv-frame">
       <div class="grv-layout">
@@ -169,6 +184,8 @@ export function renderGRVEntry({ state, onGrvFilterChange, onGrvAction = {} } = 
 
     ${filters.overlay === 'draft' ? renderDraftDrawer(statusLabel, totals, draft, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes, headerReady, grv.actionStatus, grv.actionError || '', grv.locations || [], filters.openDropdown || '', grv.stockItems || []) : ''}
     ${filters.overlay === 'po' ? renderPurchaseOrderOverlay(convertibleOrders, filters.poQuery || '') : ''}
+    ${filters.overlay === 'assistant' ? renderGrvAssistantOverlay(grv.assistant || {}) : ''}
+    ${filters.overlay === 'recent-receipts' ? renderRecentReceiptsOverlay(grv.receipts || [], filters.receiptQuery || '') : ''}
     ${filters.overlay === 'stock' ? renderStockOverlay(stockMatches, filters.lineQuery || '', headerReady, selectedStockIds) : ''}
     ${filters.overlay === 'calendar' ? renderCustomCalendarOverlay({
       title: 'Select Trade Date',
@@ -193,7 +210,7 @@ export function renderGRVEntry({ state, onGrvFilterChange, onGrvAction = {} } = 
 
 function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, onGrvAction) {
   const vatRegistered = isWorkspaceVatRegistered(state);
-  const supplierVatRate = getSupplierVatRate(state);
+  const supplierVatRate = getSupplierVatRate(state, draft.supplierId);
   const blurActiveDraftField = () => {
     const active = document.activeElement;
     if (!active || !view.contains(active)) return;
@@ -322,6 +339,29 @@ function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, 
       openDropdown: ''
     });
   });
+  view.querySelector('[data-grv-open-recent]')?.addEventListener('click', () => {
+    blurActiveDraftField();
+    onGrvFilterChange?.({
+      overlay: 'recent-receipts',
+      receiptQuery: '',
+      selectedStockIds: [],
+      calendarCursor: '',
+      openDropdown: ''
+    });
+  });
+  view.querySelector('[data-grv-open-assistant]')?.addEventListener('click', () => {
+    blurActiveDraftField();
+    onGrvAction.onOpenAssistant?.();
+  });
+  view.querySelector('[data-grv-assistant-retry]')?.addEventListener('click', () => onGrvAction.onOpenAssistant?.());
+  view.querySelector('[data-grv-assistant-trigger]')?.addEventListener('click', () => {
+    view.querySelector('[data-grv-assistant-input]')?.click();
+  });
+  view.querySelector('[data-grv-assistant-input]')?.addEventListener('change', (event) => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = '';
+    if (file) onGrvAction.onProcessInvoicePhoto?.(file);
+  });
   view.querySelector('[data-grv-open-draft]')?.addEventListener('click', () => {
     blurActiveDraftField();
     onGrvFilterChange?.({ overlay: 'draft', selectedStockIds: [], calendarCursor: '', openDropdown: '' });
@@ -339,6 +379,20 @@ function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, 
   });
   view.querySelector('[data-grv-save]')?.addEventListener('click', () => onGrvAction.onSave?.());
   view.querySelector('[data-grv-toast-close]')?.addEventListener('click', () => onGrvAction.onDismissToast?.());
+  view.querySelector('[data-grv-cancel-edit]')?.addEventListener('click', () => onGrvAction.onCancelEdit?.());
+  view.querySelectorAll('[data-grv-edit-receipt]').forEach((row) => {
+    const openEdit = () => {
+      const receipt = ((state.grv || {}).receipts || []).find((entry) => String(entry.id) === row.dataset.grvEditReceipt);
+      if (receipt) onGrvAction.onEditReceipt?.(receipt);
+    };
+    row.addEventListener('click', openEdit);
+    row.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        openEdit();
+      }
+    });
+  });
   view.querySelector('[data-grv-missing-supplier-confirm]')?.addEventListener('click', () => onGrvAction.onOpenMissingSupplierForm?.());
   view.querySelector('[data-grv-missing-supplier-continue]')?.addEventListener('click', () => onGrvAction.onContinueWithoutSupplier?.());
   view.querySelector('[data-grv-missing-supplier-save]')?.addEventListener('click', () => onGrvAction.onSaveMissingSupplier?.());
@@ -572,6 +626,7 @@ function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, 
         overlay: '',
         poQuery: '',
         lineQuery: '',
+        receiptQuery: '',
         selectedStockIds: [],
         calendarCursor: '',
         openDropdown: ''
@@ -587,6 +642,7 @@ function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, 
         overlay: '',
         poQuery: '',
         lineQuery: '',
+        receiptQuery: '',
         selectedStockIds: [],
         calendarCursor: '',
         openDropdown: ''
@@ -629,8 +685,45 @@ function renderDraftTable(draft, vatRate, vatRegistered, supplierVatRate, select
       </thead>
       <tbody>
         ${(draft.items || []).map((line, index) => renderDraftRow(line, index, draft.pricesIncludeVat, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes, splitByLocation, locations, openDropdown, stockItems, draft.locationId)).join('')}
+        ${renderTransportRow(draft, supplierVatRate)}
       </tbody>
     </table>
+  `;
+}
+
+// Transport (set via the "Transport (Ex)" field in the Adjustments card) is carried on the draft
+// as a header-level cost, not a stock line — it has no stockItemId/qty/UOM, so it's rendered as a
+// read-only trailing row rather than through renderDraftRow. It's VATable at the standard rate
+// like any other GRV line (see calculateDraftTotals, which already folds it into the taxable
+// base), never removable here — edit or clear it via the Adjustments field instead.
+function renderTransportRow(draft, supplierVatRate) {
+  const transportEx = Number(draft.transportEx || 0) || 0;
+  if (!transportEx) return '';
+  const transportVat = transportEx * supplierVatRate;
+  return `
+    <tr class="grv-lineRow grv-lineRow--transport">
+      <td class="grv-lineCheck"></td>
+      <td>
+        <div class="grv-itemCell">
+          <strong>Transport</strong>
+          <span>ADJUSTMENT · VAT on</span>
+        </div>
+      </td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td></td>
+      <td>
+        <div class="grv-tableStat grv-tableStat--price">
+          <strong>${formatCurrency(transportVat)}</strong>
+          <span>line VAT</span>
+        </div>
+      </td>
+      <td class="grv-totalCell">${formatCurrency(transportEx)}</td>
+      <td class="grv-actionsCell"></td>
+    </tr>
   `;
 }
 
@@ -1167,6 +1260,46 @@ function renderPurchaseOrderOverlay(orders, query) {
   });
 }
 
+function renderGrvAssistantOverlay(assistant = {}) {
+  const status = assistant.status || 'idle';
+  const isProcessing = status === 'processing';
+  const body = isProcessing
+    ? '<div class="grv-pickerEmpty">Reading that invoice and matching it to your stock items...</div>'
+    : status === 'error'
+      ? `
+        <div class="grv-pickerEmpty">${escapeHtml(assistant.error || 'KCP Assistant could not read that invoice.')}</div>
+        <button type="button" class="grv-add-btn" data-grv-assistant-retry>Try Again</button>
+      `
+      : `
+        <div class="grv-assistantUpload">
+          <input type="file" accept="image/*,application/pdf" capture="environment" hidden data-grv-assistant-input />
+          <button type="button" class="grv-add-btn grv-add-btn--success" data-grv-assistant-trigger>
+            ${icon('camera')}
+            <span>Take Photo or Choose File</span>
+          </button>
+          <p class="grv-muted">Photograph or upload the supplier invoice — KCP will read it, match items to your stock list, and archive a copy to Google Drive.</p>
+        </div>
+      `;
+  return `
+    <div class="grv-overlay" data-grv-overlay>
+      <div class="grv-overlayCard" role="dialog" aria-modal="true">
+        <div class="grv-overlayHeader">
+          <div>
+            <h3>Process Invoice with KCP</h3>
+            <p>${isProcessing ? 'This can take a moment on a busy photo.' : 'Pre-fill this GRV straight from a photo of the invoice.'}</p>
+          </div>
+          <button type="button" class="grv-removeBtn" data-grv-overlay-close aria-label="Close overlay" ${isProcessing ? 'disabled' : ''}>
+            ${icon('x')}
+          </button>
+        </div>
+        <div class="grv-overlayList" data-scroll-key="grv-assistant-upload">
+          ${body}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function renderStockOverlay(stockItems, query, headerReady, selectedStockIds) {
   const selectedCount = selectedStockIds.size;
   return `
@@ -1533,6 +1666,52 @@ function renderToast(toast) {
   `;
 }
 
+function renderEditingBanner(draft) {
+  const label = draft.grvNumber || draft.invoice || 'this GRV';
+  return `
+    <div class="grv-notice grv-notice--editing" style="border-color: rgba(96, 165, 250, 0.3); background: rgba(30, 58, 138, 0.22); color: #bfdbfe;">
+      <span>Editing GRV ${escapeHtml(label)} — saving will adjust stock by the difference from what was originally received.</span>
+      <button type="button" class="grv-removeBtn" data-grv-cancel-edit aria-label="Cancel edit">${icon('x')}</button>
+    </div>
+  `;
+}
+
+function filterReceiptsForEdit(receipts = [], query = '') {
+  const term = String(query || '').trim().toLowerCase();
+  if (!term) return receipts;
+  return receipts.filter((receipt) => [
+    receipt.grvNumber,
+    receipt.invoice,
+    receipt.supplierName,
+    receipt.supplier,
+    receipt.poNumber
+  ].some((value) => String(value || '').toLowerCase().includes(term)));
+}
+
+function renderRecentReceiptsOverlay(receipts, query) {
+  const matches = filterReceiptsForEdit(receipts, query).slice(0, 100);
+  return renderOverlay({
+    title: 'Recent GRVs',
+    subtitle: 'Search and select a GRV to edit',
+    filterKey: 'receiptQuery',
+    value: query,
+    placeholder: 'Search GRV #, invoice, or supplier...',
+    content: matches.length
+      ? matches.map((receipt) => `
+          <button type="button" class="grv-pickerItem" data-grv-edit-receipt="${escapeAttribute(receipt.id)}">
+            <div>
+              <strong>${escapeHtml(receipt.grvNumber || receipt.invoice || 'GRV')}</strong>
+              <span>${escapeHtml(receipt.supplierName || 'Manual Receipt')} · ${escapeHtml(formatDisplayDate(receipt.date || ''))}</span>
+            </div>
+            <em class="grv-pickerBadge neutral">${escapeHtml(formatCurrency(receipt.totalEx))}</em>
+          </button>
+        `).join('')
+      : (receipts.length
+          ? '<div class="grv-pickerEmpty">No GRVs match this search.</div>'
+          : '<div class="grv-pickerEmpty">No GRVs received yet.</div>')
+  });
+}
+
 function renderGrvLocationPicker(draft, locations = [], openDropdown = '', query = '') {
   const locationId = String(draft.locationId || '');
   const options = locations
@@ -1775,10 +1954,14 @@ function getVatRate(state) {
   // NOTE: this previously read state.source?.settings, but appState.source is never assigned
   // anywhere in the app (it stays null permanently) — so this was silently, permanently hardcoded
   // to 15% regardless of the workspace's actual configured VAT rate. Read the real, live settings
-  // instead, and respect VAT-registration status: a non-registered workspace never shows VAT on
-  // any live entry-form preview (GRV pack prices, line VAT, totals).
+  // instead.
+  //
+  // Deliberately independent of vatRegistered now — same rationale as getSupplierVatRate just
+  // below: this feeds calculateDisplayedLinePrice/calculateDisplayedPackPrice's "prices include
+  // VAT" preview math, which must keep showing the real VAT-inclusive pack price for a VATable
+  // item even on a non-registered workspace (they still pay that VAT to the supplier). Whether a
+  // line carries VAT at all is decided per line by vatEnabled, not by zeroing this for everyone.
   const settings = state.settings?.draft || state.settings?.values || {};
-  if (settings.vatRegistered === false) return 0;
   return (Number(settings.vatRate ?? settings.vatPercentage ?? 15) || 15) / 100;
 }
 
@@ -1787,12 +1970,34 @@ function isWorkspaceVatRegistered(state) {
   return settings.vatRegistered !== false;
 }
 
+function findGrvSupplierById(state, supplierId) {
+  if (!supplierId) return null;
+  const id = String(supplierId);
+  const fromGrv = (state.grv?.suppliers || []).find((supplier) => String(supplier.id) === id);
+  if (fromGrv) return fromGrv;
+  return (state.suppliers?.items || []).find((supplier) => String(supplier.id) === id) || null;
+}
+
+// A non-VAT-registered SUPPLIER (a different concept from isWorkspaceVatRegistered, which is about
+// whether THIS business can reclaim VAT) never charges VAT on anything they sell, regardless of
+// the item — defaults to true (registered) when the supplier isn't found/selected yet, so a fresh
+// draft with no supplier chosen still shows VAT normally.
+function isGrvSupplierVatRegistered(state, supplierId) {
+  const supplier = findGrvSupplierById(state, supplierId);
+  return supplier ? supplier.vatRegistered !== false : true;
+}
+
 // Unlike getVatRate (zeroed above so no VAT ever shows on a non-registered workspace's live
 // previews/totals), this is the real rate a VATable supplier actually charges on their invoice —
 // it must stay non-zero regardless of OUR OWN registration status. A non-registered business still
 // pays that VAT; it just can't reclaim it, so the input VAT becomes a genuine, unrecoverable part
 // of the item's cost (see finalizeReceivedCost below) rather than a separate line it can net off.
-function getSupplierVatRate(state) {
+//
+// EXCEPT when the SUPPLIER itself isn't VAT registered — then they never charged VAT in the first
+// place, so this correctly returns 0, which cascades through calculateDraftTotals/
+// finalizeReceivedCost/calculateDisplayedLinePrice exactly like "no VAT on this purchase at all".
+function getSupplierVatRate(state, supplierId) {
+  if (!isGrvSupplierVatRegistered(state, supplierId)) return 0;
   const settings = state.settings?.draft || state.settings?.values || {};
   return (Number(settings.vatRate ?? settings.vatPercentage ?? 15) || 15) / 100;
 }
@@ -1870,6 +2075,7 @@ function icon(name) {
     calendar: '<path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/>',
     clipboard: '<path d="M9 5h6"/><path d="M9 3h6a2 2 0 0 1 2 2v14H7V5a2 2 0 0 1 2-2Z"/><path d="M9 9h6"/><path d="M9 13h6"/>',
     history: '<path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 3v6h6"/><path d="M12 7v5l3 3"/>',
+    edit: '<path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/>',
     x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>'
   };
   return `

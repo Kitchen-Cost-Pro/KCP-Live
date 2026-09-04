@@ -74,6 +74,23 @@ export async function saveGoodsReceipt(workspaceId, receipt = {}) {
   return { id: result.id || payload.id };
 }
 
+export async function updateGoodsReceipt(workspaceId, grvId, receipt = {}) {
+  const workspaceKey = String(workspaceId || '').trim();
+  if (!workspaceKey) throw new Error('Workspace id is required to update GRV entries.');
+  const receiptId = String(grvId || '').trim();
+  if (!receiptId) throw new Error('A GRV id is required to update it.');
+
+  const payload = normalizeReceiptPayload({ ...receipt, id: receiptId });
+  if (!payload.items.length) throw new Error('Add at least one received stock item.');
+
+  const result = await callCloudflareWorkspaceRoute(workspaceKey, `grvs/${receiptId}`, {
+    method: 'PATCH',
+    payload: { receipt: payload }
+  });
+
+  return { id: result.id || receiptId, version: result.version };
+}
+
 export function normalizeGoodsReceipts(value) {
   if (!value) return [];
   const entries = Array.isArray(value)
@@ -147,6 +164,8 @@ function normalizeReceiptPayload(receipt = {}) {
     splitByLocation: receipt.splitByLocation === true,
     overrideCostPrice: receipt.overrideCostPrice !== false,
     costingMethod: normalizeCostingMethod(receipt.costingMethod || receipt.costing_method),
+    transportEx: Number(receipt.transportEx || 0) || 0,
+    discountEx: Number(receipt.invoiceDiscountEx || receipt.discountEx || 0) || 0,
     items: (receipt.items || [])
       .map((line) => normalizeReceiptLine(line, { defaultLocationId, defaultLocationName }))
       .filter((line) => line.stockItemId && Number(line.receivedQty || 0) > 0)

@@ -140,6 +140,10 @@ export function normalizeSupplier(id, supplier = {}, source = 'Live suppliers', 
     province: text(readField(value, ['province', 'Province', 'State'])),
     postalCode: text(readField(value, ['postalCode', 'Postal_Code', 'Postal Code', 'Postcode', 'Zip'])),
     country: text(readField(value, ['country', 'Country'])),
+    // A non-VAT-registered supplier never charges VAT on anything they sell, regardless of the
+    // item — defaults to true (registered) so existing suppliers see no behavior change until
+    // this is explicitly turned off.
+    vatRegistered: readField(value, ['vatRegistered', 'VatRegistered', 'VAT Registered', 'VAT_Registered'], true) !== false,
     notes: text(readField(value, ['notes', 'Notes', 'Note', 'Comments'])),
     updatedAt: value.updatedAt || value.updated_at || value.modifiedAt || value.createdAt || ''
   };
@@ -168,6 +172,7 @@ function normalizeSupplierPayload(supplier = {}, workspaceKey) {
     province: text(readField(supplier, ['province', 'Province', 'State'])),
     postalCode: text(readField(supplier, ['postalCode', 'Postal_Code', 'Postal Code', 'Postcode', 'Zip'])),
     country: text(readField(supplier, ['country', 'Country'])),
+    vatRegistered: readField(supplier, ['vatRegistered', 'VatRegistered', 'VAT Registered', 'VAT_Registered'], true) !== false,
     notes: text(readField(supplier, ['notes', 'Notes', 'Note', 'Comments']))
   });
 }

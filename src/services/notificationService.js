@@ -13,3 +13,36 @@ export function saveLowStockNotificationSettings(workspaceId, { dispatchTime = '
     }
   });
 }
+
+export function acknowledgeLowStockItem(workspaceId, { itemId, locationId } = {}) {
+  return callCloudflareWorkspaceRoute(workspaceId, 'notifications/low-stock-ack', {
+    method: 'POST',
+    payload: {
+      itemId: String(itemId || ''),
+      locationId: String(locationId || '')
+    }
+  });
+}
+
+export function acknowledgeAllLowStockItems(workspaceId, items = []) {
+  return callCloudflareWorkspaceRoute(workspaceId, 'notifications/low-stock-ack-all', {
+    method: 'POST',
+    payload: {
+      items: Array.isArray(items)
+        ? items
+          .map((item) => ({ itemId: String(item?.itemId || ''), locationId: String(item?.locationId || '') }))
+          .filter((item) => item.itemId && item.locationId)
+        : []
+    }
+  });
+}
+
+export function unacknowledgeLowStockItem(workspaceId, { itemId, locationId } = {}) {
+  return callCloudflareWorkspaceRoute(workspaceId, 'notifications/low-stock-unack', {
+    method: 'POST',
+    payload: {
+      itemId: String(itemId || ''),
+      locationId: String(locationId || '')
+    }
+  });
+}

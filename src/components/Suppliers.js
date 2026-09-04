@@ -83,6 +83,10 @@ function bindSupplierEvents(view, visibleItems, filters, suppliers, onSupplierFi
     const form = view.querySelector('[data-supplier-form]');
     if (!form) return;
     const currentItem = suppliers.editingItem || {};
+    // An UNCHECKED checkbox has no meaningful `.value` to read (it's a fixed static string
+    // regardless of checked state) — must read `.checked` directly, same fix already applied to
+    // StockItems.js's "VAT Enabled" toggle for the identical reason.
+    const vatRegisteredField = form.querySelector('[name="vatRegistered"]');
     onSupplierAction.onSave?.({
       id: form.dataset.supplierId,
       name: form.querySelector('[name="name"]')?.value,
@@ -100,6 +104,7 @@ function bindSupplierEvents(view, visibleItems, filters, suppliers, onSupplierFi
       province: form.querySelector('[name="province"]')?.value ?? currentItem.province ?? '',
       postalCode: form.querySelector('[name="postalCode"]')?.value ?? currentItem.postalCode ?? '',
       country: form.querySelector('[name="country"]')?.value ?? currentItem.country ?? '',
+      vatRegistered: vatRegisteredField ? vatRegisteredField.checked : currentItem.vatRegistered !== false,
       notes: form.querySelector('[name="notes"]')?.value ?? currentItem.notes ?? ''
     });
   };
@@ -160,11 +165,14 @@ function bindSupplierEvents(view, visibleItems, filters, suppliers, onSupplierFi
         onSupplierAction.onDraftChangeSilent?.({ [field.name]: field.value });
       });
     } else {
-      // Selects, checkboxes: change is safe to re-render (no cursor to disrupt)
+      // Selects, checkboxes: change is safe to re-render (no cursor to disrupt). A checkbox's
+      // `.value` is a fixed static string ("on") regardless of checked state, so it must read
+      // `.checked` instead — same footgun already fixed for the final submit read above.
+      const isCheckbox = field.tagName === 'INPUT' && field.type === 'checkbox';
       field.addEventListener('change', () => {
         if (!field.name) return;
         onSupplierAction.onPreserveFocus?.(field);
-        onSupplierAction.onDraftChange?.({ [field.name]: field.value });
+        onSupplierAction.onDraftChange?.({ [field.name]: isCheckbox ? field.checked : field.value });
       });
     }
   });
@@ -410,6 +418,12 @@ function renderSupplierModal(suppliers) {
             help: 'Commercial payment terms agreed with the supplier.'
           })}
           ${renderField('Account Number', 'accountNumber', item.accountNumber, validationErrors.accountNumber)}
+          <label class="suppliersModule__field suppliersModule__field--checkbox" title="A non-VAT-registered supplier never charges VAT on anything they sell, regardless of the item — GRVs, Purchase Orders, and Credit Notes for this supplier will never carry VAT while this is off.">
+            <span class="suppliersModule__checkboxRow">
+              <input type="checkbox" name="vatRegistered" data-supplier-field data-focus-key="supplier-vatRegistered" ${item.vatRegistered === false ? '' : 'checked'} />
+              <span>VAT Registered</span>
+            </span>
+          </label>
           ${renderAddressField(item.address, validationErrors.address)}
         </div>
         <div class="suppliersModule__modalFooter">

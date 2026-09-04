@@ -58,6 +58,16 @@ export interface Env {
   YOCO_V2_METADATA_CACHE_TTL_MS?: string;
   YOCO_V2_AUTH_FAILURE_THRESHOLD?: string;
   YOCO_V2_RATE_LIMIT_PAUSE_FALLBACK_MS?: string;
+
+  XERO_CLIENT_ID?: string;
+  XERO_CLIENT_SECRET?: string;
+  XERO_OAUTH_REDIRECT_URI?: string;
+  XERO_OAUTH_STATE_SECRET?: string;
+  XERO_TOKEN_ENCRYPTION_SECRET?: string;
+  XERO_API_BASE_URL?: string;
+  XERO_DAILY_CALL_CAP?: string;
+  XERO_PER_MINUTE_CALL_CAP?: string;
+  XERO_OAUTH_SCOPES?: string;
 }
 
 /**

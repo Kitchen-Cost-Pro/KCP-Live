@@ -63,6 +63,7 @@
 .categoryStrip,
 .tableFooter,
 .tableFooter > div,
+.tableActions,
 .supplierChartWrap,
 .supplierLegend > div {
   display: flex;
@@ -497,7 +498,7 @@
   width: 100%;
   min-height: 58px;
   display: grid;
-  grid-template-columns: 30px minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 10px;
   border: 0;
@@ -506,17 +507,43 @@
   background: transparent;
   color: var(--dash-text);
   text-align: left;
-  cursor: pointer;
 }
 
 .notificationItem:last-child {
   border-bottom: 0;
 }
 
-.notificationItem:hover,
-.notificationItem:focus-visible {
-  outline: none;
+.notificationItem:hover {
   background: var(--dash-hover);
+}
+
+.notificationItemBody {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.notificationItemBody:hover,
+.notificationItemBody:focus-visible {
+  outline: none;
+}
+
+.notificationItemAck {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+}
+
+.notificationItemAcked {
+  opacity: 0.55;
 }
 
 .notificationItemIcon {
@@ -1503,6 +1530,20 @@
   white-space: nowrap;
 }
 
+.inventoryTable th:first-child,
+.inventoryTable td:first-child {
+  width: 34px;
+  padding-right: 0;
+}
+
+.inventoryTable th:first-child input[type="checkbox"],
+.inventoryTable td:first-child input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--dash-green);
+  cursor: pointer;
+}
+
 .inventoryTable th {
   position: sticky;
   top: 0;
@@ -1589,6 +1630,35 @@
 
 .sortMuted {
   opacity: 0.25;
+}
+
+.tableActions:empty {
+  display: none;
+}
+
+.tableActions {
+  gap: 10px;
+  padding: 10px 18px;
+  border-top: 1px solid var(--dash-border);
+  color: var(--dash-muted);
+  font-family: var(--font-main);
+  font-size: 0.6rem;
+}
+
+.tableActions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 0.6rem;
+  border-color: color-mix(in srgb, var(--dash-amber) 35%, var(--dash-border));
+  color: var(--dash-amber);
+}
+
+.tableActions button:hover {
+  border-color: var(--dash-amber);
+  color: var(--dash-amber);
 }
 
 .tableFooter {

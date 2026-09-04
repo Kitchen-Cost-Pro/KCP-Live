@@ -4,6 +4,15 @@ name = "kcp-api-v2"
 main = "src/index.ts"
 compatibility_date = "2026-05-23"
 
+# Persistent Workers Logs — enabled 2026-08-31 to trace which cron job (low-stock-due,
+# report-schedules-due, yoco-v2 reconciliation-scheduled) is driving the per-15-minute Durable
+# Object read/write spikes seen in the dashboard Metrics tab. The existing console.log lines in
+# index.ts's scheduled() and its per-job handlers become queryable/retained once this is live,
+# instead of only visible via the real-time (no-history) Logs tail. Remove or dial down
+# head_sampling_rate later if log volume/cost becomes a concern once the cause is identified.
+[observability]
+enabled = true
+
 
 # Resolve shared export dependencies from this Worker package.
 [alias]

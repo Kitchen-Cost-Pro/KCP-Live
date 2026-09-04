@@ -8,11 +8,29 @@ import { mergeCanonicalLocations } from './utils/locationDisplayName.js';
 import { positionDashboardSelectMenu } from './utils/dashboardDropdown.js';
 import {
   loadLowStockNotificationSettings,
-  saveLowStockNotificationSettings
+  saveLowStockNotificationSettings,
+  acknowledgeLowStockItem,
+  acknowledgeAllLowStockItems,
+  unacknowledgeLowStockItem
 } from './services/notificationService.js';
 
 const DASHBOARD_CACHE_TTL = 60_000;
 const dashboardCache = new Map();
+// A background data-version poll can silently trigger a full renderDashboard() remount (a fresh
+// `ui` object + DOM tree) while the user is mid-interaction with the mute/unmute checkboxes — see
+// renderActiveSection in appShell.js, which calls renderDashboard() fresh on every app re-render,
+// not just on navigation. Keying these two Sets by workspace and reusing the same instances across
+// remounts means a checkbox selection or an in-flight mute/unmute request survives a remount
+// instead of silently resetting (which looked like "clicking does nothing" / a stuck spinner).
+const dashboardAckStateByWorkspace = new Map();
+function getDashboardAckState(workspaceId) {
+  let state = dashboardAckStateByWorkspace.get(workspaceId);
+  if (!state) {
+    state = { ackPendingKeys: new Set(), selectedAckKeys: new Set() };
+    dashboardAckStateByWorkspace.set(workspaceId, state);
+  }
+  return state;
+}
 const SERIES = [
   { key: 'cos', label: 'Cost of Sales', color: '#00e5a0' },
   { key: 'adjustments', label: 'Adjustments', color: '#f5a623' },
@@ -32,7 +50,7 @@ const RANGE_PRESETS = [
   ['custom', 'Custom range']
 ];
 
-export function renderDashboard({ state = {}, onNavigate, onStockFilterChange, onThemeToggle } = {}) {
+export function renderDashboard({ state = {}, onNavigate, onStockFilterChange } = {}) {
   const workspaceId = String(state.workspace?.id || '');
   const workspaceName = state.workspace?.siteName || state.source?.settings?.siteName || 'Workspace';
   const initialRange = getPresetRange('today');
@@ -68,7 +86,9 @@ export function renderDashboard({ state = {}, onNavigate, onStockFilterChange, o
     notificationSettingsMessage: '',
     notificationDispatchTime: '08:00',
     notificationRecipientIds: new Set(),
-    notificationWorkspaceUsers: []
+    notificationWorkspaceUsers: [],
+    ackAllPending: false,
+    ...getDashboardAckState(workspaceId)
   };
 
   renderLoading(view, workspaceName);
@@ -79,7 +99,7 @@ export function renderDashboard({ state = {}, onNavigate, onStockFilterChange, o
     ui.locationOptions = mergeLocationOptions(ui.locationOptions, cached.model.locations);
     syncInventoryLocation(ui, cached.model);
     ui.loading = false;
-    renderModel(view, ui, { workspaceName, onNavigate, onStockFilterChange, onThemeToggle, workspaceId });
+    renderModel(view, ui, { workspaceName, onNavigate, onStockFilterChange, workspaceId });
   } else {
     loadModel(false);
   }
@@ -99,7 +119,7 @@ export function renderDashboard({ state = {}, onNavigate, onStockFilterChange, o
       syncInventoryLocation(ui, model);
       ui.loading = false;
       ui.visibleRows = 75;
-      renderModel(view, ui, { workspaceName, onNavigate, onStockFilterChange, onThemeToggle, workspaceId });
+      renderModel(view, ui, { workspaceName, onNavigate, onStockFilterChange, workspaceId });
     } catch (error) {
       if (!document.contains(view) || requestId !== ui.requestId) return;
       ui.loading = false;
@@ -200,7 +220,10 @@ function getScopedInventoryItems(ui) {
 }
 
 function getScopedInventoryAlerts(ui) {
-  const items = getScopedInventoryItems(ui);
+  // Muted items no longer need immediate attention — they're excluded from this banner (and its
+  // count/name list) the same way they're excluded from the daily email, even though they still
+  // show up in the low/critical worklist table below so a user can see and unmute them.
+  const items = getScopedInventoryItems(ui).filter((item) => !item.acknowledged);
   const critical = items.filter((item) => item.status === 'critical');
   const low = items.filter((item) => item.status === 'low');
   return {
@@ -218,7 +241,7 @@ function getNotificationInventoryItems(ui) {
 }
 
 function getNotificationInventoryAlerts(ui) {
-  const items = getNotificationInventoryItems(ui);
+  const items = getNotificationInventoryItems(ui).filter((item) => !item.acknowledged);
   const critical = items.filter((item) => item.status === 'critical');
   const low = items.filter((item) => item.status === 'low');
   return {
@@ -382,7 +405,6 @@ function renderModel(view, ui, context) {
   const criticalCount = inventoryAlerts.criticalCount;
   const attentionCount = inventoryAlerts.criticalCount + inventoryAlerts.lowCount;
   const alertNames = inventoryAlerts.criticalNames.join(', ');
-  const currentTheme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
   const selectedLocation = ui.locationOptions.find((location) => location.id === ui.locationId);
 
   view.innerHTML = `
@@ -404,7 +426,6 @@ function renderModel(view, ui, context) {
             </button>
             <div id="dashboard-stock-notifications" class="${styles.notificationMenu}" data-dashboard-notification-menu ${ui.notificationsOpen ? '' : 'hidden'}></div>
           </div>
-          <button type="button" class="${styles.iconButton}" aria-label="Switch to ${currentTheme === 'dark' ? 'light' : 'dark'} mode" title="Switch to ${currentTheme === 'dark' ? 'light' : 'dark'} mode" data-dashboard-theme-toggle>${icon(currentTheme === 'dark' ? 'sun' : 'moon', 15)}</button>
           <button type="button" class="${styles.iconButton}" aria-label="Open business settings" title="Open business settings" data-dashboard-settings>${icon('settings', 15)}</button>
         </div>
       </header>
@@ -477,7 +498,7 @@ function renderModel(view, ui, context) {
         <section class="${styles.inventoryPanel}" data-dashboard-inventory-panel>
           <div class="${styles.inventoryHeader}">
             <div>
-              <h2>Inventory — Stock Levels</h2>
+              <h2>Inventory — Low &amp; Critical Stock</h2>
               <p data-dashboard-row-count></p>
             </div>
             <div class="${styles.inventoryFilters}">
@@ -485,6 +506,7 @@ function renderModel(view, ui, context) {
               <div class="${styles.categoryStrip}" data-dashboard-categories aria-label="Inventory category"></div>
             </div>
           </div>
+          <div class="${styles.tableActions}" data-dashboard-table-actions></div>
           <div class="${styles.tableWrap}" data-dashboard-table-wrap></div>
           <div class="${styles.tableFooter}" data-dashboard-table-footer></div>
         </section>
@@ -612,15 +634,6 @@ function bindDashboardEvents(view, ui, context) {
   }, { signal });
 
   view.querySelector('[data-dashboard-refresh]')?.addEventListener('click', () => view.__dashboardRefresh?.(), { signal });
-  view.querySelector('[data-dashboard-theme-toggle]')?.addEventListener('click', (event) => {
-    context.onThemeToggle?.();
-    const button = event.currentTarget;
-    const theme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
-    const nextTheme = theme === 'dark' ? 'light' : 'dark';
-    button.innerHTML = icon(theme === 'dark' ? 'sun' : 'moon', 15);
-    button.setAttribute('aria-label', `Switch to ${nextTheme} mode`);
-    button.setAttribute('title', `Switch to ${nextTheme} mode`);
-  }, { signal });
   view.querySelector('[data-dashboard-settings]')?.addEventListener('click', () => context.onNavigate?.('settings-business'), { signal });
   view.querySelector('[data-dashboard-alert-button]')?.addEventListener('click', (event) => {
     event.preventDefault();
@@ -695,7 +708,7 @@ function renderInventoryAlert(view, ui, context) {
     ${criticalCount ? '<button type="button" data-dashboard-review-stock>Review stock</button>' : ''}
   `;
   root.querySelector('[data-dashboard-review-stock]')?.addEventListener('click', () => {
-    reviewDashboardStock(view, ui, context, { criticalOnly: true });
+    reviewDashboardStock(view, ui, context);
   });
   renderNotificationCenter(view, ui, context);
 }
@@ -709,8 +722,13 @@ function renderNotificationCenter(view, ui, context) {
   const scopedItems = getNotificationInventoryItems(ui);
   const criticalItems = scopedItems.filter((item) => item.status === 'critical');
   const lowItems = scopedItems.filter((item) => item.status === 'low');
-  const attentionItems = [...criticalItems, ...lowItems].slice(0, 8);
-  const count = criticalItems.length + lowItems.length;
+  const attentionItems = [...criticalItems, ...lowItems]
+    .sort((left, right) => Number(Boolean(left.acknowledged)) - Number(Boolean(right.acknowledged)))
+    .slice(0, 8);
+  // Muted items still show in the list (so a user can confirm/undo a mute) but don't count toward
+  // the badge — the badge should reflect items that still need attention, same as an "unread" count.
+  const count = criticalItems.filter((item) => !item.acknowledged).length
+    + lowItems.filter((item) => !item.acknowledged).length;
   const locationName = getNotificationInventoryAlerts(ui).locationName;
 
   bell.classList.toggle(styles.iconButtonActive, ui.notificationsOpen);
@@ -731,7 +749,7 @@ function renderNotificationCenter(view, ui, context) {
         <button type="button" class="${styles.notificationClose}" aria-label="Close stock notifications" data-dashboard-notification-close>${icon('x', 14)}</button>
       </div>
     </div>
-    ${ui.notificationSettingsOpen ? renderLowStockNotificationSettings(ui) : renderStockNotificationList({ count, criticalItems, lowItems, attentionItems })}
+    ${ui.notificationSettingsOpen ? renderLowStockNotificationSettings(ui) : renderStockNotificationList({ count, criticalItems, lowItems, attentionItems }, ui)}
   `;
 
   menu.querySelector('[data-dashboard-notification-close]')?.addEventListener('click', (event) => {
@@ -794,10 +812,20 @@ function renderNotificationCenter(view, ui, context) {
       context.onNavigate?.('ingredients');
     });
   });
+  menu.querySelectorAll('[data-ack-item]').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const key = button.dataset.ackItem || '';
+      const item = attentionItems.find((row) => itemAckKey(row) === key);
+      if (item) handleToggleAcknowledgeItem(view, ui, context, item);
+    });
+  });
 }
 
-function renderStockNotificationList({ count, criticalItems, lowItems, attentionItems }) {
-  if (!count) {
+function renderStockNotificationList({ count, criticalItems, lowItems, attentionItems }, ui) {
+  const totalAttention = criticalItems.length + lowItems.length;
+  if (!totalAttention) {
     return `
       <div class="${styles.notificationEmpty}">
         ${icon('check', 20)}
@@ -813,11 +841,12 @@ function renderStockNotificationList({ count, criticalItems, lowItems, attention
     <div class="${styles.notificationSummary}">
       <span class="${styles.notificationSummaryCritical}">${criticalItems.length} critical</span>
       <span class="${styles.notificationSummaryLow}">${lowItems.length} low stock</span>
+      ${count < totalAttention ? `<span>${totalAttention - count} muted</span>` : ''}
     </div>
     <div class="${styles.notificationList}">
-      ${attentionItems.map((item) => notificationItem(item)).join('')}
+      ${attentionItems.map((item) => notificationItem(item, ui)).join('')}
     </div>
-    ${count > attentionItems.length ? `<p class="${styles.notificationMore}">+${count - attentionItems.length} more item${count - attentionItems.length === 1 ? '' : 's'}</p>` : ''}
+    ${totalAttention > attentionItems.length ? `<p class="${styles.notificationMore}">+${totalAttention - attentionItems.length} more item${totalAttention - attentionItems.length === 1 ? '' : 's'}</p>` : ''}
     <div class="${styles.notificationActions}">
       <button type="button" data-dashboard-notification-review>Review on dashboard</button>
       <button type="button" data-dashboard-notification-open-stock>Open Stock Items ${icon('arrowRight', 12)}</button>
@@ -882,22 +911,27 @@ function applyLowStockNotificationSettings(ui, result = {}) {
   ui.notificationRecipientIds = new Set(selected.map(String));
 }
 
-function notificationItem(item = {}) {
+function notificationItem(item = {}, ui) {
   const status = statusPresentation(item.status);
   const stockText = `${quantity(item.qty)} / ${quantity(item.reorder)} ${item.baseUom || ''}`.trim();
+  const key = itemAckKey(item);
+  const pending = ui?.ackPendingKeys?.has(key);
   return `
-    <button type="button" class="${styles.notificationItem}" data-dashboard-notification-item data-item-name="${escapeAttribute(item.name)}">
-      <span class="${styles.notificationItemIcon}" style="--notification-tone:${status.color}">${icon(item.status === 'critical' ? 'alert' : 'trendDown', 13)}</span>
-      <span class="${styles.notificationItemCopy}">
-        <strong>${escapeHtml(item.name)}</strong>
-        <small>${escapeHtml(stockText)}${item.supplier ? ` · ${escapeHtml(item.supplier)}` : ''}</small>
-      </span>
+    <div class="${styles.notificationItem} ${item.acknowledged ? styles.notificationItemAcked : ''}">
+      <button type="button" class="${styles.notificationItemBody}" data-dashboard-notification-item data-item-name="${escapeAttribute(item.name)}">
+        <span class="${styles.notificationItemIcon}" style="--notification-tone:${status.color}">${icon(item.status === 'critical' ? 'alert' : 'trendDown', 13)}</span>
+        <span class="${styles.notificationItemCopy}">
+          <strong>${escapeHtml(item.name)}</strong>
+          <small>${escapeHtml(stockText)}${item.supplier ? ` · ${escapeHtml(item.supplier)}` : ''}</small>
+        </span>
+      </button>
       <span class="${styles.notificationItemStatus}" style="--notification-tone:${status.color}">${escapeHtml(status.label)}</span>
-    </button>
+      <button type="button" class="${styles.iconButton} ${styles.notificationItemAck} ${item.acknowledged ? styles.iconButtonActive : ''}" data-ack-item="${escapeAttribute(key)}" ${pending ? 'disabled' : ''} title="${item.acknowledged ? 'Muted — click to unmute' : 'Mute daily low-stock email for this item'}" aria-label="${item.acknowledged ? 'Unmute low-stock email' : 'Mute low-stock email'}">${pending ? icon('refresh', 12) : icon(item.acknowledged ? 'bellOff' : 'bell', 12)}</button>
+    </div>
   `;
 }
 
-function reviewDashboardStock(view, ui, context, { criticalOnly = false } = {}) {
+function reviewDashboardStock(view, ui, context) {
   const panel = view.querySelector('[data-dashboard-inventory-panel]');
   ui.search = '';
   ui.category = 'All';
@@ -906,7 +940,6 @@ function reviewDashboardStock(view, ui, context, { criticalOnly = false } = {}) 
   ui.visibleRows = 75;
   renderInventory(view, ui, context);
   panel?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  if (criticalOnly) panel?.setAttribute('data-dashboard-reviewing', 'critical');
 }
 
 function renderTrendChart(view, ui) {
@@ -1021,10 +1054,11 @@ function renderInventory(view, ui, context) {
   const model = ui.model;
   const locationsRoot = view.querySelector('[data-dashboard-inventory-locations]');
   const categoriesRoot = view.querySelector('[data-dashboard-categories]');
+  const actionsRoot = view.querySelector('[data-dashboard-table-actions]');
   const tableRoot = view.querySelector('[data-dashboard-table-wrap]');
   const countRoot = view.querySelector('[data-dashboard-row-count]');
   const footerRoot = view.querySelector('[data-dashboard-table-footer]');
-  if (!locationsRoot || !categoriesRoot || !tableRoot || !countRoot || !footerRoot) return;
+  if (!locationsRoot || !categoriesRoot || !actionsRoot || !tableRoot || !countRoot || !footerRoot) return;
 
   const inventoryLocations = getInventoryLocationOptions(model);
   syncInventoryLocation(ui, model);
@@ -1043,8 +1077,12 @@ function renderInventory(view, ui, context) {
     });
   });
 
-  const scopedItems = getScopedInventoryItems(ui);
+  // This panel is a low/critical stock worklist, not a general inventory browser — it always
+  // shows only items needing attention. Browse everything (including healthy stock) from the
+  // full Stock Items screen via the "Open Stock Items" link below.
+  const scopedItems = getScopedInventoryItems(ui).filter((item) => isAttentionStatus(item.status));
   const selectedInventoryLocation = inventoryLocations.find((location) => location.id === ui.inventoryLocationId);
+
   const categories = ['All', ...new Set(scopedItems.map((item) => item.category).filter(Boolean))];
   if (!categories.includes(ui.category)) ui.category = 'All';
   categoriesRoot.innerHTML = categories.map((category) => `<button type="button" class="${styles.categoryButton} ${ui.category === category ? styles.categoryButtonActive : ''}" data-category="${escapeAttribute(category)}">${escapeHtml(category)}</button>`).join('');
@@ -1062,21 +1100,77 @@ function renderInventory(view, ui, context) {
     .filter((item) => !needle || [item.name, item.sku, item.category, item.supplier, item.locationName, ...item.locations].join(' ').toLowerCase().includes(needle))
     .sort((left, right) => compareInventory(left, right, ui.sortCol, ui.sortDir));
   const visible = filtered.slice(0, ui.visibleRows);
-  countRoot.textContent = `${filtered.length.toLocaleString('en-ZA')} item${filtered.length === 1 ? '' : 's'} shown${selectedInventoryLocation ? ` · ${selectedInventoryLocation.name}` : ''}`;
+  countRoot.textContent = `${filtered.length.toLocaleString('en-ZA')} item${filtered.length === 1 ? '' : 's'} needing attention${selectedInventoryLocation ? ` · ${selectedInventoryLocation.name}` : ''}`;
+
+  const mutableAttentionItems = filtered.filter((item) => isAttentionStatus(item.status) && !item.acknowledged);
+  const mutableKeys = new Set(mutableAttentionItems.map((item) => itemAckKey(item)));
+  // Selections only ever hold currently-visible, still-mutable items — drop anything that scrolled
+  // out of the filtered set or already got muted since it was selected.
+  for (const key of ui.selectedAckKeys) {
+    if (!mutableKeys.has(key)) ui.selectedAckKeys.delete(key);
+  }
+  const selectedItems = mutableAttentionItems.filter((item) => ui.selectedAckKeys.has(itemAckKey(item)));
+
+  if (selectedItems.length) {
+    actionsRoot.innerHTML = `
+      <button type="button" class="${styles.categoryButton}" data-dashboard-ack-selected ${ui.ackAllPending ? 'disabled' : ''}>
+        ${ui.ackAllPending ? `${icon('refresh', 12)} Muting…` : `${icon('bellOff', 12)}Mute selected (${selectedItems.length})`}
+      </button>
+      <button type="button" class="${styles.categoryButton}" data-dashboard-clear-selection ${ui.ackAllPending ? 'disabled' : ''}>Clear selection</button>
+      <span>Mutes today's low-stock email for the selected items until they restock and fall low again.</span>
+    `;
+    actionsRoot.querySelector('[data-dashboard-ack-selected]')?.addEventListener('click', () => {
+      handleAcknowledgeAllItems(view, ui, context, selectedItems);
+    });
+    actionsRoot.querySelector('[data-dashboard-clear-selection]')?.addEventListener('click', () => {
+      ui.selectedAckKeys.clear();
+      renderInventory(view, ui, context);
+    });
+  } else if (mutableAttentionItems.length) {
+    actionsRoot.innerHTML = `
+      <button type="button" class="${styles.categoryButton}" data-dashboard-ack-all ${ui.ackAllPending ? 'disabled' : ''}>
+        ${ui.ackAllPending ? `${icon('refresh', 12)} Muting…` : `${icon('bellOff', 12)}Acknowledge all (${mutableAttentionItems.length})`}
+      </button>
+      <span>Select items below to mute just those, or mute everything shown here.</span>
+    `;
+    actionsRoot.querySelector('[data-dashboard-ack-all]')?.addEventListener('click', () => {
+      handleAcknowledgeAllItems(view, ui, context, mutableAttentionItems);
+    });
+  } else {
+    actionsRoot.innerHTML = '';
+  }
 
   if (!visible.length) {
-    tableRoot.innerHTML = `<div class="${styles.tableEmpty}">${icon('search', 20)}<strong>No stock items match this location</strong><span>Change the location or category filter.</span></div>`;
+    const hasAnyAttentionItem = getScopedInventoryItems(ui).some((item) => isAttentionStatus(item.status));
+    tableRoot.innerHTML = hasAnyAttentionItem
+      ? `<div class="${styles.tableEmpty}">${icon('search', 20)}<strong>No matching items</strong><span>Change the category or location filter.</span></div>`
+      : `<div class="${styles.tableEmpty}">${icon('check', 20)}<strong>Stock control is clear</strong><span>No items are currently low or critical at this location.</span></div>`;
     footerRoot.innerHTML = `<button type="button" data-dashboard-open-stock>Open Stock Items</button>`;
   } else {
     const columns = [
-      ['sku', 'SKU'], ['name', 'Item Name'], ['category', 'Category'], ['qty', 'Qty'], ['unitCost', 'Unit Cost'], ['totalValue', 'Total Value'], ['status', 'Status'], ['supplier', 'Supplier']
+      ['sku', 'SKU'], ['name', 'Item Name'], ['category', 'Category'], ['qty', 'Qty'], ['unitCost', 'Unit Cost'], ['totalValue', 'Total Value'], ['status', 'Status'], ['supplier', 'Supplier'], [null, 'Alerts']
     ];
+    const visibleMutableKeys = visible.filter((item) => mutableKeys.has(itemAckKey(item))).map((item) => itemAckKey(item));
+    const visibleSelectedCount = visibleMutableKeys.filter((key) => ui.selectedAckKeys.has(key)).length;
+    const selectAllChecked = visibleMutableKeys.length > 0 && visibleSelectedCount === visibleMutableKeys.length;
+    const selectAllIndeterminate = visibleSelectedCount > 0 && !selectAllChecked;
     tableRoot.innerHTML = `
       <table class="${styles.inventoryTable}">
-        <thead><tr>${columns.map(([key, label]) => `<th><button type="button" data-sort="${key}">${escapeHtml(label)} ${sortIcon(ui, key)}</button></th>`).join('')}</tr></thead>
-        <tbody>${visible.map((item) => inventoryRow(item)).join('')}</tbody>
+        <thead><tr>
+          <th><input type="checkbox" data-select-all-mute aria-label="Select all mutable items shown" ${visibleMutableKeys.length ? '' : 'disabled'} ${selectAllChecked ? 'checked' : ''} /></th>
+          ${columns.map(([key, label]) => key ? `<th><button type="button" data-sort="${key}">${escapeHtml(label)} ${sortIcon(ui, key)}</button></th>` : `<th>${escapeHtml(label)}</th>`).join('')}
+        </tr></thead>
+        <tbody>${visible.map((item) => inventoryRow(item, ui)).join('')}</tbody>
       </table>
     `;
+    const selectAllBox = tableRoot.querySelector('[data-select-all-mute]');
+    if (selectAllBox) selectAllBox.indeterminate = selectAllIndeterminate;
+    selectAllBox?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      if (event.target.checked) visibleMutableKeys.forEach((key) => ui.selectedAckKeys.add(key));
+      else visibleMutableKeys.forEach((key) => ui.selectedAckKeys.delete(key));
+      renderInventory(view, ui, context);
+    });
     tableRoot.querySelectorAll('[data-sort]').forEach((button) => {
       button.addEventListener('click', () => {
         const key = button.dataset.sort || 'name';
@@ -1092,6 +1186,24 @@ function renderInventory(view, ui, context) {
           event.preventDefault();
           openStockItem(row.dataset.itemName || '', context);
         }
+      });
+    });
+    tableRoot.querySelectorAll('[data-select-item]').forEach((checkbox) => {
+      checkbox.addEventListener('click', (event) => event.stopPropagation());
+      checkbox.addEventListener('change', () => {
+        const key = checkbox.dataset.selectItem || '';
+        if (!key) return;
+        if (checkbox.checked) ui.selectedAckKeys.add(key);
+        else ui.selectedAckKeys.delete(key);
+        renderInventory(view, ui, context);
+      });
+    });
+    tableRoot.querySelectorAll('[data-ack-item]').forEach((button) => {
+      button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        const key = button.dataset.ackItem || '';
+        const item = visible.find((row) => itemAckKey(row) === key);
+        if (item) handleToggleAcknowledgeItem(view, ui, context, item);
       });
     });
 
@@ -1110,11 +1222,79 @@ function renderInventory(view, ui, context) {
   footerRoot.querySelector('[data-dashboard-open-stock]')?.addEventListener('click', () => context.onNavigate?.('ingredients'));
 }
 
-function inventoryRow(item) {
+function isAttentionStatus(status) {
+  return status === 'low' || status === 'critical';
+}
+
+function itemAckKey(item) {
+  return `${item.itemId || item.id || ''}::${item.locationId || ''}`;
+}
+
+// A background remount (see dashboardAckStateByWorkspace's comment) can detach `view` from the
+// document while a mute/unmute request is still in flight. Re-rendering a detached node is
+// harmless but invisible — the user is looking at whatever view replaced it. Resolving the
+// currently-attached view by workspace right before each post-request render keeps the visible
+// DOM in sync instead of leaving a spinner stuck on a node nobody can see anymore.
+function resolveLiveDashboardView(view, context) {
+  if (view.isConnected) return view;
+  return document.querySelector(`[data-dashboard-workspace="${context.workspaceId}"]`) || view;
+}
+
+async function handleToggleAcknowledgeItem(view, ui, context, item) {
+  const key = itemAckKey(item);
+  if (ui.ackPendingKeys.has(key)) return;
+  const wasAcknowledged = Boolean(item.acknowledged);
+  ui.ackPendingKeys.add(key);
+  renderInventory(view, ui, context);
+  try {
+    if (wasAcknowledged) {
+      await unacknowledgeLowStockItem(context.workspaceId, { itemId: item.itemId, locationId: item.locationId });
+      item.acknowledged = false;
+    } else {
+      await acknowledgeLowStockItem(context.workspaceId, { itemId: item.itemId, locationId: item.locationId });
+      item.acknowledged = true;
+    }
+  } catch (cause) {
+    console.error(`[dashboard] low-stock ${wasAcknowledged ? 'unmute' : 'mute'} failed:`, cause?.message || cause);
+  }
+  ui.ackPendingKeys.delete(key);
+  const liveView = resolveLiveDashboardView(view, context);
+  renderInventory(liveView, ui, context);
+  renderInventoryAlert(liveView, ui, context);
+}
+
+async function handleAcknowledgeAllItems(view, ui, context, items) {
+  if (!items.length || ui.ackAllPending) return;
+  ui.ackAllPending = true;
+  renderInventory(view, ui, context);
+  try {
+    await acknowledgeAllLowStockItems(context.workspaceId, items.map((item) => ({ itemId: item.itemId, locationId: item.locationId })));
+    items.forEach((item) => { item.acknowledged = true; });
+  } catch (cause) {
+    console.error('[dashboard] low-stock acknowledge-all failed:', cause?.message || cause);
+  }
+  ui.ackAllPending = false;
+  const liveView = resolveLiveDashboardView(view, context);
+  renderInventory(liveView, ui, context);
+  renderInventoryAlert(liveView, ui, context);
+}
+
+function inventoryRow(item, ui) {
   const status = statusPresentation(item.status);
   const qtyClass = item.status === 'critical' ? styles.qtyCritical : item.status === 'low' ? styles.qtyLow : '';
+  const key = itemAckKey(item);
+  const pending = ui.ackPendingKeys.has(key);
+  const ackCell = isAttentionStatus(item.status)
+    ? `<button type="button" class="${styles.iconButton} ${item.acknowledged ? styles.iconButtonActive : ''}" data-ack-item="${escapeAttribute(key)}" ${pending ? 'disabled' : ''} title="${item.acknowledged ? 'Muted — click to unmute' : 'Mute daily low-stock email for this item'}" aria-label="${item.acknowledged ? 'Unmute low-stock email' : 'Mute low-stock email'}">${pending ? icon('refresh', 13) : icon(item.acknowledged ? 'bellOff' : 'bell', 13)}</button>`
+    : '—';
+  const selectable = isAttentionStatus(item.status) && !item.acknowledged;
+  const selected = ui.selectedAckKeys.has(key);
+  const selectCell = selectable
+    ? `<input type="checkbox" data-select-item="${escapeAttribute(key)}" ${selected ? 'checked' : ''} aria-label="Select ${escapeAttribute(item.name)} to mute" />`
+    : '';
   return `
     <tr tabindex="0" role="button" data-stock-item data-item-name="${escapeAttribute(item.name)}" title="Open ${escapeAttribute(item.name)} in Stock Items">
+      <td>${selectCell}</td>
       <td>${escapeHtml(item.sku || '—')}</td>
       <td><strong>${escapeHtml(item.name)}</strong>${item.locationName ? `<span>${escapeHtml(item.locationName)}</span>` : ''}</td>
       <td>${escapeHtml(item.category)}</td>
@@ -1123,6 +1303,7 @@ function inventoryRow(item) {
       <td>${money(item.totalValue)}</td>
       <td><span class="${styles.statusBadge}" style="--status-color:${status.color}">${status.label}</span></td>
       <td>${escapeHtml(item.supplier || 'Not assigned')}</td>
+      <td>${ackCell}</td>
     </tr>
   `;
 }
@@ -1247,6 +1428,7 @@ function icon(name, size = 16) {
     filter: '<path d="M4 5h16"/><path d="M7 12h10"/><path d="M10 19h4"/>',
     refresh: '<path d="M20 6v6h-6"/><path d="M4 18v-6h6"/><path d="M18.5 9a7 7 0 0 0-11.8-2.6L4 9"/><path d="M5.5 15a7 7 0 0 0 11.8 2.6L20 15"/>',
     bell: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/>',
+    bellOff: '<path d="M8.7 3A6 6 0 0 1 18 8a21.3 21.3 0 0 0 .6 5"/><path d="M17 17H3s3-2 3-9a4.7 4.7 0 0 1 .3-1.7"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/><line x1="2" x2="22" y1="2" y2="22"/>',
     mail: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/>',
     sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
     moon: '<path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z"/>',

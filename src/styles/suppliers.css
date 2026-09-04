@@ -214,6 +214,14 @@
   accent-color: var(--accent-blue);
 }
 
+.suppliersModule__checkboxRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  font-weight: 700;
+}
+
 .suppliersModule input:focus,
 .suppliersModule select:focus,
 .suppliersModule__dropdown > button:focus {

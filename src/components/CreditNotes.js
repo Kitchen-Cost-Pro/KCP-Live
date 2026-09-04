@@ -13,6 +13,7 @@ export function renderCreditNotes({ state, onCreditNoteFilterChange, onCreditNot
     stockSearch: '',
     stockCategory: '',
     grvQuery: '',
+    noteQuery: '',
     overlay: '',
     openDropdown: '',
     calendarCursor: '',
@@ -23,7 +24,7 @@ export function renderCreditNotes({ state, onCreditNoteFilterChange, onCreditNot
   const supplierMatches = getSupplierMatches(creditNotes.suppliers || [], draft.supplierName || '');
   const stockMatches = getStockMatches(creditNotes.stockItems || [], filters.stockSearch || '', filters.stockCategory || '', draft.items || []);
   const grvMatches = getProcessedGrvMatches(creditNotes.processedGrvs || [], filters.grvQuery || '');
-  const totals = calculateTotals(draft, getVatRate(state));
+  const totals = calculateTotals(draft, getSupplierVatRate(state, draft.supplierId));
   const selectedStockIds = new Set((filters.selectedStockIds || []).map(String));
   const selectedLineIndexes = new Set((filters.selectedLineIndexes || []).map(String));
   const headerReady = Boolean(String(draft.supplierName || '').trim() && String(draft.cnNumber || '').trim() && String(draft.date || '').trim() && String(draft.locationId || '').trim());
@@ -36,6 +37,16 @@ export function renderCreditNotes({ state, onCreditNoteFilterChange, onCreditNot
     return view;
   }
   view.innerHTML = `
+    ${creditNotes.editingNoteId ? renderEditingBanner(draft) : ''}
+
+    <div class="cn-pageHeader">
+      <h2 class="cn-pageHeader__title">Credit Notes</h2>
+      <button type="button" class="cn-recentTrigger" data-cn-open-recent>
+        ${icon('clipboard')}
+        <span>Recent Credit Notes</span>
+      </button>
+    </div>
+
     <div class="cn-frame">
       <div class="cn-layout">
         <aside class="cn-sidebar">
@@ -127,7 +138,7 @@ export function renderCreditNotes({ state, onCreditNoteFilterChange, onCreditNot
           </div>
 
           <div class="cn-draft-scroll">
-            ${(draft.items || []).length ? renderDraftTable(draft, getVatRate(state), selectedLineIndexes, creditNotes.locations || [], filters.openDropdown || '') : `
+            ${(draft.items || []).length ? renderDraftTable(draft, getSupplierVatRate(state, draft.supplierId), selectedLineIndexes, creditNotes.locations || [], filters.openDropdown || '') : `
               <div class="cn-empty"><span>No returns drafted.</span></div>
             `}
           </div>
@@ -148,6 +159,7 @@ export function renderCreditNotes({ state, onCreditNoteFilterChange, onCreditNot
 
     ${filters.overlay === 'stock' ? renderStockOverlay(stockMatches, filters, creditNotes.locations || [], selectedStockIds, headerReady, draft.locationId || '') : ''}
     ${filters.overlay === 'grv' ? renderProcessedGrvOverlay(grvMatches, filters.grvQuery || '') : ''}
+    ${filters.overlay === 'recent-notes' ? renderRecentCreditNotesOverlay(creditNotes.creditNotes || [], filters.noteQuery || '') : ''}
     ${filters.overlay === 'calendar' ? renderCustomCalendarOverlay({
       title: 'Select Credit Note Date',
       selectedDate: draft.date || todayLocal(),
@@ -165,7 +177,7 @@ export function renderCreditNotes({ state, onCreditNoteFilterChange, onCreditNot
 }
 
 function bindCreditNoteEvents(view, state, filters, draft, onCreditNoteFilterChange, onCreditNoteAction) {
-  const closeOverlay = () => onCreditNoteFilterChange?.({ overlay: '', selectedStockIds: [], calendarCursor: '', grvQuery: '' });
+  const closeOverlay = () => onCreditNoteFilterChange?.({ overlay: '', selectedStockIds: [], calendarCursor: '', grvQuery: '', noteQuery: '' });
 
   view.querySelectorAll('[data-cn-draft-field]').forEach((field) => {
     const apply = () => {
@@ -301,6 +313,10 @@ function bindCreditNoteEvents(view, state, filters, draft, onCreditNoteFilterCha
     onCreditNoteFilterChange?.({ overlay: 'grv', grvQuery: '' });
   });
 
+  view.querySelector('[data-cn-open-recent]')?.addEventListener('click', () => {
+    onCreditNoteFilterChange?.({ overlay: 'recent-notes', noteQuery: '' });
+  });
+
   view.querySelector('[data-cn-open-calendar]')?.addEventListener('click', () => {
     onCreditNoteFilterChange?.({
       overlay: 'calendar',
@@ -311,6 +327,7 @@ function bindCreditNoteEvents(view, state, filters, draft, onCreditNoteFilterCha
 
   view.querySelector('[data-cn-stock-close]')?.addEventListener('click', closeOverlay);
   view.querySelector('[data-cn-grv-close]')?.addEventListener('click', closeOverlay);
+  view.querySelector('[data-cn-recent-close]')?.addEventListener('click', closeOverlay);
 
   view.querySelector('[data-cn-stock-search]')?.addEventListener('input', (event) => {
     onCreditNoteFilterChange?.({ stockSearch: event.target.value });
@@ -318,6 +335,10 @@ function bindCreditNoteEvents(view, state, filters, draft, onCreditNoteFilterCha
 
   view.querySelector('[data-cn-grv-search]')?.addEventListener('input', (event) => {
     onCreditNoteFilterChange?.({ grvQuery: event.target.value });
+  });
+
+  view.querySelector('[data-cn-recent-search]')?.addEventListener('input', (event) => {
+    onCreditNoteFilterChange?.({ noteQuery: event.target.value });
   });
 
   view.querySelectorAll('[data-cn-stock-select]').forEach((checkbox) => {
@@ -406,6 +427,20 @@ function bindCreditNoteEvents(view, state, filters, draft, onCreditNoteFilterCha
   view.querySelector('[data-cn-cancel-clear]')?.addEventListener('click', () => onCreditNoteAction.onCancelClearAll?.());
   view.querySelector('[data-cn-save]')?.addEventListener('click', () => onCreditNoteAction.onSave?.());
   view.querySelector('[data-cn-toast-close]')?.addEventListener('click', () => onCreditNoteAction.onDismissToast?.());
+  view.querySelector('[data-cn-cancel-edit]')?.addEventListener('click', () => onCreditNoteAction.onCancelEdit?.());
+  view.querySelectorAll('[data-cn-edit-note]').forEach((row) => {
+    const openEdit = () => {
+      const note = (state.creditNotes?.creditNotes || []).find((entry) => String(entry.id) === row.dataset.cnEditNote);
+      if (note) onCreditNoteAction.onEditNote?.(note);
+    };
+    row.addEventListener('click', openEdit);
+    row.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        openEdit();
+      }
+    });
+  });
 
   bindCustomCalendarEvents(view, {
     onClose: () => onCreditNoteFilterChange?.({ overlay: '', calendarCursor: '' }),
@@ -820,6 +855,58 @@ function renderToast(toast) {
   `;
 }
 
+function renderEditingBanner(draft) {
+  const label = draft.cnNumber || draft.invoice || 'this credit note';
+  return `
+    <div class="cn-editBanner">
+      <span>Editing Credit Note ${escapeHtml(label)} — saving will adjust stock by the difference from what was originally credited.</span>
+      <button type="button" data-cn-cancel-edit aria-label="Cancel edit">${icon('x')}</button>
+    </div>
+  `;
+}
+
+function filterCreditNotesForEdit(notes = [], query = '') {
+  const term = String(query || '').trim().toLowerCase();
+  if (!term) return notes;
+  return notes.filter((note) => [
+    note.cnNumber,
+    note.invoice,
+    note.supplierName,
+    note.supplier,
+    note.poNumber
+  ].some((value) => String(value || '').toLowerCase().includes(term)));
+}
+
+function renderRecentCreditNotesOverlay(notes = [], query = '') {
+  const matches = filterCreditNotesForEdit(notes, query).slice(0, 100);
+  return `
+    <div class="cn-overlayBackdrop">
+      <section class="cn-overlayCard">
+        <header>
+          <div>
+            <p>Recent Credit Notes</p>
+            <h3>Search and select a credit note to edit</h3>
+          </div>
+          <button type="button" class="cn-iconButton" data-cn-recent-close aria-label="Close">${icon('x')}</button>
+        </header>
+        <div class="cn-overlayFilters">
+          <input type="search" value="${escapeAttribute(query)}" placeholder="Search CN #, invoice, or supplier..." data-cn-recent-search data-focus-key="cn-recent-search" />
+        </div>
+        <div class="cn-pickerList" data-scroll-key="credit-note-recent-picker">
+          ${matches.length
+            ? matches.map((note) => `
+                <button type="button" class="cn-supplierOption cn-grvOption" data-cn-edit-note="${escapeAttribute(note.id)}">
+                  <strong>${escapeHtml(note.cnNumber || note.invoice || 'Credit Note')}</strong>
+                  <span>${escapeHtml(note.supplierName || note.supplier || 'Supplier')} · ${escapeHtml(formatDisplayDate(note.date || ''))} · ${escapeHtml(formatCurrency(note.totalEx))}</span>
+                </button>
+              `).join('')
+            : `<div class="cn-empty"><span>${notes.length ? 'No credit notes match this search.' : 'No credit notes yet.'}</span></div>`}
+        </div>
+      </section>
+    </div>
+  `;
+}
+
 function renderClearConfirmOverlay() {
   return `
     <div class="cn-overlayBackdrop">
@@ -980,11 +1067,37 @@ function getVatRate(state) {
   // NOTE: this previously read state.source?.settings, but appState.source is never assigned
   // anywhere in the app (it stays null permanently) — so this was silently, permanently hardcoded
   // to 15% regardless of the workspace's actual configured VAT rate. Read the real, live settings
-  // instead, and respect VAT-registration status: a non-registered workspace never shows VAT on
-  // any live entry-form preview (credit note line VAT, pack prices, totals).
+  // instead.
+  //
+  // Deliberately independent of vatRegistered: calculateTotals above already decides per line
+  // whether VAT applies at all (item.vatEnabled), matching the backend's credit-note VAT report.
+  // A non-registered workspace still pays real VAT to a VAT-registered supplier on a VATable item
+  // (e.g. beer) — it just can't reclaim it — so the rate itself must not be zeroed for everyone.
   const settings = state.settings?.draft || state.settings?.values || {};
-  if (settings.vatRegistered === false) return 0;
   return Number(settings.vatRate ?? settings.vatPercentage ?? 15) || 15;
+}
+
+function findCnSupplierById(state, supplierId) {
+  if (!supplierId) return null;
+  const id = String(supplierId);
+  return (state?.creditNotes?.suppliers || []).find((supplier) => String(supplier.id) === id) || null;
+}
+
+// A non-VAT-registered supplier never charges VAT on anything they sell, regardless of the item —
+// defaults to true (registered) when the supplier isn't found/selected yet, mirroring
+// GRVEntry.js's isGrvSupplierVatRegistered / PurchaseOrders.js's isPoSupplierVatRegistered.
+function isCnSupplierVatRegistered(state, supplierId) {
+  const supplier = findCnSupplierById(state, supplierId);
+  return supplier ? supplier.vatRegistered !== false : true;
+}
+
+// The rate actually used for this credit note's live preview: the workspace's real VAT rate,
+// unless the selected supplier isn't VAT-registered, in which case they never charged VAT in the
+// first place and this returns 0 — cascading through calculateTotals/renderDraftTable exactly like
+// "no VAT on this credit note at all", matching the GRV/PO equivalents.
+function getSupplierVatRate(state, supplierId) {
+  if (!isCnSupplierVatRegistered(state, supplierId)) return 0;
+  return getVatRate(state);
 }
 
 function getCreditNoteLineUomLabel(line = {}) {
@@ -1053,7 +1166,8 @@ function icon(name) {
     calendar: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v4"/><path d="M16 2v4"/><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M3 10h18"/></svg>',
     clipboard: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg>',
     chevronDown: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>',
-    camera: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8a2 2 0 0 1 2-2h2l1.2-2h5.6L16 6h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><circle cx="12" cy="13" r="3.5"/></svg>'
+    camera: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8a2 2 0 0 1 2-2h2l1.2-2h5.6L16 6h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><circle cx="12" cy="13" r="3.5"/></svg>',
+    edit: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>'
   };
   return icons[name] || icons.x;
 }
