@@ -1530,6 +1530,20 @@
   white-space: nowrap;
 }
 
+.inventoryTable th:first-child,
+.inventoryTable td:first-child {
+  width: 34px;
+  padding-right: 0;
+}
+
+.inventoryTable th:first-child input[type="checkbox"],
+.inventoryTable td:first-child input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--dash-green);
+  cursor: pointer;
+}
+
 .inventoryTable th {
   position: sticky;
   top: 0;
