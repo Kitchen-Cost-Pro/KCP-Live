@@ -401,13 +401,15 @@ export function calculateIncomingLocationCost(input: {
 }
 
 /**
- * Pure WAC/last-cost replay used to work out which SAME-DAY sales got costed wrong because a GRV
- * line's cost was entered incorrectly and has now been corrected on edit (e.g. R2 typed instead
- * of R20) — see routes.ts's patchGoodsReceipt/buildSameDayCostCorrectionStatements for how the
- * inputs are built and how the resulting corrections are turned into compensating ledger entries.
+ * Pure WAC/last-cost replay used to work out which sales got costed wrong because a GRV line's
+ * cost was entered incorrectly and has now been corrected on edit (e.g. R2 typed instead of R20)
+ * — see routes.ts's patchGoodsReceipt/buildSameDayCostCorrectionStatements for how the inputs are
+ * built (that caller's query window runs from the GRV's receipt through to now, not just its own
+ * trading day, so a mistake caught days later still gets every affected sale corrected) and how
+ * the resulting corrections are turned into compensating ledger entries.
  *
  * Starts from the balance/cost immediately after the (now-revised) GRV line posts, then walks
- * every later stock_item+location movement that trading day in order: an inbound movement blends
+ * every later stock_item+location movement in the caller's window in order: an inbound movement blends
  * into the running cost exactly like a fresh GRV would (calculateIncomingLocationCost — under
  * 'last' costing this just resets to that movement's own cost, under 'wac' it blends); an outbound
  * movement carries the current running cost forward, and if it's a sale whose recorded cost
