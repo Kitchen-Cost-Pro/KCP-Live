@@ -34,15 +34,19 @@ export async function saveDriveSettings(workspaceId, settings = {}) {
   return callCloudflareDriveRoute(workspaceId, 'settings', settings);
 }
 
-/** One-shot check for whether "Process GRV with KCP Assistant" should be offered on the GRV
- * screen — a plain status read, not a subscription, since GRVEntry only needs this once when the
- * section loads (see startGrvSubscription in main.js), not a live-updating value. */
-export async function fetchDriveOcrEnabled(workspaceId) {
+/** One-shot check for whether "Process GRV with KCP Assistant" should be offered, and whether
+ * Drive is connected at all (gates the GRV commit modal's invoice-upload offer) — a plain status
+ * read, not a subscription, since GRVEntry only needs this once when the section loads (see
+ * startGrvSubscription in main.js), not a live-updating value. */
+export async function fetchDriveStatusSummary(workspaceId) {
   try {
     const status = await callCloudflareDriveRoute(workspaceId, 'status', {}, { method: 'GET' });
-    return status?.settings?.ocrEnabled === true;
+    return {
+      connected: normalizeDriveStatus(status).connectionActive,
+      ocrEnabled: status?.settings?.ocrEnabled === true
+    };
   } catch {
-    return false;
+    return { connected: false, ocrEnabled: false };
   }
 }
 
@@ -74,6 +78,19 @@ export async function processDriveInvoicePhoto(workspaceId, { mimeType, imageBas
  * block or roll back the GRV save itself. */
 export async function tagDriveInvoiceWithGrv(workspaceId, { fileId, grvId }) {
   return callCloudflareDriveRoute(workspaceId, 'assistant/tag-grv', { fileId, grvId });
+}
+
+/** Archives an invoice photo/PDF to that location's Drive "Invoices" folder without running it
+ * through KCP Assistant's extraction — used by the GRV commit modal, where the GRV is already
+ * filled in and staff just want a copy of the paper invoice kept alongside it. Reuses the same
+ * timeout as processDriveInvoicePhoto since the upload itself is the slow part either way. */
+export async function uploadInvoiceToDrive(workspaceId, { mimeType, imageBase64, locationId }) {
+  const result = await callCloudflareWorkspaceRoute(workspaceId, 'drive/assistant/upload-invoice', {
+    method: 'POST',
+    timeoutMs: PROCESS_INVOICE_TIMEOUT_MS,
+    payload: { mimeType, imageBase64, locationId }
+  });
+  return { driveFileId: result?.driveFileId || '' };
 }
 
 async function callCloudflareDriveRoute(workspaceId, action, payload = {}, options = {}) {
