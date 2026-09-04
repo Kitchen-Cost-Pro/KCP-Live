@@ -5,7 +5,8 @@ import { CanvasRenderer } from 'echarts/renderers';
 import styles from './styles/dashboard.module.css';
 import {
   loadDashboardReportingModel,
-  reconcileDashboardLocationNames
+  reconcileDashboardLocationNames,
+  percentageChange
 } from './dashboardData.js';
 import { fetchWorkspaceLocationOptions } from './services/locationService.js';
 import { mergeCanonicalLocations } from './utils/locationDisplayName.js';
@@ -505,7 +506,7 @@ function renderModel(view, ui, context) {
                 <p>${escapeHtml(model.trendRangeLabel)}</p>
               </div>
               <div class="${styles.trendHeaderStats}">
-                ${trendHeaderStat({ label: 'Total Cost', value: model.metrics.totalCost, delta: model.metrics.totalCostDelta, invert: true })}
+                ${trendHeaderStat({ label: 'Total Cost', value: model.metrics.totalCost, delta: model.metrics.totalCostDelta, invert: true, attr: 'data-trend-total-cost' })}
                 ${trendHeaderStat({ label: 'Total Sales', value: model.metrics.netSales, delta: model.metrics.netSalesDelta, invert: false })}
               </div>
               <div class="${styles.seriesToggles}" data-dashboard-series-toggles></div>
@@ -1009,6 +1010,7 @@ function renderTrendChart(view, ui) {
   const trend = ui.model.trend;
   const activeSeries = SERIES.filter((series) => ui.activeSeries.has(series.key));
   const hasValues = trend.some((bucket) => activeSeries.some((series) => number(bucket[series.key]) > 0));
+  updateTrendTotalCostStat(view, ui.model, activeSeries);
 
   let chart = trendChartInstances.get(view);
   if (!chart || chart.getDom() !== chartRoot) {
@@ -1504,12 +1506,40 @@ function kpiCard({ label, value, sub = '', delta = null, iconName, accent, inver
   `;
 }
 
-function trendHeaderStat({ label, value, delta, invert = false }) {
+// The "Total Cost" header stat used to be a fixed sum of ALL FOUR categories (cos + adjustments +
+// wastage + mfgWastage) regardless of which series toggles were actually active in the chart below
+// it — so with only "Cost of Sales" toggled on (the common case), the chart's visible area and its
+// own "Total" line could add up to far less than the number shown right above it, reading as a
+// broken/wrong chart. This recomputes both the value and its vs-prior-period delta from only the
+// currently active series (using the per-category current/previous totals in
+// model.metrics.categoryTotals — see buildDashboardModel), so the header always agrees with what's
+// actually drawn.
+function updateTrendTotalCostStat(view, model, activeSeries) {
+  const target = view.querySelector('[data-trend-total-cost]');
+  if (!target) return;
+  const categoryTotals = model.metrics.categoryTotals || {};
+  const current = activeSeries.reduce((sum, series) => sum + number(categoryTotals[series.key]?.current), 0);
+  const previous = activeSeries.reduce((sum, series) => sum + number(categoryTotals[series.key]?.previous), 0);
+  const label = activeSeries.length === SERIES.length
+    ? 'Total Cost'
+    : activeSeries.length === 1
+      ? activeSeries[0].label
+      : 'Selected Cost';
+  target.outerHTML = trendHeaderStat({
+    label,
+    value: current,
+    delta: percentageChange(current, previous),
+    invert: true,
+    attr: 'data-trend-total-cost'
+  });
+}
+
+function trendHeaderStat({ label, value, delta, invert = false, attr = '' }) {
   const hasDelta = Number.isFinite(delta);
   const positiveDirection = hasDelta && delta >= 0;
   const favourable = hasDelta ? (invert ? !positiveDirection : positiveDirection) : null;
   return `
-    <div class="${styles.trendHeaderTotal}">
+    <div class="${styles.trendHeaderTotal}" ${attr}>
       <span>${escapeHtml(label)}</span>
       <div>
         <strong>${money(value)}</strong>

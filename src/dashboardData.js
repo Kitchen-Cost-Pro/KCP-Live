@@ -236,7 +236,19 @@ export function buildDashboardModel({
       netSales: selectedTotals.netSales,
       netSalesDelta: percentageChange(selectedTotals.netSales, comparisonTotals.netSales),
       totalCost: currentTotalCost,
-      totalCostDelta: percentageChange(currentTotalCost, previousTotalCost)
+      totalCostDelta: percentageChange(currentTotalCost, previousTotalCost),
+      // Per-category current/previous totals, keyed the same as the trend chart's series toggles
+      // (cos/adjustments/wastage/mfgWastage) — lets the dashboard recompute "Total Cost" (and its
+      // delta) to match whichever series are actually toggled on in the chart, instead of always
+      // showing the fixed sum of all four regardless of what's visible. See dashboard.js's
+      // renderTrendChart, which previously showed a static totalCost that disagreed with the
+      // chart whenever fewer than all four series were active.
+      categoryTotals: {
+        cos: { current: selectedTotals.cos, previous: comparisonTotals.cos },
+        adjustments: { current: selectedTotals.adjustments, previous: comparisonTotals.adjustments },
+        wastage: { current: selectedTotals.wastage, previous: comparisonTotals.wastage },
+        mfgWastage: { current: selectedTotals.mfgWastage, previous: comparisonTotals.mfgWastage }
+      }
     },
     alerts: {
       criticalCount: criticalItems.length,
@@ -774,7 +786,7 @@ function marginPercent(netSales, costOfSales) {
   return ((sales - number(costOfSales)) / sales) * 100;
 }
 
-function percentageChange(current, previous) {
+export function percentageChange(current, previous) {
   const before = number(previous);
   if (Math.abs(before) < 0.000001) return null;
   return ((number(current) - before) / Math.abs(before)) * 100;

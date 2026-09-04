@@ -125,6 +125,17 @@ test('dashboard model derives KPI and trend values from reporting rows', () => {
   assert.equal(model.metrics.grossMargin, 60);
   assert.equal(model.alerts.criticalCount, 1);
   assert.equal(model.trend.at(-1).adjustments, 20);
+
+  // Regression: the dashboard's "Total Cost" header stat used to always sum ALL FOUR categories
+  // regardless of which series toggles were active in the trend chart, disagreeing with the chart
+  // whenever fewer than all four were shown (see dashboard.js's updateTrendTotalCostStat). These
+  // per-category current/previous totals let the header be recomputed to match the active toggles.
+  assert.deepEqual(model.metrics.categoryTotals, {
+    cos: { current: 600, previous: 0 },
+    adjustments: { current: 20, previous: 0 },
+    wastage: { current: 40, previous: 0 },
+    mfgWastage: { current: 10, previous: 0 }
+  });
 });
 
 test('dashboard date range supports custom dates and an equal comparison period', () => {
