@@ -65,7 +65,8 @@ export function renderDashboard({ state = {}, onNavigate, onStockFilterChange } 
     sortCol: 'status',
     sortDir: 'desc',
     activeSeries: new Set(SERIES.map((series) => series.key)),
-    visibleRows: 75,
+    pageSize: 25,
+    currentPage: 1,
     model: null,
     loading: true,
     error: '',
@@ -118,7 +119,7 @@ export function renderDashboard({ state = {}, onNavigate, onStockFilterChange } 
       ui.locationOptions = mergeLocationOptions(ui.locationOptions, model.locations);
       syncInventoryLocation(ui, model);
       ui.loading = false;
-      ui.visibleRows = 75;
+      ui.currentPage = 1;
       renderModel(view, ui, { workspaceName, onNavigate, onStockFilterChange, workspaceId });
     } catch (error) {
       if (!document.contains(view) || requestId !== ui.requestId) return;
@@ -564,7 +565,7 @@ function bindDashboardEvents(view, ui, context) {
         ui.locationId = value;
         ui.inventoryLocationId = value || ui.inventoryLocationId;
         ui.category = 'All';
-        ui.visibleRows = 75;
+        ui.currentPage = 1;
         ui.calendarOpen = false;
         ui.pendingRangeStart = '';
         hideChartTooltip(view);
@@ -937,7 +938,7 @@ function reviewDashboardStock(view, ui, context) {
   ui.category = 'All';
   ui.sortCol = 'status';
   ui.sortDir = 'desc';
-  ui.visibleRows = 75;
+  ui.currentPage = 1;
   renderInventory(view, ui, context);
   panel?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
@@ -1071,7 +1072,7 @@ function renderInventory(view, ui, context) {
       if (!locationId || locationId === ui.inventoryLocationId) return;
       ui.inventoryLocationId = locationId;
       ui.category = 'All';
-      ui.visibleRows = 75;
+      ui.currentPage = 1;
       renderInventory(view, ui, context);
       renderInventoryAlert(view, ui, context);
     });
@@ -1085,13 +1086,18 @@ function renderInventory(view, ui, context) {
 
   const categories = ['All', ...new Set(scopedItems.map((item) => item.category).filter(Boolean))];
   if (!categories.includes(ui.category)) ui.category = 'All';
-  categoriesRoot.innerHTML = categories.map((category) => `<button type="button" class="${styles.categoryButton} ${ui.category === category ? styles.categoryButtonActive : ''}" data-category="${escapeAttribute(category)}">${escapeHtml(category)}</button>`).join('');
-  categoriesRoot.querySelectorAll('[data-category]').forEach((button) => {
-    button.addEventListener('click', () => {
-      ui.category = button.dataset.category || 'All';
-      ui.visibleRows = 75;
-      renderInventory(view, ui, context);
-    });
+  categoriesRoot.innerHTML = `
+    <label class="${styles.pageSizeSelect}">
+      <span>Category</span>
+      <select data-dashboard-category>
+        ${categories.map((category) => `<option value="${escapeAttribute(category)}" ${ui.category === category ? 'selected' : ''}>${escapeHtml(category)}</option>`).join('')}
+      </select>
+    </label>
+  `;
+  categoriesRoot.querySelector('[data-dashboard-category]')?.addEventListener('change', (event) => {
+    ui.category = event.target.value || 'All';
+    ui.currentPage = 1;
+    renderInventory(view, ui, context);
   });
 
   const needle = ui.search.toLowerCase().trim();
@@ -1099,7 +1105,11 @@ function renderInventory(view, ui, context) {
     .filter((item) => ui.category === 'All' || item.category === ui.category)
     .filter((item) => !needle || [item.name, item.sku, item.category, item.supplier, item.locationName, ...item.locations].join(' ').toLowerCase().includes(needle))
     .sort((left, right) => compareInventory(left, right, ui.sortCol, ui.sortDir));
-  const visible = filtered.slice(0, ui.visibleRows);
+  const totalPages = Math.max(1, Math.ceil(filtered.length / ui.pageSize));
+  if (ui.currentPage > totalPages) ui.currentPage = totalPages;
+  if (ui.currentPage < 1) ui.currentPage = 1;
+  const pageStart = (ui.currentPage - 1) * ui.pageSize;
+  const visible = filtered.slice(pageStart, pageStart + ui.pageSize);
   countRoot.textContent = `${filtered.length.toLocaleString('en-ZA')} item${filtered.length === 1 ? '' : 's'} needing attention${selectedInventoryLocation ? ` · ${selectedInventoryLocation.name}` : ''}`;
 
   const mutableAttentionItems = filtered.filter((item) => isAttentionStatus(item.status) && !item.acknowledged);
@@ -1208,14 +1218,33 @@ function renderInventory(view, ui, context) {
     });
 
     footerRoot.innerHTML = `
-      <span>Showing ${visible.length.toLocaleString('en-ZA')} of ${filtered.length.toLocaleString('en-ZA')}</span>
-      <div>
-        ${visible.length < filtered.length ? '<button type="button" data-dashboard-load-more>Load more</button>' : ''}
+      <span>Showing ${pageStart + 1}–${(pageStart + visible.length).toLocaleString('en-ZA')} of ${filtered.length.toLocaleString('en-ZA')}</span>
+      <div class="${styles.paginationControls}">
+        <label class="${styles.pageSizeSelect}">
+          <span>Per page</span>
+          <select data-dashboard-page-size>
+            ${[25, 50, 100].map((size) => `<option value="${size}" ${ui.pageSize === size ? 'selected' : ''}>${size}</option>`).join('')}
+          </select>
+        </label>
+        <button type="button" data-dashboard-prev-page ${ui.currentPage <= 1 ? 'disabled' : ''} aria-label="Previous page">${icon('chevronLeft', 12)}</button>
+        <span>Page ${ui.currentPage} of ${totalPages}</span>
+        <button type="button" data-dashboard-next-page ${ui.currentPage >= totalPages ? 'disabled' : ''} aria-label="Next page">${icon('chevronRight', 12)}</button>
         <button type="button" data-dashboard-open-stock>Open Stock Items ${icon('arrowRight', 12)}</button>
       </div>
     `;
-    footerRoot.querySelector('[data-dashboard-load-more]')?.addEventListener('click', () => {
-      ui.visibleRows += 75;
+    footerRoot.querySelector('[data-dashboard-page-size]')?.addEventListener('change', (event) => {
+      ui.pageSize = Number(event.target.value) || 25;
+      ui.currentPage = 1;
+      renderInventory(view, ui, context);
+    });
+    footerRoot.querySelector('[data-dashboard-prev-page]')?.addEventListener('click', () => {
+      if (ui.currentPage <= 1) return;
+      ui.currentPage -= 1;
+      renderInventory(view, ui, context);
+    });
+    footerRoot.querySelector('[data-dashboard-next-page]')?.addEventListener('click', () => {
+      if (ui.currentPage >= totalPages) return;
+      ui.currentPage += 1;
       renderInventory(view, ui, context);
     });
   }
