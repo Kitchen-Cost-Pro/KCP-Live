@@ -9,6 +9,35 @@ test('dashboard date range defaults to the current day', () => {
   assert.equal(range.dayCount, 1);
 });
 
+test('a single-day dashboard range buckets the trend by hour, honouring the trading day start hour', () => {
+  const range = getDashboardDateRange(new Date(2026, 8, 4), {
+    from: '2026-09-04',
+    to: '2026-09-04',
+    tradingDayStartHour: 5
+  });
+  assert.equal(range.granularity, 'hour');
+  assert.equal(range.buckets.length, 24);
+  assert.equal(range.buckets[0].label, '05:00');
+  assert.equal(range.buckets[0].key, '2026-09-04T05');
+  assert.equal(range.buckets.at(-1).label, '04:00');
+  assert.equal(range.buckets.at(-1).key, '2026-09-05T04');
+  assert.equal(range.label, '05:00 – 05:00 · 04 Sept 2026');
+
+  const model = buildDashboardModel({
+    now: new Date(2026, 8, 4),
+    range,
+    ledgerRows: [
+      { date: '2026-09-04 06:30:00', source: 'Sale Usage', movementValue: -150 },
+      { date: '2026-09-05 02:15:00', source: 'Sale Usage', movementValue: -50 }
+    ]
+  });
+
+  const sixAm = model.trend.find((bucket) => bucket.label === '06:00');
+  const twoAmNextDay = model.trend.find((bucket) => bucket.label === '02:00');
+  assert.equal(sixAm.cos, 150);
+  assert.equal(twoAmNextDay.cos, 50);
+});
+
 test('inventory rows stay split by location so stock status is never based on cumulative quantity', () => {
   const rows = aggregateInventoryRows([
     { itemId: 'a', itemName: 'Milk', currentStock: 25, parLevel: 20, unitCostExVat: 10, status: 'Healthy', locationId: 'bar', locationName: 'Bar' },

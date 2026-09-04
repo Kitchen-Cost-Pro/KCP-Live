@@ -1,3 +1,7 @@
+import * as echarts from 'echarts/core';
+import { LineChart } from 'echarts/charts';
+import { GridComponent, TooltipComponent } from 'echarts/components';
+import { CanvasRenderer } from 'echarts/renderers';
 import styles from './styles/dashboard.module.css';
 import {
   loadDashboardReportingModel,
@@ -13,6 +17,17 @@ import {
   acknowledgeAllLowStockItems,
   unacknowledgeLowStockItem
 } from './services/notificationService.js';
+
+echarts.use([LineChart, GridComponent, TooltipComponent, CanvasRenderer]);
+const trendChartInstances = new WeakMap();
+
+function disposeTrendChart(view) {
+  const instance = trendChartInstances.get(view);
+  if (instance) {
+    instance.dispose();
+    trendChartInstances.delete(view);
+  }
+}
 
 const DASHBOARD_CACHE_TTL = 60_000;
 const dashboardCache = new Map();
@@ -142,7 +157,8 @@ export function renderDashboard({ state = {}, onNavigate, onStockFilterChange } 
         filters: {
           from: dashboardUi.from,
           to: dashboardUi.to,
-          locationId: dashboardUi.locationId
+          locationId: dashboardUi.locationId,
+          tradingDayStartHour: getTradingDayStartHour(state)
         },
         services: { reporting: {} }
       }),
@@ -183,6 +199,11 @@ function getKnownStateLocations(state = {}) {
 
 function getDashboardCacheKey(workspaceId, ui = {}) {
   return [workspaceId, ui.from || '', ui.to || '', ui.locationId || 'all'].join('::');
+}
+
+function getTradingDayStartHour(state = {}) {
+  const hour = Number(state.settings?.values?.tradingDayStartHour ?? state.settings?.draft?.tradingDayStartHour ?? 0);
+  return Number.isFinite(hour) ? Math.min(23, Math.max(0, hour)) : 0;
 }
 
 function mergeLocationOptions(existing = [], incoming = []) {
@@ -407,6 +428,8 @@ function renderModel(view, ui, context) {
   const alertNames = inventoryAlerts.criticalNames.join(', ');
   const selectedLocation = ui.locationOptions.find((location) => location.id === ui.locationId);
 
+  disposeTrendChart(view);
+
   view.innerHTML = `
     <div class="${styles.frame}">
       <header class="${styles.topbar}">
@@ -474,10 +497,18 @@ function renderModel(view, ui, context) {
 
         <section class="${styles.chartGrid}">
           <article class="${styles.panel} ${styles.trendPanel}">
-            <div class="${styles.panelHeader}">
-              <div>
-                <h2>${escapeHtml(model.trendTitle)}</h2>
+            <div class="${styles.trendHeader}">
+              <div class="${styles.trendHeaderTitle}">
+                <h2>${escapeHtml((model.trendTitle || '').toUpperCase())}</h2>
                 <p>${escapeHtml(model.trendRangeLabel)}</p>
+              </div>
+              <div class="${styles.trendHeaderTotal}">
+                <span>Total Cost</span>
+                <div>
+                  <strong>${money(model.metrics.totalCost)}</strong>
+                  ${Number.isFinite(model.metrics.totalCostDelta) ? `<em class="${model.metrics.totalCostDelta >= 0 ? styles.trendDeltaBad : styles.trendDeltaGood}">${icon(model.metrics.totalCostDelta >= 0 ? 'arrowUp' : 'arrowDown', 11)}${decimal(Math.abs(model.metrics.totalCostDelta))}%</em>` : ''}
+                </div>
+                <small>vs prior period</small>
               </div>
               <div class="${styles.seriesToggles}" data-dashboard-series-toggles></div>
             </div>
@@ -964,63 +995,127 @@ function renderTrendChart(view, ui) {
     });
   });
 
-  const width = 800;
-  const height = 240;
-  const pad = { top: 18, right: 18, bottom: 34, left: 66 };
-  const chartWidth = width - pad.left - pad.right;
-  const chartHeight = height - pad.top - pad.bottom;
+  const trend = ui.model.trend;
   const activeSeries = SERIES.filter((series) => ui.activeSeries.has(series.key));
-  const values = ui.model.trend.flatMap((month) => activeSeries.map((series) => number(month[series.key])));
-  const rawMax = Math.max(...values, 0);
-  const maxY = niceMax(rawMax || 1);
-  const xAt = (index) => pad.left + (ui.model.trend.length === 1 ? chartWidth / 2 : (index / (ui.model.trend.length - 1)) * chartWidth);
-  const yAt = (value) => pad.top + chartHeight - (number(value) / maxY) * chartHeight;
+  const hasValues = trend.some((bucket) => activeSeries.some((series) => number(bucket[series.key]) > 0));
 
-  const grids = Array.from({ length: 5 }, (_, index) => {
-    const value = maxY - (index * maxY / 4);
-    const y = pad.top + index * chartHeight / 4;
-    return `<line x1="${pad.left}" y1="${y}" x2="${width - pad.right}" y2="${y}" class="${styles.gridLine}"/><text x="${pad.left - 10}" y="${y + 4}" text-anchor="end" class="${styles.axisText}">${escapeHtml(axisMoney(value))}</text>`;
-  }).join('');
+  let chart = trendChartInstances.get(view);
+  if (!chart || chart.getDom() !== chartRoot) {
+    if (chart) chart.dispose();
+    chart = echarts.init(chartRoot, null, { renderer: 'canvas' });
+    trendChartInstances.set(view, chart);
+    if (typeof ResizeObserver !== 'undefined' && !chartRoot.__dashboardResizeObserver) {
+      const observer = new ResizeObserver(() => chart.resize());
+      observer.observe(chartRoot);
+      chartRoot.__dashboardResizeObserver = observer;
+    }
+  }
 
-  const paths = activeSeries.map((series) => {
-    const points = ui.model.trend.map((month, index) => `${xAt(index)},${yAt(month[series.key])}`).join(' ');
-    const dots = ui.model.trend.map((month, index) => `<circle cx="${xAt(index)}" cy="${yAt(month[series.key])}" r="3.2" fill="${series.color}" class="${styles.chartDot}"/>`).join('');
-    return `<polyline points="${points}" fill="none" stroke="${series.color}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="${styles.chartLine}"/>${dots}`;
-  }).join('');
+  const totalSeries = trend.map((bucket) => roundMoney(activeSeries.reduce((sum, series) => sum + number(bucket[series.key]), 0)));
 
-  const xLabels = ui.model.trend.map((month, index) => `<text x="${xAt(index)}" y="${height - 10}" text-anchor="middle" class="${styles.axisText}">${escapeHtml(month.label)}</text>`).join('');
-  const hoverWidth = chartWidth / Math.max(ui.model.trend.length, 1);
-  const hitZones = ui.model.trend.map((month, index) => `<rect x="${xAt(index) - hoverWidth / 2}" y="${pad.top}" width="${hoverWidth}" height="${chartHeight}" fill="transparent" data-trend-index="${index}" tabindex="0" aria-label="${escapeAttribute(month.label)} trend values"/>`).join('');
+  chart.setOption({
+    animationDuration: 420,
+    animationEasing: 'cubicOut',
+    grid: { top: 14, right: 14, bottom: 26, left: 54 },
+    xAxis: {
+      type: 'category',
+      data: trend.map((bucket) => bucket.label),
+      boundaryGap: false,
+      axisLine: { lineStyle: { color: 'rgba(255,255,255,0.08)' } },
+      axisTick: { show: false },
+      axisLabel: { color: 'var(--dash-muted)', fontSize: 10, fontFamily: 'var(--font-main)' }
+    },
+    yAxis: {
+      type: 'value',
+      splitLine: { lineStyle: { color: 'rgba(255,255,255,0.06)', type: 'dashed' } },
+      axisLabel: { color: 'var(--dash-muted)', fontSize: 10, fontFamily: 'var(--font-main)', formatter: (value) => axisMoney(value) }
+    },
+    axisPointer: {
+      type: 'line',
+      lineStyle: { color: 'rgba(255,255,255,0.32)', type: 'dashed', width: 1 },
+      z: 1
+    },
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: 'transparent',
+      borderWidth: 0,
+      padding: 0,
+      extraCssText: 'box-shadow:none;',
+      confine: true,
+      position: (point, params, dom, rect, size) => [
+        Math.max(size.viewSize[0] - size.contentSize[0] - 4, 4),
+        4
+      ],
+      formatter: (params) => {
+        const items = Array.isArray(params) ? params.filter((entry) => entry.seriesName !== 'Total') : [];
+        const index = items[0]?.dataIndex ?? 0;
+        const bucket = trend[index];
+        if (!bucket) return '';
+        const rows = activeSeries.map((series) => `
+          <span><i style="background:${series.color}"></i>${escapeHtml(series.label)}</span>
+          <b>${money(bucket[series.key])}</b>
+        `).join('');
+        return `
+          <div class="${styles.trendTooltip}">
+            <strong>${escapeHtml(bucket.label)}</strong>
+            <div class="${styles.trendTooltipRows}">${rows}</div>
+            <footer><span>TOTAL COST</span><b>${money(totalSeries[index])}</b></footer>
+          </div>
+        `;
+      }
+    },
+    series: [
+      ...activeSeries.map((series) => ({
+        name: series.label,
+        type: 'line',
+        stack: 'total',
+        smooth: 0.35,
+        symbol: 'none',
+        lineStyle: { width: 1, color: series.color, opacity: 0.9 },
+        areaStyle: {
+          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+            { offset: 0, color: colorWithAlpha(series.color, 0.55) },
+            { offset: 1, color: colorWithAlpha(series.color, 0.04) }
+          ])
+        },
+        emphasis: { focus: 'series' },
+        data: trend.map((bucket) => number(bucket[series.key]))
+      })),
+      {
+        name: 'Total',
+        type: 'line',
+        smooth: 0.35,
+        symbol: 'circle',
+        symbolSize: 6,
+        showSymbol: false,
+        z: 10,
+        lineStyle: {
+          width: 2.4,
+          color: '#eafff5',
+          shadowColor: 'rgba(0, 229, 160, 0.65)',
+          shadowBlur: 12
+        },
+        itemStyle: { color: '#eafff5', borderColor: '#00e5a0', borderWidth: 2 },
+        tooltip: { show: false },
+        data: totalSeries
+      }
+    ]
+  }, { notMerge: true });
 
-  chartRoot.innerHTML = `
-    <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Cost and stock movement trend for ${escapeAttribute(ui.model.trendRangeLabel)}">
-      ${grids}${paths}${xLabels}${hitZones}
-    </svg>
-    <div class="${styles.chartTooltip}" data-dashboard-chart-tooltip hidden></div>
-    ${rawMax <= 0 ? `<div class="${styles.chartEmpty}">No movement values recorded for this period.</div>` : ''}
-  `;
+  chartRoot.querySelector(`.${styles.chartEmpty}`)?.remove();
+  if (!hasValues) {
+    const empty = document.createElement('div');
+    empty.className = styles.chartEmpty;
+    empty.textContent = 'No movement values recorded for this period.';
+    chartRoot.appendChild(empty);
+  }
+}
 
-  const tooltip = chartRoot.querySelector('[data-dashboard-chart-tooltip]');
-  const show = (target, event) => {
-    const index = number(target.dataset.trendIndex);
-    const month = ui.model.trend[index];
-    if (!month || !tooltip) return;
-    tooltip.innerHTML = `<strong>${escapeHtml(month.label)}</strong>${activeSeries.map((series) => `<span style="color:${series.color}">${escapeHtml(series.label)} <b>${money(month[series.key])}</b></span>`).join('')}`;
-    tooltip.hidden = false;
-    const bounds = chartRoot.getBoundingClientRect();
-    const clientX = event?.clientX || bounds.left + (xAt(index) / width) * bounds.width;
-    const left = Math.min(Math.max(clientX - bounds.left + 10, 8), Math.max(bounds.width - 180, 8));
-    tooltip.style.left = `${left}px`;
-    tooltip.style.top = '18px';
-  };
-  chartRoot.querySelectorAll('[data-trend-index]').forEach((target) => {
-    target.addEventListener('pointerenter', (event) => show(target, event));
-    target.addEventListener('pointermove', (event) => show(target, event));
-    target.addEventListener('focus', (event) => show(target, event));
-    target.addEventListener('blur', () => hideChartTooltip(view));
-  });
-  chartRoot.addEventListener('pointerleave', () => hideChartTooltip(view));
-  chartRoot.addEventListener('pointercancel', () => hideChartTooltip(view));
+function colorWithAlpha(hex, alpha) {
+  const match = String(hex || '').replace('#', '').match(/^([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
+  if (!match) return hex;
+  const [, r, g, b] = match;
+  return `rgba(${parseInt(r, 16)}, ${parseInt(g, 16)}, ${parseInt(b, 16)}, ${alpha})`;
 }
 
 function renderSupplierChart(view, model) {
@@ -1360,8 +1455,7 @@ function statusRank(status) {
 }
 
 function hideChartTooltip(view) {
-  const tooltip = view.querySelector('[data-dashboard-chart-tooltip]');
-  if (tooltip) tooltip.hidden = true;
+  trendChartInstances.get(view)?.dispatchAction({ type: 'hideTip' });
 }
 
 function setRefreshing(view, refreshing) {
@@ -1369,13 +1463,6 @@ function setRefreshing(view, refreshing) {
   if (!button) return;
   button.disabled = refreshing;
   button.classList.toggle(styles.refreshing, refreshing);
-}
-
-function niceMax(value) {
-  const exponent = Math.floor(Math.log10(value));
-  const fraction = value / (10 ** exponent);
-  const niceFraction = fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 5 ? 5 : 10;
-  return niceFraction * (10 ** exponent);
 }
 
 function axisMoney(value) {
