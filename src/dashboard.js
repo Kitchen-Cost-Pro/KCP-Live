@@ -205,7 +205,10 @@ function getScopedInventoryItems(ui) {
 }
 
 function getScopedInventoryAlerts(ui) {
-  const items = getScopedInventoryItems(ui);
+  // Muted items no longer need immediate attention — they're excluded from this banner (and its
+  // count/name list) the same way they're excluded from the daily email, even though they still
+  // show up in the low/critical worklist table below so a user can see and unmute them.
+  const items = getScopedInventoryItems(ui).filter((item) => !item.acknowledged);
   const critical = items.filter((item) => item.status === 'critical');
   const low = items.filter((item) => item.status === 'low');
   return {
@@ -223,7 +226,7 @@ function getNotificationInventoryItems(ui) {
 }
 
 function getNotificationInventoryAlerts(ui) {
-  const items = getNotificationInventoryItems(ui);
+  const items = getNotificationInventoryItems(ui).filter((item) => !item.acknowledged);
   const critical = items.filter((item) => item.status === 'critical');
   const low = items.filter((item) => item.status === 'low');
   return {
@@ -1236,7 +1239,7 @@ async function handleAcknowledgeItem(view, ui, context, item) {
   }
   ui.ackPendingKeys.delete(key);
   renderInventory(view, ui, context);
-  renderNotificationCenter(view, ui, context);
+  renderInventoryAlert(view, ui, context);
 }
 
 async function handleAcknowledgeAllItems(view, ui, context, items) {
@@ -1251,7 +1254,7 @@ async function handleAcknowledgeAllItems(view, ui, context, items) {
   }
   ui.ackAllPending = false;
   renderInventory(view, ui, context);
-  renderNotificationCenter(view, ui, context);
+  renderInventoryAlert(view, ui, context);
 }
 
 function inventoryRow(item, ui) {
