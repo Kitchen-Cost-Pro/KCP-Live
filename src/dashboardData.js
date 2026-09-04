@@ -260,7 +260,8 @@ export function buildDashboardModel({
       cos: roundMoney(bucket.cos),
       adjustments: roundMoney(bucket.adjustments),
       wastage: roundMoney(bucket.wastage),
-      mfgWastage: roundMoney(bucket.mfgWastage)
+      mfgWastage: roundMoney(bucket.mfgWastage),
+      netSales: roundMoney(bucket.netSales)
     })),
     supplierMode,
     suppliers,
