@@ -128,6 +128,19 @@ export class WorkspaceDO extends DurableObject<Env> {
    */
   private migrationSettledInMemory = false;
   private migrationSuspendedUntilMs = 0;
+  // A repair that fails because its own prerequisite table/column hasn't been reached yet by the
+  // indexed migration chain (e.g. XERO_V2_SETTINGS_SCHEMA_REPAIR on a tenant still early in
+  // TENANT_MIGRATIONS) is doomed to fail again on every subsequent migrate() call too, until the
+  // indexed chain catches up — which normally happens at most once per request, so retrying costs
+  // little. ensureFullyMigrated() breaks that assumption: it calls migrate() in a tight loop
+  // (up to TENANT_MIGRATIONS.length+5 times) to fully catch a brand-new tenant up in one request,
+  // so a doomed repair got retried dozens of times in that same loop — live incident 2026-09-05:
+  // WS-davies-666d95's migrate-import call retried XERO_V2_SETTINGS_SCHEMA_REPAIR 46 times before
+  // its prerequisite table existed, and a subsequent request against the same warm instance then
+  // hit SQLITE_NOMEM, very likely from that wasted repeated work. Tracked per-instance (not
+  // persisted) so a genuine cold start still gets a fresh attempt once the indexed chain has
+  // actually moved forward.
+  private failedRepairIdsThisInstance = new Set<string>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -391,6 +404,7 @@ export class WorkspaceDO extends DurableObject<Env> {
       // blocks the others, and the failed one simply retries on the tenant's next request (its
       // marker is only recorded on success).
       const runRepair = (repairId: string, repairSql: string) => {
+        if (this.failedRepairIdsThisInstance.has(repairId)) return;
         const applied = sql.exec(
           `SELECT repair_id FROM _kcp_runtime_repairs WHERE repair_id = ?1`,
           repairId,
@@ -406,7 +420,8 @@ export class WorkspaceDO extends DurableObject<Env> {
             );
           });
         } catch (cause) {
-          console.error(`[WorkspaceDO] runtime repair ${repairId} failed — will retry next request`, cause);
+          this.failedRepairIdsThisInstance.add(repairId);
+          console.error(`[WorkspaceDO] runtime repair ${repairId} failed — will retry once this instance restarts`, cause);
         }
       };
       runRepair(YOCO_V2_RUNTIME_SCHEMA_REPAIR_ID, YOCO_V2_RUNTIME_SCHEMA_REPAIR);
@@ -598,13 +613,21 @@ export class WorkspaceDO extends DurableObject<Env> {
 
     // Manual escape hatch for a workspace that's ALREADY stuck mid-catch-up (e.g. one onboarded
     // before ensureFullyMigrated() existed, or one whose migrate-import call landed before a
-    // migration was appended). postAdminWorkspaceMigrationRetry (routes.ts) only clears a stuck
-    // backoff — it doesn't itself advance anything — so an admin still needed to trigger dozens of
-    // ordinary requests to walk the tenant through its backlog one migration at a time. This runs
-    // the same full-catchup loop on demand instead. Safe to call on a tenant with real data too:
-    // each step is still exactly one migration (identical cost to the normal lazy path), just
-    // requested back-to-back instead of spread across a user's incoming traffic.
+    // migration was appended). postAdminWorkspaceMigrationRetry (routes.ts) only clears the
+    // PERSISTED backoff (_kcp_migration_health) — it doesn't itself advance anything, and it does
+    // NOT touch the IN-MEMORY migrationSuspendedUntilMs/migrationSettledInMemory circuit breaker on
+    // whichever DO instance is currently warm for this tenant (see their own field comment for why
+    // that breaker exists). Once that in-memory latch trips, every migrate() call on this warm
+    // instance returns instantly at the top of the function — before ever reaching the try block,
+    // so nothing gets logged or recorded either — until the instance eventually cold-starts on its
+    // own. Live incident 2026-09-05: WS-sausage-saloon-eastgate-00c479 stayed stuck at the same
+    // schema version through two separate admin-migrate-full-catchup calls AND a migration-retry
+    // in between, with zero log output, because that in-memory latch was still armed on the warm
+    // instance the whole time. Clearing both here — not just the persisted row — is what actually
+    // lets the very next migrate() call in the loop below attempt anything at all.
     if (resource === 'admin-migrate-full-catchup') {
+      this.migrationSuspendedUntilMs = 0;
+      this.migrationSettledInMemory = false;
       const before = this.readSchemaVersion();
       this.ensureFullyMigrated();
       const after = this.readSchemaVersion();
