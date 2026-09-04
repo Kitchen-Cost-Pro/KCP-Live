@@ -72,7 +72,8 @@ export function renderDashboard({ state = {}, onNavigate, onStockFilterChange, o
     notificationRecipientIds: new Set(),
     notificationWorkspaceUsers: [],
     ackPendingKeys: new Set(),
-    ackAllPending: false
+    ackAllPending: false,
+    selectedAckKeys: new Set()
   };
 
   renderLoading(view, workspaceName);
@@ -204,7 +205,10 @@ function getScopedInventoryItems(ui) {
 }
 
 function getScopedInventoryAlerts(ui) {
-  const items = getScopedInventoryItems(ui);
+  // Muted items no longer need immediate attention — they're excluded from this banner (and its
+  // count/name list) the same way they're excluded from the daily email, even though they still
+  // show up in the low/critical worklist table below so a user can see and unmute them.
+  const items = getScopedInventoryItems(ui).filter((item) => !item.acknowledged);
   const critical = items.filter((item) => item.status === 'critical');
   const low = items.filter((item) => item.status === 'low');
   return {
@@ -222,7 +226,7 @@ function getNotificationInventoryItems(ui) {
 }
 
 function getNotificationInventoryAlerts(ui) {
-  const items = getNotificationInventoryItems(ui);
+  const items = getNotificationInventoryItems(ui).filter((item) => !item.acknowledged);
   const critical = items.filter((item) => item.status === 'critical');
   const low = items.filter((item) => item.status === 'low');
   return {
@@ -1095,15 +1099,42 @@ function renderInventory(view, ui, context) {
   countRoot.textContent = `${filtered.length.toLocaleString('en-ZA')} item${filtered.length === 1 ? '' : 's'} needing attention${selectedInventoryLocation ? ` · ${selectedInventoryLocation.name}` : ''}`;
 
   const mutableAttentionItems = filtered.filter((item) => isAttentionStatus(item.status) && !item.acknowledged);
-  actionsRoot.innerHTML = mutableAttentionItems.length ? `
-    <button type="button" class="${styles.categoryButton}" data-dashboard-ack-all ${ui.ackAllPending ? 'disabled' : ''}>
-      ${ui.ackAllPending ? `${icon('refresh', 12)} Muting…` : `${icon('bellOff', 12)}Acknowledge all (${mutableAttentionItems.length})`}
-    </button>
-    <span>Mutes today's low-stock email for these items until they restock and fall low again.</span>
-  ` : '';
-  actionsRoot.querySelector('[data-dashboard-ack-all]')?.addEventListener('click', () => {
-    handleAcknowledgeAllItems(view, ui, context, mutableAttentionItems);
-  });
+  const mutableKeys = new Set(mutableAttentionItems.map((item) => itemAckKey(item)));
+  // Selections only ever hold currently-visible, still-mutable items — drop anything that scrolled
+  // out of the filtered set or already got muted since it was selected.
+  for (const key of ui.selectedAckKeys) {
+    if (!mutableKeys.has(key)) ui.selectedAckKeys.delete(key);
+  }
+  const selectedItems = mutableAttentionItems.filter((item) => ui.selectedAckKeys.has(itemAckKey(item)));
+
+  if (selectedItems.length) {
+    actionsRoot.innerHTML = `
+      <button type="button" class="${styles.categoryButton}" data-dashboard-ack-selected ${ui.ackAllPending ? 'disabled' : ''}>
+        ${ui.ackAllPending ? `${icon('refresh', 12)} Muting…` : `${icon('bellOff', 12)}Mute selected (${selectedItems.length})`}
+      </button>
+      <button type="button" class="${styles.categoryButton}" data-dashboard-clear-selection ${ui.ackAllPending ? 'disabled' : ''}>Clear selection</button>
+      <span>Mutes today's low-stock email for the selected items until they restock and fall low again.</span>
+    `;
+    actionsRoot.querySelector('[data-dashboard-ack-selected]')?.addEventListener('click', () => {
+      handleAcknowledgeAllItems(view, ui, context, selectedItems);
+    });
+    actionsRoot.querySelector('[data-dashboard-clear-selection]')?.addEventListener('click', () => {
+      ui.selectedAckKeys.clear();
+      renderInventory(view, ui, context);
+    });
+  } else if (mutableAttentionItems.length) {
+    actionsRoot.innerHTML = `
+      <button type="button" class="${styles.categoryButton}" data-dashboard-ack-all ${ui.ackAllPending ? 'disabled' : ''}>
+        ${ui.ackAllPending ? `${icon('refresh', 12)} Muting…` : `${icon('bellOff', 12)}Acknowledge all (${mutableAttentionItems.length})`}
+      </button>
+      <span>Select items below to mute just those, or mute everything shown here.</span>
+    `;
+    actionsRoot.querySelector('[data-dashboard-ack-all]')?.addEventListener('click', () => {
+      handleAcknowledgeAllItems(view, ui, context, mutableAttentionItems);
+    });
+  } else {
+    actionsRoot.innerHTML = '';
+  }
 
   if (!visible.length) {
     const hasAnyAttentionItem = getScopedInventoryItems(ui).some((item) => isAttentionStatus(item.status));
@@ -1115,12 +1146,27 @@ function renderInventory(view, ui, context) {
     const columns = [
       ['sku', 'SKU'], ['name', 'Item Name'], ['category', 'Category'], ['qty', 'Qty'], ['unitCost', 'Unit Cost'], ['totalValue', 'Total Value'], ['status', 'Status'], ['supplier', 'Supplier'], [null, 'Alerts']
     ];
+    const visibleMutableKeys = visible.filter((item) => mutableKeys.has(itemAckKey(item))).map((item) => itemAckKey(item));
+    const visibleSelectedCount = visibleMutableKeys.filter((key) => ui.selectedAckKeys.has(key)).length;
+    const selectAllChecked = visibleMutableKeys.length > 0 && visibleSelectedCount === visibleMutableKeys.length;
+    const selectAllIndeterminate = visibleSelectedCount > 0 && !selectAllChecked;
     tableRoot.innerHTML = `
       <table class="${styles.inventoryTable}">
-        <thead><tr>${columns.map(([key, label]) => key ? `<th><button type="button" data-sort="${key}">${escapeHtml(label)} ${sortIcon(ui, key)}</button></th>` : `<th>${escapeHtml(label)}</th>`).join('')}</tr></thead>
+        <thead><tr>
+          <th><input type="checkbox" data-select-all-mute aria-label="Select all mutable items shown" ${visibleMutableKeys.length ? '' : 'disabled'} ${selectAllChecked ? 'checked' : ''} /></th>
+          ${columns.map(([key, label]) => key ? `<th><button type="button" data-sort="${key}">${escapeHtml(label)} ${sortIcon(ui, key)}</button></th>` : `<th>${escapeHtml(label)}</th>`).join('')}
+        </tr></thead>
         <tbody>${visible.map((item) => inventoryRow(item, ui)).join('')}</tbody>
       </table>
     `;
+    const selectAllBox = tableRoot.querySelector('[data-select-all-mute]');
+    if (selectAllBox) selectAllBox.indeterminate = selectAllIndeterminate;
+    selectAllBox?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      if (event.target.checked) visibleMutableKeys.forEach((key) => ui.selectedAckKeys.add(key));
+      else visibleMutableKeys.forEach((key) => ui.selectedAckKeys.delete(key));
+      renderInventory(view, ui, context);
+    });
     tableRoot.querySelectorAll('[data-sort]').forEach((button) => {
       button.addEventListener('click', () => {
         const key = button.dataset.sort || 'name';
@@ -1136,6 +1182,16 @@ function renderInventory(view, ui, context) {
           event.preventDefault();
           openStockItem(row.dataset.itemName || '', context);
         }
+      });
+    });
+    tableRoot.querySelectorAll('[data-select-item]').forEach((checkbox) => {
+      checkbox.addEventListener('click', (event) => event.stopPropagation());
+      checkbox.addEventListener('change', () => {
+        const key = checkbox.dataset.selectItem || '';
+        if (!key) return;
+        if (checkbox.checked) ui.selectedAckKeys.add(key);
+        else ui.selectedAckKeys.delete(key);
+        renderInventory(view, ui, context);
       });
     });
     tableRoot.querySelectorAll('[data-ack-item]').forEach((button) => {
@@ -1183,7 +1239,7 @@ async function handleAcknowledgeItem(view, ui, context, item) {
   }
   ui.ackPendingKeys.delete(key);
   renderInventory(view, ui, context);
-  renderNotificationCenter(view, ui, context);
+  renderInventoryAlert(view, ui, context);
 }
 
 async function handleAcknowledgeAllItems(view, ui, context, items) {
@@ -1198,7 +1254,7 @@ async function handleAcknowledgeAllItems(view, ui, context, items) {
   }
   ui.ackAllPending = false;
   renderInventory(view, ui, context);
-  renderNotificationCenter(view, ui, context);
+  renderInventoryAlert(view, ui, context);
 }
 
 function inventoryRow(item, ui) {
@@ -1209,8 +1265,14 @@ function inventoryRow(item, ui) {
   const ackCell = isAttentionStatus(item.status)
     ? `<button type="button" class="${styles.iconButton} ${item.acknowledged ? styles.iconButtonActive : ''}" data-ack-item="${escapeAttribute(key)}" ${pending || item.acknowledged ? 'disabled' : ''} title="${item.acknowledged ? 'Daily low-stock email muted for this item' : 'Mute daily low-stock email for this item'}" aria-label="${item.acknowledged ? 'Muted' : 'Mute low-stock email'}">${pending ? icon('refresh', 13) : icon(item.acknowledged ? 'bellOff' : 'bell', 13)}</button>`
     : '—';
+  const selectable = isAttentionStatus(item.status) && !item.acknowledged;
+  const selected = ui.selectedAckKeys.has(key);
+  const selectCell = selectable
+    ? `<input type="checkbox" data-select-item="${escapeAttribute(key)}" ${selected ? 'checked' : ''} aria-label="Select ${escapeAttribute(item.name)} to mute" />`
+    : '';
   return `
     <tr tabindex="0" role="button" data-stock-item data-item-name="${escapeAttribute(item.name)}" title="Open ${escapeAttribute(item.name)} in Stock Items">
+      <td>${selectCell}</td>
       <td>${escapeHtml(item.sku || '—')}</td>
       <td><strong>${escapeHtml(item.name)}</strong>${item.locationName ? `<span>${escapeHtml(item.locationName)}</span>` : ''}</td>
       <td>${escapeHtml(item.category)}</td>
