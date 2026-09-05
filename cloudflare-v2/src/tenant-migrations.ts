@@ -813,5 +813,26 @@ CREATE INDEX IF NOT EXISTS idx_stock_movements_workspace_effective_date
   // reset requested for the restock-and-deplete cycle comes for free from that existing transition.
   `ALTER TABLE low_stock_alert_state ADD COLUMN acknowledged INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE low_stock_alert_state ADD COLUMN acknowledged_at TEXT;
-ALTER TABLE low_stock_alert_state ADD COLUMN acknowledged_by TEXT;`
+ALTER TABLE low_stock_alert_state ADD COLUMN acknowledged_by TEXT;`,
+  // 57 — index the Webhook Health dashboard's sales-stock-stats fan-out (admin-routes.ts,
+  // 'sales-stock-stats'). Diagnosed 2026-09-05: loading the admin dashboard fans this query out to
+  // every workspace, and three of its four per-workspace queries filter on a date column with no
+  // supporting index, so each one full-scans the workspace's ENTIRE history of that table just to
+  // find one day's rows — the same unbounded-scan shape as migration 40's reconciliation bug.
+  // Measured via Cloudflare's storage-operations chart: a single dashboard load read ~3M rows,
+  // growing without bound as each workspace accumulates more sales/stock history. These composite
+  // indexes make all three queries a SEARCH on (workspace_id, ...) instead of a SCAN:
+  //   - yoco_v2_proposed_stock_movements: WHERE workspace_id=? AND created_at BETWEEN ?
+  //   - yoco_v2_live_sale_reporting_effects: WHERE workspace_id=? AND applied_at BETWEEN ?
+  //   - yoco_v2_live_sale_stock_effects: WHERE workspace_id=? AND status=? AND applied_at/
+  //     updated_at BETWEEN ? (status leads the range column in each index since the query always
+  //     filters status first — 'APPLIED' for applied_at, 'FAILED'/'BLOCKED' for updated_at).
+  `CREATE INDEX IF NOT EXISTS idx_yoco_v2_proposed_stock_movements_workspace_created
+  ON yoco_v2_proposed_stock_movements(workspace_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_yoco_v2_live_sale_reporting_effects_workspace_applied
+  ON yoco_v2_live_sale_reporting_effects(workspace_id, applied_at);
+CREATE INDEX IF NOT EXISTS idx_yoco_v2_live_sale_stock_effects_workspace_status_applied
+  ON yoco_v2_live_sale_stock_effects(workspace_id, status, applied_at);
+CREATE INDEX IF NOT EXISTS idx_yoco_v2_live_sale_stock_effects_workspace_status_updated
+  ON yoco_v2_live_sale_stock_effects(workspace_id, status, updated_at);`
 ];
