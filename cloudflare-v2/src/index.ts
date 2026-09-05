@@ -248,6 +248,55 @@ async function dispatchCentral(request: Request, env: Env, url: URL): Promise<Re
     return json(request, env, { ok: true, range, bucketMinutes, bucketCount, windowStart, labels, series });
   }
 
+  // Webhook & Workspace Health: per-workspace sales & stock-movement counts for one day, so an
+  // admin auditing sales (e.g. "we seem to be missing N sales today") can see completed vs.
+  // failed sales and proposed vs. applied stock movements without digging into each workspace.
+  if (request.method === 'GET' && url.pathname === '/api/admin/webhook-health/sales-stock') {
+    await requireAdmin(request, lenv);
+    const date = String(url.searchParams.get('date') || '');
+    const workspaceRows = await env.CENTRAL_DB.prepare(
+      `SELECT id, name, status FROM workspaces WHERE status = 'active' ORDER BY name COLLATE NOCASE ASC`
+    ).all<{ id: string; name: string; status: string }>();
+    const workspaces = workspaceRows.results || [];
+    const resource = `yoco-v2/admin/sales-stock-stats${date ? `?date=${encodeURIComponent(date)}` : ''}`;
+    const stats = await fanOutWorkspaceDOs(
+      env,
+      workspaces.map((row) => String(row.id)),
+      resource,
+      { uid: 'admin', email: '', systemRole: 'admin' }
+    );
+    const statsByWorkspace = new Map(stats.map((r) => [r.workspaceId, r.data as any]));
+    let resolvedDate = date;
+    const rows = workspaces.map((row) => {
+      const workspaceId = String(row.id);
+      const data = statsByWorkspace.get(workspaceId);
+      if (data?.ok && data.date && !resolvedDate) resolvedDate = String(data.date);
+      return {
+        workspaceId,
+        name: String(row.name || workspaceId),
+        ok: Boolean(data?.ok),
+        successfulSales: Number(data?.successfulSales || 0),
+        failedSales: Number(data?.failedSales || 0),
+        totalSales: Number(data?.totalSales || 0),
+        stockMovementsProposed: Number(data?.stockMovementsProposed || 0),
+        stockMovementsApplied: Number(data?.stockMovementsApplied || 0),
+        stockMovementsFailed: Number(data?.stockMovementsFailed || 0),
+        stockMovementTransactions: Number(data?.stockMovementTransactions || 0)
+      };
+    });
+    const totals = rows.reduce((acc, row) => {
+      acc.successfulSales += row.successfulSales;
+      acc.failedSales += row.failedSales;
+      acc.totalSales += row.totalSales;
+      acc.stockMovementsProposed += row.stockMovementsProposed;
+      acc.stockMovementsApplied += row.stockMovementsApplied;
+      acc.stockMovementsFailed += row.stockMovementsFailed;
+      acc.stockMovementTransactions += row.stockMovementTransactions;
+      return acc;
+    }, { successfulSales: 0, failedSales: 0, totalSales: 0, stockMovementsProposed: 0, stockMovementsApplied: 0, stockMovementsFailed: 0, stockMovementTransactions: 0 });
+    return json(request, env, { ok: true, date: resolvedDate || date, workspaces: rows, totals });
+  }
+
   // Write-budget observability: the gate is a single global Durable Object (not per-workspace),
   // so this reads its state directly rather than fanning out to workspace DOs.
   if (request.method === 'GET' && url.pathname === '/api/admin/webhook-health/write-budget') {

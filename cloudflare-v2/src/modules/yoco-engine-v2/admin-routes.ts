@@ -1015,6 +1015,53 @@ export async function handleYocoV2AdminRoute(
     return response({ ok: true, workspaceId, buckets });
   }
 
+  // Webhook Health dashboard: sales & stock-movement throughput for one day, so an operator
+  // auditing sales can see (per workspace) how many completed vs. failed alongside how many
+  // stock movements were proposed vs. actually applied — none of that was visible anywhere
+  // before, only the raw webhook call counts above.
+  if (request.method === 'GET' && suffix === 'sales-stock-stats') {
+    const dateParam = String(url.searchParams.get('date') || '');
+    const dayStart = /^\d{4}-\d{2}-\d{2}$/.test(dateParam) ? `${dateParam}T00:00:00.000Z` : sargableDayFloor(nowIso()) + 'T00:00:00.000Z';
+    const dayEnd = new Date(new Date(dayStart).getTime() + 24 * 60 * 60 * 1000).toISOString();
+
+    const [sales, stock] = await Promise.all([
+      env.DB.prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM yoco_v2_live_sale_reporting_effects
+             WHERE workspace_id = ?1 AND applied_at >= ?2 AND applied_at < ?3) AS successful_sales,
+           (SELECT COUNT(*) FROM yoco_v2_live_effect_outbox
+             WHERE workspace_id = ?1 AND effect_type = 'SALE_REPORTING' AND status IN ('FAILED', 'BLOCKED')
+               AND updated_at >= ?2 AND updated_at < ?3) AS failed_sales`
+      ).bind(workspaceId, dayStart, dayEnd).first<Row>(),
+      env.DB.prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM yoco_v2_proposed_stock_movements
+             WHERE workspace_id = ?1 AND created_at >= ?2 AND created_at < ?3) AS stock_movements_proposed,
+           (SELECT COUNT(*) FROM yoco_v2_live_sale_stock_effects
+             WHERE workspace_id = ?1 AND status = 'APPLIED' AND applied_at >= ?2 AND applied_at < ?3) AS stock_movements_applied,
+           (SELECT COUNT(*) FROM yoco_v2_live_sale_stock_effects
+             WHERE workspace_id = ?1 AND status IN ('FAILED', 'BLOCKED') AND updated_at >= ?2 AND updated_at < ?3) AS stock_movements_failed`
+      ).bind(workspaceId, dayStart, dayEnd).first<Row>()
+    ]);
+
+    const successfulSales = Number((sales as Row | null)?.successful_sales || 0);
+    const failedSales = Number((sales as Row | null)?.failed_sales || 0);
+    const stockMovementsApplied = Number((stock as Row | null)?.stock_movements_applied || 0);
+    const stockMovementsFailed = Number((stock as Row | null)?.stock_movements_failed || 0);
+    return response({
+      ok: true,
+      workspaceId,
+      date: dayStart.slice(0, 10),
+      successfulSales,
+      failedSales,
+      totalSales: successfulSales + failedSales,
+      stockMovementsProposed: Number((stock as Row | null)?.stock_movements_proposed || 0),
+      stockMovementsApplied,
+      stockMovementsFailed,
+      stockMovementTransactions: stockMovementsApplied + stockMovementsFailed
+    });
+  }
+
   if (request.method === 'GET' && suffix === 'receipts') {
     const limit = positiveInteger(url.searchParams.get('limit'), 50, 200);
     const offset = positiveInteger(url.searchParams.get('offset'), 0, 100_000);
