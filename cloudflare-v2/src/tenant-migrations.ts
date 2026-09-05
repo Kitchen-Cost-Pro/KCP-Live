@@ -229,7 +229,20 @@ UPDATE report_schedules
   // 11 — replace the transitional schedule storage with the canonical release schema.
   // Saved views are copied into immutable report item snapshots and every export type is
   // stored directly in the single validated format column. Schedule and run history are kept.
-  `DROP TABLE IF EXISTS report_schedule_runs_next;
+  //
+  // Live incident, 2026-09-05: this SELECT reads report_schedules.saved_view_id (added by
+  // migration 7), but tenant-schema.generated.ts has since been regenerated from the CURRENT
+  // schema — i.e. AFTER this migration's own DROP/RENAME already removed that column from the
+  // canonical shape — so a brand-new tenant's baseline (migration 0) creates report_schedules
+  // straight in its POST-migration-11 form, without saved_view_id ever existing. Migration 7's
+  // `CREATE TABLE IF NOT EXISTS report_schedules` then no-ops against that baseline table, and
+  // this migration's SELECT throws "no such column: rs.saved_view_id" for every new tenant,
+  // permanently wedging their migration chain (WS-sausage-saloon-eastgate-00c479 stuck at
+  // index 11 out of 57 through onboarding). The ADD COLUMN below restores it defensively: a
+  // no-op (tolerated duplicate-column error, per d1-facade.ts execScript) for a tenant that
+  // already has it from migration 7, and a real fix for one whose baseline never did.
+  `ALTER TABLE report_schedules ADD COLUMN saved_view_id TEXT;
+DROP TABLE IF EXISTS report_schedule_runs_next;
 DROP TABLE IF EXISTS report_schedules_next;
 CREATE TABLE report_schedules_next (
   id TEXT PRIMARY KEY,

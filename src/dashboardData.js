@@ -32,7 +32,10 @@ export async function loadDashboardReportingModel({
     }),
     runPagedReport('payment_sales_financial', {
       workspaceId,
-      view: 'daily_summary',
+      // daily_summary rows are aggregated per calendar day with no time-of-day at all, so an
+      // hour-bucketed "today" view needs the per-transaction view instead to actually plot a
+      // sales curve across the day.
+      view: range.granularity === 'hour' ? 'transaction_detail' : 'daily_summary',
       filters: { from: range.queryFrom, to: range.to, locationId },
       pageSize: SALES_PAGE_SIZE,
       services
@@ -136,9 +139,9 @@ export function buildDashboardModel({
     const movementValue = number(row.movementValue ?? row.netValue ?? row.valueDelta);
     const impact = Math.abs(movementValue);
     const source = normalizeSource(row.source || row.sourceType || row.movementType);
-    const target = dateInRange(rowDate, resolvedRange.from, resolvedRange.to)
+    const target = inSelectedWindow(row, rowDate, resolvedRange)
       ? selectedTotals
-      : dateInRange(rowDate, resolvedRange.comparisonFrom, resolvedRange.comparisonTo)
+      : inComparisonWindow(row, rowDate, resolvedRange)
         ? comparisonTotals
         : null;
     if (!target) continue;
@@ -150,8 +153,8 @@ export function buildDashboardModel({
     if (isManualWastage(source)) target.wastage += impact;
     if (isPurchase(source)) target.purchases += Math.max(movementValue, 0);
 
-    if (!dateInRange(rowDate, resolvedRange.from, resolvedRange.to)) continue;
-    const bucket = bucketIndex.get(toBucketKey(rowDate, resolvedRange.granularity));
+    if (!inSelectedWindow(row, rowDate, resolvedRange)) continue;
+    const bucket = bucketIndex.get(toBucketKey(row, rowDate, resolvedRange.granularity));
     if (!bucket) continue;
 
     bucket.netMovement += movementValue;
@@ -171,15 +174,15 @@ export function buildDashboardModel({
     if (!rowDate) continue;
     const grossSales = number(row.grossSales ?? row.grossAmount);
     const netSales = number(row.netSales ?? row.netAmount);
-    if (dateInRange(rowDate, resolvedRange.from, resolvedRange.to)) {
+    if (inSelectedWindow(row, rowDate, resolvedRange)) {
       selectedTotals.grossSales += grossSales;
       selectedTotals.netSales += netSales;
-      const bucket = bucketIndex.get(toBucketKey(rowDate, resolvedRange.granularity));
+      const bucket = bucketIndex.get(toBucketKey(row, rowDate, resolvedRange.granularity));
       if (bucket) {
         bucket.grossSales += grossSales;
         bucket.netSales += netSales;
       }
-    } else if (dateInRange(rowDate, resolvedRange.comparisonFrom, resolvedRange.comparisonTo)) {
+    } else if (inComparisonWindow(row, rowDate, resolvedRange)) {
       comparisonTotals.grossSales += grossSales;
       comparisonTotals.netSales += netSales;
     }
@@ -192,6 +195,8 @@ export function buildDashboardModel({
   const inventoryLocations = collectInventoryLocations(inventoryItems);
   const currentWastage = selectedTotals.wastage + selectedTotals.mfgWastage;
   const previousWastage = comparisonTotals.wastage + comparisonTotals.mfgWastage;
+  const currentTotalCost = selectedTotals.cos + selectedTotals.adjustments + selectedTotals.wastage + selectedTotals.mfgWastage;
+  const previousTotalCost = comparisonTotals.cos + comparisonTotals.adjustments + comparisonTotals.wastage + comparisonTotals.mfgWastage;
   const grossMargin = marginPercent(selectedTotals.netSales, selectedTotals.cos);
   const previousGrossMargin = marginPercent(comparisonTotals.netSales, comparisonTotals.cos);
   const estimatedOpeningStockValue = totalStockValue - selectedTotals.netMovement;
@@ -228,7 +233,22 @@ export function buildDashboardModel({
       wastagePercentOfCos: selectedTotals.cos > 0 ? (currentWastage / selectedTotals.cos) * 100 : null,
       grossMargin,
       grossMarginDelta: grossMargin === null || previousGrossMargin === null ? null : grossMargin - previousGrossMargin,
-      netSales: selectedTotals.netSales
+      netSales: selectedTotals.netSales,
+      netSalesDelta: percentageChange(selectedTotals.netSales, comparisonTotals.netSales),
+      totalCost: currentTotalCost,
+      totalCostDelta: percentageChange(currentTotalCost, previousTotalCost),
+      // Per-category current/previous totals, keyed the same as the trend chart's series toggles
+      // (cos/adjustments/wastage/mfgWastage) — lets the dashboard recompute "Total Cost" (and its
+      // delta) to match whichever series are actually toggled on in the chart, instead of always
+      // showing the fixed sum of all four regardless of what's visible. See dashboard.js's
+      // renderTrendChart, which previously showed a static totalCost that disagreed with the
+      // chart whenever fewer than all four series were active.
+      categoryTotals: {
+        cos: { current: selectedTotals.cos, previous: comparisonTotals.cos },
+        adjustments: { current: selectedTotals.adjustments, previous: comparisonTotals.adjustments },
+        wastage: { current: selectedTotals.wastage, previous: comparisonTotals.wastage },
+        mfgWastage: { current: selectedTotals.mfgWastage, previous: comparisonTotals.mfgWastage }
+      }
     },
     alerts: {
       criticalCount: criticalItems.length,
@@ -240,7 +260,8 @@ export function buildDashboardModel({
       cos: roundMoney(bucket.cos),
       adjustments: roundMoney(bucket.adjustments),
       wastage: roundMoney(bucket.wastage),
-      mfgWastage: roundMoney(bucket.mfgWastage)
+      mfgWastage: roundMoney(bucket.mfgWastage),
+      netSales: roundMoney(bucket.netSales)
     })),
     supplierMode,
     suppliers,
@@ -386,25 +407,61 @@ export function getDashboardDateRange(now = new Date(), filters = {}) {
   const dayCount = Math.max(1, daysBetween(fromDate, toDate) + 1);
   const comparisonToDate = addDays(fromDate, -1);
   const comparisonFromDate = addDays(comparisonToDate, -(dayCount - 1));
-  const granularity = dayCount <= 31 ? 'day' : dayCount <= 120 ? 'week' : 'month';
-  const buckets = buildTrendBuckets(fromDate, toDate, granularity);
-  const label = formatRangeLabel(fromDate, toDate);
+  const tradingDayStartHour = normalizeHour(filters.tradingDayStartHour);
+  const granularity = dayCount === 1 ? 'hour' : dayCount <= 31 ? 'day' : dayCount <= 120 ? 'week' : 'month';
+  const buckets = buildTrendBuckets(fromDate, toDate, granularity, tradingDayStartHour);
+  const label = granularity === 'hour'
+    ? formatTradingHoursLabel(tradingDayStartHour, fromDate)
+    : formatRangeLabel(fromDate, toDate);
   const displayName = getRangeDisplayName(dayCount, granularity, buckets.length);
+  // A trading day that doesn't start at midnight spills into the next calendar date (e.g. a
+  // 05:00 start means "today" runs 05:00 today through 04:59 tomorrow). Widening `to` by one
+  // calendar day here ensures both the backend report query and the date-only row filters below
+  // actually include that spillover; hourWindowStart/End then trim it to the exact 24h window.
+  const queryToDate = granularity === 'hour' && tradingDayStartHour > 0 ? addDays(toDate, 1) : toDate;
+  const hourWindowStart = granularity === 'hour'
+    ? new Date(fromDate.getFullYear(), fromDate.getMonth(), fromDate.getDate(), tradingDayStartHour, 0, 0, 0)
+    : null;
+  const hourWindowEnd = hourWindowStart ? new Date(hourWindowStart.getTime() + 24 * 60 * 60 * 1000) : null;
+  const comparisonHourWindowEnd = hourWindowStart;
+  const comparisonHourWindowStart = hourWindowStart
+    ? new Date(hourWindowStart.getTime() - 24 * 60 * 60 * 1000)
+    : null;
 
   return {
     from: formatLocalDate(fromDate),
-    to: formatLocalDate(toDate),
+    to: formatLocalDate(queryToDate),
     queryFrom: formatLocalDate(comparisonFromDate),
     comparisonFrom: formatLocalDate(comparisonFromDate),
     comparisonTo: formatLocalDate(comparisonToDate),
     currentFrom: formatLocalDate(new Date(anchor.getFullYear(), anchor.getMonth(), 1)),
     dayCount,
     granularity,
+    tradingDayStartHour,
+    hourWindowStart,
+    hourWindowEnd,
+    comparisonHourWindowStart,
+    comparisonHourWindowEnd,
     label,
     displayName,
     buckets,
     months: buckets
   };
+}
+
+function normalizeHour(value) {
+  const hour = Math.trunc(Number(value));
+  return Number.isFinite(hour) ? Math.min(23, Math.max(0, hour)) : 0;
+}
+
+function formatHourLabel(hour) {
+  return `${String(normalizeHour(hour)).padStart(2, '0')}:00`;
+}
+
+function formatTradingHoursLabel(tradingDayStartHour, fromDate) {
+  const boundary = formatHourLabel(tradingDayStartHour);
+  const dateLabel = fromDate.toLocaleDateString('en-ZA', { day: 'numeric', month: 'short', year: 'numeric' });
+  return `${boundary} – ${boundary} · ${dateLabel}`;
 }
 
 function filterDashboardRows(rows = [], { from = '', to = '', locationId = '' } = {}) {
@@ -480,8 +537,39 @@ function dateInRange(value = '', from = '', to = '') {
   return Boolean(key && (!from || key >= from) && (!to || key <= to));
 }
 
-function buildTrendBuckets(fromDate, toDate, granularity) {
+function inSelectedWindow(row, rowDate, range) {
+  if (range.granularity === 'hour') {
+    const dateTime = getDateTimeValue(row);
+    if (dateTime) return dateTime >= range.hourWindowStart && dateTime < range.hourWindowEnd;
+    // No time-of-day on this row (e.g. a daily sales aggregate) — the best we can do is
+    // attribute it to its calendar day, same as the pre-hour-granularity behaviour.
+    return rowDate === range.from;
+  }
+  return dateInRange(rowDate, range.from, range.to);
+}
+
+function inComparisonWindow(row, rowDate, range) {
+  if (range.granularity === 'hour') {
+    const dateTime = getDateTimeValue(row);
+    if (dateTime) return dateTime >= range.comparisonHourWindowStart && dateTime < range.comparisonHourWindowEnd;
+    return rowDate === range.comparisonTo;
+  }
+  return dateInRange(rowDate, range.comparisonFrom, range.comparisonTo);
+}
+
+function buildTrendBuckets(fromDate, toDate, granularity, tradingDayStartHour = 0) {
   const buckets = [];
+  if (granularity === 'hour') {
+    const start = new Date(fromDate.getFullYear(), fromDate.getMonth(), fromDate.getDate(), normalizeHour(tradingDayStartHour), 0, 0, 0);
+    for (let i = 0; i < 24; i += 1) {
+      const cursor = new Date(start.getTime() + i * 60 * 60 * 1000);
+      buckets.push({
+        key: formatHourKey(cursor),
+        label: `${String(cursor.getHours()).padStart(2, '0')}:00`
+      });
+    }
+    return buckets;
+  }
   if (granularity === 'day') {
     for (let cursor = new Date(fromDate); cursor <= toDate; cursor = addDays(cursor, 1)) {
       buckets.push({
@@ -518,12 +606,48 @@ function buildTrendBuckets(fromDate, toDate, granularity) {
   return buckets;
 }
 
-function toBucketKey(value = '', granularity = 'month') {
-  const date = parseLocalDate(value);
+function toBucketKey(row, dateKey, granularity = 'month') {
+  if (granularity === 'hour') {
+    const dateTime = getDateTimeValue(row);
+    return dateTime ? formatHourKey(dateTime) : '';
+  }
+  const date = parseLocalDate(dateKey);
   if (!date) return '';
   if (granularity === 'day') return formatLocalDate(date);
   if (granularity === 'week') return formatLocalDate(startOfWeek(date));
   return formatMonthKey(date);
+}
+
+// Returns null when the row carries no real time-of-day (e.g. a daily-aggregate sales row
+// whose `date` is just "2026-09-04") — defaulting those to midnight would misattribute them to
+// the wrong side of a trading day that doesn't start at midnight. Callers fall back to a
+// calendar-date comparison for rows this returns null for.
+//
+// Ledger and per-transaction sales rows carry the date and time-of-day as two separate fields
+// (`date` is always truncated to "YYYY-MM-DD"; the real clock time lives in `time`/`saleTime`),
+// so those are checked first. `timestamp`/`createdAt` are a fallback for rows that only carry a
+// single combined field.
+function getDateTimeValue(row = {}) {
+  const datePart = text(row.date || row.saleDate || row.sale_date || row.movementDate || row.movement_date);
+  const timePart = text(row.time || row.saleTime || row.sale_time);
+  if (datePart && /^\d{2}:\d{2}/.test(timePart)) {
+    const date = new Date(`${datePart.slice(0, 10)}T${timePart}`);
+    if (validDate(date)) return date;
+  }
+  if (/\d{2}:\d{2}/.test(datePart)) {
+    const date = new Date(datePart.replace(' ', 'T'));
+    if (validDate(date)) return date;
+  }
+  const stamp = text(row.timestamp || row.createdAt || row.created_at);
+  if (stamp && /\d{2}:\d{2}/.test(stamp)) {
+    const date = new Date(stamp.replace(' ', 'T'));
+    if (validDate(date)) return date;
+  }
+  return null;
+}
+
+function formatHourKey(date) {
+  return `${formatLocalDate(date)}T${String(date.getHours()).padStart(2, '0')}`;
 }
 
 function startOfWeek(value) {
@@ -576,6 +700,7 @@ function formatRangeLabel(fromDate, toDate) {
 }
 
 function getRangeDisplayName(dayCount, granularity, bucketCount = 0) {
+  if (granularity === 'hour') return 'Today';
   if (granularity === 'day') return `${dayCount} Day`;
   if (granularity === 'week') return `${Math.max(1, bucketCount || Math.ceil(dayCount / 7))} Week`;
   return `${Math.max(1, bucketCount || Math.round(dayCount / 30.4375))} Month`;
@@ -662,7 +787,7 @@ function marginPercent(netSales, costOfSales) {
   return ((sales - number(costOfSales)) / sales) * 100;
 }
 
-function percentageChange(current, previous) {
+export function percentageChange(current, previous) {
   const before = number(previous);
   if (Math.abs(before) < 0.000001) return null;
   return ((number(current) - before) / Math.abs(before)) * 100;

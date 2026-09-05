@@ -337,6 +337,58 @@ test('patchGoodsReceipt: correcting a mistaken cost retroactively compensates a 
   assert.equal(balance(tenant), 7);
 });
 
+test('patchGoodsReceipt: correcting a mistaken cost retroactively compensates a sale made days after the GRV, not just its own trading day', async () => {
+  const { env, tenant } = createEnv();
+  // A mispriced GRV isn't always caught same-day — this backdates receipt to 3 days ago, well
+  // outside the GRV's own trading-day window the correction scan used to be limited to.
+  const threeDaysAgo = new Date(Date.now() - 3 * 86400000).toISOString();
+  const created = await postGrv(env, {
+    date: threeDaysAgo,
+    items: [{ stockItemId: 'si_1', receivedQty: 10, baseQuantity: 10, unitCost: 2, unit: 'kg' }],
+  });
+  const grvId = created.id as string;
+
+  // A sale made a full day after the GRV's own trading day (but still before "now") — exactly
+  // the case a trading-day-only correction window would miss entirely.
+  const saleAt = new Date(new Date(threeDaysAgo).getTime() + 86400000).toISOString();
+  tenant.prepare(
+    `INSERT INTO stock_movements (id, workspace_id, stock_item_id, location_id, movement_type, document_type, document_id, quantity_delta, unit_cost, value_delta, occurred_at, created_by, metadata_json, created_at)
+     VALUES ('mv_sale_1', ?1, 'si_1', 'loc_main', 'sale_depletion', 'yoco_order', 'order_1', -3, 2, -6, ?2, 'test', '{}', ?2)`,
+  ).run(WORKSPACE, saleAt);
+  tenant.prepare(
+    `UPDATE stock_balances SET quantity = quantity - 3 WHERE workspace_id = ?1 AND stock_item_id = 'si_1' AND location_id = 'loc_main'`,
+  ).run(WORKSPACE);
+
+  // Now fix the GRV's cost to the true R20 — no `date` in this PATCH, same as a real edit that
+  // only touches the price.
+  const response = await routes.patchGoodsReceipt(
+    req('PATCH', {
+      receipt: {
+        supplierId: 'sup_1',
+        invoiceNumber: 'INV-1',
+        locationId: 'loc_main',
+        overrideCostPrice: true,
+        items: [{ stockItemId: 'si_1', receivedQty: 10, baseQuantity: 10, unitCost: 20, unit: 'kg' }],
+      },
+    }),
+    env,
+    AUTH,
+    WORKSPACE,
+    grvId,
+  );
+  assert.equal(response.status, 200);
+
+  const corrections = tenant
+    .prepare(`SELECT unit_cost, value_delta, quantity_delta FROM stock_movements WHERE workspace_id = ? AND movement_type = 'cost_correction'`)
+    .all(WORKSPACE) as Array<{ unit_cost: number; value_delta: number; quantity_delta: number }>;
+  assert.equal(corrections.length, 1);
+  assert.equal(corrections[0].unit_cost, 20);
+  assert.equal(corrections[0].quantity_delta, 0);
+  assert.equal(corrections[0].value_delta, -54);
+
+  assert.equal(balance(tenant), 7);
+});
+
 // --- Credit note edit ---
 
 async function postCreditNote(env: Env, overrides: Record<string, unknown> = {}) {

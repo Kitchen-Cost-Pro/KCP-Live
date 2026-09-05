@@ -5,7 +5,7 @@ import { getDriveConnection, saveDriveConnection, disconnectDrive } from './conn
 import { canManageDrive } from './admin-permissions';
 import { syncPendingDriveGrvs } from './grv-drive-sync';
 import { syncPendingDriveCreditNotes } from './credit-note-drive-sync';
-import { processInvoicePhoto, tagDriveInvoiceWithGrv, GrvExtractResult } from './assistant';
+import { processInvoicePhoto, uploadInvoiceDocument, tagDriveInvoiceWithGrv, GrvExtractResult } from './assistant';
 import { listActiveLocations } from './folders';
 
 function response(data: unknown, status = 200): Response {
@@ -175,6 +175,21 @@ async function postAssistantProcess(request: Request, env: Env, workspaceId: str
   }
 }
 
+async function postAssistantUploadInvoice(request: Request, env: Env, workspaceId: string) {
+  const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+  const mimeType = text(body.mimeType);
+  const imageBase64 = text(body.imageBase64);
+  if (!imageBase64) return response({ ok: false, error: 'imageBase64 is required.' }, 400);
+  const location = await resolveLocation(env, workspaceId, text(body.locationId));
+  if (!location) return response({ ok: false, error: 'This workspace has no active locations yet.' }, 400);
+  try {
+    const result = await uploadInvoiceDocument(env, workspaceId, location.id, location.name, { mimeType, imageBase64 });
+    return response({ ok: true, driveFileId: result.driveFileId });
+  } catch (cause) {
+    return response({ ok: false, error: cause instanceof Error ? cause.message : 'Could not upload that invoice to Google Drive.' }, 502);
+  }
+}
+
 async function postAssistantTagGrv(request: Request, env: Env, workspaceId: string) {
   const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
   const fileId = text(body.fileId);
@@ -218,6 +233,9 @@ export async function handleDriveAdminRoute(
   }
   if (request.method === 'POST' && resource === 'drive/assistant/process') {
     return postAssistantProcess(request, env, workspaceId);
+  }
+  if (request.method === 'POST' && resource === 'drive/assistant/upload-invoice') {
+    return postAssistantUploadInvoice(request, env, workspaceId);
   }
   if (request.method === 'POST' && resource === 'drive/assistant/tag-grv') {
     return postAssistantTagGrv(request, env, workspaceId);

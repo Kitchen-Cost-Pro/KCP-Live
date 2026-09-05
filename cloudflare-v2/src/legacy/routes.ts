@@ -10131,9 +10131,10 @@ export async function patchGoodsReceipt(
 
   }
 
-  // Same-day sale cost correction (Phase 2): if a stock_item+location's cost actually changed and
-  // it's meant to drive valuation, work out which sales made that same trading day were costed off
-  // the wrong figure and compensate them — see buildSameDayCostCorrectionStatements's doc comment.
+  // Backdated sale cost correction: if a stock_item+location's cost actually changed and it's
+  // meant to drive valuation, work out which sales made since this GRV was received were costed
+  // off the wrong figure — not just ones made on the GRV's own trading day, but every day between
+  // then and now — and compensate them. See buildSameDayCostCorrectionStatements's doc comment.
   // Runs for BOTH costing modes (the replay handles 'last' and 'wac' the same way); it's unrelated
   // to the 'last'-only stock_item_location_prices upsert above, which is about the location's
   // going-forward cost snapshot, not past sales.
@@ -10153,14 +10154,14 @@ export async function patchGoodsReceipt(
         (revisedCostValueByKey.get(key) || 0) + revised.quantity * revised.unitCost,
       );
     }
-    // Normally just the OLD received_at's trading day — that's when the mistaken cost started
-    // being in effect, so that's where mis-costed sales are. But an edit can change received_at
-    // AND cost in the same request (e.g. correcting a backdated GRV's date along with a typo'd
-    // price) — sales made on the NEW date, before this edit lands, were also costed off the stale
-    // pre-edit figure, and they live in a different trading-day window the old-date scan alone
-    // would never look at. Scanning both windows when the dates differ covers that; scanning the
-    // same window twice when they don't would just be redundant work, not wrong, but the dedup
-    // below skips it for clarity.
+    // Each window now runs from its start date through to "now", so normally just the OLD
+    // received_at's window already covers every sale since the mistaken cost took effect. But an
+    // edit can change received_at AND cost in the same request (e.g. correcting a backdated GRV's
+    // date along with a typo'd price) — if the new date is earlier than the old one, sales between
+    // the new and old dates were also costed off the stale pre-edit figure, and the old-date window
+    // alone wouldn't reach back far enough to find them. Scanning both windows covers that either
+    // way; when one window is a subset of the other (the common case) it's redundant work, not
+    // wrong — alreadyHandledMovementIds below skips re-correcting anything the first window found.
     const oldReceivedAt = text(existing.received_at);
     const correctionWindows = Array.from(
       new Set([oldReceivedAt, payload.receivedAt].filter(Boolean)),
@@ -10244,13 +10245,15 @@ export async function patchGoodsReceipt(
 
 /**
  * DB-wired wrapper around replaySameDayCostCorrections (see its doc comment in
- * inventory-costing.ts for the replay logic itself): loads the trading-day window's movements
- * for one stock_item+location, resolves each sale's current effective cost (folding in any prior
- * correction from an earlier edit of this same GRV), runs the replay, and returns compensating
- * 'cost_correction' INSERT statements — never UPDATEs — so stock_movements stays append-only, same
- * design as patchGoodsReceipt's reversal/reapply. quantity_delta on a correction row is always 0
- * (nothing about stock quantity changes here, only its recorded value), so stock_balances is
- * untouched.
+ * inventory-costing.ts for the replay logic itself): loads every movement for one
+ * stock_item+location from the GRV's effective time through to now (not just its own trading
+ * day — a mispriced GRV is often only noticed and fixed days later, and every sale in between was
+ * costed off the same wrong figure), resolves each sale's current effective cost (folding in any
+ * prior correction from an earlier edit of this same GRV), runs the replay, and returns
+ * compensating 'cost_correction' INSERT statements — never UPDATEs — so stock_movements stays
+ * append-only, same design as patchGoodsReceipt's reversal/reapply. quantity_delta on a correction
+ * row is always 0 (nothing about stock quantity changes here, only its recorded value), so
+ * stock_balances is untouched.
  */
 async function buildSameDayCostCorrectionStatements(
   env: Env,
@@ -10275,10 +10278,14 @@ async function buildSameDayCostCorrectionStatements(
     alreadyHandledMovementIds: Set<string>;
   },
 ): Promise<DbStatementLike[]> {
-  const startHour = await getWorkspaceTradingDayStartHour(env, workspaceId);
-  const dateKey = todayDateKey(startHour, new Date(input.grvEffectiveAt));
-  const { endIso } = businessDayUtcBounds(dateKey, startHour);
-
+  // Originally scoped to just the GRV's own trading day ("Phase 2: same-day"), which missed the
+  // common case a mispriced GRV isn't noticed and fixed until days after it was received — every
+  // sale made in between kept the wrong cost forever, silently understating (or, if the mistake
+  // ran the other way, overstating) gross profit for those days with no way to correct it short of
+  // manually posting adjustments. The replay itself (replaySameDayCostCorrections) was always
+  // generic over whatever window of movements it's given — extending the window through to `now`
+  // instead of the end of the GRV's own trading day is what actually backdates the correction
+  // across every affected day, not just the receipt day.
   const windowMovements =
     (
       await env.DB.prepare(
@@ -10298,7 +10305,7 @@ async function buildSameDayCostCorrectionStatements(
           input.stockItemId,
           input.locationId,
           input.grvEffectiveAt,
-          endIso,
+          input.now,
           input.grvId,
         )
         .all<Record<string, unknown>>()

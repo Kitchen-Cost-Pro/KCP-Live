@@ -3140,9 +3140,9 @@ async function startGrvSubscription(workspaceId) {
 
   appState.grv = createGrvState('loading', appState.grv.filters, appState.grv.pendingSourcePoId, appState.grv.pendingEditReceiptId);
 
-  import('./services/driveService.js').then(({ fetchDriveOcrEnabled }) => fetchDriveOcrEnabled(workspaceId)).then((enabled) => {
+  import('./services/driveService.js').then(({ fetchDriveStatusSummary }) => fetchDriveStatusSummary(workspaceId)).then(({ connected, ocrEnabled }) => {
     if (subscriptionToken !== grvSubscriptionToken || appState.route.active !== 'grv' || appState.workspace?.id !== workspaceId) return;
-    appState.grv = { ...appState.grv, driveOcrEnabled: enabled };
+    appState.grv = { ...appState.grv, driveOcrEnabled: ocrEnabled, driveConnected: connected };
     renderApp();
   }).catch(() => {});
 
@@ -3563,6 +3563,12 @@ async function startStockTakeSubscription(workspaceId) {
   }
 
   appState.stockTake = createStockTakeState('loading', appState.stockTake.filters, appState.stockTake.sessionActive);
+
+  import('./services/driveService.js').then(({ fetchDriveStatusSummary }) => fetchDriveStatusSummary(workspaceId)).then(({ connected }) => {
+    if (subscriptionToken !== stockTakeSubscriptionToken || appState.route.active !== 'stock-count' || appState.workspace?.id !== workspaceId) return;
+    appState.stockTake = { ...appState.stockTake, driveConnected: connected };
+    renderApp();
+  }).catch(() => {});
 
   try {
     const { subscribeStockTakeWorkspace } = await import('./services/stockTakeService.js');
@@ -11154,6 +11160,160 @@ function confirmClearGrvLines() {
 }
 
 let grvCommitInProgress = false;
+// The synchronous checks a GRV draft must pass before it can be committed — shared by the
+// pre-commit modal gate (requestGrvCommit, which must know a draft is ready before it's worth
+// asking about an invoice photo) and the actual save (saveGrvReceipt), so the same rules apply
+// whichever entry point runs first. Returns '' when the draft is ready to save. Doesn't cover
+// supplier resolution (resolveWorkspaceSupplier) — that's async and has its own missing-supplier
+// prompt flow, so it stays inline in saveGrvReceipt.
+function getGrvCommitValidationError(draft) {
+  const supplierName = String(draft.supplierName || '').trim();
+  if (!supplierName) return 'Select or enter a supplier before saving the GRV.';
+
+  const items = draft.items || [];
+  if (!items.length) return 'Add at least one stock item before saving the GRV.';
+
+  const isPoReceiving = Boolean(String(draft.sourcePoId || draft.poNumber || '').trim());
+  const invalidLine = items.find((line) => {
+    const receivedQty = Number(line.receivedQty || 0);
+    return isPoReceiving ? receivedQty < 0 : receivedQty <= 0;
+  });
+  if (invalidLine) {
+    return isPoReceiving
+      ? `${invalidLine.stockItemName || 'A stock item'} cannot have a negative received quantity.`
+      : `${invalidLine.stockItemName || 'A stock item'} needs a received quantity greater than zero.`;
+  }
+
+  if (isPoReceiving && !items.some((line) => Number(line.receivedQty || 0) > 0)) {
+    return 'Enter a received quantity greater than zero on at least one PO line before saving the GRV.';
+  }
+
+  const splitValidation = validateGrvSplitGroups(items);
+  if (splitValidation) return splitValidation;
+
+  // A destination location is required. When splitting by location every line must
+  // have one; otherwise the header destination must be set. "Select your location"
+  // (blank) is not a valid selection.
+  if (draft.splitByLocation === true) {
+    const lineMissingLocation = items.some((line) => !String(line.locationId || line.targetLocation || '').trim());
+    if (lineMissingLocation) return 'Select a destination location for every line before saving the GRV.';
+  } else if (!String(draft.locationId || '').trim()) {
+    return 'Select a destination location before saving the GRV.';
+  }
+
+  return '';
+}
+
+// "Commit Stock" no longer saves immediately — it first offers to attach a photo of the invoice
+// (or, without Drive connected, just a tip that connecting it would archive one automatically),
+// then confirms before the actual save runs (see confirmGrvCommit/saveGrvReceipt).
+function requestGrvCommit() {
+  const draft = appState.grv.draftReceipt || createEmptyGrvDraft();
+  const validationError = getGrvCommitValidationError(draft);
+  if (validationError) {
+    appState.grv = { ...appState.grv, actionError: validationError };
+    renderApp();
+    return;
+  }
+  appState.grv = {
+    ...appState.grv,
+    actionError: '',
+    filters: { ...appState.grv.filters, overlay: 'commit' },
+    commit: {
+      step: appState.grv.driveConnected ? 'ask' : 'confirm',
+      uploading: false,
+      error: '',
+      file: null,
+      fileName: ''
+    }
+  };
+  renderApp();
+}
+
+function chooseGrvCommitUploadImage() {
+  if (!appState.grv.commit) return;
+  appState.grv = { ...appState.grv, commit: { ...appState.grv.commit, step: 'upload' } };
+  renderApp();
+}
+
+function chooseGrvCommitSkipImage() {
+  if (!appState.grv.commit) return;
+  appState.grv = { ...appState.grv, commit: { ...appState.grv.commit, step: 'confirm' } };
+  renderApp();
+}
+
+// "Back" from either the upload step or the confirm step (when it was reached by skipping the
+// image) — always returns to the initial ask step, never used when Drive isn't connected (confirm
+// is the entry step there, and its "Back" is a plain cancel instead — see onGrvAction.onCommitCancel).
+function backGrvCommitToAsk() {
+  if (!appState.grv.commit) return;
+  appState.grv = { ...appState.grv, commit: { ...appState.grv.commit, step: 'ask', error: '' } };
+  renderApp();
+}
+
+function setGrvCommitFile(file) {
+  if (!file || !appState.grv.commit) return;
+  appState.grv = { ...appState.grv, commit: { ...appState.grv.commit, file, fileName: file.name, error: '' } };
+  renderApp();
+}
+
+function clearGrvCommitFile() {
+  if (!appState.grv.commit) return;
+  appState.grv = { ...appState.grv, commit: { ...appState.grv.commit, file: null, fileName: '' } };
+  renderApp();
+}
+
+function cancelGrvCommit() {
+  appState.grv = {
+    ...appState.grv,
+    commit: null,
+    filters: { ...appState.grv.filters, overlay: '' }
+  };
+  renderApp();
+}
+
+// The commit modal's final step, for both branches: with a photo attached, upload it to Drive
+// first and remember its file id the same way processGrvInvoicePhoto does (assistantSource),
+// so the existing tag-after-save step inside saveGrvReceipt picks it up automatically; without
+// one, this just closes the modal and saves.
+async function confirmGrvCommit() {
+  const commit = appState.grv.commit;
+  if (!commit || commit.uploading) return;
+  const file = commit.file;
+  if (file) {
+    appState.grv = { ...appState.grv, commit: { ...commit, uploading: true, error: '' } };
+    renderApp();
+    try {
+      const imageBase64 = await readInvoicePhotoAsBase64(file);
+      if (!imageBase64) throw new Error('Could not read the selected file.');
+      const draft = appState.grv.draftReceipt || createEmptyGrvDraft();
+      const { uploadInvoiceToDrive } = await import('./services/driveService.js');
+      const { driveFileId } = await uploadInvoiceToDrive(appState.workspace?.id, {
+        mimeType: file.type || 'application/octet-stream',
+        imageBase64,
+        locationId: draft.locationId || ''
+      });
+      appState.grv = {
+        ...appState.grv,
+        assistantSource: driveFileId ? { fileId: driveFileId } : appState.grv.assistantSource
+      };
+    } catch (error) {
+      appState.grv = {
+        ...appState.grv,
+        commit: { ...appState.grv.commit, uploading: false, error: error.message || 'Could not upload the invoice image.' }
+      };
+      renderApp();
+      return;
+    }
+  }
+  appState.grv = {
+    ...appState.grv,
+    commit: null,
+    filters: { ...appState.grv.filters, overlay: '' }
+  };
+  await saveGrvReceipt();
+}
+
 async function saveGrvReceipt(options = {}) {
   const draft = appState.grv.draftReceipt || createEmptyGrvDraft();
   if (!draft) return;
@@ -11165,15 +11325,16 @@ async function saveGrvReceipt(options = {}) {
   const isAutoGenerated = Boolean(draft.sourceReport);
   const { skipSupplierValidation = isAutoGenerated } = options;
 
-  const supplierName = String(draft.supplierName || '').trim();
-  if (!supplierName) {
+  const validationError = getGrvCommitValidationError(draft);
+  if (validationError) {
     appState.grv = {
       ...appState.grv,
-      actionError: 'Select or enter a supplier before saving the GRV.'
+      actionError: validationError
     };
     renderApp();
     return;
   }
+  const supplierName = String(draft.supplierName || '').trim();
 
   let resolvedSupplier = null;
   if (!skipSupplierValidation) {
@@ -11203,63 +11364,6 @@ async function saveGrvReceipt(options = {}) {
   }
 
   const items = draft.items || [];
-  if (!items.length) {
-    appState.grv = {
-      ...appState.grv,
-      actionError: 'Add at least one stock item before saving the GRV.'
-    };
-    renderApp();
-    return;
-  }
-
-  const isPoReceiving = Boolean(String(draft.sourcePoId || draft.poNumber || '').trim());
-  const invalidLine = items.find((line) => {
-    const receivedQty = Number(line.receivedQty || 0);
-    return isPoReceiving ? receivedQty < 0 : receivedQty <= 0;
-  });
-  if (invalidLine) {
-    appState.grv = {
-      ...appState.grv,
-      actionError: isPoReceiving
-        ? `${invalidLine.stockItemName || 'A stock item'} cannot have a negative received quantity.`
-        : `${invalidLine.stockItemName || 'A stock item'} needs a received quantity greater than zero.`
-    };
-    renderApp();
-    return;
-  }
-
-  if (isPoReceiving && !items.some((line) => Number(line.receivedQty || 0) > 0)) {
-    appState.grv = {
-      ...appState.grv,
-      actionError: 'Enter a received quantity greater than zero on at least one PO line before saving the GRV.'
-    };
-    renderApp();
-    return;
-  }
-
-  const splitValidation = validateGrvSplitGroups(items);
-  if (splitValidation) {
-    appState.grv = {
-      ...appState.grv,
-      actionError: splitValidation
-    };
-    renderApp();
-    return;
-  }
-
-  // A destination location is required. When splitting by location every line must
-  // have one; otherwise the header destination must be set. "Select your location"
-  // (blank) is not a valid selection.
-  if (draft.splitByLocation === true) {
-    const lineMissingLocation = items.some((line) => !String(line.locationId || line.targetLocation || '').trim());
-    if (lineMissingLocation) {
-      showGrvToast('Select a destination location for every line before saving the GRV.', 'error');
-      return;
-    }
-  } else if (!String(draft.locationId || '').trim()) {
-    showGrvToast('Select a destination location before saving the GRV.', 'error');
-    return;
-  }
 
   const hydratedItems = items.map((line) => {
     const { unitCostDisplay, ...lineWithoutDisplay } = line;
@@ -18708,6 +18812,115 @@ function updateStockTakeCount(stockItemId, value, uomKey = 'base') {
   renderApp();
 }
 
+// The synchronous checks a stock take draft must pass before it can be committed — same
+// share-between-the-modal-gate-and-the-actual-save shape as GRV's getGrvCommitValidationError.
+function getStockTakeCommitValidationError(commitDraft) {
+  if (!commitDraft.locationId) return 'Choose a stock take location before committing.';
+  if (!(commitDraft.items || []).length) return 'Enter at least one shelf count before committing.';
+  return '';
+}
+
+// "Commit" no longer saves immediately — it first offers to attach a photo of the physical count
+// sheet (or, without Drive connected, just a tip that connecting it would archive one
+// automatically), then confirms before the actual save runs (see confirmStockTakeCommit).
+function requestStockTakeCommit() {
+  const draft = hydrateStockTakeDraft(appState.stockTake.draftSession, appState.stockTake.locations || []);
+  const commitDraft = normalizeStockTakeCommitDraft(draft);
+  const validationError = getStockTakeCommitValidationError(commitDraft);
+  if (validationError) {
+    appState.stockTake = { ...appState.stockTake, actionError: validationError };
+    renderApp();
+    return;
+  }
+  appState.stockTake = {
+    ...appState.stockTake,
+    actionError: '',
+    filters: { ...appState.stockTake.filters, overlay: 'commit' },
+    commit: {
+      step: appState.stockTake.driveConnected ? 'ask' : 'confirm',
+      uploading: false,
+      error: '',
+      file: null,
+      fileName: '',
+      locationId: commitDraft.locationId,
+      locationName: commitDraft.locationName
+    }
+  };
+  renderApp();
+}
+
+function chooseStockTakeCommitUploadImage() {
+  if (!appState.stockTake.commit) return;
+  appState.stockTake = { ...appState.stockTake, commit: { ...appState.stockTake.commit, step: 'upload' } };
+  renderApp();
+}
+
+function chooseStockTakeCommitSkipImage() {
+  if (!appState.stockTake.commit) return;
+  appState.stockTake = { ...appState.stockTake, commit: { ...appState.stockTake.commit, step: 'confirm' } };
+  renderApp();
+}
+
+function setStockTakeCommitFile(file) {
+  if (!file || !appState.stockTake.commit) return;
+  appState.stockTake = { ...appState.stockTake, commit: { ...appState.stockTake.commit, file, fileName: file.name, error: '' } };
+  renderApp();
+}
+
+function clearStockTakeCommitFile() {
+  if (!appState.stockTake.commit) return;
+  appState.stockTake = { ...appState.stockTake, commit: { ...appState.stockTake.commit, file: null, fileName: '' } };
+  renderApp();
+}
+
+function backStockTakeCommitToAsk() {
+  if (!appState.stockTake.commit) return;
+  appState.stockTake = { ...appState.stockTake, commit: { ...appState.stockTake.commit, step: 'ask', error: '' } };
+  renderApp();
+}
+
+function cancelStockTakeCommit() {
+  appState.stockTake = {
+    ...appState.stockTake,
+    commit: null,
+    filters: { ...appState.stockTake.filters, overlay: '' }
+  };
+  renderApp();
+}
+
+async function confirmStockTakeCommit() {
+  const commit = appState.stockTake.commit;
+  if (!commit || commit.uploading) return;
+  const file = commit.file;
+  if (file) {
+    appState.stockTake = { ...appState.stockTake, commit: { ...commit, uploading: true, error: '' } };
+    renderApp();
+    try {
+      const imageBase64 = await readInvoicePhotoAsBase64(file);
+      if (!imageBase64) throw new Error('Could not read the selected file.');
+      const { uploadInvoiceToDrive } = await import('./services/driveService.js');
+      await uploadInvoiceToDrive(appState.workspace?.id, {
+        mimeType: file.type || 'application/octet-stream',
+        imageBase64,
+        locationId: commit.locationId || ''
+      });
+    } catch (error) {
+      appState.stockTake = {
+        ...appState.stockTake,
+        commit: { ...appState.stockTake.commit, uploading: false, error: error.message || 'Could not upload the count sheet image.' }
+      };
+      renderApp();
+      return;
+    }
+  }
+  appState.stockTake = {
+    ...appState.stockTake,
+    commit: null,
+    filters: { ...appState.stockTake.filters, overlay: '' }
+  };
+  await saveStockTakeDraft();
+}
+
 async function saveStockTakeDraft() {
   const activeElement = document.activeElement;
   if (activeElement && (activeElement.tagName === 'INPUT' || activeElement.tagName === 'TEXTAREA')) {
@@ -18716,18 +18929,11 @@ async function saveStockTakeDraft() {
 
   const draft = hydrateStockTakeDraft(appState.stockTake.draftSession, appState.stockTake.locations || []);
   const commitDraft = normalizeStockTakeCommitDraft(draft);
-  if (!commitDraft.locationId) {
+  const validationError = getStockTakeCommitValidationError(commitDraft);
+  if (validationError) {
     appState.stockTake = {
       ...appState.stockTake,
-      actionError: 'Choose a stock take location before committing.'
-    };
-    renderApp();
-    return;
-  }
-  if (!(commitDraft.items || []).length) {
-    appState.stockTake = {
-      ...appState.stockTake,
-      actionError: 'Enter at least one shelf count before committing.'
+      actionError: validationError
     };
     renderApp();
     return;
@@ -20268,6 +20474,14 @@ function renderApp() {
       onSaveMissingSupplier: saveGrvMissingSupplier,
       onDismissMissingSupplier: dismissGrvMissingSupplierPrompt,
       onSave: saveGrvReceipt,
+      onRequestCommit: requestGrvCommit,
+      onCommitUploadImage: chooseGrvCommitUploadImage,
+      onCommitSkipImage: chooseGrvCommitSkipImage,
+      onCommitBack: backGrvCommitToAsk,
+      onCommitFileSelected: setGrvCommitFile,
+      onCommitRemoveFile: clearGrvCommitFile,
+      onCommitConfirm: confirmGrvCommit,
+      onCommitCancel: cancelGrvCommit,
       onExport: exportGrvReceipts,
       onDismissToast: dismissGrvToast
     },
@@ -20403,6 +20617,14 @@ function renderApp() {
       onDeleteTemplate: withPermission('stockTake', ACTION_PERMISSION_MAP.deleteRecords, deleteStockTakeTemplateEntry, 'You do not have permission to delete stock take templates.'),
       onCountChange: updateStockTakeCount,
       onSave: saveStockTakeDraft,
+      onRequestCommit: requestStockTakeCommit,
+      onCommitUploadImage: chooseStockTakeCommitUploadImage,
+      onCommitSkipImage: chooseStockTakeCommitSkipImage,
+      onCommitBack: backStockTakeCommitToAsk,
+      onCommitFileSelected: setStockTakeCommitFile,
+      onCommitRemoveFile: clearStockTakeCommitFile,
+      onCommitConfirm: confirmStockTakeCommit,
+      onCommitCancel: cancelStockTakeCommit,
       onDismissToast: dismissStockTakeToast
     },
     onLocationFilterChange: updateLocationFilters,
@@ -21655,6 +21877,15 @@ function createGrvState(status, filters = {}, pendingSourcePoId = '', pendingEdi
     // aiOnboardingEnabled, so it's read fresh from the backend rather than trusted from
     // appState.settings.values (which is only populated once the Settings route itself has loaded).
     driveOcrEnabled: false,
+    // Same refresh cadence/reasoning as driveOcrEnabled above — whether Drive is connected at all,
+    // read fresh each time the GRV section loads. Gates whether the commit modal (see
+    // requestGrvCommit) offers to archive an invoice photo, or just shows a tip about connecting.
+    driveConnected: false,
+    // The "Commit Stock" confirmation flow (see requestGrvCommit and friends): null while the
+    // modal is closed. `step` is 'ask' (offer to attach an invoice photo — only when Drive is
+    // connected), 'upload' (drag-and-drop/file picker), or 'confirm' (final confirm, also the
+    // entry step when Drive isn't connected, since there's nothing to offer).
+    commit: null,
     filters: {
       query: '',
       source: '',
@@ -21836,6 +22067,10 @@ function createStockTakeState(status, filters = {}, sessionActive = false) {
     actionStatus: '',
     actionError: '',
     toast: null,
+    // Same refresh cadence/reasoning and commit-modal shape as GRV's driveConnected/commit (see
+    // requestGrvCommit) — whether Drive is connected gates the commit modal's photo-upload offer.
+    driveConnected: false,
+    commit: null,
     filters: {
       query: '',
       templateListQuery: '',

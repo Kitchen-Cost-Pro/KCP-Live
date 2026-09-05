@@ -4,7 +4,6 @@ import gmailLogo from '../assets/integrations/gmail.svg';
 import yocoLogo from '../assets/integrations/yoco.svg';
 import xeroLogo from '../assets/integrations/xero.png';
 import googleDriveLogo from '../assets/integrations/google-drive.svg';
-import squareLogo from '../assets/integrations/square.svg';
 import quickbooksLogo from '../assets/integrations/quickbooks.svg';
 import {
   connectYocoIntegration,
@@ -96,18 +95,6 @@ const INTEGRATIONS = [
     action: 'Coming Soon'
   },
   {
-    id: 'square',
-    name: 'Square',
-    category: 'POS & Payments',
-    status: 'Coming Soon',
-    stage: 'Planned',
-    popular: false,
-    description: 'Bring Square sales, payments, and catalogue data into Kitchen Cost Pro.',
-    logo: squareLogo,
-    tone: 'amber',
-    action: 'Coming Soon'
-  },
-  {
     id: 'stockmate',
     name: 'StockMate',
     category: 'Inventory & Stock',
@@ -119,6 +106,12 @@ const INTEGRATIONS = [
     tone: 'amber',
     action: 'Coming Soon'
   }
+];
+
+const VIEW_OPTIONS = [
+  { value: 'all', label: 'All Integrations' },
+  { value: 'available', label: 'Available' },
+  { value: 'popular', label: 'Popular' }
 ];
 
 const CATEGORY_OPTIONS = [
@@ -569,11 +562,7 @@ export function renderIntegrations({ state } = {}) {
       </header>
 
       <section class="integrationsToolbar" aria-label="Integration filters">
-        <div class="integrationsTabs" role="tablist" aria-label="Integration status tabs">
-          ${renderTab('all', 'All Integrations', true)}
-          ${renderTab('available', 'Available', false)}
-          ${renderTab('popular', 'Popular', false)}
-        </div>
+        ${renderDropdown('activeTab', VIEW_OPTIONS, 'all')}
         <div class="integrationsFilters">
           <label class="integrationsSearch">
             ${icon('search')}
@@ -629,18 +618,6 @@ export function renderIntegrations({ state } = {}) {
 
 function bindIntegrationEvents(view) {
   view.querySelector('[data-integrations-search]')?.addEventListener('input', () => applyIntegrationFilters(view));
-
-  view.querySelectorAll('[data-integrations-tab]').forEach((button) => {
-    button.addEventListener('click', () => {
-      view.dataset.activeTab = button.dataset.integrationsTab || 'all';
-      view.querySelectorAll('[data-integrations-tab]').forEach((tab) => {
-        const isActive = tab === button;
-        tab.classList.toggle('is-active', isActive);
-        tab.setAttribute('aria-selected', String(isActive));
-      });
-      applyIntegrationFilters(view);
-    });
-  });
 
   view.querySelectorAll('[data-integrations-dropdown]').forEach((button) => {
     button.addEventListener('click', () => {
@@ -1086,11 +1063,6 @@ function applyIntegrationFilters(view) {
     if (visible) visibleCount += 1;
   });
 
-  view.querySelectorAll('[data-integrations-category-group]').forEach((group) => {
-    const hasVisibleCard = group.querySelector('[data-integration-card]:not([hidden])');
-    group.hidden = !hasVisibleCard;
-  });
-
   const count = view.querySelector('[data-integrations-count]');
   if (count) count.textContent = `Showing ${visibleCount} of ${INTEGRATIONS.length} integrations`;
   const empty = view.querySelector('[data-integrations-empty]');
@@ -1102,20 +1074,6 @@ function closeDropdowns(view) {
     root.classList.remove('is-open');
     root.querySelector('[data-integrations-dropdown]')?.setAttribute('aria-expanded', 'false');
   });
-}
-
-function renderTab(id, label, active) {
-  return `
-    <button
-      type="button"
-      class="${active ? 'is-active' : ''}"
-      role="tab"
-      aria-selected="${active}"
-      data-integrations-tab="${escapeAttribute(id)}"
-    >
-      ${escapeHtml(label)}
-    </button>
-  `;
 }
 
 function renderDropdown(field, options, selectedValue) {
@@ -1144,23 +1102,7 @@ function renderDropdown(field, options, selectedValue) {
 }
 
 function renderIntegrationGroups(integrations) {
-  const orderedCategories = CATEGORY_OPTIONS
-    .map((option) => option.value)
-    .filter((value) => value !== 'all');
-  return orderedCategories
-    .map((category) => {
-      const items = integrations.filter((item) => item.category === category);
-      if (!items.length) return '';
-      return `
-        <div class="integrationsCategoryGroup" data-integrations-category-group="${escapeAttribute(category)}">
-          <h3 class="integrationsCategoryTitle">${escapeHtml(category)}</h3>
-          <div class="integrationsCategoryCards">
-            ${items.map(renderIntegrationCard).join('')}
-          </div>
-        </div>
-      `;
-    })
-    .join('');
+  return integrations.map(renderIntegrationCard).join('');
 }
 
 function renderIntegrationCard(item) {

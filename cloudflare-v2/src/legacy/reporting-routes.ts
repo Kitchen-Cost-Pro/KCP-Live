@@ -4625,7 +4625,14 @@ function standardizeSaleStockUsageRow(
   const movementValue = hasMeaningfulValue(row.value_delta)
     ? numberValue(row.value_delta, 0)
     : physicalQuantityDelta * unitCostExVat;
-  const stockValueUsed = isRefundWastage ? 0 : -movementValue;
+  // A GRV edit that fixes a mistaken cost after this sale already happened writes a compensating
+  // 'cost_correction' stock_movements row keyed back to this sale's id (see
+  // buildSameDayCostCorrectionStatements in routes.ts) rather than mutating this row in place. The
+  // query above already selects it summed via COST_CORRECTION_VALUE_DELTA_SQL — fold it in here,
+  // the same way signedMovementStockCost does for other reports, or a corrected sale keeps showing
+  // its stale pre-correction value forever in this one.
+  const costCorrectionValue = numberValue(row.cost_correction_value_delta, 0);
+  const stockValueUsed = isRefundWastage ? 0 : -(movementValue + costCorrectionValue);
   const wastageQty = isRefundWastage
     ? Math.abs(numberValue(metadata.wastageQty || metadata.wasteQty || metadata.wastage_quantity, 0))
     : 0;
@@ -6398,6 +6405,7 @@ export const __modifierReportingInternals = {
   movementModifierName,
   signedMovementStockCost,
   standardizeModifierSalesRow,
+  standardizeSaleStockUsageRow,
   COST_CORRECTION_VALUE_DELTA_SQL,
 };
 

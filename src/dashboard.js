@@ -1,7 +1,12 @@
+import * as echarts from 'echarts/core';
+import { LineChart } from 'echarts/charts';
+import { GridComponent, TooltipComponent } from 'echarts/components';
+import { CanvasRenderer } from 'echarts/renderers';
 import styles from './styles/dashboard.module.css';
 import {
   loadDashboardReportingModel,
-  reconcileDashboardLocationNames
+  reconcileDashboardLocationNames,
+  percentageChange
 } from './dashboardData.js';
 import { fetchWorkspaceLocationOptions } from './services/locationService.js';
 import { mergeCanonicalLocations } from './utils/locationDisplayName.js';
@@ -13,6 +18,17 @@ import {
   acknowledgeAllLowStockItems,
   unacknowledgeLowStockItem
 } from './services/notificationService.js';
+
+echarts.use([LineChart, GridComponent, TooltipComponent, CanvasRenderer]);
+const trendChartInstances = new WeakMap();
+
+function disposeTrendChart(view) {
+  const instance = trendChartInstances.get(view);
+  if (instance) {
+    instance.dispose();
+    trendChartInstances.delete(view);
+  }
+}
 
 const DASHBOARD_CACHE_TTL = 60_000;
 const dashboardCache = new Map();
@@ -35,8 +51,14 @@ const SERIES = [
   { key: 'cos', label: 'Cost of Sales', color: '#00e5a0' },
   { key: 'adjustments', label: 'Adjustments', color: '#f5a623' },
   { key: 'wastage', label: 'Wastage', color: '#ff4455' },
-  { key: 'mfgWastage', label: 'Manufacture Wastage', color: '#7b61ff' }
+  { key: 'mfgWastage', label: 'Manufacture Wastage', color: '#7b61ff' },
+  // Sales value is deliberately NOT a cost — it must never be stacked with, or added into, the
+  // cost series above (that's what "Total Cost" / the white Total line mean). isSales marks it so
+  // renderTrendChart and updateTrendTotalCostStat can exclude it from that stacking/summing while
+  // still letting it be toggled on/off like any other series, drawn as its own overlay line.
+  { key: 'netSales', label: 'Sales Value', color: '#38bdf8', isSales: true }
 ];
+const COST_SERIES = SERIES.filter((series) => !series.isSales);
 const SUPPLIER_COLORS = ['#00e5a0', '#f5a623', '#7b61ff', '#00b3ff', '#ff4455'];
 const RANGE_PRESETS = [
   ['today', 'Today'],
@@ -62,10 +84,15 @@ export function renderDashboard({ state = {}, onNavigate, onStockFilterChange } 
   const ui = {
     search: '',
     category: 'All',
+    categorySelectOpen: false,
     sortCol: 'status',
     sortDir: 'desc',
-    activeSeries: new Set(SERIES.map((series) => series.key)),
-    visibleRows: 75,
+    // Sales Value defaults OFF — it's usually a much larger figure than any cost category, so
+    // showing it by default would visually flatten the cost lines most people open this chart to
+    // read. It's still one click away via its own toggle.
+    activeSeries: new Set(COST_SERIES.map((series) => series.key)),
+    pageSize: 25,
+    currentPage: 1,
     model: null,
     loading: true,
     error: '',
@@ -118,7 +145,7 @@ export function renderDashboard({ state = {}, onNavigate, onStockFilterChange } 
       ui.locationOptions = mergeLocationOptions(ui.locationOptions, model.locations);
       syncInventoryLocation(ui, model);
       ui.loading = false;
-      ui.visibleRows = 75;
+      ui.currentPage = 1;
       renderModel(view, ui, { workspaceName, onNavigate, onStockFilterChange, workspaceId });
     } catch (error) {
       if (!document.contains(view) || requestId !== ui.requestId) return;
@@ -142,7 +169,8 @@ export function renderDashboard({ state = {}, onNavigate, onStockFilterChange } 
         filters: {
           from: dashboardUi.from,
           to: dashboardUi.to,
-          locationId: dashboardUi.locationId
+          locationId: dashboardUi.locationId,
+          tradingDayStartHour: getTradingDayStartHour(state)
         },
         services: { reporting: {} }
       }),
@@ -183,6 +211,11 @@ function getKnownStateLocations(state = {}) {
 
 function getDashboardCacheKey(workspaceId, ui = {}) {
   return [workspaceId, ui.from || '', ui.to || '', ui.locationId || 'all'].join('::');
+}
+
+function getTradingDayStartHour(state = {}) {
+  const hour = Number(state.settings?.values?.tradingDayStartHour ?? state.settings?.draft?.tradingDayStartHour ?? 0);
+  return Number.isFinite(hour) ? Math.min(23, Math.max(0, hour)) : 0;
 }
 
 function mergeLocationOptions(existing = [], incoming = []) {
@@ -407,6 +440,8 @@ function renderModel(view, ui, context) {
   const alertNames = inventoryAlerts.criticalNames.join(', ');
   const selectedLocation = ui.locationOptions.find((location) => location.id === ui.locationId);
 
+  disposeTrendChart(view);
+
   view.innerHTML = `
     <div class="${styles.frame}">
       <header class="${styles.topbar}">
@@ -474,14 +509,21 @@ function renderModel(view, ui, context) {
 
         <section class="${styles.chartGrid}">
           <article class="${styles.panel} ${styles.trendPanel}">
-            <div class="${styles.panelHeader}">
-              <div>
-                <h2>${escapeHtml(model.trendTitle)}</h2>
+            <div class="${styles.trendHeader}">
+              <div class="${styles.trendHeaderTitle}">
+                <h2>${escapeHtml((model.trendTitle || '').toUpperCase())}</h2>
                 <p>${escapeHtml(model.trendRangeLabel)}</p>
+              </div>
+              <div class="${styles.trendHeaderStats}">
+                ${trendHeaderStat({ label: 'Total Cost', value: model.metrics.totalCost, delta: model.metrics.totalCostDelta, invert: true, attr: 'data-trend-total-cost' })}
+                ${trendHeaderStat({ label: 'Total Sales', value: model.metrics.netSales, delta: model.metrics.netSalesDelta, invert: false })}
               </div>
               <div class="${styles.seriesToggles}" data-dashboard-series-toggles></div>
             </div>
-            <div class="${styles.chartStage}" data-dashboard-trend-chart></div>
+            <div class="${styles.chartStage}">
+              <div class="${styles.chartCanvas}" data-dashboard-trend-chart></div>
+              <div class="${styles.trendInfoPanel}" data-dashboard-trend-info></div>
+            </div>
           </article>
 
           <article class="${styles.panel} ${styles.supplierPanel}">
@@ -503,7 +545,7 @@ function renderModel(view, ui, context) {
             </div>
             <div class="${styles.inventoryFilters}">
               <div class="${styles.locationPills}" data-dashboard-inventory-locations aria-label="Inventory location"></div>
-              <div class="${styles.categoryStrip}" data-dashboard-categories aria-label="Inventory category"></div>
+              <div class="${styles.categoryDropdownWrap}" data-dashboard-categories aria-label="Inventory category"></div>
             </div>
           </div>
           <div class="${styles.tableActions}" data-dashboard-table-actions></div>
@@ -564,7 +606,7 @@ function bindDashboardEvents(view, ui, context) {
         ui.locationId = value;
         ui.inventoryLocationId = value || ui.inventoryLocationId;
         ui.category = 'All';
-        ui.visibleRows = 75;
+        ui.currentPage = 1;
         ui.calendarOpen = false;
         ui.pendingRangeStart = '';
         hideChartTooltip(view);
@@ -664,6 +706,7 @@ function bindDashboardEvents(view, ui, context) {
     }
     if (event.target.closest('[data-dashboard-custom-select]')) return;
     if (event.target.closest('[data-dashboard-notification-wrap]')) return;
+    if (event.target.closest('[data-dashboard-category-select]')) return;
     closeMenus('');
     if (ui.notificationsOpen) {
       ui.notificationsOpen = false;
@@ -673,6 +716,10 @@ function bindDashboardEvents(view, ui, context) {
       ui.calendarOpen = false;
       ui.pendingRangeStart = '';
       view.querySelector('[data-dashboard-date-calendar]')?.remove();
+    }
+    if (ui.categorySelectOpen) {
+      ui.categorySelectOpen = false;
+      renderInventory(view, ui, context);
     }
   }, { signal });
   document.addEventListener('keydown', (event) => {
@@ -686,6 +733,10 @@ function bindDashboardEvents(view, ui, context) {
       ui.calendarOpen = false;
       ui.pendingRangeStart = '';
       view.querySelector('[data-dashboard-date-calendar]')?.remove();
+    }
+    if (ui.categorySelectOpen) {
+      ui.categorySelectOpen = false;
+      renderInventory(view, ui, context);
     }
   }, { signal });
 }
@@ -937,7 +988,7 @@ function reviewDashboardStock(view, ui, context) {
   ui.category = 'All';
   ui.sortCol = 'status';
   ui.sortDir = 'desc';
-  ui.visibleRows = 75;
+  ui.currentPage = 1;
   renderInventory(view, ui, context);
   panel?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
@@ -945,7 +996,8 @@ function reviewDashboardStock(view, ui, context) {
 function renderTrendChart(view, ui) {
   const toggleRoot = view.querySelector('[data-dashboard-series-toggles]');
   const chartRoot = view.querySelector('[data-dashboard-trend-chart]');
-  if (!toggleRoot || !chartRoot) return;
+  const infoPanel = view.querySelector('[data-dashboard-trend-info]');
+  if (!toggleRoot || !chartRoot || !infoPanel) return;
 
   toggleRoot.innerHTML = SERIES.map((series) => {
     const active = ui.activeSeries.has(series.key);
@@ -964,63 +1016,166 @@ function renderTrendChart(view, ui) {
     });
   });
 
-  const width = 800;
-  const height = 240;
-  const pad = { top: 18, right: 18, bottom: 34, left: 66 };
-  const chartWidth = width - pad.left - pad.right;
-  const chartHeight = height - pad.top - pad.bottom;
+  const trend = ui.model.trend;
   const activeSeries = SERIES.filter((series) => ui.activeSeries.has(series.key));
-  const values = ui.model.trend.flatMap((month) => activeSeries.map((series) => number(month[series.key])));
-  const rawMax = Math.max(...values, 0);
-  const maxY = niceMax(rawMax || 1);
-  const xAt = (index) => pad.left + (ui.model.trend.length === 1 ? chartWidth / 2 : (index / (ui.model.trend.length - 1)) * chartWidth);
-  const yAt = (value) => pad.top + chartHeight - (number(value) / maxY) * chartHeight;
+  // Sales Value is plotted as its own overlay line (see below) — it must never join the stacked
+  // cost area or the white "Total" line, and never feed the header stat, or a sales figure would
+  // get silently added into what's supposed to be a cost total.
+  const activeCostSeries = activeSeries.filter((series) => !series.isSales);
+  const activeSalesSeries = activeSeries.filter((series) => series.isSales);
+  const hasValues = trend.some((bucket) => activeSeries.some((series) => number(bucket[series.key]) > 0));
+  updateTrendTotalCostStat(view, ui.model, activeCostSeries);
 
-  const grids = Array.from({ length: 5 }, (_, index) => {
-    const value = maxY - (index * maxY / 4);
-    const y = pad.top + index * chartHeight / 4;
-    return `<line x1="${pad.left}" y1="${y}" x2="${width - pad.right}" y2="${y}" class="${styles.gridLine}"/><text x="${pad.left - 10}" y="${y + 4}" text-anchor="end" class="${styles.axisText}">${escapeHtml(axisMoney(value))}</text>`;
-  }).join('');
+  let chart = trendChartInstances.get(view);
+  if (!chart || chart.getDom() !== chartRoot) {
+    if (chart) chart.dispose();
+    chart = echarts.init(chartRoot, null, { renderer: 'canvas' });
+    trendChartInstances.set(view, chart);
+    if (typeof ResizeObserver !== 'undefined' && !chartRoot.__dashboardResizeObserver) {
+      const observer = new ResizeObserver(() => chart.resize());
+      observer.observe(chartRoot);
+      chartRoot.__dashboardResizeObserver = observer;
+    }
+  }
 
-  const paths = activeSeries.map((series) => {
-    const points = ui.model.trend.map((month, index) => `${xAt(index)},${yAt(month[series.key])}`).join(' ');
-    const dots = ui.model.trend.map((month, index) => `<circle cx="${xAt(index)}" cy="${yAt(month[series.key])}" r="3.2" fill="${series.color}" class="${styles.chartDot}"/>`).join('');
-    return `<polyline points="${points}" fill="none" stroke="${series.color}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="${styles.chartLine}"/>${dots}`;
-  }).join('');
+  const totalSeries = trend.map((bucket) => Math.round(activeCostSeries.reduce((sum, series) => sum + number(bucket[series.key]), 0) * 100) / 100);
 
-  const xLabels = ui.model.trend.map((month, index) => `<text x="${xAt(index)}" y="${height - 10}" text-anchor="middle" class="${styles.axisText}">${escapeHtml(month.label)}</text>`).join('');
-  const hoverWidth = chartWidth / Math.max(ui.model.trend.length, 1);
-  const hitZones = ui.model.trend.map((month, index) => `<rect x="${xAt(index) - hoverWidth / 2}" y="${pad.top}" width="${hoverWidth}" height="${chartHeight}" fill="transparent" data-trend-index="${index}" tabindex="0" aria-label="${escapeAttribute(month.label)} trend values"/>`).join('');
+  // ECharts draws axis text on a <canvas>, which never resolves CSS custom properties — passing
+  // "var(--dash-muted)" as a fillStyle silently fails and canvas falls back to black text, which
+  // is invisible on this dark theme. Resolve the real computed values first.
+  const mutedColor = resolveCssVar(chartRoot, '--dash-muted', '#8b93a3');
+  const chartFontFamily = resolveCssVar(chartRoot, '--font-main', 'system-ui, sans-serif');
 
-  chartRoot.innerHTML = `
-    <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Cost and stock movement trend for ${escapeAttribute(ui.model.trendRangeLabel)}">
-      ${grids}${paths}${xLabels}${hitZones}
-    </svg>
-    <div class="${styles.chartTooltip}" data-dashboard-chart-tooltip hidden></div>
-    ${rawMax <= 0 ? `<div class="${styles.chartEmpty}">No movement values recorded for this period.</div>` : ''}
+  chart.setOption({
+    animationDuration: 420,
+    animationEasing: 'cubicOut',
+    grid: { top: 14, right: 14, bottom: 26, left: 54 },
+    xAxis: {
+      type: 'category',
+      data: trend.map((bucket) => bucket.label),
+      boundaryGap: false,
+      axisLine: { lineStyle: { color: 'rgba(255,255,255,0.08)' } },
+      axisTick: { show: false },
+      axisLabel: { color: mutedColor, fontSize: 10, fontFamily: chartFontFamily }
+    },
+    yAxis: {
+      type: 'value',
+      splitLine: { lineStyle: { color: 'rgba(255,255,255,0.06)', type: 'dashed' } },
+      axisLabel: { color: mutedColor, fontSize: 10, fontFamily: chartFontFamily, formatter: (value) => axisMoney(value) }
+    },
+    axisPointer: {
+      type: 'line',
+      lineStyle: { color: 'rgba(255,255,255,0.32)', type: 'dashed', width: 1 },
+      z: 1
+    },
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: 'transparent',
+      borderWidth: 0,
+      padding: 0,
+      extraCssText: 'box-shadow:none;',
+      // The formatter always returns '', so ECharts' own floating tooltip box renders with zero
+      // content, padding and border — effectively invisible. It's used purely as a hook to
+      // update the dedicated info panel beside the chart instead, which can never overlap the
+      // plotted data because it lives in its own flex column rather than floating over the canvas.
+      formatter: (params) => {
+        const items = Array.isArray(params) ? params.filter((entry) => entry.seriesName !== 'Total') : [];
+        const index = items[0]?.dataIndex ?? 0;
+        renderTrendInfoPanel(infoPanel, trend[index], activeSeries, totalSeries[index]);
+        return '';
+      }
+    },
+    series: [
+      ...activeCostSeries.map((series) => ({
+        name: series.label,
+        type: 'line',
+        stack: 'total',
+        symbol: 'none',
+        lineStyle: { width: 1, color: series.color, opacity: 0.9 },
+        areaStyle: {
+          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+            { offset: 0, color: colorWithAlpha(series.color, 0.55) },
+            { offset: 1, color: colorWithAlpha(series.color, 0.04) }
+          ])
+        },
+        emphasis: { focus: 'series' },
+        data: trend.map((bucket) => number(bucket[series.key]))
+      })),
+      {
+        name: 'Total',
+        type: 'line',
+        symbol: 'circle',
+        symbolSize: 6,
+        showSymbol: false,
+        z: 10,
+        lineStyle: {
+          width: 2.4,
+          color: '#eafff5',
+          shadowColor: 'rgba(0, 229, 160, 0.65)',
+          shadowBlur: 12
+        },
+        itemStyle: { color: '#eafff5', borderColor: '#00e5a0', borderWidth: 2 },
+        tooltip: { show: false },
+        data: totalSeries
+      },
+      // Sales Value is revenue, not a cost — deliberately NOT stacked with the cost series above
+      // (stacking it would add a sales figure into what's supposed to be a cost total) and drawn
+      // with no area fill so it reads as a comparison overlay rather than part of the cost stack.
+      ...activeSalesSeries.map((series) => ({
+        name: series.label,
+        type: 'line',
+        symbol: 'none',
+        z: 9,
+        lineStyle: { width: 1.6, color: series.color, opacity: 0.95, type: 'dashed' },
+        emphasis: { focus: 'series' },
+        data: trend.map((bucket) => number(bucket[series.key]))
+      }))
+    ]
+  }, { notMerge: true });
+  // The flex layout (chart + info panel side by side) can still be settling when echarts first
+  // measures its container, sizing the canvas off a stale/too-narrow width. The ResizeObserver
+  // set up above self-corrects once it fires, but that can lag a frame behind the initial paint
+  // — resizing once more right after setOption closes that gap so the chart never flashes blank.
+  chart.resize();
+
+  chartRoot.querySelector(`.${styles.chartEmpty}`)?.remove();
+  if (!hasValues) {
+    const empty = document.createElement('div');
+    empty.className = styles.chartEmpty;
+    empty.textContent = 'No movement values recorded for this period.';
+    chartRoot.appendChild(empty);
+  }
+
+  const lastIndex = trend.length - 1;
+  renderTrendInfoPanel(infoPanel, trend[lastIndex], activeSeries, totalSeries[lastIndex]);
+  if (chart.__dashboardResetInfoPanel) chart.getZr().off('globalout', chart.__dashboardResetInfoPanel);
+  chart.__dashboardResetInfoPanel = () => renderTrendInfoPanel(infoPanel, trend[lastIndex], activeSeries, totalSeries[lastIndex]);
+  chart.getZr().on('globalout', chart.__dashboardResetInfoPanel);
+}
+
+function renderTrendInfoPanel(panel, bucket, activeSeries, total) {
+  if (!panel || !bucket) return;
+  const rows = activeSeries.map((series) => `
+    <span><i style="background:${series.color}"></i>${escapeHtml(series.label)}</span>
+    <b>${money(bucket[series.key])}</b>
+  `).join('');
+  panel.innerHTML = `
+    <strong>${escapeHtml(bucket.label)}</strong>
+    <div class="${styles.trendTooltipRows}">${rows}</div>
+    <footer><span>TOTAL COST</span><b>${money(total)}</b></footer>
   `;
+}
 
-  const tooltip = chartRoot.querySelector('[data-dashboard-chart-tooltip]');
-  const show = (target, event) => {
-    const index = number(target.dataset.trendIndex);
-    const month = ui.model.trend[index];
-    if (!month || !tooltip) return;
-    tooltip.innerHTML = `<strong>${escapeHtml(month.label)}</strong>${activeSeries.map((series) => `<span style="color:${series.color}">${escapeHtml(series.label)} <b>${money(month[series.key])}</b></span>`).join('')}`;
-    tooltip.hidden = false;
-    const bounds = chartRoot.getBoundingClientRect();
-    const clientX = event?.clientX || bounds.left + (xAt(index) / width) * bounds.width;
-    const left = Math.min(Math.max(clientX - bounds.left + 10, 8), Math.max(bounds.width - 180, 8));
-    tooltip.style.left = `${left}px`;
-    tooltip.style.top = '18px';
-  };
-  chartRoot.querySelectorAll('[data-trend-index]').forEach((target) => {
-    target.addEventListener('pointerenter', (event) => show(target, event));
-    target.addEventListener('pointermove', (event) => show(target, event));
-    target.addEventListener('focus', (event) => show(target, event));
-    target.addEventListener('blur', () => hideChartTooltip(view));
-  });
-  chartRoot.addEventListener('pointerleave', () => hideChartTooltip(view));
-  chartRoot.addEventListener('pointercancel', () => hideChartTooltip(view));
+function resolveCssVar(el, name, fallback) {
+  const value = getComputedStyle(el).getPropertyValue(name).trim();
+  return value || fallback;
+}
+
+function colorWithAlpha(hex, alpha) {
+  const match = String(hex || '').replace('#', '').match(/^([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
+  if (!match) return hex;
+  const [, r, g, b] = match;
+  return `rgba(${parseInt(r, 16)}, ${parseInt(g, 16)}, ${parseInt(b, 16)}, ${alpha})`;
 }
 
 function renderSupplierChart(view, model) {
@@ -1071,7 +1226,7 @@ function renderInventory(view, ui, context) {
       if (!locationId || locationId === ui.inventoryLocationId) return;
       ui.inventoryLocationId = locationId;
       ui.category = 'All';
-      ui.visibleRows = 75;
+      ui.currentPage = 1;
       renderInventory(view, ui, context);
       renderInventoryAlert(view, ui, context);
     });
@@ -1085,11 +1240,34 @@ function renderInventory(view, ui, context) {
 
   const categories = ['All', ...new Set(scopedItems.map((item) => item.category).filter(Boolean))];
   if (!categories.includes(ui.category)) ui.category = 'All';
-  categoriesRoot.innerHTML = categories.map((category) => `<button type="button" class="${styles.categoryButton} ${ui.category === category ? styles.categoryButtonActive : ''}" data-category="${escapeAttribute(category)}">${escapeHtml(category)}</button>`).join('');
-  categoriesRoot.querySelectorAll('[data-category]').forEach((button) => {
-    button.addEventListener('click', () => {
-      ui.category = button.dataset.category || 'All';
-      ui.visibleRows = 75;
+  categoriesRoot.innerHTML = `
+    <div class="${styles.customField}" data-dashboard-category-select>
+      <span class="${styles.customFieldLabel}">Category</span>
+      <button type="button" class="${styles.customSelectButton}" aria-haspopup="listbox" aria-expanded="${ui.categorySelectOpen}" data-dashboard-category-button>
+        <span>${escapeHtml(ui.category)}</span>
+        ${icon('chevronDown', 14)}
+      </button>
+      <div class="${styles.customSelectMenu} ${ui.categorySelectOpen ? styles.customSelectMenuOpen : ''}" role="listbox" aria-label="Category" ${ui.categorySelectOpen ? '' : 'hidden'}>
+        ${categories.map((category) => `
+          <button type="button" role="option" aria-selected="${category === ui.category}" class="${styles.customSelectOption} ${category === ui.category ? styles.customSelectOptionSelected : ''}" data-dashboard-category-option data-value="${escapeAttribute(category)}">
+            <span>${escapeHtml(category)}</span>
+            ${category === ui.category ? icon('check', 13) : ''}
+          </button>
+        `).join('')}
+      </div>
+    </div>
+  `;
+  categoriesRoot.querySelector('[data-dashboard-category-button]')?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    ui.categorySelectOpen = !ui.categorySelectOpen;
+    renderInventory(view, ui, context);
+  });
+  categoriesRoot.querySelectorAll('[data-dashboard-category-option]').forEach((option) => {
+    option.addEventListener('click', (event) => {
+      event.stopPropagation();
+      ui.category = option.dataset.value || 'All';
+      ui.categorySelectOpen = false;
+      ui.currentPage = 1;
       renderInventory(view, ui, context);
     });
   });
@@ -1099,7 +1277,11 @@ function renderInventory(view, ui, context) {
     .filter((item) => ui.category === 'All' || item.category === ui.category)
     .filter((item) => !needle || [item.name, item.sku, item.category, item.supplier, item.locationName, ...item.locations].join(' ').toLowerCase().includes(needle))
     .sort((left, right) => compareInventory(left, right, ui.sortCol, ui.sortDir));
-  const visible = filtered.slice(0, ui.visibleRows);
+  const totalPages = Math.max(1, Math.ceil(filtered.length / ui.pageSize));
+  if (ui.currentPage > totalPages) ui.currentPage = totalPages;
+  if (ui.currentPage < 1) ui.currentPage = 1;
+  const pageStart = (ui.currentPage - 1) * ui.pageSize;
+  const visible = filtered.slice(pageStart, pageStart + ui.pageSize);
   countRoot.textContent = `${filtered.length.toLocaleString('en-ZA')} item${filtered.length === 1 ? '' : 's'} needing attention${selectedInventoryLocation ? ` · ${selectedInventoryLocation.name}` : ''}`;
 
   const mutableAttentionItems = filtered.filter((item) => isAttentionStatus(item.status) && !item.acknowledged);
@@ -1208,14 +1390,33 @@ function renderInventory(view, ui, context) {
     });
 
     footerRoot.innerHTML = `
-      <span>Showing ${visible.length.toLocaleString('en-ZA')} of ${filtered.length.toLocaleString('en-ZA')}</span>
-      <div>
-        ${visible.length < filtered.length ? '<button type="button" data-dashboard-load-more>Load more</button>' : ''}
+      <span>Showing ${pageStart + 1}–${(pageStart + visible.length).toLocaleString('en-ZA')} of ${filtered.length.toLocaleString('en-ZA')}</span>
+      <div class="${styles.paginationControls}">
+        <label class="${styles.pageSizeSelect}">
+          <span>Per page</span>
+          <select data-dashboard-page-size>
+            ${[25, 50, 100].map((size) => `<option value="${size}" ${ui.pageSize === size ? 'selected' : ''}>${size}</option>`).join('')}
+          </select>
+        </label>
+        <button type="button" data-dashboard-prev-page ${ui.currentPage <= 1 ? 'disabled' : ''} aria-label="Previous page">${icon('chevronLeft', 12)}</button>
+        <span>Page ${ui.currentPage} of ${totalPages}</span>
+        <button type="button" data-dashboard-next-page ${ui.currentPage >= totalPages ? 'disabled' : ''} aria-label="Next page">${icon('chevronRight', 12)}</button>
         <button type="button" data-dashboard-open-stock>Open Stock Items ${icon('arrowRight', 12)}</button>
       </div>
     `;
-    footerRoot.querySelector('[data-dashboard-load-more]')?.addEventListener('click', () => {
-      ui.visibleRows += 75;
+    footerRoot.querySelector('[data-dashboard-page-size]')?.addEventListener('change', (event) => {
+      ui.pageSize = Number(event.target.value) || 25;
+      ui.currentPage = 1;
+      renderInventory(view, ui, context);
+    });
+    footerRoot.querySelector('[data-dashboard-prev-page]')?.addEventListener('click', () => {
+      if (ui.currentPage <= 1) return;
+      ui.currentPage -= 1;
+      renderInventory(view, ui, context);
+    });
+    footerRoot.querySelector('[data-dashboard-next-page]')?.addEventListener('click', () => {
+      if (ui.currentPage >= totalPages) return;
+      ui.currentPage += 1;
       renderInventory(view, ui, context);
     });
   }
@@ -1331,6 +1532,50 @@ function kpiCard({ label, value, sub = '', delta = null, iconName, accent, inver
   `;
 }
 
+// The "Total Cost" header stat used to be a fixed sum of ALL FOUR categories (cos + adjustments +
+// wastage + mfgWastage) regardless of which series toggles were actually active in the chart below
+// it — so with only "Cost of Sales" toggled on (the common case), the chart's visible area and its
+// own "Total" line could add up to far less than the number shown right above it, reading as a
+// broken/wrong chart. This recomputes both the value and its vs-prior-period delta from only the
+// currently active series (using the per-category current/previous totals in
+// model.metrics.categoryTotals — see buildDashboardModel), so the header always agrees with what's
+// actually drawn.
+function updateTrendTotalCostStat(view, model, activeSeries) {
+  const target = view.querySelector('[data-trend-total-cost]');
+  if (!target) return;
+  const categoryTotals = model.metrics.categoryTotals || {};
+  const current = activeSeries.reduce((sum, series) => sum + number(categoryTotals[series.key]?.current), 0);
+  const previous = activeSeries.reduce((sum, series) => sum + number(categoryTotals[series.key]?.previous), 0);
+  const label = activeSeries.length === SERIES.length
+    ? 'Total Cost'
+    : activeSeries.length === 1
+      ? activeSeries[0].label
+      : 'Selected Cost';
+  target.outerHTML = trendHeaderStat({
+    label,
+    value: current,
+    delta: percentageChange(current, previous),
+    invert: true,
+    attr: 'data-trend-total-cost'
+  });
+}
+
+function trendHeaderStat({ label, value, delta, invert = false, attr = '' }) {
+  const hasDelta = Number.isFinite(delta);
+  const positiveDirection = hasDelta && delta >= 0;
+  const favourable = hasDelta ? (invert ? !positiveDirection : positiveDirection) : null;
+  return `
+    <div class="${styles.trendHeaderTotal}" ${attr}>
+      <span>${escapeHtml(label)}</span>
+      <div>
+        <strong>${money(value)}</strong>
+        ${hasDelta ? `<em class="${favourable ? styles.trendDeltaGood : styles.trendDeltaBad}">${icon(positiveDirection ? 'arrowUp' : 'arrowDown', 11)}${decimal(Math.abs(delta))}%</em>` : ''}
+      </div>
+      <small>${hasDelta ? 'vs prior period' : 'No prior-period comparison'}</small>
+    </div>
+  `;
+}
+
 function compareInventory(left, right, col, dir) {
   let a = left[col];
   let b = right[col];
@@ -1360,8 +1605,7 @@ function statusRank(status) {
 }
 
 function hideChartTooltip(view) {
-  const tooltip = view.querySelector('[data-dashboard-chart-tooltip]');
-  if (tooltip) tooltip.hidden = true;
+  trendChartInstances.get(view)?.dispatchAction({ type: 'hideTip' });
 }
 
 function setRefreshing(view, refreshing) {
@@ -1369,13 +1613,6 @@ function setRefreshing(view, refreshing) {
   if (!button) return;
   button.disabled = refreshing;
   button.classList.toggle(styles.refreshing, refreshing);
-}
-
-function niceMax(value) {
-  const exponent = Math.floor(Math.log10(value));
-  const fraction = value / (10 ** exponent);
-  const niceFraction = fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 5 ? 5 : 10;
-  return niceFraction * (10 ** exponent);
 }
 
 function axisMoney(value) {

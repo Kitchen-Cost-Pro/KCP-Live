@@ -193,6 +193,7 @@ export function renderGRVEntry({ state, onGrvFilterChange, onGrvAction = {} } = 
       cursorDate: filters.calendarCursor || draft.date || todayLocal()
     }) : ''}
     ${filters.overlay === 'clear-confirm' ? renderClearConfirmOverlay() : ''}
+    ${filters.overlay === 'commit' ? renderGrvCommitOverlay(grv.commit || {}, grv.driveConnected === true) : ''}
     ${grv.lineDetailDraft?.entries?.length ? renderLineDetailOverlay(grv.lineDetailDraft, draft, grv.sites || [], grv.locations || [], vatRate) : ''}
     ${grv.missingSupplierPrompt ? renderMissingSupplierOverlay(grv.missingSupplierPrompt, grv.actionStatus === 'adding-supplier') : ''}
   `;
@@ -377,7 +378,39 @@ function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, 
     blurActiveDraftField();
     onGrvFilterChange?.({ overlay: 'calendar', calendarCursor: startOfMonthKey(draft.date || todayLocal()), openDropdown: '' });
   });
-  view.querySelector('[data-grv-save]')?.addEventListener('click', () => onGrvAction.onSave?.());
+  view.querySelector('[data-grv-save]')?.addEventListener('click', () => {
+    blurActiveDraftField();
+    onGrvAction.onRequestCommit?.();
+  });
+  view.querySelector('[data-grv-commit-yes]')?.addEventListener('click', () => onGrvAction.onCommitUploadImage?.());
+  view.querySelector('[data-grv-commit-no]')?.addEventListener('click', () => onGrvAction.onCommitSkipImage?.());
+  view.querySelector('[data-grv-commit-back]')?.addEventListener('click', () => onGrvAction.onCommitBack?.());
+  view.querySelector('[data-grv-commit-confirm]')?.addEventListener('click', () => onGrvAction.onCommitConfirm?.());
+  view.querySelector('[data-grv-commit-remove-file]')?.addEventListener('click', () => onGrvAction.onCommitRemoveFile?.());
+  view.querySelector('[data-grv-commit-trigger]')?.addEventListener('click', () => {
+    view.querySelector('[data-grv-commit-input]')?.click();
+  });
+  view.querySelector('[data-grv-commit-input]')?.addEventListener('change', (event) => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = '';
+    if (file) onGrvAction.onCommitFileSelected?.(file);
+  });
+  const commitDropzone = view.querySelector('[data-grv-commit-dropzone]');
+  commitDropzone?.addEventListener('dragover', (event) => {
+    event.preventDefault();
+    commitDropzone.classList.add('is-dragging');
+  });
+  commitDropzone?.addEventListener('dragleave', (event) => {
+    if (!commitDropzone.contains(event.relatedTarget)) {
+      commitDropzone.classList.remove('is-dragging');
+    }
+  });
+  commitDropzone?.addEventListener('drop', (event) => {
+    event.preventDefault();
+    commitDropzone.classList.remove('is-dragging');
+    const file = event.dataTransfer?.files?.[0];
+    if (file) onGrvAction.onCommitFileSelected?.(file);
+  });
   view.querySelector('[data-grv-toast-close]')?.addEventListener('click', () => onGrvAction.onDismissToast?.());
   view.querySelector('[data-grv-cancel-edit]')?.addEventListener('click', () => onGrvAction.onCancelEdit?.());
   view.querySelectorAll('[data-grv-edit-receipt]').forEach((row) => {
@@ -1209,6 +1242,91 @@ function renderClearConfirmOverlay() {
         <div class="grv-overlayFooter grv-overlayFooter--confirm">
           <button type="button" class="grv-add-primary" data-grv-confirm-clear>Clear all</button>
           <button type="button" class="grv-outlineButton" data-grv-cancel-clear>Keep draft</button>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function renderGrvCommitOverlay(commit = {}, driveConnected) {
+  const step = commit.step || (driveConnected ? 'ask' : 'confirm');
+
+  if (step === 'ask') {
+    return `
+      <div class="grv-overlay">
+        <section class="grv-overlayCard grv-overlayCard--confirm">
+          <header class="grv-overlayHeader">
+            <div>
+              <h3>Attach an invoice image?</h3>
+              <p>Upload a photo or PDF of the supplier invoice to keep alongside this GRV in Google Drive.</p>
+            </div>
+          </header>
+          <div class="grv-overlayFooter grv-overlayFooter--confirm">
+            <button type="button" class="grv-add-primary" data-grv-commit-yes>${icon('upload')} Yes, upload one</button>
+            <button type="button" class="grv-outlineButton" data-grv-commit-no>No, skip</button>
+          </div>
+        </section>
+      </div>
+    `;
+  }
+
+  if (step === 'upload') {
+    const hasFile = Boolean(commit.fileName);
+    return `
+      <div class="grv-overlay">
+        <section class="grv-overlayCard grv-overlayCard--confirm">
+          <header class="grv-overlayHeader">
+            <div>
+              <h3>Upload invoice image</h3>
+              <p>Drag and drop a file, or choose one from your device.</p>
+            </div>
+          </header>
+          ${commit.error ? renderNotice(commit.error, 'error') : ''}
+          <input type="file" accept="image/*,application/pdf" hidden data-grv-commit-input />
+          ${hasFile ? `
+            <div class="grv-commitFilePicked">
+              ${icon('file')}
+              <span>${escapeHtml(commit.fileName)}</span>
+              <button type="button" class="grv-removeBtn" data-grv-commit-remove-file aria-label="Remove file" ${commit.uploading ? 'disabled' : ''}>${icon('x')}</button>
+            </div>
+          ` : `
+            <div class="grv-commitDropzone" data-grv-commit-dropzone>
+              ${icon('upload')}
+              <p>Drop a photo or PDF here</p>
+              <button type="button" class="grv-add-btn grv-add-btn--success" data-grv-commit-trigger>Choose File</button>
+            </div>
+          `}
+          <div class="grv-overlayFooter grv-overlayFooter--confirm">
+            <button type="button" class="grv-add-primary" data-grv-commit-confirm ${hasFile && !commit.uploading ? '' : 'disabled'}>
+              ${commit.uploading ? 'Uploading…' : 'Upload & Commit GRV'}
+            </button>
+            <button type="button" class="grv-outlineButton" data-grv-commit-back ${commit.uploading ? 'disabled' : ''}>Back</button>
+          </div>
+        </section>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="grv-overlay">
+      <section class="grv-overlayCard grv-overlayCard--confirm">
+        <header class="grv-overlayHeader">
+          <div>
+            <h3>Confirm this GRV?</h3>
+            <p>Stock levels and location costs will update as soon as you commit.</p>
+          </div>
+        </header>
+        ${!driveConnected ? `
+          <div class="grv-commitDriveTip">
+            ${icon('info')}
+            <span>Connect Google Drive in Integrations to automatically store a copy of your invoices.</span>
+          </div>
+        ` : ''}
+        <div class="grv-overlayFooter grv-overlayFooter--confirm">
+          <button type="button" class="grv-add-primary" data-grv-commit-confirm>Confirm & Commit</button>
+          ${driveConnected
+            ? '<button type="button" class="grv-outlineButton" data-grv-commit-back>Back</button>'
+            : '<button type="button" class="grv-outlineButton" data-grv-overlay-close>Cancel</button>'}
         </div>
       </section>
     </div>
@@ -2072,6 +2190,9 @@ function icon(name) {
     chevronDoubleLeft: '<path d="m17 18-6-6 6-6"/><path d="m11 18-6-6 6-6"/>',
     chevronDoubleRight: '<path d="m7 18 6-6-6-6"/><path d="m13 18 6-6-6-6"/>',
     camera: '<path d="M14.5 4h-5L8 6H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-3z"/><circle cx="12" cy="12.5" r="3.5"/>',
+    upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/>',
+    info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/>',
+    file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/>',
     calendar: '<path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/>',
     clipboard: '<path d="M9 5h6"/><path d="M9 3h6a2 2 0 0 1 2 2v14H7V5a2 2 0 0 1 2-2Z"/><path d="M9 9h6"/><path d="M9 13h6"/>',
     history: '<path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 3v6h6"/><path d="M12 7v5l3 3"/>',

@@ -45,7 +45,6 @@
 }
 
 .integrationsDocsButton,
-.integrationsTabs button,
 .integrationsDropdown > button,
 .integrationPrimaryAction,
 .integrationGhostAction,
@@ -90,34 +89,12 @@
   padding-bottom: 16px;
 }
 
-.integrationsTabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.integrationsTabs button {
-  min-height: 40px;
-  border: 0;
-  background: transparent;
-  color: var(--text-muted);
-  padding: 0 12px;
-  position: relative;
-}
-
-.integrationsTabs button.is-active {
-  color: var(--accent-blue);
-}
-
-.integrationsTabs button.is-active::after {
-  content: '';
-  position: absolute;
-  left: 10px;
-  right: 10px;
-  bottom: -17px;
-  height: 2px;
-  border-radius: 999px;
-  background: var(--accent-blue);
+/* The "All Integrations / Available / Popular" view filter used to be a row of tab buttons; it's
+   now the first dropdown in the toolbar (see renderDropdown('activeTab', ...)) instead of a set of
+   pill buttons, so it needs its own width constraint rather than relying on a flex parent. */
+.integrationsToolbar > .integrationsDropdown {
+  display: inline-flex;
+  max-width: 240px;
 }
 
 .integrationsFilters {
@@ -206,29 +183,15 @@
 }
 
 .integrationsGrid {
-  display: flex;
-  flex-direction: column;
-  gap: 28px;
-  margin-top: 22px;
-}
-
-.integrationsCategoryGroup {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.integrationsCategoryTitle {
-  margin: 0;
-  font-size: 0.95rem;
-  font-weight: 600;
-  color: var(--text-main);
-}
-
-.integrationsCategoryCards {
   display: grid;
-  grid-template-columns: repeat(3, minmax(260px, 1fr));
+  /* auto-fit sizes columns off the CONTAINER's actual width, not the viewport's — the page has a
+     persistent sidebar eating into that width, so a viewport-width media query (the old 3/2/1
+     breakpoints) could still claim 3 columns' worth of viewport while the sidebar left the
+     container too narrow to actually fit them, forcing an overflow that read as "stuck in one
+     column" instead of reflowing. This adapts to whatever width the container really has. */
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: 16px;
+  margin-top: 22px;
 }
 
 .integrationCard {
@@ -241,6 +204,14 @@
   background: var(--surface-primary);
   padding: 18px;
   box-shadow: var(--shadow-soft);
+}
+
+/* The plain class rule above ties with the UA default `[hidden] { display: none }` in specificity,
+   and author styles always win that tie regardless of source order — so a filtered-out card's
+   `hidden` attribute was being silently ignored and it kept rendering. This attribute+class
+   selector outranks the plain class rule, so hiding actually takes effect. */
+.integrationCard[hidden] {
+  display: none;
 }
 
 .integrationCard--featured {
@@ -1250,12 +1221,6 @@
   color: var(--text-main);
 }
 
-@media (max-width: 1180px) {
-  .integrationsCategoryCards {
-    grid-template-columns: repeat(2, minmax(260px, 1fr));
-  }
-}
-
 @media (max-width: 760px) {
   .integrationsShell {
     padding: 20px;
@@ -1270,7 +1235,7 @@
     justify-self: start;
   }
 
-  .integrationsCategoryCards,
+  .integrationsGrid,
   .integrationsFilters {
     grid-template-columns: 1fr;
   }

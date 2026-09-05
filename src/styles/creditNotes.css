@@ -1,6 +1,5 @@
 #view-credit-note {
   min-height: 100%;
-  display: flex;
   padding: clamp(12px, 2vw, 24px) clamp(10px, 1.5vw, 20px) clamp(16px, 2.5vw, 32px);
   color: var(--text-main);
   font-family: var(--font-main);
