@@ -1483,6 +1483,8 @@
                 </div>
             </div>
 
+            <div class="dash-stat-grid" id="webhook-health-global-stats"></div>
+
             <div id="webhook-health-summary" class="glass px-5 py-3 text-[11px] text-slate-400 font-semibold"></div>
 
             <div class="glass p-5 space-y-4">
@@ -3885,6 +3887,28 @@ let webhookHealthWriteBudget = null;
 
 async function refreshWebhookHealth() {
     await Promise.all([fetchWebhookHealth(), fetchWebhookHealthTimeseries(), fetchWebhookWriteBudget(), fetchSalesStockHealth()]);
+    renderWebhookHealthGlobalStats();
+}
+
+// System-wide (all-workspaces) headline numbers for the Webhook Health tab, built entirely from
+// data the tab already fetches (webhookHealthRows + the sales-stock totals) — no extra API call.
+let salesStockHealthTotals = null;
+
+function renderWebhookHealthGlobalStats() {
+    const el = document.getElementById('webhook-health-global-stats');
+    if (!el) return;
+    const totalTransactions24h = webhookHealthRows.reduce((sum, r) => sum + Number(r.total24h || 0), 0);
+    const totalErrors24h = webhookHealthRows.reduce((sum, r) => sum + Number(r.failed24h || 0), 0);
+    const errorRate = totalTransactions24h ? Math.round((totalErrors24h / totalTransactions24h) * 1000) / 10 : 0;
+    const workspacesWithIssues = webhookHealthRows.filter(r => !r.connectionActive || r.subscriptionCheckError || r.activeSubscriptions > 1).length;
+    const t = salesStockHealthTotals || { totalSales: 0, failedSales: 0, salesWithNoStockMovement: 0, stockMovementTransactions: 0 };
+    el.innerHTML =
+        statCard('fa-bolt', 'Total Transactions (24h)', totalTransactions24h.toLocaleString(), 'Webhook calls, all workspaces', totalErrors24h ? `${errorRate}% error rate` : 'No errors', null, totalErrors24h ? 'amber' : 'emerald') +
+        statCard('fa-triangle-exclamation', 'Total Errors (24h)', totalErrors24h.toLocaleString(), 'Failed webhook calls, all workspaces', totalErrors24h ? 'Needs review' : 'Clear', null, totalErrors24h ? 'amber' : 'emerald') +
+        statCard('fa-cash-register', 'Sales Today', t.totalSales.toLocaleString(), 'Completed, all workspaces', t.failedSales ? `${t.failedSales} failed` : 'None failed', null, t.failedSales ? 'amber' : 'blue') +
+        statCard('fa-box-open', 'Sales w/ No Stock Movement', t.salesWithNoStockMovement.toLocaleString(), 'Today, all workspaces', t.salesWithNoStockMovement ? 'Review' : 'None', null, t.salesWithNoStockMovement ? 'amber' : 'emerald') +
+        statCard('fa-dolly', 'Stock Movement Transactions', t.stockMovementTransactions.toLocaleString(), 'Applied today, all workspaces', '', null, 'blue') +
+        statCard('fa-plug-circle-exclamation', 'Workspaces w/ Issues', workspacesWithIssues.toLocaleString(), 'Disconnected, drift, or check failed', workspacesWithIssues ? 'Needs review' : 'Clear', null, workspacesWithIssues ? 'amber' : 'emerald');
 }
 
 let salesStockHealthRows = [];
@@ -3902,6 +3926,7 @@ async function fetchSalesStockHealth() {
     try {
         const result = await callAdminApi('GET', `/api/admin/webhook-health/sales-stock?date=${encodeURIComponent(date)}`);
         salesStockHealthRows = result?.workspaces || [];
+        salesStockHealthTotals = result?.totals || null;
         renderSalesStockHealthSummary(result?.totals || null, result?.date || date);
         renderSalesStockHealthTable();
     } catch (e) {
