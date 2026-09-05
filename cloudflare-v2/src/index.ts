@@ -928,6 +928,12 @@ async function callWorkspaceDO(
 }
 
 /** Fan out the same resource to many workspaces concurrently; nulls for any that failed. */
+// TEMPORARY diagnostic (2026-09-05): the admin dashboard's GET /api/admin was observed taking
+// ~5s in production with only 9 workspaces total — far more than 9 concurrent DO round-trips
+// should cost. Logs each workspace's individual round-trip time so we can see whether the cost is
+// spread evenly (real per-DO overhead) or concentrated in one or two slow workspaces (e.g. a
+// migration-catchup backlog or a slow query specific to that tenant's data). Remove once the
+// actual cause is identified — see admin-summary/sales-stock-stats callers for context.
 async function fanOutWorkspaceDOs(
   env: Env,
   workspaceIds: string[],
@@ -935,10 +941,12 @@ async function fanOutWorkspaceDOs(
   auth: AuthContext
 ): Promise<Array<{ workspaceId: string; data: Record<string, unknown> | null }>> {
   return Promise.all(
-    workspaceIds.map(async (workspaceId) => ({
-      workspaceId,
-      data: await callWorkspaceDO(env, workspaceId, resource, auth)
-    }))
+    workspaceIds.map(async (workspaceId) => {
+      const startedAt = Date.now();
+      const data = await callWorkspaceDO(env, workspaceId, resource, auth);
+      console.log(`[fanOutWorkspaceDOs] ${resource} workspace=${workspaceId} durationMs=${Date.now() - startedAt}`);
+      return { workspaceId, data };
+    })
   );
 }
 

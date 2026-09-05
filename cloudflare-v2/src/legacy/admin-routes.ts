@@ -1100,6 +1100,10 @@ export async function getAdminOverview(
   tenantDataProvider?: (workspaceIds: string[]) => Promise<Record<string, AdminTenantSummary>>
 ) {
   const adminSession = await requireAdmin(request, env);
+  // TEMPORARY diagnostic (2026-09-05) — see fanOutWorkspaceDOs in index.ts for why. Times the
+  // CENTRAL_DB half separately from the per-workspace DO fan-out below, so the two known-slow
+  // candidates (a big central join vs. the DO round-trips) don't get conflated in the logs.
+  const centralQueriesStartedAt = Date.now();
   const [workspaces, requests, members, invitations, admins] = await Promise.all([
     env.DB.prepare(
       `SELECT w.id, w.name, w.status, w.owner_uid, w.currency, w.timezone, w.created_at, w.updated_at
@@ -1134,14 +1138,17 @@ export async function getAdminOverview(
     ).all(),
     listAdminUsers(env)
   ]);
+  console.log(`[getAdminOverview] CENTRAL_DB queries durationMs=${Date.now() - centralQueriesStartedAt}`);
   const workspaceRows = (workspaces.results || []) as any[];
   const memberRows = (members.results || []) as any[];
   const invitationRows = (invitations.results || []) as any[];
   const requestRows = (requests.results || []) as any[];
   // Settings/metrics/yoco live in each workspace's DO — fanned in by the front Worker (empty if absent).
+  const tenantDataStartedAt = Date.now();
   const tenantData: Record<string, AdminTenantSummary> = tenantDataProvider
     ? await tenantDataProvider(workspaceRows.map((r) => String(r.id)))
     : {};
+  console.log(`[getAdminOverview] tenantDataProvider (DO fan-out) durationMs=${Date.now() - tenantDataStartedAt}`);
   const workspaceMap: Record<string, any> = {};
   for (const row of workspaceRows) {
     const tenant = tenantData[row.id] || {};
