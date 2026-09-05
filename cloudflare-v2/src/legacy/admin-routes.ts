@@ -1144,9 +1144,16 @@ export async function getAdminOverview(
   const invitationRows = (invitations.results || []) as any[];
   const requestRows = (requests.results || []) as any[];
   // Settings/metrics/yoco live in each workspace's DO — fanned in by the front Worker (empty if absent).
+  // Only wake DOs for active workspaces: an inactive one still needs to appear in the table above
+  // (from CENTRAL_DB, no DO involved) but has no reason to be woken on every admin dashboard load —
+  // that DO may be dormant with a large accumulated history and a long-pending migration backlog, so
+  // touching it here just to fetch settings/metrics nobody's viewing costs a full migration-catch-up
+  // attempt for zero benefit. Found 2026-09-05: an inactive tenant's DO was the single slowest call
+  // in this fan-out (3360ms vs ~200ms for active ones) and hit SQLITE_NOMEM mid-migration.
   const tenantDataStartedAt = Date.now();
+  const activeWorkspaceIds = workspaceRows.filter((r) => r.status === 'active').map((r) => String(r.id));
   const tenantData: Record<string, AdminTenantSummary> = tenantDataProvider
-    ? await tenantDataProvider(workspaceRows.map((r) => String(r.id)))
+    ? await tenantDataProvider(activeWorkspaceIds)
     : {};
   console.log(`[getAdminOverview] tenantDataProvider (DO fan-out) durationMs=${Date.now() - tenantDataStartedAt}`);
   const workspaceMap: Record<string, any> = {};
