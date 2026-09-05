@@ -39,6 +39,18 @@ function sargableDayFloor(isoInstant: string): string {
   return String(isoInstant || '').slice(0, 10);
 }
 
+// Resolves the ?date=YYYY-MM-DD query param (defaulting to today, UTC) into an exact
+// [dayStart, dayEnd) instant pair, so callers can bind plain >= / < comparisons against ISO
+// timestamp columns instead of wrapping them in date()/datetime() — the latter would make an
+// otherwise-sargable index unusable, exactly the class of bug the recent domain_event_id /
+// applyStock INDEXED BY fixes were chasing.
+function resolveDayRange(url: URL): { dayStart: string; dayEnd: string } {
+  const dateParam = String(url.searchParams.get('date') || '');
+  const dayStart = /^\d{4}-\d{2}-\d{2}$/.test(dateParam) ? `${dateParam}T00:00:00.000Z` : sargableDayFloor(nowIso()) + 'T00:00:00.000Z';
+  const dayEnd = new Date(new Date(dayStart).getTime() + 24 * 60 * 60 * 1000).toISOString();
+  return { dayStart, dayEnd };
+}
+
 function response(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
 }
@@ -1020,11 +1032,9 @@ export async function handleYocoV2AdminRoute(
   // stock movements were proposed vs. actually applied — none of that was visible anywhere
   // before, only the raw webhook call counts above.
   if (request.method === 'GET' && suffix === 'sales-stock-stats') {
-    const dateParam = String(url.searchParams.get('date') || '');
-    const dayStart = /^\d{4}-\d{2}-\d{2}$/.test(dateParam) ? `${dateParam}T00:00:00.000Z` : sargableDayFloor(nowIso()) + 'T00:00:00.000Z';
-    const dayEnd = new Date(new Date(dayStart).getTime() + 24 * 60 * 60 * 1000).toISOString();
+    const { dayStart, dayEnd } = resolveDayRange(url);
 
-    const [sales, stock] = await Promise.all([
+    const [sales, stock, noMovement] = await Promise.all([
       env.DB.prepare(
         `SELECT
            (SELECT COUNT(*) FROM yoco_v2_live_sale_reporting_effects
@@ -1041,6 +1051,21 @@ export async function handleYocoV2AdminRoute(
              WHERE workspace_id = ?1 AND status = 'APPLIED' AND applied_at >= ?2 AND applied_at < ?3) AS stock_movements_applied,
            (SELECT COUNT(*) FROM yoco_v2_live_sale_stock_effects
              WHERE workspace_id = ?1 AND status IN ('FAILED', 'BLOCKED') AND updated_at >= ?2 AND updated_at < ?3) AS stock_movements_failed`
+      ).bind(workspaceId, dayStart, dayEnd).first<Row>(),
+      // A sale can complete (reporting effect applied) yet never produce an applied stock
+      // movement — a pure "Custom Amount" line with no ingredient to deduct, every line
+      // unmapped/missing a recipe (yoco_v2_proposed_stock_movements.warning_code set), or simply
+      // an order with no lines at all. Surfaced as its own count because none of the existing
+      // stock-proposal metrics (all scoped to yoco_v2_proposed_stock_movements rows, which don't
+      // exist for a no-lines order) would catch that last case.
+      env.DB.prepare(
+        `SELECT COUNT(*) AS sales_with_no_stock_movement
+           FROM yoco_v2_live_sale_reporting_effects r
+          WHERE r.workspace_id = ?1 AND r.applied_at >= ?2 AND r.applied_at < ?3
+            AND NOT EXISTS (
+              SELECT 1 FROM yoco_v2_live_sale_stock_effects se
+               WHERE se.workspace_id = r.workspace_id AND se.source_order_id = r.source_order_id
+                 AND se.status = 'APPLIED')`
       ).bind(workspaceId, dayStart, dayEnd).first<Row>()
     ]);
 
@@ -1058,8 +1083,72 @@ export async function handleYocoV2AdminRoute(
       stockMovementsProposed: Number((stock as Row | null)?.stock_movements_proposed || 0),
       stockMovementsApplied,
       stockMovementsFailed,
-      stockMovementTransactions: stockMovementsApplied + stockMovementsFailed
+      stockMovementTransactions: stockMovementsApplied + stockMovementsFailed,
+      salesWithNoStockMovement: Number((noMovement as Row | null)?.sales_with_no_stock_movement || 0)
     });
+  }
+
+  // Drill-down for one cell of the Sales & Stock Movement Health table: the underlying
+  // transactions for one workspace/day/category, so "why is this number what it is" doesn't
+  // require a separate DB query by hand.
+  if (request.method === 'GET' && suffix === 'sales-stock-details') {
+    const { dayStart, dayEnd } = resolveDayRange(url);
+    const category = String(url.searchParams.get('category') || '');
+    const limit = positiveInteger(url.searchParams.get('limit'), 100, 500);
+
+    let rows: Row[] = [];
+    if (category === 'successful') {
+      rows = (await env.DB.prepare(
+        `SELECT source_order_id, applied_at FROM yoco_v2_live_sale_reporting_effects
+          WHERE workspace_id = ?1 AND applied_at >= ?2 AND applied_at < ?3
+          ORDER BY applied_at DESC LIMIT ?4`
+      ).bind(workspaceId, dayStart, dayEnd, limit).all<Row>()).results || [];
+    } else if (category === 'failed') {
+      rows = (await env.DB.prepare(
+        `SELECT domain_event_id, effect_key, status, last_error_code, last_error_message, updated_at
+           FROM yoco_v2_live_effect_outbox
+          WHERE workspace_id = ?1 AND effect_type = 'SALE_REPORTING' AND status IN ('FAILED', 'BLOCKED')
+            AND updated_at >= ?2 AND updated_at < ?3
+          ORDER BY updated_at DESC LIMIT ?4`
+      ).bind(workspaceId, dayStart, dayEnd, limit).all<Row>()).results || [];
+    } else if (category === 'stockProposed') {
+      rows = (await env.DB.prepare(
+        `SELECT source_order_id, source_line_id, ingredient_item_id, movement_type, quantity, warning_code, created_at
+           FROM yoco_v2_proposed_stock_movements
+          WHERE workspace_id = ?1 AND created_at >= ?2 AND created_at < ?3
+          ORDER BY created_at DESC LIMIT ?4`
+      ).bind(workspaceId, dayStart, dayEnd, limit).all<Row>()).results || [];
+    } else if (category === 'stockApplied') {
+      rows = (await env.DB.prepare(
+        `SELECT source_order_id, movement_id, applied_at FROM yoco_v2_live_sale_stock_effects
+          WHERE workspace_id = ?1 AND status = 'APPLIED' AND applied_at >= ?2 AND applied_at < ?3
+          ORDER BY applied_at DESC LIMIT ?4`
+      ).bind(workspaceId, dayStart, dayEnd, limit).all<Row>()).results || [];
+    } else if (category === 'stockFailed') {
+      rows = (await env.DB.prepare(
+        `SELECT source_order_id, movement_id, status, updated_at FROM yoco_v2_live_sale_stock_effects
+          WHERE workspace_id = ?1 AND status IN ('FAILED', 'BLOCKED') AND updated_at >= ?2 AND updated_at < ?3
+          ORDER BY updated_at DESC LIMIT ?4`
+      ).bind(workspaceId, dayStart, dayEnd, limit).all<Row>()).results || [];
+    } else if (category === 'noStockMovement') {
+      rows = (await env.DB.prepare(
+        `SELECT r.source_order_id, r.applied_at,
+                (SELECT GROUP_CONCAT(DISTINCT NULLIF(p.warning_code, ''))
+                   FROM yoco_v2_proposed_stock_movements p
+                  WHERE p.workspace_id = r.workspace_id AND p.source_order_id = r.source_order_id) AS reasons
+           FROM yoco_v2_live_sale_reporting_effects r
+          WHERE r.workspace_id = ?1 AND r.applied_at >= ?2 AND r.applied_at < ?3
+            AND NOT EXISTS (
+              SELECT 1 FROM yoco_v2_live_sale_stock_effects se
+               WHERE se.workspace_id = r.workspace_id AND se.source_order_id = r.source_order_id
+                 AND se.status = 'APPLIED')
+          ORDER BY r.applied_at DESC LIMIT ?4`
+      ).bind(workspaceId, dayStart, dayEnd, limit).all<Row>()).results || [];
+    } else {
+      return response({ ok: false, error: 'Unknown category.' }, 400);
+    }
+
+    return response({ ok: true, workspaceId, date: dayStart.slice(0, 10), category, rows });
   }
 
   if (request.method === 'GET' && suffix === 'receipts') {

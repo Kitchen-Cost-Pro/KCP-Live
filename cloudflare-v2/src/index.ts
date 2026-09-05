@@ -281,7 +281,8 @@ async function dispatchCentral(request: Request, env: Env, url: URL): Promise<Re
         stockMovementsProposed: Number(data?.stockMovementsProposed || 0),
         stockMovementsApplied: Number(data?.stockMovementsApplied || 0),
         stockMovementsFailed: Number(data?.stockMovementsFailed || 0),
-        stockMovementTransactions: Number(data?.stockMovementTransactions || 0)
+        stockMovementTransactions: Number(data?.stockMovementTransactions || 0),
+        salesWithNoStockMovement: Number(data?.salesWithNoStockMovement || 0)
       };
     });
     const totals = rows.reduce((acc, row) => {
@@ -292,8 +293,9 @@ async function dispatchCentral(request: Request, env: Env, url: URL): Promise<Re
       acc.stockMovementsApplied += row.stockMovementsApplied;
       acc.stockMovementsFailed += row.stockMovementsFailed;
       acc.stockMovementTransactions += row.stockMovementTransactions;
+      acc.salesWithNoStockMovement += row.salesWithNoStockMovement;
       return acc;
-    }, { successfulSales: 0, failedSales: 0, totalSales: 0, stockMovementsProposed: 0, stockMovementsApplied: 0, stockMovementsFailed: 0, stockMovementTransactions: 0 });
+    }, { successfulSales: 0, failedSales: 0, totalSales: 0, stockMovementsProposed: 0, stockMovementsApplied: 0, stockMovementsFailed: 0, stockMovementTransactions: 0, salesWithNoStockMovement: 0 });
     return json(request, env, { ok: true, date: resolvedDate || date, workspaces: rows, totals });
   }
 
