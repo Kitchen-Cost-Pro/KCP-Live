@@ -2,6 +2,7 @@ import './styles/tailwind.css';
 import './styles/main.css';
 import './styles/chat.css';
 import './styles/reporting.css';
+import './styles/reportingHub.css';
 import { mountChatWidget, unmountChatWidget } from './components/Chat.js';
 import { renderAuthenticatedApp } from './appShell.js';
 import { renderLogin } from './auth.js';
