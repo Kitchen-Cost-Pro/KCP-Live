@@ -1,5 +1,5 @@
-// Guided first-run setup wizard. Sequences KCP's EXISTING bulk-import tools (Suppliers, Stock
-// Items, Recipes) and the Yoco POS connect/sync flow into one guided flow for a brand-new
+// Guided first-run setup wizard. Sequences KCP's EXISTING bulk-import tools (Stock Items,
+// Suppliers, Recipes) and the Yoco POS connect/sync flow into one guided flow for a brand-new
 // workspace — it introduces no new import/sync logic of its own, only sequencing/UX glue. See
 // memory/plan: no POS integration can ever supply supplier/recipe/cost data, so this is purely
 // about making the tools that already exist easy to find and use in the right order.
@@ -11,7 +11,14 @@
 // src/styles/tailwind.css) that maps straight onto this app's own CSS variables, so it follows
 // the app's real accent colors and light/dark toggle rather than a generic daisyUI palette.
 
+import yocoLogo from '../assets/integrations/yoco.svg';
+
 const ONBOARDING_STEPS = [1, 2, 3, 4];
+
+// Same Yoco developer-portal link the Integrations page's "Get Your Yoco API Key Now" button uses
+// (see Integrations.js's renderYocoModal) — this is the one place a KCP user actually generates a
+// Personal API Key, so both entry points must point at the exact same URL.
+const YOCO_API_KEY_URL = 'https://developer-iam.yoco.com/ui/login?flow=c9249270-71ae-46c1-8d7f-9414a0f6c64b';
 
 // Which "pane" is currently showing, independent of the step number — used to decide how the
 // next pane should enter (see getPaneEnterClass below). Module-level rather than on the onboarding
@@ -45,8 +52,8 @@ function getPaneEnterClass(signature) {
 
 const STEPS = [
   { value: 1, label: 'Connect POS' },
-  { value: 2, label: 'Suppliers' },
-  { value: 3, label: 'Stock Items' },
+  { value: 2, label: 'Stock Items' },
+  { value: 3, label: 'Suppliers' },
   { value: 4, label: 'Recipes' },
   { value: 5, label: 'Finish' }
 ];
@@ -78,7 +85,7 @@ export function renderOnboardingWelcomePane() {
       <h3 class="text-xl font-semibold">Welcome to KCP 👋</h3>
       <p class="text-sm opacity-80 max-w-md">
         Let's get your workspace ready to go live. We'll connect your Yoco POS, bring in your
-        suppliers and stock items, and make sure every product has a recipe, all in a few quick
+        stock items and suppliers, and make sure every product has a recipe, all in a few quick
         steps, right here.
       </p>
       <button type="button" class="btn btn-primary btn-wide mt-2" data-onboarding-start>Let's Get Started</button>
@@ -116,8 +123,8 @@ export function bindOnboardingResumeButtonEvents(el, onOnboardingAction = {}) {
 export function isOnboardingStepComplete(step, onboarding = {}) {
   const counts = onboarding.counts;
   if (step === 1) return onboarding.yoco?.connectionActive === true;
-  if (step === 2) return Number(counts?.supplierCount || 0) > 0;
-  if (step === 3) return Number(counts?.stockItemCount || 0) > 0;
+  if (step === 2) return Number(counts?.stockItemCount || 0) > 0;
+  if (step === 3) return Number(counts?.supplierCount || 0) > 0;
   if (step === 4) return Number(counts?.productCount || 0) > 0 && Number(counts?.missingRecipeCount || 0) === 0;
   return false;
 }
@@ -278,6 +285,19 @@ export function updateOnboardingWizardContent(container, onboarding, onOnboardin
 function renderWizardPane(wizardStep, context) {
   if (wizardStep === 1) return renderConnectStep(context);
   if (wizardStep === 2) return renderImportStep(context, {
+    kind: 'stock',
+    title: 'Import your stock items',
+    description: 'Raw ingredients, costs, and units of measure. Recipes later in this wizard can only reference ingredients that already exist here.',
+    countLabel: (count) => `${count} stock item${count === 1 ? '' : 's'} on file`,
+    count: context.counts?.stockItemCount ?? null,
+    inputAttr: 'data-onboarding-import-stock',
+    accept: '.csv,.json,.xlsx,.xls,text/csv,application/json',
+    downloadTemplateAttr: 'data-onboarding-download-stock-template',
+    addManuallyAttr: 'data-onboarding-add-stock-manually',
+    aiInputAttr: 'data-onboarding-scan-stock',
+    aiHint: 'Upload a photo of a stock sheet or price list'
+  });
+  if (wizardStep === 3) return renderImportStep(context, {
     kind: 'suppliers',
     title: 'Import your suppliers',
     description: 'Bring in supplier contacts, payment terms, and account details. Yoco has no concept of suppliers, so this always starts as a bulk import or manual entry.',
@@ -289,19 +309,6 @@ function renderWizardPane(wizardStep, context) {
     addManuallyAttr: 'data-onboarding-add-supplier-manually',
     aiInputAttr: 'data-onboarding-scan-suppliers',
     aiHint: 'Upload a photo of a supplier list, invoice letterhead, or business cards'
-  });
-  if (wizardStep === 3) return renderImportStep(context, {
-    kind: 'stock',
-    title: 'Import your stock items',
-    description: 'Raw ingredients, costs, and units of measure. Recipes in the next step can only reference ingredients that already exist here.',
-    countLabel: (count) => `${count} stock item${count === 1 ? '' : 's'} on file`,
-    count: context.counts?.stockItemCount ?? null,
-    inputAttr: 'data-onboarding-import-stock',
-    accept: '.csv,.json,.xlsx,.xls,text/csv,application/json',
-    downloadTemplateAttr: 'data-onboarding-download-stock-template',
-    addManuallyAttr: 'data-onboarding-add-stock-manually',
-    aiInputAttr: 'data-onboarding-scan-stock',
-    aiHint: 'Upload a photo of a stock sheet or price list'
   });
   if (wizardStep === 4) return renderRecipesStep(context);
   return renderFinishStep(context);
@@ -325,8 +332,20 @@ function renderConnectStep({ yoco, actionStatus }) {
         ? `<div class="flex gap-2">
             <button type="button" class="btn btn-primary" data-onboarding-sync-now ${actionStatus === 'syncing' ? 'disabled' : ''}>${actionStatus === 'syncing' ? 'Syncing…' : 'Sync Now'}</button>
           </div>`
-        : `<form class="flex flex-wrap gap-2 items-start" data-onboarding-connect-yoco-form>
-            <input type="text" name="apiKey" class="input input-bordered flex-1 min-w-[16rem]" placeholder="Yoco API key" autocomplete="off" ${connecting ? 'disabled' : ''} />
+        : `<a
+            href="${YOCO_API_KEY_URL}"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="btn btn-outline justify-start gap-3 h-auto py-3 normal-case self-start"
+          >
+            <img src="${yocoLogo}" alt="" class="w-8 h-8 rounded-md bg-white p-1 shrink-0" />
+            <span class="flex flex-col items-start text-left leading-tight">
+              <strong class="text-sm">Get Your Yoco API Key</strong>
+              <span class="text-xs opacity-60">Opens Yoco's developer portal in a new tab</span>
+            </span>
+          </a>
+          <form class="flex flex-wrap gap-2 items-start" data-onboarding-connect-yoco-form>
+            <input type="text" name="apiKey" class="input input-bordered flex-1 min-w-[16rem]" placeholder="Paste your Yoco API key here" autocomplete="off" ${connecting ? 'disabled' : ''} />
             <button type="submit" class="btn btn-primary" ${connecting ? 'disabled' : ''}>${connecting ? 'Connecting…' : 'Connect'}</button>
           </form>`}
     </section>
@@ -559,7 +578,7 @@ function renderQuickRecipeBuilder(recipeBuilder, actionStatus) {
     return `<div class="alert alert-success text-sm"><span>Every synced product already has a recipe.</span></div>`;
   }
   if (!stockItems.length) {
-    return `<div class="alert alert-warning text-sm"><span>Add stock items first (previous step); a recipe needs at least one to reference.</span></div>`;
+    return `<div class="alert alert-warning text-sm"><span>Add stock items first (Stock Items step); a recipe needs at least one to reference.</span></div>`;
   }
   const stockOptions = stockItems.map((item) => `<option value="${escapeAttribute(item.id)}">${escapeHtml(item.name)}</option>`).join('');
   const rows = Array.from({ length: QUICK_RECIPE_ROW_COUNT }, (_, index) => `
@@ -609,7 +628,7 @@ function renderRecipesStep({ counts, actionStatus, actionNote, pendingImport, re
         buttonLabel: busyImport ? 'Reading file…' : 'Import Filled-in Template',
         hint: 'or drag & drop a file here'
       })}
-      <p class="text-xs opacity-60">Ingredients must already exist as stock items (previous step); import stock items first if a row fails to match.</p>
+      <p class="text-xs opacity-60">Ingredients must already exist as stock items (Stock Items step); import stock items first if a row fails to match.</p>
       ${aiOnboardingEnabled ? `
         <div class="divider text-xs opacity-60 my-0">or</div>
         ${renderFileDropzone({

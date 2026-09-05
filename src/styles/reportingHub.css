@@ -1,0 +1,261 @@
+/* Reports home — category headings + report cards only. This intentionally does NOT touch the
+   surrounding app chrome (nav/sidebar/header/search/profile menu) or the report viewer pages; it
+   only styles the "Reports" landing content rendered by renderReportingHome in
+   ReportingDashboard.js. All rules are scoped under .repHub so nothing here can leak onto other
+   screens, and nothing from the app's legacy reporting-home CSS (further up this same stylesheet,
+   scoped to the old .reportingDashboard--miniBentoHome/.reportTile--miniBento classes) can apply
+   to this markup either, since it uses an entirely different class namespace. */
+
+.repHub {
+  --repHub-card-bg: linear-gradient(155deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.015)), #12151c;
+  --repHub-card-bg-hover: linear-gradient(155deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.02)), #151922;
+  --repHub-card-border: rgba(255, 255, 255, 0.08);
+  --repHub-text: rgba(246, 248, 251, 0.96);
+  --repHub-muted: rgba(163, 174, 189, 0.78);
+  --repHub-dim: rgba(139, 149, 163, 0.62);
+  --repHub-rule: rgba(255, 255, 255, 0.08);
+}
+
+.repHub__pageHead {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.repHub__eyebrow {
+  margin: 0;
+  color: var(--repHub-dim);
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.repHub__pageHead h1 {
+  margin: 0;
+  color: var(--repHub-text);
+  font-size: clamp(1.4rem, 2vw, 1.85rem);
+  letter-spacing: -0.03em;
+}
+
+.repHub__sections {
+  display: flex;
+  flex-direction: column;
+  gap: 1.6rem;
+}
+
+.repHub__section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+/* Category heading: glowing dot + name + count + a rule that fills the remaining width. */
+.repHub__sectionHead {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.repHub__dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--repHub-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--repHub-accent) 22%, transparent), 0 0 10px 1px color-mix(in srgb, var(--repHub-accent) 65%, transparent);
+}
+
+.repHub__sectionHead h2 {
+  margin: 0;
+  color: var(--repHub-text);
+  font-size: 0.92rem;
+  font-weight: 750;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.repHub__sectionCount {
+  flex: none;
+  color: var(--repHub-dim);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.repHub__rule {
+  flex: 1 1 auto;
+  height: 1px;
+  min-width: 24px;
+  background: linear-gradient(90deg, var(--repHub-rule), transparent 92%);
+}
+
+/* Card grid: 4 columns desktop, 2 tablet, 1 mobile (see media queries below). */
+.repHub__grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.7rem;
+}
+
+@media (max-width: 1180px) {
+  .repHub__grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 620px) {
+  .repHub__grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Report card: compact horizontal layout with a left accent rail. */
+.repHubCard {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  min-height: 88px;
+  max-height: 96px;
+  padding: 0.85rem 0.9rem 0.85rem 1.05rem;
+  overflow: hidden;
+  border: 1px solid var(--repHub-card-border);
+  border-radius: 0.85rem;
+  background: var(--repHub-card-bg);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.22);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
+}
+
+.repHubCard__rail {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--repHub-accent);
+  opacity: 0.75;
+  transition: opacity 160ms ease, width 160ms ease;
+}
+
+.repHubCard:hover,
+.repHubCard:focus-visible {
+  transform: translateY(-2px);
+  outline: none;
+  border-color: color-mix(in srgb, var(--repHub-accent) 46%, var(--repHub-card-border));
+  background: var(--repHub-card-bg-hover);
+  box-shadow:
+    0 16px 34px rgba(0, 0, 0, 0.3),
+    0 0 0 1px color-mix(in srgb, var(--repHub-accent) 16%, transparent),
+    0 10px 30px -6px color-mix(in srgb, var(--repHub-accent) 38%, transparent);
+}
+
+.repHubCard:hover .repHubCard__rail,
+.repHubCard:focus-visible .repHubCard__rail {
+  width: 4px;
+  opacity: 1;
+}
+
+.repHubCard:hover .repHubCard__arrow,
+.repHubCard:focus-visible .repHubCard__arrow {
+  transform: translateX(3px);
+  border-color: color-mix(in srgb, var(--repHub-accent) 55%, var(--repHub-card-border));
+  color: var(--repHub-accent);
+}
+
+/* 44px rounded-square icon container, tinted with the category accent. */
+.repHubCard__icon {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 0.65rem;
+  background: color-mix(in srgb, var(--repHub-accent) 16%, transparent);
+  color: var(--repHub-accent);
+}
+
+.repHubCard__icon svg {
+  width: 21px;
+  height: 21px;
+}
+
+.repHubCard__body {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 0.32rem;
+}
+
+.repHubCard__title {
+  overflow: hidden;
+  color: var(--repHub-text);
+  font-size: 0.88rem;
+  font-weight: 650;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Pill-style count badge. */
+.repHubCard__badge {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 999px;
+  padding: 0.14rem 0.5rem;
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--repHub-muted);
+  font-size: 0.64rem;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+/* Circular arrow button, far right. */
+.repHubCard__arrow {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--repHub-card-border);
+  border-radius: 999px;
+  color: var(--repHub-dim);
+  transition: transform 160ms ease, border-color 160ms ease, color 160ms ease;
+}
+
+.repHubCard__arrow svg {
+  width: 15px;
+  height: 15px;
+}
+
+.repHubCard__qualityDot {
+  flex: none;
+  align-self: flex-start;
+  width: 8px;
+  height: 8px;
+  margin-top: 0.2rem;
+  border-radius: 999px;
+  background: #fbbf24;
+  box-shadow: 0 0 0 3px rgba(251, 191, 36, 0.16);
+}
+
+.repHubCard--warning .repHubCard__icon {
+  background: rgba(251, 191, 36, 0.16);
+  color: #fbbf24;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .repHubCard,
+  .repHubCard__rail,
+  .repHubCard__arrow {
+    transition: none;
+  }
+}

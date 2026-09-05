@@ -1100,6 +1100,10 @@ export async function getAdminOverview(
   tenantDataProvider?: (workspaceIds: string[]) => Promise<Record<string, AdminTenantSummary>>
 ) {
   const adminSession = await requireAdmin(request, env);
+  // TEMPORARY diagnostic (2026-09-05) — see fanOutWorkspaceDOs in index.ts for why. Times the
+  // CENTRAL_DB half separately from the per-workspace DO fan-out below, so the two known-slow
+  // candidates (a big central join vs. the DO round-trips) don't get conflated in the logs.
+  const centralQueriesStartedAt = Date.now();
   const [workspaces, requests, members, invitations, admins] = await Promise.all([
     env.DB.prepare(
       `SELECT w.id, w.name, w.status, w.owner_uid, w.currency, w.timezone, w.created_at, w.updated_at
@@ -1134,14 +1138,24 @@ export async function getAdminOverview(
     ).all(),
     listAdminUsers(env)
   ]);
+  console.log(`[getAdminOverview] CENTRAL_DB queries durationMs=${Date.now() - centralQueriesStartedAt}`);
   const workspaceRows = (workspaces.results || []) as any[];
   const memberRows = (members.results || []) as any[];
   const invitationRows = (invitations.results || []) as any[];
   const requestRows = (requests.results || []) as any[];
   // Settings/metrics/yoco live in each workspace's DO — fanned in by the front Worker (empty if absent).
+  // Only wake DOs for active workspaces: an inactive one still needs to appear in the table above
+  // (from CENTRAL_DB, no DO involved) but has no reason to be woken on every admin dashboard load —
+  // that DO may be dormant with a large accumulated history and a long-pending migration backlog, so
+  // touching it here just to fetch settings/metrics nobody's viewing costs a full migration-catch-up
+  // attempt for zero benefit. Found 2026-09-05: an inactive tenant's DO was the single slowest call
+  // in this fan-out (3360ms vs ~200ms for active ones) and hit SQLITE_NOMEM mid-migration.
+  const tenantDataStartedAt = Date.now();
+  const activeWorkspaceIds = workspaceRows.filter((r) => r.status === 'active').map((r) => String(r.id));
   const tenantData: Record<string, AdminTenantSummary> = tenantDataProvider
-    ? await tenantDataProvider(workspaceRows.map((r) => String(r.id)))
+    ? await tenantDataProvider(activeWorkspaceIds)
     : {};
+  console.log(`[getAdminOverview] tenantDataProvider (DO fan-out) durationMs=${Date.now() - tenantDataStartedAt}`);
   const workspaceMap: Record<string, any> = {};
   for (const row of workspaceRows) {
     const tenant = tenantData[row.id] || {};

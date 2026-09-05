@@ -31,6 +31,9 @@ const UNBOUNDED_GROWTH_TABLES = [
   'yoco_order_lines',
   'audit_events',
   'integration_logs',
+  'yoco_v2_proposed_stock_movements',
+  'yoco_v2_live_sale_reporting_effects',
+  'yoco_v2_live_sale_stock_effects',
 ];
 
 function applyMigration(database: DatabaseSync, script: string): void {
@@ -98,6 +101,34 @@ function seededTenantDb(): DatabaseSync {
   for (let i = 0; i < 4000; i += 1) {
     order.run(`yo_${i}`, WS, `yid_${i}`, new Date(Date.UTC(2026, 7, 27) - i * 60000).toISOString());
     line.run(`yl_${i}`, WS, `yo_${i}`, `p_${i % 2000}`);
+  }
+
+  // Yoco V2's live-sale tables — one row of accumulated integration history per event, growing
+  // without bound just like stock_movements above (see migration 57's comment in
+  // tenant-migrations.ts for the outage this seeding exists to catch).
+  const proposedMovement = database.prepare(
+    `INSERT INTO yoco_v2_proposed_stock_movements
+       (id, domain_event_id, workspace_id, source_order_id, source_line_id, ingredient_item_id,
+        movement_type, quantity, base_uom, proposal_key, resolution_status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, 'si_0', 'sale', -1, 'ea', ?, 'RESOLVED', ?, ?)`,
+  );
+  const reportingEffect = database.prepare(
+    `INSERT INTO yoco_v2_live_sale_reporting_effects
+       (id, workspace_id, domain_event_id, source_order_id, effect_key, yoco_order_db_id, applied_at, created_at)
+     VALUES (?, ?, ?, ?, ?, 'yo_0', ?, ?)`,
+  );
+  const stockEffect = database.prepare(
+    `INSERT INTO yoco_v2_live_sale_stock_effects
+       (id, workspace_id, domain_event_id, source_order_id, proposal_key, effect_key, movement_id,
+        status, applied_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  for (let i = 0; i < 20000; i += 1) {
+    const stamp = new Date(Date.UTC(2026, 7, 27) - i * 60000).toISOString();
+    proposedMovement.run(`psm_${i}`, `de_${i}`, WS, `order_${i}`, `line_${i}`, `pk_${i}`, stamp, stamp);
+    reportingEffect.run(`rse_${i}`, WS, `de_${i}`, `order_${i}`, `rek_${i}`, stamp, stamp);
+    const status = i % 20 === 0 ? 'FAILED' : 'APPLIED';
+    stockEffect.run(`sse_${i}`, WS, `de_${i}`, `order_${i}`, `pk_${i}`, `sek_${i}`, `mv_${i}`, status, stamp, stamp, stamp);
   }
   database.exec('COMMIT');
   database.exec('ANALYZE');
@@ -181,6 +212,10 @@ test('the migration chain creates every index the hot read paths depend on', () 
     'idx_yoco_order_lines_workspace_product',
     'idx_stock_movements_workspace_movement_type',
     'idx_stock_movements_workspace_effective_date',
+    'idx_yoco_v2_proposed_stock_movements_workspace_created',
+    'idx_yoco_v2_live_sale_reporting_effects_workspace_applied',
+    'idx_yoco_v2_live_sale_stock_effects_workspace_status_applied',
+    'idx_yoco_v2_live_sale_stock_effects_workspace_status_updated',
   ]) {
     assert.ok(present.has(indexName), `missing index ${indexName}`);
   }
@@ -244,6 +279,46 @@ const HOT_QUERIES: Array<{
     sql: `SELECT product_id, SUM(quantity) AS qty FROM yoco_order_lines
            WHERE workspace_id = ?1 AND product_id = ?2 GROUP BY product_id`,
     binds: [WS, 'p_5'],
+  },
+  {
+    guarded: ['yoco_v2_proposed_stock_movements'],
+    name: 'admin sales-stock-stats — stock_movements_proposed',
+    sql: `SELECT COUNT(*) FROM yoco_v2_proposed_stock_movements
+           WHERE workspace_id = ?1 AND created_at >= ?2 AND created_at < ?3`,
+    binds: [WS, '2026-08-27T00:00:00.000Z', '2026-08-28T00:00:00.000Z'],
+  },
+  {
+    guarded: ['yoco_v2_live_sale_reporting_effects'],
+    name: 'admin sales-stock-stats — successful_sales',
+    sql: `SELECT COUNT(*) FROM yoco_v2_live_sale_reporting_effects
+           WHERE workspace_id = ?1 AND applied_at >= ?2 AND applied_at < ?3`,
+    binds: [WS, '2026-08-27T00:00:00.000Z', '2026-08-28T00:00:00.000Z'],
+  },
+  {
+    guarded: ['yoco_v2_live_sale_stock_effects'],
+    name: 'admin sales-stock-stats — stock_movements_applied',
+    sql: `SELECT COUNT(*) FROM yoco_v2_live_sale_stock_effects
+           WHERE workspace_id = ?1 AND status = 'APPLIED' AND applied_at >= ?2 AND applied_at < ?3`,
+    binds: [WS, '2026-08-27T00:00:00.000Z', '2026-08-28T00:00:00.000Z'],
+  },
+  {
+    guarded: ['yoco_v2_live_sale_stock_effects'],
+    name: 'admin sales-stock-stats — stock_movements_failed',
+    sql: `SELECT COUNT(*) FROM yoco_v2_live_sale_stock_effects
+           WHERE workspace_id = ?1 AND status IN ('FAILED', 'BLOCKED') AND updated_at >= ?2 AND updated_at < ?3`,
+    binds: [WS, '2026-08-27T00:00:00.000Z', '2026-08-28T00:00:00.000Z'],
+  },
+  {
+    guarded: ['yoco_v2_live_sale_reporting_effects'],
+    name: 'admin sales-stock-stats — salesWithNoStockMovement (outer scan)',
+    sql: `SELECT COUNT(*) AS sales_with_no_stock_movement
+           FROM yoco_v2_live_sale_reporting_effects r
+          WHERE r.workspace_id = ?1 AND r.applied_at >= ?2 AND r.applied_at < ?3
+            AND NOT EXISTS (
+              SELECT 1 FROM yoco_v2_live_sale_stock_effects se
+               WHERE se.workspace_id = r.workspace_id AND se.source_order_id = r.source_order_id
+                 AND se.status = 'APPLIED')`,
+    binds: [WS, '2026-08-27T00:00:00.000Z', '2026-08-28T00:00:00.000Z'],
   },
 ];
 

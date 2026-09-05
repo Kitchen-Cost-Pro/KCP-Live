@@ -1483,6 +1483,8 @@
                 </div>
             </div>
 
+            <div class="dash-stat-grid" id="webhook-health-global-stats"></div>
+
             <div id="webhook-health-summary" class="glass px-5 py-3 text-[11px] text-slate-400 font-semibold"></div>
 
             <div class="glass p-5 space-y-4">
@@ -1518,6 +1520,36 @@
                     </tr></thead>
                     <tbody id="webhook-health-tbody"><tr><td colspan="11" class="px-5 py-10 text-center text-slate-500 text-xs">Loading workspaces...</td></tr></tbody>
                 </table>
+            </div>
+
+            <div class="glass p-5 space-y-4">
+                <div class="flex items-center justify-between flex-wrap gap-3">
+                    <div class="flex items-center gap-3">
+                        <h4 class="text-xs font-black uppercase tracking-widest text-slate-300">Sales &amp; Stock Movement Health</h4>
+                        <i class="fa-solid fa-circle-info info-icon" onclick="showInfo('Sales &amp; Stock Movement Health', 'Per-workspace count of completed sales (successful vs. failed) and stock movements (proposed vs. actually applied) for a single day. Sales w/ No Stock Movement is a sale that completed but never produced an applied stock deduction — e.g. a Custom Amount line with nothing to deduct, or every line unmapped / missing a recipe. Click any number to see the underlying transactions. Pick a past date to audit a specific day.')"></i>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <input type="date" id="sales-stock-date" class="bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-violet-500/50" onchange="fetchSalesStockHealth()">
+                        <input type="text" id="sales-stock-search" placeholder="Search workspaces..." class="bg-white/5 border border-white/10 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:border-violet-500/50 w-56" oninput="renderSalesStockHealthTable()">
+                        <button onclick="fetchSalesStockHealth()" class="btn-ghost text-[10px]"><i class="fa-solid fa-sync mr-2"></i>Refresh</button>
+                    </div>
+                </div>
+                <div id="sales-stock-summary" class="text-[11px] text-slate-400 font-semibold"></div>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left">
+                        <thead><tr class="border-b border-white/5 text-[9px] font-black uppercase tracking-widest text-slate-500">
+                            <th class="px-5 py-4">Workspace</th>
+                            <th class="px-4 py-4 text-right">Successful Sales</th>
+                            <th class="px-4 py-4 text-right">Failed Sales</th>
+                            <th class="px-4 py-4 text-right">Total Sales</th>
+                            <th class="px-4 py-4 text-right">Sales w/ No Stock Movement</th>
+                            <th class="px-4 py-4 text-right">Stock Movements Proposed</th>
+                            <th class="px-4 py-4 text-right">Stock Movement Transactions</th>
+                            <th class="px-4 py-4 text-right">Failed Movements</th>
+                        </tr></thead>
+                        <tbody id="sales-stock-tbody"><tr><td colspan="8" class="px-5 py-10 text-center text-slate-500 text-xs">Loading workspaces...</td></tr></tbody>
+                    </table>
+                </div>
             </div>
         </div>
 
@@ -3854,7 +3886,145 @@ const WEBHOOK_HEALTH_PALETTE = ['#60a5fa','#fbbf24','#a78bfa','#34d399','#f472b6
 let webhookHealthWriteBudget = null;
 
 async function refreshWebhookHealth() {
-    await Promise.all([fetchWebhookHealth(), fetchWebhookHealthTimeseries(), fetchWebhookWriteBudget()]);
+    await Promise.all([fetchWebhookHealth(), fetchWebhookHealthTimeseries(), fetchWebhookWriteBudget(), fetchSalesStockHealth()]);
+    renderWebhookHealthGlobalStats();
+}
+
+// System-wide (all-workspaces) headline numbers for the Webhook Health tab, built entirely from
+// data the tab already fetches (webhookHealthRows + the sales-stock totals) — no extra API call.
+let salesStockHealthTotals = null;
+
+function renderWebhookHealthGlobalStats() {
+    const el = document.getElementById('webhook-health-global-stats');
+    if (!el) return;
+    const totalTransactions24h = webhookHealthRows.reduce((sum, r) => sum + Number(r.total24h || 0), 0);
+    const totalErrors24h = webhookHealthRows.reduce((sum, r) => sum + Number(r.failed24h || 0), 0);
+    const errorRate = totalTransactions24h ? Math.round((totalErrors24h / totalTransactions24h) * 1000) / 10 : 0;
+    const workspacesWithIssues = webhookHealthRows.filter(r => !r.connectionActive || r.subscriptionCheckError || r.activeSubscriptions > 1).length;
+    const t = salesStockHealthTotals || { totalSales: 0, failedSales: 0, salesWithNoStockMovement: 0, stockMovementTransactions: 0 };
+    el.innerHTML =
+        statCard('fa-bolt', 'Total Transactions (24h)', totalTransactions24h.toLocaleString(), 'Webhook calls, all workspaces', totalErrors24h ? `${errorRate}% error rate` : 'No errors', null, totalErrors24h ? 'amber' : 'emerald') +
+        statCard('fa-triangle-exclamation', 'Total Errors (24h)', totalErrors24h.toLocaleString(), 'Failed webhook calls, all workspaces', totalErrors24h ? 'Needs review' : 'Clear', null, totalErrors24h ? 'amber' : 'emerald') +
+        statCard('fa-cash-register', 'Sales Today', t.totalSales.toLocaleString(), 'Completed, all workspaces', t.failedSales ? `${t.failedSales} failed` : 'None failed', null, t.failedSales ? 'amber' : 'blue') +
+        statCard('fa-box-open', 'Sales w/ No Stock Movement', t.salesWithNoStockMovement.toLocaleString(), 'Today, all workspaces', t.salesWithNoStockMovement ? 'Review' : 'None', null, t.salesWithNoStockMovement ? 'amber' : 'emerald') +
+        statCard('fa-dolly', 'Stock Movement Transactions', t.stockMovementTransactions.toLocaleString(), 'Applied today, all workspaces', '', null, 'blue') +
+        statCard('fa-plug-circle-exclamation', 'Workspaces w/ Issues', workspacesWithIssues.toLocaleString(), 'Disconnected, drift, or check failed', workspacesWithIssues ? 'Needs review' : 'Clear', null, workspacesWithIssues ? 'amber' : 'emerald');
+}
+
+let salesStockHealthRows = [];
+
+function salesStockHealthToday() {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+async function fetchSalesStockHealth() {
+    const tbody = document.getElementById('sales-stock-tbody');
+    const dateInput = document.getElementById('sales-stock-date');
+    if (dateInput && !dateInput.value) dateInput.value = salesStockHealthToday();
+    const date = dateInput ? dateInput.value : salesStockHealthToday();
+    try {
+        const result = await callAdminApi('GET', `/api/admin/webhook-health/sales-stock?date=${encodeURIComponent(date)}`);
+        salesStockHealthRows = result?.workspaces || [];
+        salesStockHealthTotals = result?.totals || null;
+        renderSalesStockHealthSummary(result?.totals || null, result?.date || date);
+        renderSalesStockHealthTable();
+    } catch (e) {
+        console.error('[Admin] Failed to load sales & stock health', e);
+        if (tbody) tbody.innerHTML = `<tr><td colspan="8" class="px-5 py-10 text-center text-red-400 text-xs">Failed to load: ${adminEscapeHtml(e.message)}</td></tr>`;
+    }
+}
+
+function renderSalesStockHealthSummary(totals, date) {
+    const el = document.getElementById('sales-stock-summary');
+    if (!el) return;
+    if (!totals) { el.innerHTML = ''; return; }
+    const parts = [
+        `<span class="text-slate-500">${adminEscapeHtml(date)}</span>`,
+        `<span class="text-emerald-400 font-black">${totals.successfulSales}</span> <span class="text-emerald-400">successful sales</span>`
+    ];
+    if (totals.failedSales) parts.push(`<span class="text-red-400 font-black">${totals.failedSales}</span> <span class="text-red-400">failed sales</span>`);
+    parts.push(`<span class="text-white font-black">${totals.totalSales}</span> total sales made`);
+    if (totals.salesWithNoStockMovement) parts.push(`<span class="text-amber-400 font-black">${totals.salesWithNoStockMovement}</span> <span class="text-amber-400">sales w/ no stock movement</span>`);
+    parts.push(`<span class="text-slate-300 font-black">${totals.stockMovementsProposed}</span> <span class="text-slate-500">stock movements proposed</span>`);
+    parts.push(`<span class="text-slate-300 font-black">${totals.stockMovementTransactions}</span> <span class="text-slate-500">stock movement transactions</span>`);
+    if (totals.stockMovementsFailed) parts.push(`<span class="text-red-400 font-black">${totals.stockMovementsFailed}</span> <span class="text-red-400">failed movements</span>`);
+    el.innerHTML = parts.join(' <span class="text-slate-600">&middot;</span> ');
+}
+
+// Every non-zero-friendly stat below is clickable to drill into the underlying transactions for
+// that workspace/day/category (see viewSalesStockDetails) — categories match the backend's
+// yoco-v2/admin/sales-stock-details `category` param exactly.
+function salesStockHealthCell(count, workspaceId, date, category, colorClass) {
+    const cls = count ? colorClass : 'text-slate-500';
+    return `<td class="px-4 py-3 text-right text-xs"><button class="${cls} hover:underline" onclick="viewSalesStockDetails(${adminInlineString(workspaceId)}, ${adminInlineString(date)}, ${adminInlineString(category)})">${count}</button></td>`;
+}
+
+function renderSalesStockHealthTable() {
+    const tbody = document.getElementById('sales-stock-tbody');
+    if (!tbody) return;
+    const query = (document.getElementById('sales-stock-search')?.value || '').trim().toLowerCase();
+    const rows = salesStockHealthRows.filter(r => !query || r.name.toLowerCase().includes(query));
+    if (!rows.length) {
+        tbody.innerHTML = `<tr><td colspan="8" class="px-5 py-10 text-center text-slate-500 text-xs">No workspaces found.</td></tr>`;
+        return;
+    }
+    const date = document.getElementById('sales-stock-date')?.value || salesStockHealthToday();
+    tbody.innerHTML = rows.map(r => `
+        <tr class="border-b border-white/5 hover:bg-white/5 transition-all">
+            <td class="px-5 py-3 text-xs font-bold text-white">${adminEscapeHtml(r.name)}</td>
+            ${salesStockHealthCell(r.successfulSales, r.workspaceId, date, 'successful', 'text-emerald-400 font-bold')}
+            ${salesStockHealthCell(r.failedSales, r.workspaceId, date, 'failed', 'text-red-400 font-bold')}
+            <td class="px-4 py-3 text-right text-xs text-white font-bold">${r.totalSales}</td>
+            ${salesStockHealthCell(r.salesWithNoStockMovement, r.workspaceId, date, 'noStockMovement', 'text-amber-400 font-bold')}
+            ${salesStockHealthCell(r.stockMovementsProposed, r.workspaceId, date, 'stockProposed', 'text-slate-300')}
+            ${salesStockHealthCell(r.stockMovementTransactions, r.workspaceId, date, 'stockApplied', 'text-slate-300')}
+            ${salesStockHealthCell(r.stockMovementsFailed, r.workspaceId, date, 'stockFailed', 'text-red-400 font-bold')}
+        </tr>
+    `).join('');
+}
+
+const SALES_STOCK_DETAIL_CATEGORY_LABELS = {
+    successful: 'Successful Sales',
+    failed: 'Failed Sales',
+    noStockMovement: 'Sales w/ No Stock Movement',
+    stockProposed: 'Stock Movements Proposed',
+    stockApplied: 'Stock Movement Transactions (Applied)',
+    stockFailed: 'Failed Stock Movements'
+};
+
+async function viewSalesStockDetails(workspaceId, date, category) {
+    const row = salesStockHealthRows.find(r => r.workspaceId === workspaceId);
+    const wsName = row ? row.name : workspaceId;
+    const label = SALES_STOCK_DETAIL_CATEGORY_LABELS[category] || category;
+    openModal(`<div class="space-y-4"><h3 class="text-sm font-black uppercase tracking-widest text-white">${adminEscapeHtml(label)}</h3><p class="text-[10px] text-slate-500 uppercase font-black">${adminEscapeHtml(wsName)} &middot; ${adminEscapeHtml(date)}</p><div id="sales-stock-details-body" class="text-xs text-slate-400">Loading...</div></div>`, true, true);
+    const body = document.getElementById('sales-stock-details-body');
+    try {
+        const result = await callAdminApi('GET', `/api/admin/workspaces/${encodeURIComponent(workspaceId)}/yoco-v2/sales-stock-details?date=${encodeURIComponent(date)}&category=${encodeURIComponent(category)}&limit=200`);
+        const rows = result?.rows || [];
+        if (!body) return;
+        if (!rows.length) { body.innerHTML = '<p class="text-slate-500">No matching transactions for this day.</p>'; return; }
+        body.innerHTML = renderSalesStockDetailTable(category, rows);
+    } catch (e) {
+        if (body) body.innerHTML = `<p class="text-red-400">Failed to load details: ${adminEscapeHtml(e.message)}</p>`;
+    }
+}
+
+function renderSalesStockDetailTable(category, rows) {
+    const cols = {
+        successful: [['Order', 'source_order_id'], ['Applied At', 'applied_at', formatAdminDateTime]],
+        failed: [['Event', 'domain_event_id'], ['Status', 'status'], ['Error', 'last_error_code'], ['Message', 'last_error_message'], ['Updated At', 'updated_at', formatAdminDateTime]],
+        noStockMovement: [['Order', 'source_order_id'], ['Applied At', 'applied_at', formatAdminDateTime], ['Reason', 'reasons', (v) => v || 'No stock lines (e.g. Custom Amount)']],
+        stockProposed: [['Order', 'source_order_id'], ['Ingredient', 'ingredient_item_id'], ['Movement Type', 'movement_type'], ['Qty', 'quantity'], ['Warning', 'warning_code', (v) => v || '—'], ['Created At', 'created_at', formatAdminDateTime]],
+        stockApplied: [['Order', 'source_order_id'], ['Movement', 'movement_id'], ['Applied At', 'applied_at', formatAdminDateTime]],
+        stockFailed: [['Order', 'source_order_id'], ['Movement', 'movement_id'], ['Status', 'status'], ['Updated At', 'updated_at', formatAdminDateTime]]
+    }[category] || [];
+    return `
+        <table class="w-full text-left text-[10px]">
+            <thead><tr class="text-slate-500 uppercase border-b border-white/10">${cols.map(c => `<th class="py-2 pr-2">${adminEscapeHtml(c[0])}</th>`).join('')}</tr></thead>
+            <tbody>${rows.map(r => `<tr class="border-b border-white/5">${cols.map(c => `<td class="py-2 pr-2 text-slate-300">${adminEscapeHtml(String((c[2] ? c[2](r[c[1]]) : r[c[1]]) ?? ''))}</td>`).join('')}</tr>`).join('')}</tbody>
+        </table>
+    `;
 }
 
 async function fetchWebhookWriteBudget() {
