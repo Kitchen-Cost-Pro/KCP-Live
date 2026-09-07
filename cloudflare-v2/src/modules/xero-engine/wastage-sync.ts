@@ -19,11 +19,19 @@ interface AggregatedWastageRow {
  * Sums the day's wastage cost per location from stock_movements, the same source table
  * postWastageAdjustment (legacy/routes.ts) writes to at write time — value_delta is already
  * `quantity_delta * unit_cost` there, so no re-join against adjustments/adjustment_lines is
- * needed. document_type is checked against both historical spellings ('wastage_adjustment' and
- * 'wastage-adjustment'), matching IS_PRODUCT_WASTAGE_SQL's existing dual-spelling handling
- * (legacy/routes.ts) — wastage rows have always been written with an underscore, but the
- * reporting code guards both, so this does too. value_delta is negative (removing stock), so ABS()
- * turns it into the positive expense amount a Xero journal debit line needs.
+ * needed. value_delta is negative (removing stock), so ABS() turns it into the positive expense
+ * amount a Xero journal debit line needs.
+ *
+ * The movement_type match mirrors legacy/routes.ts's canonical IS_WASTE_SQL (the same definition
+ * the Wastage report and dashboard tile use) rather than the old, narrower
+ * `document_type IN ('wastage_adjustment', 'wastage-adjustment')` check this used to run — that
+ * only covered the standalone "waste stock" adjustment feature, so a day with wastage recorded
+ * ONLY through a manufacturing batch (movement_type 'manufacturing_wastage', document_type
+ * 'manufacturing_batch') reported zero wastage lines here and the push silently no-opped as
+ * "skipped_no_wastage" even though the Wastage report showed real wastage for that day.
+ * manufacturing_wastage rows are accounting-only (quantity_delta = 0, the real unit-count effect
+ * is on the paired manufacturing_finished_in movement) but always carry a real value_delta, so
+ * summing that directly here is correct with no quantity involved.
  */
 export async function aggregateDailyWastageLines(env: Env, workspaceId: string, dateKey: string, startHour: number): Promise<AggregatedWastageRow[]> {
   const { startIso, endIso } = businessDayUtcBounds(dateKey, startHour);
@@ -35,7 +43,15 @@ export async function aggregateDailyWastageLines(env: Env, workspaceId: string, 
      FROM stock_movements sm
      LEFT JOIN locations l ON l.id = sm.location_id AND l.workspace_id = sm.workspace_id
      WHERE sm.workspace_id = ?1
-       AND lower(COALESCE(sm.document_type, '')) IN ('wastage_adjustment', 'wastage-adjustment')
+       AND (
+         lower(sm.movement_type) LIKE '%waste%'
+         OR lower(sm.movement_type) LIKE '%wastage%'
+         OR lower(sm.movement_type) = 'manufacturing_wastage'
+         OR (lower(sm.movement_type) LIKE '%adjust%' AND (
+              lower(COALESCE(json_extract(sm.metadata_json, '$.mode'), '')) = 'wastage'
+              OR COALESCE(json_extract(sm.metadata_json, '$.wasteReason'), '') <> ''
+            ))
+       )
        AND datetime(sm.occurred_at) >= datetime(?2) AND datetime(sm.occurred_at) < datetime(?3)
      GROUP BY sm.location_id
      HAVING SUM(ABS(sm.value_delta)) != 0
