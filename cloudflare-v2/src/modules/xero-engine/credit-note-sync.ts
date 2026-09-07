@@ -40,16 +40,18 @@ function creditNotePushEffectKey(workspaceId: string, creditNoteId: string, vers
 }
 
 /** The Xero CreditNote ID from the most recent successful push of this credit note, under any of
- * its versions — see findLatestAppliedGrvXeroBillId in grv-sync.ts for the full reasoning. */
+ * its versions — see findLatestAppliedGrvXeroBillId in grv-sync.ts for the full reasoning, including
+ * why this uses substr/length instead of LIKE (D1's SQLITE_LIMIT_LIKE_PATTERN_LENGTH). */
 export async function findLatestAppliedCreditNoteXeroId(env: Env, workspaceId: string, creditNoteId: string): Promise<string | null> {
+  const versionedPrefix = `credit-note:${workspaceId}:${creditNoteId}:v`;
   const row = await env.DB.prepare(
     `SELECT xero_object_id FROM xero_v2_effect_outbox
       WHERE workspace_id = ?1 AND effect_type = 'CREDIT_NOTE_PUSH' AND status = 'APPLIED'
-        AND (effect_key = 'credit-note:' || ?1 || ':' || ?2 OR effect_key LIKE 'credit-note:' || ?1 || ':' || ?2 || ':v%')
+        AND (effect_key = 'credit-note:' || ?1 || ':' || ?2 OR substr(effect_key, 1, length(?3)) = ?3)
       ORDER BY updated_at DESC
       LIMIT 1`
   )
-    .bind(workspaceId, creditNoteId)
+    .bind(workspaceId, creditNoteId, versionedPrefix)
     .first<{ xero_object_id: string | null }>();
   return row?.xero_object_id || null;
 }

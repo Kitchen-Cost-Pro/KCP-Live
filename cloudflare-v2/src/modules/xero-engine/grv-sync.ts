@@ -65,14 +65,20 @@ function grvPushEffectKey(workspaceId: string, grvId: string, version: number | 
  * prior APPLIED row exists yet under any key), which is exactly when a create is correct.
  */
 export async function findLatestAppliedGrvXeroBillId(env: Env, workspaceId: string, grvId: string): Promise<string | null> {
+  // Prefix-matches the versioned key ('grv:{ws}:{id}:v{n}') via substr/length rather than LIKE —
+  // D1 caps SQLITE_LIMIT_LIKE_PATTERN_LENGTH low enough that a pattern built by concatenating a
+  // real workspace_id + grv_id (both bound params, so D1 can't see the pattern is short) routinely
+  // exceeds it, failing every GRV push with "LIKE or GLOB pattern too complex". substr/length are
+  // plain string functions with no such pattern-complexity guard.
+  const versionedPrefix = `grv:${workspaceId}:${grvId}:v`;
   const row = await env.DB.prepare(
     `SELECT xero_object_id FROM xero_v2_effect_outbox
       WHERE workspace_id = ?1 AND effect_type = 'GRV_PUSH' AND status = 'APPLIED'
-        AND (effect_key = 'grv:' || ?1 || ':' || ?2 OR effect_key LIKE 'grv:' || ?1 || ':' || ?2 || ':v%')
+        AND (effect_key = 'grv:' || ?1 || ':' || ?2 OR substr(effect_key, 1, length(?3)) = ?3)
       ORDER BY updated_at DESC
       LIMIT 1`
   )
-    .bind(workspaceId, grvId)
+    .bind(workspaceId, grvId, versionedPrefix)
     .first<{ xero_object_id: string | null }>();
   return row?.xero_object_id || null;
 }
