@@ -213,7 +213,7 @@ import {
   getManufacturingTransactionsReport,
   getStockTransferTransactionsReport,
 } from "./reporting-phase21-routes";
-import { getTransactionDetailReport } from "./transaction-detail-routes";
+import { getTransactionDetailReport, getGrvInvoiceFile } from "./transaction-detail-routes";
 import {
   deleteReportSavedView,
   deleteReportSchedule,
@@ -815,6 +815,13 @@ export async function dispatchWorkspaceRoute(
       workspaceId,
       decodeURIComponent(transactionDetailMatch[1]),
     );
+  }
+
+  if (request.method === "GET" && resource === "grv/invoice-file") {
+    const url = new URL(request.url);
+    const grvId = url.searchParams.get("grvId") || "";
+    if (!grvId) return error(request, env, 400, "grvId query param is required");
+    return getGrvInvoiceFile(request, env, auth, workspaceId, grvId);
   }
 
   if (request.method === "GET" && resource === "reports/detailed-activity") {

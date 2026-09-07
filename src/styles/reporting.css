@@ -4011,6 +4011,46 @@ body > .reportActionMenu__panel--portal {
   min-height: 180px;
 }
 
+.transactionDetailInvoice {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.transactionDetailInvoice__toggle {
+  min-height: 38px;
+  padding: 0 16px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 9999px;
+  background: #1d293a;
+  color: #dbeafe;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.transactionDetailInvoice__toggle:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.transactionDetailInvoice__frame {
+  margin-top: 14px;
+  height: min(80vh, 900px);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 14px;
+  overflow: hidden;
+  background: #0b1220;
+}
+
+.transactionDetailInvoice__frame iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
 .transactionDetailTableWrap {
   max-width: 100%;
   overflow: auto;

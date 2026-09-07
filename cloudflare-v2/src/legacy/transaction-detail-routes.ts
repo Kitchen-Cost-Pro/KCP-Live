@@ -14,6 +14,7 @@ import {
 } from "./transaction-references";
 import { buildGrvRawLinePool, takeGrvRawLine } from "./reporting-phase21-routes";
 import { getWorkspaceEffectiveVatRate, isSupplierVatRegistered, applyGrvTransportAndDiscount } from "./inventory-costing";
+import { downloadFile } from "../modules/drive-engine/drive-client";
 
 type Row = Record<string, unknown>;
 
@@ -394,6 +395,19 @@ export async function loadGrvDetail(env: Env, workspaceId: string, entityId: str
   const lineItems = [...stockLineItems, ...extraLineItems];
   const actor = await attachActor(env, workspaceId, text(row.created_by));
   const purchaseOrderId = text(row.purchase_order_id);
+  // The staff-uploaded invoice photo/PDF (see uploadInvoiceDocument/tagDriveInvoiceWithGrv in
+  // drive-engine/assistant.ts) is tagged onto this exact GRV via drive_documents.entity_id — used
+  // by the "Preview Invoice" button below the Line Items table (fetched lazily via a separate
+  // grv/invoice-file request, never inlined here) and by the Xero attachment push, which prefers
+  // the real invoice over the generated GRV PDF when one was uploaded.
+  // Best-effort: drive_documents is created by the Drive foundation migration (tenant-migrations.ts),
+  // which every real tenant DB has, but this lookup must never take down the whole GRV detail view
+  // over it — same defensive stance as loadUploadedInvoiceAttachment on the Xero side.
+  const invoiceDoc = await env.DB.prepare(
+    `SELECT drive_file_id FROM drive_documents
+      WHERE workspace_id = ?1 AND entity_type = 'invoice_photo' AND entity_id = ?2
+      ORDER BY uploaded_at DESC LIMIT 1`,
+  ).bind(workspaceId, entityId).first<{ drive_file_id: string }>().catch(() => null);
   return {
     entityType: "grv", entityId, transactionReference: "", title: `GRV ${text(raw.grvNumber || row.invoice_number || entityId)}`,
     status: text(raw.status, "Committed"), occurredAt: text(row.received_at), createdAt: text(row.created_at),
@@ -419,6 +433,7 @@ export async function loadGrvDetail(env: Env, workspaceId: string, entityId: str
       purchaseOrderId, purchaseOrderNumber: text(row.po_number),
       splitByLocation: Number(row.split_by_location) === 1, pricesIncludeVat: Number(row.prices_include_vat) === 1,
       vatMode: Number(row.prices_include_vat) === 1 ? "Prices include VAT" : "Prices exclude VAT",
+      invoiceFileAvailable: Boolean(invoiceDoc?.drive_file_id),
     },
   };
 }
@@ -1420,6 +1435,41 @@ export async function getTransactionDetailReport(
     ok: true,
     transaction: detail,
     source: "cloudflare-d1:transaction-detail",
+  });
+}
+
+// Chunked to avoid blowing the call-stack limit on String.fromCharCode(...bytes) for a file near
+// the frontend's 2MB upload cap — spreading a ~2M-element array as call arguments is a real risk
+// in some engines, this isn't.
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+/** GET grv/invoice-file?grvId=... — proxies the staff-uploaded invoice photo/PDF for a GRV back
+ * through the Worker rather than pointing the frontend straight at Google Drive: the file lives in
+ * the workspace's connected Drive account, which individual staff have no access to browse
+ * directly. Returned as base64 JSON (not a binary response) since every other endpoint in this app
+ * goes through the same JSON-only fetch plumbing (services/cloudflareApi.js) — the frontend turns
+ * it into a Blob URL for the "Preview Invoice" iframe. */
+export async function getGrvInvoiceFile(request: Request, env: Env, auth: AuthContext, workspaceId: string, grvId: string) {
+  await assertWorkspaceAccess(env, auth, workspaceId);
+  await assertWorkspacePermission(env, auth, workspaceId, "nav-reporting");
+  const doc = await env.DB.prepare(
+    `SELECT drive_file_id, mime_type FROM drive_documents
+      WHERE workspace_id = ?1 AND entity_type = 'invoice_photo' AND entity_id = ?2
+      ORDER BY uploaded_at DESC LIMIT 1`,
+  ).bind(workspaceId, grvId).first<{ drive_file_id: string; mime_type: string | null }>();
+  if (!doc?.drive_file_id) return error(request, env, 404, "No invoice file was uploaded for this GRV.");
+  const { bytes, mimeType } = await downloadFile(env, workspaceId, doc.drive_file_id);
+  return json(request, env, {
+    ok: true,
+    mimeType: mimeType || doc.mime_type || "application/octet-stream",
+    dataBase64: bytesToBase64(bytes),
   });
 }
 

@@ -10458,6 +10458,21 @@ function openGrvAssistant() {
   renderApp();
 }
 
+const INVOICE_COMMIT_MAX_FILE_BYTES = 2 * 1024 * 1024;
+
+// Shared by the GRV and Stock Take "attach invoice" commit flows — drag-and-drop bypasses the
+// file input's `accept` filter, so type has to be re-checked here too.
+function validateInvoiceCommitFile(file) {
+  const type = String(file?.type || '').toLowerCase();
+  if (!type.startsWith('image/') && type !== 'application/pdf') {
+    return 'Please choose a photo (JPG, PNG, HEIC) or PDF file.';
+  }
+  if (Number(file?.size || 0) > INVOICE_COMMIT_MAX_FILE_BYTES) {
+    return 'That file is too large. Please choose one under 2MB.';
+  }
+  return '';
+}
+
 function readInvoicePhotoAsBase64(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -10615,10 +10630,22 @@ function updateGrvDraft(updates = {}) {
     });
   }
 
+  // Every line's displayed pack price is cached verbatim (packPriceDisplay) so the user's exact
+  // typed text survives re-renders — but that text was typed under the OLD interpretation of
+  // "Prices include VAT". Left in place, it (a) silently keeps showing the stale figure until the
+  // user touches another field on that line, and (b) once they DO edit qty/pack size, gets
+  // re-parsed under the NEW pricesIncludeVat setting (see applyLineChange's receivedQty/packSize
+  // branch), which re-derives unitCost by a full VAT-rate factor with no real price change — the
+  // exact 15%-sized "cost variance" this was reported against. Clearing it here forces every
+  // line's display (and any later re-derivation) to recompute fresh from the untouched, always-
+  // correct ex-VAT unitCost/packPriceEx instead of reinterpreting stale gross/net text.
+  // unitCostDisplay is unused dead state from an earlier version of this field; cleared too for
+  // the same reason, in case anything still relies on it.
   if (Object.hasOwn(normalizedUpdates, 'pricesIncludeVat')) {
     normalizedUpdates.items = (normalizedUpdates.items || draft.items || []).map((line) => {
       const nextLine = { ...line };
       delete nextLine.unitCostDisplay;
+      delete nextLine.packPriceDisplay;
       return nextLine;
     });
   }
@@ -11231,12 +11258,6 @@ function requestGrvCommit() {
   renderApp();
 }
 
-function chooseGrvCommitUploadImage() {
-  if (!appState.grv.commit) return;
-  appState.grv = { ...appState.grv, commit: { ...appState.grv.commit, step: 'upload' } };
-  renderApp();
-}
-
 function chooseGrvCommitSkipImage() {
   if (!appState.grv.commit) return;
   appState.grv = { ...appState.grv, commit: { ...appState.grv.commit, step: 'confirm' } };
@@ -11254,7 +11275,13 @@ function backGrvCommitToAsk() {
 
 function setGrvCommitFile(file) {
   if (!file || !appState.grv.commit) return;
-  appState.grv = { ...appState.grv, commit: { ...appState.grv.commit, file, fileName: file.name, error: '' } };
+  const error = validateInvoiceCommitFile(file);
+  if (error) {
+    appState.grv = { ...appState.grv, commit: { ...appState.grv.commit, step: 'upload', file: null, fileName: '', error } };
+    renderApp();
+    return;
+  }
+  appState.grv = { ...appState.grv, commit: { ...appState.grv.commit, step: 'upload', file, fileName: file.name, error: '' } };
   renderApp();
 }
 
@@ -18864,7 +18891,13 @@ function chooseStockTakeCommitSkipImage() {
 
 function setStockTakeCommitFile(file) {
   if (!file || !appState.stockTake.commit) return;
-  appState.stockTake = { ...appState.stockTake, commit: { ...appState.stockTake.commit, file, fileName: file.name, error: '' } };
+  const error = validateInvoiceCommitFile(file);
+  if (error) {
+    appState.stockTake = { ...appState.stockTake, commit: { ...appState.stockTake.commit, step: 'upload', file: null, fileName: '', error } };
+    renderApp();
+    return;
+  }
+  appState.stockTake = { ...appState.stockTake, commit: { ...appState.stockTake.commit, step: 'upload', file, fileName: file.name, error: '' } };
   renderApp();
 }
 
@@ -20476,7 +20509,6 @@ function renderApp() {
       onDismissMissingSupplier: dismissGrvMissingSupplierPrompt,
       onSave: saveGrvReceipt,
       onRequestCommit: requestGrvCommit,
-      onCommitUploadImage: chooseGrvCommitUploadImage,
       onCommitSkipImage: chooseGrvCommitSkipImage,
       onCommitBack: backGrvCommitToAsk,
       onCommitFileSelected: setGrvCommitFile,

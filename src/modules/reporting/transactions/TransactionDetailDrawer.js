@@ -1,5 +1,5 @@
 import { escapeHtml } from "../engine/formatters.js";
-import { fetchTransactionDetail } from "./transactionDetailService.js";
+import { fetchTransactionDetail, fetchGrvInvoiceFile } from "./transactionDetailService.js";
 import { getTransactionDetailDefinition } from "./transactionDetailRegistry.js";
 import {
   downloadTransactionDetailCsv,
@@ -114,7 +114,13 @@ function renderLoadedDetail(overlay, detail = {}, { branding = {}, canExport = t
       <button type="button" data-transaction-tab="stockMovements">Stock Movements <span>${(detail.stockMovements || []).length}</span></button>
       <button type="button" data-transaction-tab="auditTrail">Audit Trail <span>${(detail.auditTrail || []).length}</span></button>
     </nav>
-    <div class="transactionDetailPanel" data-transaction-panel></div>`;
+    <div class="transactionDetailPanel" data-transaction-panel></div>
+    ${effectiveEntityType === "grv" && detail.metadata?.invoiceFileAvailable ? `
+      <section class="transactionDetailInvoice" data-transaction-invoice>
+        <button type="button" class="transactionDetailInvoice__toggle" data-transaction-invoice-toggle>Preview Invoice</button>
+        <div class="transactionDetailInvoice__frame" data-transaction-invoice-frame hidden></div>
+      </section>
+    ` : ""}`;
 
   const panel = body.querySelector("[data-transaction-panel]");
   const renderTab = (tab) => {
@@ -134,6 +140,50 @@ function renderLoadedDetail(overlay, detail = {}, { branding = {}, canExport = t
   body.querySelector('[data-transaction-export="csv"]')?.addEventListener("click", () => downloadTransactionDetailCsv(detail, { workspaceName: branding?.companyName }));
   body.querySelector('[data-transaction-export="xlsx"]')?.addEventListener("click", () => downloadTransactionDetailExcel(detail, { workspaceName: branding?.companyName }));
   body.querySelector('[data-transaction-export="pdf"]')?.addEventListener("click", () => downloadTransactionDetailPdf(detail, { branding, workspaceName: branding?.companyName }));
+  // The invoice file itself is never fetched eagerly — a photo can run close to the 2MB upload
+  // cap, and most visits to this drawer never open it — only loaded, as base64 JSON, the first
+  // time the user clicks "Preview Invoice"; a second click just hides/shows the already-built
+  // iframe again with no re-fetch.
+  let invoiceObjectUrl = "";
+  const revokeInvoiceObjectUrl = () => {
+    if (!invoiceObjectUrl) return;
+    URL.revokeObjectURL(invoiceObjectUrl);
+    invoiceObjectUrl = "";
+  };
+  body.querySelector("[data-transaction-invoice-toggle]")?.addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    const frame = body.querySelector("[data-transaction-invoice-frame]");
+    if (!frame) return;
+    if (frame.dataset.loaded === "true") {
+      const nowHidden = !frame.hidden;
+      frame.hidden = nowHidden;
+      button.textContent = nowHidden ? "Preview Invoice" : "Hide Invoice";
+      return;
+    }
+    button.disabled = true;
+    button.textContent = "Loading…";
+    try {
+      const { mimeType, dataBase64 } = await fetchGrvInvoiceFile(workspaceId, detail.entityId || entityId);
+      const bytes = Uint8Array.from(atob(dataBase64), (char) => char.charCodeAt(0));
+      revokeInvoiceObjectUrl();
+      invoiceObjectUrl = URL.createObjectURL(new Blob([bytes], { type: mimeType }));
+      frame.innerHTML = `<iframe src="${invoiceObjectUrl}" title="Invoice preview"></iframe>`;
+      frame.dataset.loaded = "true";
+      frame.hidden = false;
+      button.textContent = "Hide Invoice";
+    } catch (loadError) {
+      frame.innerHTML = `<div class="transactionDetailEmpty">${escapeHtml(loadError?.message || "Could not load the invoice file.")}</div>`;
+      frame.hidden = false;
+      button.textContent = "Preview Invoice";
+    } finally {
+      button.disabled = false;
+    }
+  });
+  overlay.querySelector("[data-transaction-detail-close]")?.addEventListener("click", revokeInvoiceObjectUrl);
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) revokeInvoiceObjectUrl();
+  });
+
   body.querySelectorAll("[data-linked-transaction-reference]").forEach((button) => {
     button.addEventListener("click", () => openTransactionDetailDrawer({
       workspaceId,
