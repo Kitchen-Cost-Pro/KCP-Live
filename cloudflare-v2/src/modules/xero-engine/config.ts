@@ -42,26 +42,26 @@ export function xeroRateCaps(env: Env): { dailyCap: number; perMinuteCap: number
 }
 
 // Xero deprecated the old blanket 'accounting.transactions' scope in favor of granular per-endpoint
-// scopes. KCP creates Invoices/Bills (see invoice-sync.ts, grv-sync.ts) — now covered by its own
-// 'accounting.invoices' scope — and Items (see item-sync.ts, which lives under the 'settings' scope
-// group in Xero's API, alongside accounts/tax rates/currencies). 'accounting.attachments' is Xero's
-// separate granular scope for attaching files (the GRV PDF/invoice photo) to a Bill — it doesn't
-// ride along with 'accounting.invoices' the way reading/writing the invoice body does.
+// scopes. KCP creates Invoices/Bills (see invoice-sync.ts, grv-sync.ts) and Items (see item-sync.ts,
+// which lives under the 'settings' scope group in Xero's API, alongside accounts/tax rates/
+// currencies) — no bank transactions, payments, or manual journals — so 'accounting.invoices' (write)
+// is the correct replacement, not the old catch-all. 'accounting.attachments' is Xero's separate
+// granular scope for attaching files (the GRV PDF) to a Bill — it doesn't ride along with
+// 'accounting.invoices' the way reading/writing the invoice body does.
 //
-// 'accounting.transactions' IS still required, though — it's the scope Xero kept for everything
-// that wasn't carved out into its own scope, which still includes Manual Journals (wastage-sync.ts's
-// daily wastage journal) and Payments (grv-sync.ts's applyCodPayment for a COD supplier's Bill).
-// Omitting it doesn't reject the OAuth connect itself; it silently authorizes fine and every
-// Invoices/Bills call keeps working, so this only surfaces later as a confusing, unrelated-looking
-// "AuthorizationUnsuccessful" from Xero the first time a wastage push or COD payment actually runs.
-// A workspace that connected before this scope was added must disconnect and reconnect Xero —
-// re-consenting is the only way to add a scope to an existing token; it can't be granted silently.
+// Manual Journals (wastage-sync.ts) and a COD Bill's Payment (grv-sync.ts's applyCodPayment) both
+// still need whatever scope actually covers them — confirmed missing (they fail with Xero's
+// "AuthorizationUnsuccessful") but 'accounting.transactions' is NOT it: requesting it makes Xero's
+// OAuth consent screen itself reject the connect with "invalid_scope", which is worse — it blocks
+// every reconnect entirely, not just these two features. This app's Xero Developer Portal
+// registration likely needs the correct scope/product added there before requesting it here; do not
+// re-add 'accounting.transactions' (or guess another scope name) without confirming it in the
+// Developer Portal first and testing an actual reconnect.
 const DEFAULT_XERO_SCOPES = [
   'openid',
   'profile',
   'email',
   'accounting.invoices',
-  'accounting.transactions',
   'accounting.contacts',
   'accounting.attachments',
   'accounting.settings',
