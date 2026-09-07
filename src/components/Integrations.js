@@ -1781,6 +1781,13 @@ function updateGmailStatus(view, status = {}, options = {}) {
   setText(view, '[data-gmail-account]', status.accountEmail || 'No account');
   setText(view, '[data-gmail-connected-at]', formatDateTime(status.connectedAt) || 'Not connected');
   setText(view, '[data-gmail-last-sent]', formatDateTime(status.lastSentAt) || 'No sends yet');
+  // Same bug class as Xero/Drive: these buttons' `disabled` attribute is only set at the modal's
+  // initial render, before this async status has resolved — re-apply it on every refresh so
+  // "Disconnect" isn't stuck disabled forever right after completing the OAuth popup.
+  const gmailConnectButton = view.querySelector('[data-gmail-connect]');
+  if (gmailConnectButton) gmailConnectButton.disabled = status.configured === false;
+  const gmailDisconnectButton = view.querySelector('[data-gmail-disconnect]');
+  if (gmailDisconnectButton) gmailDisconnectButton.disabled = status.connectionActive !== true;
   updateIntegrationCardStatus(view, 'gmail', nextStatus, nextStatus === 'Active' ? 'Manage Gmail' : nextStatus === 'Setup Required' ? 'Needs Config' : 'Connect Gmail');
   if (status.lastError) setGmailModalStatus(view, status.lastError, 'error');
   else if (status.message && status.configured === false) setGmailModalStatus(view, status.message, 'error');
@@ -1891,6 +1898,34 @@ function updateXeroStatus(view, status = {}, options = {}) {
   }
   const settings = status.settings || {};
   refreshXeroSettingsFormFields(view, settings);
+  // renderXeroModal only bakes each sync/connect/disconnect button's `disabled` attribute in at
+  // the moment the modal first paints — usually before this very status fetch has resolved, since
+  // it starts disconnected/unconfigured until the async load lands. Every later status refresh
+  // (including the one right after a reconnect completes) came through here and updated the
+  // "Connected" text/dot, but never these buttons — leaving every sync action permanently
+  // disabled until the modal was fully closed and reopened, even though the connection was live.
+  const isConfiguredNow = status.configured !== false;
+  const isConnectedNow = status.connectionActive === true;
+  const connectButton = view.querySelector('[data-xero-connect]');
+  if (connectButton) {
+    connectButton.disabled = !isConfiguredNow;
+    const label = connectButton.querySelector('span');
+    if (label) label.textContent = isConnectedNow ? 'Reconnect Xero' : 'Connect Xero';
+  }
+  [
+    '[data-xero-sync-items]',
+    '[data-xero-sync-invoice-today]',
+    '[data-xero-sync-invoice]',
+    '[data-xero-sync-grv]',
+    '[data-xero-sync-credit-notes]',
+    '[data-xero-sync-wastage-today]',
+    '[data-xero-sync-wastage]',
+    '[data-xero-sync-suppliers]',
+    '[data-xero-disconnect]'
+  ].forEach((selector) => {
+    const button = view.querySelector(selector);
+    if (button) button.disabled = !isConnectedNow;
+  });
   const nextStatus = status.configured === false
     ? 'Setup Required'
     : status.connectionActive === true
