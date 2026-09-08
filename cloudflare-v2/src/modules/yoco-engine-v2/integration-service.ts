@@ -1694,6 +1694,11 @@ export async function syncYocoCatalogue(env: Env, workspaceId: string, options: 
       // stock_items.vat_enabled's own DEFAULT 1 convention, so an item Yoco is silent about stays
       // VATable rather than silently becoming exempt.
       const nextVatEnabled = item.is_taxable === false ? 0 : 1;
+      // Preserve user-set flags that live inside raw_json but aren't owned by the Yoco sync (e.g.
+      // "No Recipe Required", toggled from the menu item edit screen) — otherwise every sync
+      // rebuilds raw_json from scratch and silently wipes them the moment anything else changes.
+      const prevProduct = existingProductStateByKey.get(productKey);
+      const prevRaw = prevProduct ? jsonParse(prevProduct.raw) : {};
       const nextRawJson = jsonString({
         item,
         variant,
@@ -1703,12 +1708,12 @@ export async function syncYocoCatalogue(env: Env, workspaceId: string, options: 
         yocoHasMultipleVariants: item.has_multiple_variants === true || item.hasMultipleVariants === true || normalizeVariants(item).length > 1,
         yocoModifierGroupIds: modifierGroupIdsByItemId.get(itemId) || [],
         yocoBrandId: text(item.brand_id || (item.brand && typeof item.brand === 'object' ? (item.brand as Row).id : '')),
-        yocoBrandName: item.brand && typeof item.brand === 'object' ? normalizeName(item.brand as Row, '') : ''
+        yocoBrandName: item.brand && typeof item.brand === 'object' ? normalizeName(item.brand as Row, '') : '',
+        noRecipeRequired: prevRaw.noRecipeRequired === true
       });
 
       // Change-detection: skip the upsert when this variant already exists and neither its
       // active state nor its full Yoco payload (raw_json) changed since last sync.
-      const prevProduct = existingProductStateByKey.get(productKey);
       if (existingId && prevProduct && prevProduct.active === nextActive && prevProduct.raw === nextRawJson) {
         continue;
       }
