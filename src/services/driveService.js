@@ -80,6 +80,12 @@ export async function tagDriveInvoiceWithGrv(workspaceId, { fileId, grvId }) {
   return callCloudflareDriveRoute(workspaceId, 'assistant/tag-grv', { fileId, grvId });
 }
 
+/** Tags the archived count-sheet photo with the stock take it ended up creating — call this once
+ * that stock take has actually been saved. Same pattern as tagDriveInvoiceWithGrv. */
+export async function tagDriveInvoiceWithStockTake(workspaceId, { fileId, stockTakeId }) {
+  return callCloudflareDriveRoute(workspaceId, 'assistant/tag-stocktake', { fileId, stockTakeId });
+}
+
 /** Archives an invoice photo/PDF to that location's Drive "Invoices" folder without running it
  * through KCP Assistant's extraction — used by the GRV commit modal, where the GRV is already
  * filled in and staff just want a copy of the paper invoice kept alongside it. Reuses the same

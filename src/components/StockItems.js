@@ -1393,7 +1393,7 @@ function getEditableUomConfigurationRows(item = {}, fallbackBaseUom = '') {
   const configs = normalizeStockUomConfigurations(item.uomConfigurations || item.uomConfig || item.uom_configuration || item.uomConversions || item.uomConversion);
   const rows = configs.length ? configs : [{ baseUom, customUom: '', ratio: '', barcode: '', isDefaultOrdering: false }];
   while (rows.length < 3) rows.push({ baseUom, customUom: '', ratio: '', barcode: '', isDefaultOrdering: false });
-  return rows.slice(0, 3).map((row) => ({ ...row, baseUom: row.baseUom || baseUom }));
+  return rows.slice(0, 3).map((row) => ({ ...row, baseUom }));
 }
 
 function getStockEditorOpenSections(item = {}) {

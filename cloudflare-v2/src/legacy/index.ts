@@ -819,9 +819,9 @@ export async function dispatchWorkspaceRoute(
 
   if (request.method === "GET" && resource === "grv/invoice-file") {
     const url = new URL(request.url);
-    const grvId = url.searchParams.get("grvId") || "";
-    if (!grvId) return error(request, env, 400, "grvId query param is required");
-    return getGrvInvoiceFile(request, env, auth, workspaceId, grvId);
+    const entityId = url.searchParams.get("entityId") || url.searchParams.get("grvId") || "";
+    if (!entityId) return error(request, env, 400, "entityId query param is required");
+    return getGrvInvoiceFile(request, env, auth, workspaceId, entityId);
   }
 
   if (request.method === "GET" && resource === "reports/detailed-activity") {

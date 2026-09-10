@@ -17,12 +17,12 @@ export async function fetchTransactionDetail({
   return response.transaction;
 }
 
-/** Fetches the staff-uploaded invoice photo/PDF for a GRV, base64-encoded (see
- * getGrvInvoiceFile in the Worker) — only called once the user clicks "Preview Invoice", never
- * eagerly, since it can be up to ~2MB of JSON for a photo. */
-export async function fetchGrvInvoiceFile(workspaceId, grvId) {
+/** Fetches the staff-uploaded invoice/count-sheet photo or PDF for a transaction (GRV, stock take,
+ * ...), base64-encoded (see getGrvInvoiceFile in the Worker) — only called once the user clicks
+ * "Preview Invoice", never eagerly, since it can be up to ~2MB of JSON for a photo. */
+export async function fetchEntityInvoiceFile(workspaceId, entityId) {
   const response = await callCloudflareWorkspaceRoute(workspaceId, "grv/invoice-file", {
-    query: { grvId },
+    query: { entityId },
   });
   if (!response?.dataBase64) throw new Error("Invoice file was not returned.");
   return { mimeType: response.mimeType || "application/octet-stream", dataBase64: response.dataBase64 };

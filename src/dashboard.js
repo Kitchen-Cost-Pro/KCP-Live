@@ -62,8 +62,8 @@ const COST_SERIES = SERIES.filter((series) => !series.isSales);
 const SUPPLIER_COLORS = ['#00e5a0', '#f5a623', '#7b61ff', '#00b3ff', '#ff4455'];
 const RANGE_PRESETS = [
   ['today', 'Today'],
+  ['yesterday', 'Yesterday'],
   ['this_week', 'This Week'],
-  ['two_weeks', '2 Weeks'],
   ['month', 'This month'],
   ['3m', 'Last 3 months'],
   ['6m', 'Last 6 months'],
@@ -298,17 +298,21 @@ function startOfCalendarMonth(value = '') {
 function getPresetRange(preset = 'today', now = new Date()) {
   const anchor = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   let from = new Date(anchor);
+  let to = new Date(anchor);
+  if (preset === 'yesterday') {
+    from = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() - 1);
+    to = new Date(from);
+  }
   if (preset === 'this_week') {
     const mondayOffset = (anchor.getDay() + 6) % 7;
     from = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() - mondayOffset);
   }
-  if (preset === 'two_weeks') from = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() - 13);
   if (preset === 'month') from = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
   if (preset === '3m') from = new Date(anchor.getFullYear(), anchor.getMonth() - 2, 1);
   if (preset === '6m') from = new Date(anchor.getFullYear(), anchor.getMonth() - 5, 1);
   if (preset === '12m') from = new Date(anchor.getFullYear(), anchor.getMonth() - 11, 1);
   if (preset === 'ytd') from = new Date(anchor.getFullYear(), 0, 1);
-  return { from: formatDateInput(from), to: formatDateInput(anchor) };
+  return { from: formatDateInput(from), to: formatDateInput(to) };
 }
 
 function formatDateInput(date) {

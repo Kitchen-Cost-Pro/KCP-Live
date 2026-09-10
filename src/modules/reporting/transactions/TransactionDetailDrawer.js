@@ -1,5 +1,5 @@
 import { escapeHtml } from "../engine/formatters.js";
-import { fetchTransactionDetail, fetchGrvInvoiceFile } from "./transactionDetailService.js";
+import { fetchTransactionDetail, fetchEntityInvoiceFile } from "./transactionDetailService.js";
 import { getTransactionDetailDefinition } from "./transactionDetailRegistry.js";
 import {
   downloadTransactionDetailCsv,
@@ -115,7 +115,7 @@ function renderLoadedDetail(overlay, detail = {}, { branding = {}, canExport = t
       <button type="button" data-transaction-tab="auditTrail">Audit Trail <span>${(detail.auditTrail || []).length}</span></button>
     </nav>
     <div class="transactionDetailPanel" data-transaction-panel></div>
-    ${effectiveEntityType === "grv" && detail.metadata?.invoiceFileAvailable ? `
+    ${["grv", "stock_take"].includes(effectiveEntityType) && detail.metadata?.invoiceFileAvailable ? `
       <section class="transactionDetailInvoice" data-transaction-invoice>
         <button type="button" class="transactionDetailInvoice__toggle" data-transaction-invoice-toggle>Preview Invoice</button>
         <div class="transactionDetailInvoice__frame" data-transaction-invoice-frame hidden></div>
@@ -163,7 +163,7 @@ function renderLoadedDetail(overlay, detail = {}, { branding = {}, canExport = t
     button.disabled = true;
     button.textContent = "Loading…";
     try {
-      const { mimeType, dataBase64 } = await fetchGrvInvoiceFile(workspaceId, detail.entityId || entityId);
+      const { mimeType, dataBase64 } = await fetchEntityInvoiceFile(workspaceId, detail.entityId || entityId);
       const bytes = Uint8Array.from(atob(dataBase64), (char) => char.charCodeAt(0));
       revokeInvoiceObjectUrl();
       invoiceObjectUrl = URL.createObjectURL(new Blob([bytes], { type: mimeType }));

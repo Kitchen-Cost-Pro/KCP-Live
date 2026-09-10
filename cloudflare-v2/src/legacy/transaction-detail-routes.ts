@@ -990,6 +990,14 @@ async function loadStockTakeDetail(env: Env, workspaceId: string, entityId: stri
   const varianceValue = countedValue - expectedValue;
   const varianceQty = lineItems.reduce((sum, line) => sum + numberValue(line.varianceQty), 0);
   const occurredAt = text(row.counted_at || row.updated_at || row.created_at);
+  // The staff-uploaded count-sheet photo (see uploadInvoiceDocument/tagDriveInvoiceWithStockTake in
+  // drive-engine/assistant.ts) is tagged onto this exact stock take via drive_documents.entity_id —
+  // same pattern as loadGrvDetail's invoiceDoc lookup above, used by the "Preview Invoice" button.
+  const invoiceDoc = await env.DB.prepare(
+    `SELECT drive_file_id FROM drive_documents
+      WHERE workspace_id = ?1 AND entity_type = 'invoice_photo' AND entity_id = ?2
+      ORDER BY uploaded_at DESC LIMIT 1`,
+  ).bind(workspaceId, entityId).first<{ drive_file_id: string }>().catch(() => null);
   return {
     entityType: "stock_take",
     entityId,
@@ -1044,6 +1052,7 @@ async function loadStockTakeDetail(env: Env, workspaceId: string, entityId: stri
       countedAt: occurredAt,
       committedAt: text(row.updated_at || row.counted_at || row.created_at),
       varianceClassification: "Stock variance (not wastage)",
+      invoiceFileAvailable: Boolean(invoiceDoc?.drive_file_id),
     },
   };
 }
@@ -1450,21 +1459,23 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-/** GET grv/invoice-file?grvId=... — proxies the staff-uploaded invoice photo/PDF for a GRV back
- * through the Worker rather than pointing the frontend straight at Google Drive: the file lives in
- * the workspace's connected Drive account, which individual staff have no access to browse
- * directly. Returned as base64 JSON (not a binary response) since every other endpoint in this app
- * goes through the same JSON-only fetch plumbing (services/cloudflareApi.js) — the frontend turns
- * it into a Blob URL for the "Preview Invoice" iframe. */
-export async function getGrvInvoiceFile(request: Request, env: Env, auth: AuthContext, workspaceId: string, grvId: string) {
+/** GET grv/invoice-file?entityId=... — proxies the staff-uploaded invoice/count-sheet photo or PDF
+ * for a transaction (GRV, stock take, ...) back through the Worker rather than pointing the
+ * frontend straight at Google Drive: the file lives in the workspace's connected Drive account,
+ * which individual staff have no access to browse directly. Returned as base64 JSON (not a binary
+ * response) since every other endpoint in this app goes through the same JSON-only fetch plumbing
+ * (services/cloudflareApi.js) — the frontend turns it into a Blob URL for the "Preview Invoice"
+ * iframe. Named for its original GRV-only route path/param, but entityId works for any entity type
+ * that tags a drive_documents row via its entity_id (see tagDriveInvoiceWithGrv/WithStockTake). */
+export async function getGrvInvoiceFile(request: Request, env: Env, auth: AuthContext, workspaceId: string, entityId: string) {
   await assertWorkspaceAccess(env, auth, workspaceId);
   await assertWorkspacePermission(env, auth, workspaceId, "nav-reporting");
   const doc = await env.DB.prepare(
     `SELECT drive_file_id, mime_type FROM drive_documents
       WHERE workspace_id = ?1 AND entity_type = 'invoice_photo' AND entity_id = ?2
       ORDER BY uploaded_at DESC LIMIT 1`,
-  ).bind(workspaceId, grvId).first<{ drive_file_id: string; mime_type: string | null }>();
-  if (!doc?.drive_file_id) return error(request, env, 404, "No invoice file was uploaded for this GRV.");
+  ).bind(workspaceId, entityId).first<{ drive_file_id: string; mime_type: string | null }>();
+  if (!doc?.drive_file_id) return error(request, env, 404, "No invoice file was uploaded for this transaction.");
   const { bytes, mimeType } = await downloadFile(env, workspaceId, doc.drive_file_id);
   return json(request, env, {
     ok: true,

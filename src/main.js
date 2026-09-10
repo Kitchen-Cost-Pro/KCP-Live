@@ -654,14 +654,19 @@ async function maybeOpenOnboardingWizard(workspaceId, settings) {
       getOnboardingReadiness(workspaceId),
       fetchYocoStatusOnce(workspaceId)
     ]);
-    if (readiness.productCount > 0 || readiness.supplierCount > 0 || readiness.stockItemCount > 0) return;
+    // Reopen based on REAL completion (every step done), not just whether every count happens to
+    // be zero — a workspace that's only imported stock items so far (steps 3/4 still incomplete)
+    // must keep getting nudged on login, not just the ones that haven't started at all. See
+    // isOnboardingStepComplete/firstIncompleteOnboardingStep for what "done" means per step.
+    const wizardStep = firstIncompleteOnboardingStep({ counts: readiness, yoco });
+    if (wizardStep >= 5) return;
     if (appState.workspace?.id !== workspaceId) return; // workspace changed while this was in flight
     appState.onboarding = {
       open: true,
       welcome: true,
       // Feature: skip straight past whichever steps are already done (e.g. Yoco was connected in
       // a previous session) instead of always starting at step 1.
-      wizardStep: firstIncompleteOnboardingStep({ counts: readiness, yoco }),
+      wizardStep,
       actionStatus: '',
       actionError: '',
       counts: readiness,
@@ -725,9 +730,10 @@ function onboardingGoBack() {
 
 // Closing via X, clicking the backdrop, or "Skip for now" — none of these mean "done", just "not
 // right now". They must NOT persist a dismissed flag: the whole point of this wizard is that it
-// keeps coming back on every login while the workspace is still genuinely empty (see
-// maybeOpenOnboardingWizard's zero-counts check), so a closed tab or a skipped session doesn't
-// lose the nudge. Only finishOnboardingWizard (the actual "Finish" button on step 5) persists.
+// keeps coming back on every login until every step is genuinely complete (see
+// maybeOpenOnboardingWizard's firstIncompleteOnboardingStep check), so a closed tab or a skipped
+// session doesn't lose the nudge. Only finishOnboardingWizard (the actual "Finish" button on step
+// 5) persists.
 function closeOnboardingWizard() {
   appState.onboarding = null;
   renderApp();
@@ -18933,11 +18939,15 @@ async function confirmStockTakeCommit() {
       const imageBase64 = await readInvoicePhotoAsBase64(file);
       if (!imageBase64) throw new Error('Could not read the selected file.');
       const { uploadInvoiceToDrive } = await import('./services/driveService.js');
-      await uploadInvoiceToDrive(appState.workspace?.id, {
+      const { driveFileId } = await uploadInvoiceToDrive(appState.workspace?.id, {
         mimeType: file.type || 'application/octet-stream',
         imageBase64,
         locationId: commit.locationId || ''
       });
+      appState.stockTake = {
+        ...appState.stockTake,
+        assistantSource: driveFileId ? { fileId: driveFileId } : appState.stockTake.assistantSource
+      };
     } catch (error) {
       appState.stockTake = {
         ...appState.stockTake,
@@ -18991,6 +19001,20 @@ async function saveStockTakeDraft() {
       timestamp: new Date().toISOString(),
       lineCount: (commitDraft.items || []).length
     };
+
+    // If a count sheet photo was uploaded for this commit, tag the copy already archived in Drive
+    // with the stock take it produced — mirrors saveGrvReceipt's tagDriveInvoiceWithGrv. Best-effort
+    // and fire-and-forget, never blocks the stock take save the user is waiting on.
+    const assistantSource = appState.stockTake.assistantSource;
+    if (assistantSource?.fileId && committedId) {
+      import('./services/driveService.js')
+        .then(({ tagDriveInvoiceWithStockTake }) => tagDriveInvoiceWithStockTake(appState.workspace?.id, {
+          fileId: assistantSource.fileId,
+          stockTakeId: committedId
+        }))
+        .catch(() => {});
+    }
+
     if ((appState.user?.uid || appState.user?.id) && commitDraft.id) {
       await deleteStockTakeDraftSession(appState.workspace?.id, appState.user?.uid || appState.user?.id || '', commitDraft.id);
     }
@@ -18999,6 +19023,7 @@ async function saveStockTakeDraft() {
       ...appState.stockTake,
       stockItems: nextStockItems,
       stockTakes: [committedDraft, ...(appState.stockTake.stockTakes || []).filter((entry) => String(entry.id || '') !== String(committedDraft.id || ''))],
+      assistantSource: null,
       actionStatus: '',
       actionError: '',
       sessionActive: false,
