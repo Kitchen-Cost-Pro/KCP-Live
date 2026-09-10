@@ -1722,6 +1722,7 @@ function mergeProductRawJson(nextRawJson: string, existingRawJson?: string) {
     "yocoBrandName",
     "yocoCategoryId",
     "yocoCategoryName",
+    "noRecipeRequired",
   ].forEach(preserveIfMissing);
 
   return JSON.stringify(next);

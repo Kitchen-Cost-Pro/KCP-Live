@@ -382,7 +382,9 @@ function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, 
     blurActiveDraftField();
     onGrvAction.onRequestCommit?.();
   });
-  view.querySelector('[data-grv-commit-yes]')?.addEventListener('click', () => onGrvAction.onCommitUploadImage?.());
+  view.querySelector('[data-grv-commit-yes]')?.addEventListener('click', () => {
+    view.querySelector('[data-grv-commit-input]')?.click();
+  });
   view.querySelector('[data-grv-commit-no]')?.addEventListener('click', () => onGrvAction.onCommitSkipImage?.());
   view.querySelector('[data-grv-commit-back]')?.addEventListener('click', () => onGrvAction.onCommitBack?.());
   view.querySelector('[data-grv-commit-confirm]')?.addEventListener('click', () => onGrvAction.onCommitConfirm?.());
@@ -1258,13 +1260,18 @@ function renderGrvCommitOverlay(commit = {}, driveConnected) {
           <header class="grv-overlayHeader">
             <div>
               <h3>Attach an invoice image?</h3>
-              <p>Upload a photo or PDF of the supplier invoice to keep alongside this GRV in Google Drive.</p>
+              <p>Upload a photo or PDF of the supplier invoice to keep alongside this GRV in Google Drive. Max 2MB, photo or PDF only.</p>
             </div>
           </header>
-          <div class="grv-overlayFooter grv-overlayFooter--confirm">
-            <button type="button" class="grv-add-primary" data-grv-commit-yes>${icon('upload')} Yes, upload one</button>
-            <button type="button" class="grv-outlineButton" data-grv-commit-no>No, skip</button>
+          <input type="file" accept="image/*,application/pdf" hidden data-grv-commit-input />
+          <div class="grv-commitAskDropzone" data-grv-commit-dropzone>
+            <button type="button" class="grv-commitAskButton" data-grv-commit-yes>
+              ${icon('upload')}
+              <span>Yes, upload one</span>
+            </button>
+            <p>or drag and drop a file here</p>
           </div>
+          <button type="button" class="grv-outlineButton grv-commitAskSkip" data-grv-commit-no>No, skip</button>
         </section>
       </div>
     `;
@@ -1278,7 +1285,7 @@ function renderGrvCommitOverlay(commit = {}, driveConnected) {
           <header class="grv-overlayHeader">
             <div>
               <h3>Upload invoice image</h3>
-              <p>Drag and drop a file, or choose one from your device.</p>
+              <p>Drag and drop a file, or choose one from your device. Max 2MB, photo or PDF only.</p>
             </div>
           </header>
           ${commit.error ? renderNotice(commit.error, 'error') : ''}

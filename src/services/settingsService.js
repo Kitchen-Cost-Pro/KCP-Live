@@ -142,7 +142,7 @@ export async function getOnboardingReadiness(workspaceId) {
   return {
     productCount: products.length,
     missingRecipeCount,
-    supplierCount: (suppliers || []).length,
+    supplierCount: (suppliers?.items || []).length,
     stockItemCount: (stock.items || []).length
   };
 }

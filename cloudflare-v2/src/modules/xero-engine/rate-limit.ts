@@ -1,8 +1,14 @@
 import type { Env } from '../../legacy/types';
 import { nowIso, xeroRateCaps } from './config';
 
+// Off-by-one: slice(0, 15) stops BEFORE the minute's ones digit (index 15), so appending '0'
+// zeroed the ones digit of MINUTES rather than the seconds — e.g. 12:31 through 12:39 all
+// collapsed onto the SAME "12:30" bucket. That silently turned the "per-minute" cap into a
+// per-10-minutes cap (~10x stricter than intended), which is exactly what was tripping "Per-minute
+// Xero API call cap reached" on an ordinary handful of GRV pushes. slice(0, 16) keeps full
+// HH:MM precision and simply drops seconds, giving a genuine one-minute bucket.
 function minuteBucket(date: Date): string {
-  return `${date.toISOString().slice(0, 15)}0`; // e.g. '2026-08-31T12:3' -> '2026-08-31T12:30' bucket
+  return date.toISOString().slice(0, 16); // e.g. '2026-08-31T12:37:45.123Z' -> '2026-08-31T12:37'
 }
 
 function dayKey(date: Date): string {

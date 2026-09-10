@@ -84,3 +84,15 @@ export async function updateFile(env: Env, workspaceId: string, fileId: string, 
     body: JSON.stringify({ appProperties: input.appProperties })
   });
 }
+
+/** Downloads a file's raw bytes plus its stored mime type — used by the "Preview Invoice" button
+ * (proxied through the Worker, since the Drive file is private to the connected account, not
+ * shared with individual staff) and by the Xero GRV attachment push, which prefers the real
+ * uploaded invoice over the generated GRV PDF when one exists. */
+export async function downloadFile(env: Env, workspaceId: string, fileId: string): Promise<{ bytes: Uint8Array; mimeType: string }> {
+  const metaResponse = await driveFetch(env, workspaceId, `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=mimeType`);
+  const meta = (await metaResponse.json()) as { mimeType?: string };
+  const mediaResponse = await driveFetch(env, workspaceId, `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media`);
+  const bytes = new Uint8Array(await mediaResponse.arrayBuffer());
+  return { bytes, mimeType: meta.mimeType || '' };
+}

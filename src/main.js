@@ -654,14 +654,19 @@ async function maybeOpenOnboardingWizard(workspaceId, settings) {
       getOnboardingReadiness(workspaceId),
       fetchYocoStatusOnce(workspaceId)
     ]);
-    if (readiness.productCount > 0 || readiness.supplierCount > 0 || readiness.stockItemCount > 0) return;
+    // Reopen based on REAL completion (every step done), not just whether every count happens to
+    // be zero — a workspace that's only imported stock items so far (steps 3/4 still incomplete)
+    // must keep getting nudged on login, not just the ones that haven't started at all. See
+    // isOnboardingStepComplete/firstIncompleteOnboardingStep for what "done" means per step.
+    const wizardStep = firstIncompleteOnboardingStep({ counts: readiness, yoco });
+    if (wizardStep >= 5) return;
     if (appState.workspace?.id !== workspaceId) return; // workspace changed while this was in flight
     appState.onboarding = {
       open: true,
       welcome: true,
       // Feature: skip straight past whichever steps are already done (e.g. Yoco was connected in
       // a previous session) instead of always starting at step 1.
-      wizardStep: firstIncompleteOnboardingStep({ counts: readiness, yoco }),
+      wizardStep,
       actionStatus: '',
       actionError: '',
       counts: readiness,
@@ -725,9 +730,10 @@ function onboardingGoBack() {
 
 // Closing via X, clicking the backdrop, or "Skip for now" — none of these mean "done", just "not
 // right now". They must NOT persist a dismissed flag: the whole point of this wizard is that it
-// keeps coming back on every login while the workspace is still genuinely empty (see
-// maybeOpenOnboardingWizard's zero-counts check), so a closed tab or a skipped session doesn't
-// lose the nudge. Only finishOnboardingWizard (the actual "Finish" button on step 5) persists.
+// keeps coming back on every login until every step is genuinely complete (see
+// maybeOpenOnboardingWizard's firstIncompleteOnboardingStep check), so a closed tab or a skipped
+// session doesn't lose the nudge. Only finishOnboardingWizard (the actual "Finish" button on step
+// 5) persists.
 function closeOnboardingWizard() {
   appState.onboarding = null;
   renderApp();
@@ -10458,6 +10464,21 @@ function openGrvAssistant() {
   renderApp();
 }
 
+const INVOICE_COMMIT_MAX_FILE_BYTES = 2 * 1024 * 1024;
+
+// Shared by the GRV and Stock Take "attach invoice" commit flows — drag-and-drop bypasses the
+// file input's `accept` filter, so type has to be re-checked here too.
+function validateInvoiceCommitFile(file) {
+  const type = String(file?.type || '').toLowerCase();
+  if (!type.startsWith('image/') && type !== 'application/pdf') {
+    return 'Please choose a photo (JPG, PNG, HEIC) or PDF file.';
+  }
+  if (Number(file?.size || 0) > INVOICE_COMMIT_MAX_FILE_BYTES) {
+    return 'That file is too large. Please choose one under 2MB.';
+  }
+  return '';
+}
+
 function readInvoicePhotoAsBase64(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -10615,10 +10636,22 @@ function updateGrvDraft(updates = {}) {
     });
   }
 
+  // Every line's displayed pack price is cached verbatim (packPriceDisplay) so the user's exact
+  // typed text survives re-renders — but that text was typed under the OLD interpretation of
+  // "Prices include VAT". Left in place, it (a) silently keeps showing the stale figure until the
+  // user touches another field on that line, and (b) once they DO edit qty/pack size, gets
+  // re-parsed under the NEW pricesIncludeVat setting (see applyLineChange's receivedQty/packSize
+  // branch), which re-derives unitCost by a full VAT-rate factor with no real price change — the
+  // exact 15%-sized "cost variance" this was reported against. Clearing it here forces every
+  // line's display (and any later re-derivation) to recompute fresh from the untouched, always-
+  // correct ex-VAT unitCost/packPriceEx instead of reinterpreting stale gross/net text.
+  // unitCostDisplay is unused dead state from an earlier version of this field; cleared too for
+  // the same reason, in case anything still relies on it.
   if (Object.hasOwn(normalizedUpdates, 'pricesIncludeVat')) {
     normalizedUpdates.items = (normalizedUpdates.items || draft.items || []).map((line) => {
       const nextLine = { ...line };
       delete nextLine.unitCostDisplay;
+      delete nextLine.packPriceDisplay;
       return nextLine;
     });
   }
@@ -11231,12 +11264,6 @@ function requestGrvCommit() {
   renderApp();
 }
 
-function chooseGrvCommitUploadImage() {
-  if (!appState.grv.commit) return;
-  appState.grv = { ...appState.grv, commit: { ...appState.grv.commit, step: 'upload' } };
-  renderApp();
-}
-
 function chooseGrvCommitSkipImage() {
   if (!appState.grv.commit) return;
   appState.grv = { ...appState.grv, commit: { ...appState.grv.commit, step: 'confirm' } };
@@ -11254,7 +11281,13 @@ function backGrvCommitToAsk() {
 
 function setGrvCommitFile(file) {
   if (!file || !appState.grv.commit) return;
-  appState.grv = { ...appState.grv, commit: { ...appState.grv.commit, file, fileName: file.name, error: '' } };
+  const error = validateInvoiceCommitFile(file);
+  if (error) {
+    appState.grv = { ...appState.grv, commit: { ...appState.grv.commit, step: 'upload', file: null, fileName: '', error } };
+    renderApp();
+    return;
+  }
+  appState.grv = { ...appState.grv, commit: { ...appState.grv.commit, step: 'upload', file, fileName: file.name, error: '' } };
   renderApp();
 }
 
@@ -18864,7 +18897,13 @@ function chooseStockTakeCommitSkipImage() {
 
 function setStockTakeCommitFile(file) {
   if (!file || !appState.stockTake.commit) return;
-  appState.stockTake = { ...appState.stockTake, commit: { ...appState.stockTake.commit, file, fileName: file.name, error: '' } };
+  const error = validateInvoiceCommitFile(file);
+  if (error) {
+    appState.stockTake = { ...appState.stockTake, commit: { ...appState.stockTake.commit, step: 'upload', file: null, fileName: '', error } };
+    renderApp();
+    return;
+  }
+  appState.stockTake = { ...appState.stockTake, commit: { ...appState.stockTake.commit, step: 'upload', file, fileName: file.name, error: '' } };
   renderApp();
 }
 
@@ -18900,11 +18939,15 @@ async function confirmStockTakeCommit() {
       const imageBase64 = await readInvoicePhotoAsBase64(file);
       if (!imageBase64) throw new Error('Could not read the selected file.');
       const { uploadInvoiceToDrive } = await import('./services/driveService.js');
-      await uploadInvoiceToDrive(appState.workspace?.id, {
+      const { driveFileId } = await uploadInvoiceToDrive(appState.workspace?.id, {
         mimeType: file.type || 'application/octet-stream',
         imageBase64,
         locationId: commit.locationId || ''
       });
+      appState.stockTake = {
+        ...appState.stockTake,
+        assistantSource: driveFileId ? { fileId: driveFileId } : appState.stockTake.assistantSource
+      };
     } catch (error) {
       appState.stockTake = {
         ...appState.stockTake,
@@ -18958,6 +19001,20 @@ async function saveStockTakeDraft() {
       timestamp: new Date().toISOString(),
       lineCount: (commitDraft.items || []).length
     };
+
+    // If a count sheet photo was uploaded for this commit, tag the copy already archived in Drive
+    // with the stock take it produced — mirrors saveGrvReceipt's tagDriveInvoiceWithGrv. Best-effort
+    // and fire-and-forget, never blocks the stock take save the user is waiting on.
+    const assistantSource = appState.stockTake.assistantSource;
+    if (assistantSource?.fileId && committedId) {
+      import('./services/driveService.js')
+        .then(({ tagDriveInvoiceWithStockTake }) => tagDriveInvoiceWithStockTake(appState.workspace?.id, {
+          fileId: assistantSource.fileId,
+          stockTakeId: committedId
+        }))
+        .catch(() => {});
+    }
+
     if ((appState.user?.uid || appState.user?.id) && commitDraft.id) {
       await deleteStockTakeDraftSession(appState.workspace?.id, appState.user?.uid || appState.user?.id || '', commitDraft.id);
     }
@@ -18966,6 +19023,7 @@ async function saveStockTakeDraft() {
       ...appState.stockTake,
       stockItems: nextStockItems,
       stockTakes: [committedDraft, ...(appState.stockTake.stockTakes || []).filter((entry) => String(entry.id || '') !== String(committedDraft.id || ''))],
+      assistantSource: null,
       actionStatus: '',
       actionError: '',
       sessionActive: false,
@@ -20476,7 +20534,6 @@ function renderApp() {
       onDismissMissingSupplier: dismissGrvMissingSupplierPrompt,
       onSave: saveGrvReceipt,
       onRequestCommit: requestGrvCommit,
-      onCommitUploadImage: chooseGrvCommitUploadImage,
       onCommitSkipImage: chooseGrvCommitSkipImage,
       onCommitBack: backGrvCommitToAsk,
       onCommitFileSelected: setGrvCommitFile,

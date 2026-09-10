@@ -41,18 +41,28 @@ export function xeroRateCaps(env: Env): { dailyCap: number; perMinuteCap: number
   return { dailyCap, perMinuteCap };
 }
 
-// Xero deprecated the old blanket 'accounting.transactions' scope in favor of granular per-endpoint
-// scopes. KCP creates Invoices/Bills (see invoice-sync.ts, grv-sync.ts) and Items (see item-sync.ts,
-// which lives under the 'settings' scope group in Xero's API, alongside accounts/tax rates/
-// currencies) — no bank transactions, payments, or manual journals — so 'accounting.invoices' (write)
-// is the correct replacement, not the old catch-all. 'accounting.attachments' is Xero's separate
-// granular scope for attaching files (the GRV PDF) to a Bill — it doesn't ride along with
-// 'accounting.invoices' the way reading/writing the invoice body does.
+// Xero split its old blanket 'accounting.transactions' scope into per-endpoint granular scopes
+// (see devblog.xero.com "Upcoming changes to Xero Accounting API scopes") — there's no portal-side
+// "enable this scope for your app" step for these any more, unlike the old model; whatever's listed
+// here is simply what gets requested and granted at OAuth consent. KCP creates Invoices/Bills (see
+// invoice-sync.ts, grv-sync.ts) under 'accounting.invoices', and Items (see item-sync.ts) under the
+// 'settings' scope group, alongside accounts/tax rates/currencies. 'accounting.attachments' is its
+// own separate scope for attaching files (the GRV PDF/invoice photo) to a Bill.
+//
+// 'accounting.manualjournals' and 'accounting.payments' are the two scopes carved out of that old
+// catch-all that KCP actually still needs: wastage-sync.ts posts a Manual Journal for the day's
+// wastage, and grv-sync.ts's applyCodPayment posts a Payment against a COD supplier's Bill. Both
+// failed with Xero's "AuthorizationUnsuccessful" before these were added. Do NOT reach for the old
+// 'accounting.transactions' name if something like this recurs — Xero's OAuth consent screen now
+// rejects it outright with "invalid_scope" for an app on the new scope model, which breaks every
+// reconnect, not just the one feature that was missing a scope.
 const DEFAULT_XERO_SCOPES = [
   'openid',
   'profile',
   'email',
   'accounting.invoices',
+  'accounting.manualjournals',
+  'accounting.payments',
   'accounting.contacts',
   'accounting.attachments',
   'accounting.settings',

@@ -7,6 +7,7 @@ import { recordXeroDiagnosticIfNotable } from './observability';
 import { loadLocationTrackingContext, resolveLocationTracking } from './tracking';
 import { yesterdayDateKey, autoSyncDueDateKey } from './invoice-sync';
 import { grvToPdfBytes } from '../../../../src/modules/reporting/exports/exportPdf.js';
+import { downloadFile } from '../drive-engine/drive-client';
 
 export { yesterdayDateKey };
 
@@ -64,14 +65,20 @@ function grvPushEffectKey(workspaceId: string, grvId: string, version: number | 
  * prior APPLIED row exists yet under any key), which is exactly when a create is correct.
  */
 export async function findLatestAppliedGrvXeroBillId(env: Env, workspaceId: string, grvId: string): Promise<string | null> {
+  // Prefix-matches the versioned key ('grv:{ws}:{id}:v{n}') via substr/length rather than LIKE —
+  // D1 caps SQLITE_LIMIT_LIKE_PATTERN_LENGTH low enough that a pattern built by concatenating a
+  // real workspace_id + grv_id (both bound params, so D1 can't see the pattern is short) routinely
+  // exceeds it, failing every GRV push with "LIKE or GLOB pattern too complex". substr/length are
+  // plain string functions with no such pattern-complexity guard.
+  const versionedPrefix = `grv:${workspaceId}:${grvId}:v`;
   const row = await env.DB.prepare(
     `SELECT xero_object_id FROM xero_v2_effect_outbox
       WHERE workspace_id = ?1 AND effect_type = 'GRV_PUSH' AND status = 'APPLIED'
-        AND (effect_key = 'grv:' || ?1 || ':' || ?2 OR effect_key LIKE 'grv:' || ?1 || ':' || ?2 || ':v%')
+        AND (effect_key = 'grv:' || ?1 || ':' || ?2 OR substr(effect_key, 1, length(?3)) = ?3)
       ORDER BY updated_at DESC
       LIMIT 1`
   )
-    .bind(workspaceId, grvId)
+    .bind(workspaceId, grvId, versionedPrefix)
     .first<{ xero_object_id: string | null }>();
   return row?.xero_object_id || null;
 }
@@ -491,27 +498,71 @@ export function buildGrvBillPayload(
   };
 }
 
+const ATTACHMENT_EXTENSION_BY_MIME_TYPE: Record<string, string> = {
+  'application/pdf': 'pdf',
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+  'image/heic': 'heic',
+  'image/heif': 'heif'
+};
+
+/** The real supplier invoice, if staff uploaded one via the GRV commit modal (see
+ * uploadInvoiceDocument/tagDriveInvoiceWithGrv in drive-engine/assistant.ts) — preferred over the
+ * generated GRV PDF below since it's the actual paper record, not KCP's own summary of it. Returns
+ * null on any lookup/download failure so the caller falls back to the generated PDF rather than
+ * leaving the Bill with no attachment at all. */
+async function loadUploadedInvoiceAttachment(
+  env: Env,
+  workspaceId: string,
+  grvId: string
+): Promise<{ bytes: Uint8Array; fileName: string; contentType: string } | null> {
+  try {
+    const doc = await env.DB.prepare(
+      `SELECT drive_file_id, mime_type FROM drive_documents
+        WHERE workspace_id = ?1 AND entity_type = 'invoice_photo' AND entity_id = ?2
+        ORDER BY uploaded_at DESC LIMIT 1`
+    ).bind(workspaceId, grvId).first<{ drive_file_id: string; mime_type: string | null }>();
+    if (!doc?.drive_file_id) return null;
+    const { bytes, mimeType } = await downloadFile(env, workspaceId, doc.drive_file_id);
+    const contentType = mimeType || doc.mime_type || 'application/octet-stream';
+    const extension = ATTACHMENT_EXTENSION_BY_MIME_TYPE[contentType] || 'jpg';
+    return { bytes, contentType, fileName: `Invoice-${grvId.slice(-6).toUpperCase()}.${extension}` };
+  } catch {
+    return null;
+  }
+}
+
 async function pushGrvAttachment(env: Env, workspaceId: string, grv: GrvRow, billId: string): Promise<void> {
   const effectKey = `grv-attachment:${workspaceId}:${grv.id}`;
   const claim = await claimXeroEffect(env, workspaceId, 'GRV_ATTACHMENT', effectKey);
   if (claim.alreadyApplied) return;
   try {
-    const { items } = parseGrvRawJson(grv.raw_json);
-    const bytes = await grvToPdfBytes({
-      id: grv.id,
-      grvNumber: grv.invoice_number,
-      invoice: grv.invoice_number,
-      supplierName: grv.supplier_name,
-      date: grv.received_at,
-      items,
-      transportEx: grv.transport_ex,
-      discountEx: grv.discount_ex,
-      totalEx: grv.total_ex,
-      totalVat: grv.total_vat,
-      totalInc: grv.total_inc
-    });
-    const fileName = `${text(grv.invoice_number) || `GRV-${grv.id.slice(-6).toUpperCase()}`}.pdf`;
-    await executeXeroBinaryPutRequest(env, workspaceId, { invoiceId: billId, fileName, bytes, contentType: 'application/pdf' });
+    const uploadedInvoice = await loadUploadedInvoiceAttachment(env, workspaceId, grv.id);
+    let bytes: Uint8Array;
+    let fileName: string;
+    let contentType: string;
+    if (uploadedInvoice) {
+      ({ bytes, fileName, contentType } = uploadedInvoice);
+    } else {
+      const { items } = parseGrvRawJson(grv.raw_json);
+      bytes = await grvToPdfBytes({
+        id: grv.id,
+        grvNumber: grv.invoice_number,
+        invoice: grv.invoice_number,
+        supplierName: grv.supplier_name,
+        date: grv.received_at,
+        items,
+        transportEx: grv.transport_ex,
+        discountEx: grv.discount_ex,
+        totalEx: grv.total_ex,
+        totalVat: grv.total_vat,
+        totalInc: grv.total_inc
+      });
+      fileName = `${text(grv.invoice_number) || `GRV-${grv.id.slice(-6).toUpperCase()}`}.pdf`;
+      contentType = 'application/pdf';
+    }
+    await executeXeroBinaryPutRequest(env, workspaceId, { invoiceId: billId, fileName, bytes, contentType });
     await markXeroEffectApplied(env, claim.id, billId);
   } catch (cause) {
     const message = cause instanceof XeroApiClientError ? cause.message : cause instanceof Error ? cause.message : 'Unknown error attaching GRV PDF to Xero.';

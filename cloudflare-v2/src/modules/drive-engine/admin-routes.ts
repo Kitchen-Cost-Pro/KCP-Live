@@ -5,7 +5,7 @@ import { getDriveConnection, saveDriveConnection, disconnectDrive } from './conn
 import { canManageDrive } from './admin-permissions';
 import { syncPendingDriveGrvs } from './grv-drive-sync';
 import { syncPendingDriveCreditNotes } from './credit-note-drive-sync';
-import { processInvoicePhoto, uploadInvoiceDocument, tagDriveInvoiceWithGrv, GrvExtractResult } from './assistant';
+import { processInvoicePhoto, uploadInvoiceDocument, tagDriveInvoiceWithGrv, tagDriveInvoiceWithStockTake, GrvExtractResult } from './assistant';
 import { listActiveLocations } from './folders';
 
 function response(data: unknown, status = 200): Response {
@@ -199,6 +199,15 @@ async function postAssistantTagGrv(request: Request, env: Env, workspaceId: stri
   return response({ ok: true });
 }
 
+async function postAssistantTagStockTake(request: Request, env: Env, workspaceId: string) {
+  const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+  const fileId = text(body.fileId);
+  const stockTakeId = text(body.stockTakeId);
+  if (!fileId || !stockTakeId) return response({ ok: false, error: 'fileId and stockTakeId are required.' }, 400);
+  await tagDriveInvoiceWithStockTake(env, workspaceId, fileId, stockTakeId);
+  return response({ ok: true });
+}
+
 export async function handleDriveAdminRoute(
   request: Request,
   env: Env,
@@ -239,6 +248,9 @@ export async function handleDriveAdminRoute(
   }
   if (request.method === 'POST' && resource === 'drive/assistant/tag-grv') {
     return postAssistantTagGrv(request, env, workspaceId);
+  }
+  if (request.method === 'POST' && resource === 'drive/assistant/tag-stocktake') {
+    return postAssistantTagStockTake(request, env, workspaceId);
   }
 
   if (!(await canManageDrive(env, auth, workspaceId))) {

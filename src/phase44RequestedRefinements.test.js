@@ -17,8 +17,8 @@ const reportingCss = fs.readFileSync(new URL('./styles/reporting.css', import.me
 
 test('dashboard defaults to Today, includes week presets, removes search, and uses a Refresh pill', () => {
   assert.match(dashboard, /\['today', 'Today'\]/);
+  assert.match(dashboard, /\['yesterday', 'Yesterday'\]/);
   assert.match(dashboard, /\['this_week', 'This Week'\]/);
-  assert.match(dashboard, /\['two_weeks', '2 Weeks'\]/);
   assert.match(dashboard, /rangePreset: 'today'/);
   assert.doesNotMatch(dashboard, /data-dashboard-search/);
   assert.match(dashboard, /styles\.refreshButton/);

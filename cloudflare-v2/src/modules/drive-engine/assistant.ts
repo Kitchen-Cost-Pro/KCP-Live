@@ -163,3 +163,14 @@ export async function tagDriveInvoiceWithGrv(env: Env, workspaceId: string, file
     .bind(workspaceId, fileId, grvId)
     .run();
 }
+
+/** Tags the archived count-sheet photo with the stock take it ended up creating, once that stock
+ * take is actually saved — same pattern as tagDriveInvoiceWithGrv, called fire-and-forget from the
+ * frontend after a successful save. */
+export async function tagDriveInvoiceWithStockTake(env: Env, workspaceId: string, fileId: string, stockTakeId: string): Promise<void> {
+  if (!fileId) return;
+  await updateFile(env, workspaceId, fileId, { appProperties: { kcp_status: 'processed', kcp_stocktake_id: stockTakeId } });
+  await env.DB.prepare(`UPDATE drive_documents SET entity_id = ?3 WHERE workspace_id = ?1 AND drive_file_id = ?2`)
+    .bind(workspaceId, fileId, stockTakeId)
+    .run();
+}
