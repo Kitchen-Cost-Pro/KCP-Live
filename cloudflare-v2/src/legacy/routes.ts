@@ -6129,6 +6129,10 @@ export async function postProductImport(
   workspaceId: string,
 ) {
   await scoped(request, env, auth, workspaceId);
+  const limited = await checkRateLimit(env.CENTRAL_DB, `bulk-import:products:${workspaceId}`, 10, 300);
+  if (limited.blocked) {
+    return json(request, env, { ok: false, error: "Too many product imports for this workspace. Wait a few minutes and try again." }, { status: 429 });
+  }
   const payload = await readJson<Record<string, unknown>>(request);
   const rows = arrayValue(payload.rows || payload.products || payload.items);
   let importedCount = 0;
@@ -6444,6 +6448,10 @@ export async function postSupplierImport(
   workspaceId: string,
 ) {
   await scoped(request, env, auth, workspaceId);
+  const limited = await checkRateLimit(env.CENTRAL_DB, `bulk-import:suppliers:${workspaceId}`, 10, 300);
+  if (limited.blocked) {
+    return json(request, env, { ok: false, error: "Too many supplier imports for this workspace. Wait a few minutes and try again." }, { status: 429 });
+  }
   const payload = await readJson<Record<string, unknown>>(request);
   const rows = arrayValue(payload.rows || payload.suppliers);
   const errors: Array<{ code: string; message: string }> = [];
@@ -6914,6 +6922,10 @@ export async function postStockImport(
   workspaceId: string,
 ) {
   await scoped(request, env, auth, workspaceId);
+  const limited = await checkRateLimit(env.CENTRAL_DB, `bulk-import:stock-items:${workspaceId}`, 10, 300);
+  if (limited.blocked) {
+    return json(request, env, { ok: false, error: "Too many stock imports for this workspace. Wait a few minutes and try again." }, { status: 429 });
+  }
   const payload = await readJson<{
     items?: unknown[];
     options?: Record<string, unknown>;
@@ -6959,6 +6971,10 @@ export async function postStockLocationCostsImport(
 ) {
   await scoped(request, env, auth, workspaceId);
   await assertWorkspacePermission(env, auth, workspaceId, "nav-ingredients");
+  const limited = await checkRateLimit(env.CENTRAL_DB, `bulk-import:location-costs:${workspaceId}`, 10, 300);
+  if (limited.blocked) {
+    return json(request, env, { ok: false, error: "Too many location-cost imports for this workspace. Wait a few minutes and try again." }, { status: 429 });
+  }
   const payload = await readJson<{
     locationId?: unknown;
     locationName?: unknown;

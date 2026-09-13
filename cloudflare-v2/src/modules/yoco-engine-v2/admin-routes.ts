@@ -1,4 +1,5 @@
 import type { AuthContext, Env } from '../../legacy/types';
+import { checkRateLimit } from '../../legacy/rate-limit';
 import type { YocoV2QueueMessage, YocoV2EffectType } from './contracts';
 import type { YocoV2QueueEnv } from './capture';
 import { yocoV2FeatureFlags } from './config';
@@ -305,6 +306,13 @@ export async function handleYocoV2AdminRoute(
   if (!flags.yoco_v2_admin_enabled) return response({ ok: false, error: 'Yoco V2 admin diagnostics are disabled.' }, 404);
   if (!auth.uid) return response({ ok: false, error: 'Authentication required.' }, 401);
   if (auth.systemRole !== 'admin') return response({ ok: false, error: 'Administrator access required.' }, 403);
+  // Defense in depth: this is already restricted to KCP admins, but several of the diagnostics
+  // below (getReceiptStats' six-query fan-out especially) are expensive per call, and a compromised
+  // or scripted admin session could otherwise hammer them with no cost.
+  const rateLimited = await checkRateLimit(env.CENTRAL_DB, `yoco-v2-admin:${workspaceId}`, 60, 60);
+  if (rateLimited.blocked) {
+    return response({ ok: false, error: 'Too many admin requests for this workspace. Wait a minute and try again.' }, 429);
+  }
 
   // `resource` doubles as the routing key AND (for callWorkspaceDO-style fan-outs, unlike
   // forwardToWorkspaceDO) may carry its own query string appended by the caller — strip it here

@@ -1,4 +1,5 @@
 import type { AuthContext, Env } from '../../legacy/types';
+import { checkRateLimit } from '../../legacy/rate-limit';
 import { text, nowIso, xeroConfigured, xeroRedirectUri } from './config';
 import { signXeroState, verifyXeroState, buildXeroAuthorizeUrl, exchangeXeroCode, fetchXeroConnections } from './oauth';
 import { getXeroConnection, saveXeroConnection, disconnectXero } from './connection';
@@ -513,6 +514,16 @@ export async function handleXeroAdminRoute(
 
   if (!resource.startsWith('xero/')) return null;
   if (!auth.uid) return response({ ok: false, error: 'Authentication required.' }, 401);
+
+  // Every xero/* action below is reachable by any workspace member (see the per-action comments),
+  // with no rate limiting anywhere in front of it until now — unlike the Yoco integration's
+  // equivalent actions, which sit behind YocoV2RateGateDO/write-budget gates. Xero's own outbound
+  // API rate limit (reserveXeroApiCall) only protects KCP's calls TO Xero, not this Worker's own
+  // inbound endpoint from being hammered.
+  const xeroRateLimited = await checkRateLimit(env.CENTRAL_DB, `xero-admin:${workspaceId}`, 30, 60);
+  if (xeroRateLimited.blocked) {
+    return response({ ok: false, error: 'Too many Xero requests for this workspace. Wait a minute and try again.' }, 429);
+  }
 
   // The front Worker already confirmed this user has access to this workspace at all
   // (assertWorkspaceAccess) before forwarding here, so status/sync-now — reads and a one-off
