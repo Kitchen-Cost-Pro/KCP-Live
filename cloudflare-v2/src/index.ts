@@ -1514,6 +1514,19 @@ async function handle(request: Request, env: Env): Promise<Response> {
       return withCors(request, env, json(request, env, { ok: false, error: 'Workforce is not available.' }, 410));
     }
 
+    // `admin-*` resources (and `migrate-import`) are internal-only: every legitimate caller is a
+    // dedicated /api/admin/... route that already ran requireAdmin and then calls
+    // callWorkspaceDO()/the DO stub directly (see index.ts's admin handlers and workspace-do.ts),
+    // never this generic per-workspace proxy. That means this proxy was never supposed to be able
+    // to reach them at all — but until now it forwarded ANY resource string here after only a
+    // membership check (assertWorkspaceAccess), so any authenticated member of a workspace could
+    // call admin-only DO actions (including a full tenant-data purge via `admin-purge`) against
+    // their own workspace. Block it outright — 404 rather than 403 so these internal resource
+    // names aren't even confirmed to exist to an unauthorized caller.
+    if (resource === 'migrate-import' || resource.startsWith('admin-')) {
+      return json(request, env, { ok: false, error: 'Not found' }, 404);
+    }
+
     const auth = await requireAuth(request, env);
     if (!auth) return json(request, env, { ok: false, error: 'Sign in required.' }, 401);
     const allowed = await assertWorkspaceAccess(env, auth, workspaceId);
