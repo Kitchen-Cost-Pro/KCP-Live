@@ -980,6 +980,24 @@ let onboardingAiScannedRows = null;
 
 const ONBOARDING_AI_MAX_FILE_BYTES = 8 * 1024 * 1024; // generous for a compressed phone photo
 
+// Recipe row validation (mapLegacyRecipeRows) checks each row's product/ingredient against
+// appState.recipes.items/ingredients, which are normally hydrated by startRecipeSubscription —
+// but that subscription only starts while the active route is 'recipes' (see
+// bootstrapActiveRouteForWorkspace), so it never runs while the onboarding wizard is open over
+// another route. Fetch that data directly here so recipe rows can be validated correctly.
+async function ensureOnboardingRecipeDataLoaded() {
+  const workspaceId = appState.workspace?.id;
+  if (!workspaceId) return;
+  const { fetchRecipeItems } = await import('./services/recipeService.js');
+  const { items, ingredients, locations } = await fetchRecipeItems(workspaceId);
+  appState.recipes = {
+    ...appState.recipes,
+    items,
+    ingredients,
+    locations: locations || appState.recipes.locations || []
+  };
+}
+
 async function buildOnboardingImportPreview(kind, file) {
   if (kind === 'suppliers') {
     const rows = await parseDataFile(file, { preferredSheetNames: ['Supplier_Import'] });
@@ -998,6 +1016,9 @@ async function buildOnboardingImportPreview(kind, file) {
       skippedCount: Number(review.skippedCount || review.errors?.length || 0),
       errorSummary: formatImportErrors(review.errors || [], 5)
     };
+  }
+  if (appState.route.active !== 'recipes') {
+    await ensureOnboardingRecipeDataLoaded();
   }
   const rows = await parseDataFile(file, { preferredSheetNames: ['Recipe_Import'] });
   const { recipes, review } = mapLegacyRecipeRows(rows);
@@ -1210,11 +1231,23 @@ async function onboardingScanWithAi(kind, file) {
     let recipeIngredients = appState.recipes?.ingredients || [];
     if (kind === 'recipes') {
       const { fetchRecipeItems } = await import('./services/recipeService.js');
-      const { items, ingredients } = await fetchRecipeItems(workspaceId);
+      const { items, ingredients, locations } = await fetchRecipeItems(workspaceId);
       knownProductNames = (items || [])
         .filter((item) => item.name && String(item.status || '').toLowerCase() === 'missing')
         .map((item) => item.name);
       recipeIngredients = ingredients || recipeIngredients;
+      // mapLegacyRecipeRows below (and the confirm-time importRecipeFile) validate rows against
+      // appState.recipes.items/ingredients, which is normally hydrated by startRecipeSubscription —
+      // but that never runs while the onboarding wizard is open over a non-'recipes' route, so
+      // seed it here with the data we just fetched.
+      if (appState.route.active !== 'recipes') {
+        appState.recipes = {
+          ...appState.recipes,
+          items,
+          ingredients,
+          locations: locations || appState.recipes.locations || []
+        };
+      }
     }
 
     const { rows } = await extractDataWithAiRetrying(workspaceId, kind, file, { knownProductNames });
