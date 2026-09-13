@@ -180,6 +180,53 @@ async function attachActor(
   };
 }
 
+// Batched counterpart to attachActor for loops over many rows (e.g. an audit trail) — one
+// query for every distinct actor instead of one round-trip per row. Preserves attachActor's
+// exact matching/priority rules: a workspace_members hit beats an app_users hit for the same id.
+async function attachActors(
+  env: Env,
+  workspaceId: string,
+  actorIds: string[],
+): Promise<Map<string, { id: string; name: string; email: string }>> {
+  const ids = [...new Set(actorIds.map((actorId) => text(actorId)).filter(Boolean))];
+  const result = new Map<string, { id: string; name: string; email: string }>();
+  if (!ids.length) return result;
+
+  const lowerIds = ids.map((id) => id.toLowerCase());
+  const idPlaceholders = ids.map((_, index) => `?${2 + index}`).join(", ");
+  const emailPlaceholders = lowerIds.map((_, index) => `?${2 + ids.length + index}`).join(", ");
+  const rows = await env.CENTRAL_DB.prepare(
+    `SELECT auth_uid AS id, email, display_name
+       FROM workspace_members
+      WHERE workspace_id = ?1
+        AND (auth_uid IN (${idPlaceholders}) OR lower(email) IN (${emailPlaceholders}))
+     UNION ALL
+     SELECT id, email, display_name
+       FROM app_users
+      WHERE id IN (${idPlaceholders}) OR lower(email) IN (${emailPlaceholders})`,
+  )
+    .bind(workspaceId, ...ids, ...lowerIds)
+    .all<{ id: string; email: string; display_name: string }>();
+
+  const byId = new Map<string, { email: string; display_name: string }>();
+  const byEmail = new Map<string, { email: string; display_name: string }>();
+  for (const row of rows.results || []) {
+    const rowId = text(row.id);
+    const rowEmail = text(row.email).toLowerCase();
+    if (rowId && !byId.has(rowId)) byId.set(rowId, row);
+    if (rowEmail && !byEmail.has(rowEmail)) byEmail.set(rowEmail, row);
+  }
+  for (const rawId of ids) {
+    const match = byId.get(rawId) || byEmail.get(rawId.toLowerCase());
+    result.set(rawId, {
+      id: rawId,
+      name: text(match?.display_name || match?.email || rawId),
+      email: text(match?.email),
+    });
+  }
+  return result;
+}
+
 export async function loadMovements(
   env: Env,
   workspaceId: string,
@@ -273,9 +320,14 @@ async function loadAuditTrail(
   )
     .bind(workspaceId, entityId, ...aliases)
     .all<Row>();
+  const actorsById = await attachActors(
+    env,
+    workspaceId,
+    (rows.results || []).map((row) => text(row.actor_uid)),
+  );
   const result: Row[] = [];
   for (const row of rows.results || []) {
-    const actor = await attachActor(env, workspaceId, text(row.actor_uid));
+    const actor = actorsById.get(text(row.actor_uid)) || { id: "", name: "", email: "" };
     result.push({
       id: text(row.id),
       action: text(row.event_type).replace(/_/g, " "),

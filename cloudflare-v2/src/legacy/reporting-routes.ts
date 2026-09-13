@@ -870,6 +870,19 @@ export async function getSaleStockUsageReport(
     sourceScope,
     timeZone,
   );
+
+  // The yo/yol dedup subqueries below re-rank ALL of yoco_orders/yoco_order_lines for this
+  // workspace on every call, regardless of the sm.occurred_at range just filtered above — the
+  // canonicalization exists to protect against pre-uniqueness-constraint duplicate rows, but it
+  // recomputes from scratch every time, so cost grows with a tenant's entire lifetime order
+  // history. yo always resolves to the very order that produced THIS stock movement — and
+  // document_type = 'yoco_order' movements are never backdated (see
+  // BACKDATABLE_LEDGER_DOCUMENT_TYPES above) — so its own occurred_at tracks sm.occurred_at
+  // closely, making it safe to bound its ranking window to the same (widened) date range. This
+  // does NOT apply to original_yo/original_yol below, which resolve the ORIGINAL sale being
+  // refunded and must be able to reach arbitrarily far back in time, so they stay unbounded.
+  const ownOrderDateGuard = buildOwnOrderDateGuard(filters, timeZone, binds, "yo_source");
+
   const rows = await env.DB.prepare(
     `SELECT
         sm.id,
@@ -940,6 +953,7 @@ export async function getSaleStockUsageReport(
                   ) AS canonical_rank
              FROM yoco_orders yo_source
             WHERE yo_source.workspace_id = ?1
+              ${ownOrderDateGuard}
          ) WHERE canonical_rank = 1
        ) yo ON yo.workspace_id = sm.workspace_id AND yo.yoco_order_id = COALESCE(NULLIF(json_extract(sm.metadata_json, '$.reportOrderKey'), ''), sm.document_id)
        LEFT JOIN (
@@ -1127,6 +1141,10 @@ export async function getModifierSalesReport(
     tableStatus,
     timeZone,
   );
+  // See buildOwnOrderDateGuard: yo here is the order line's own order (joined directly on
+  // yo.id = yol.yoco_order_id below), not a lookup that needs to reach further back in time, so
+  // bounding its dedup ranking to the requested range is safe.
+  const ownOrderDateGuard = buildOwnOrderDateGuard(filters, timeZone, binds, "yo_source");
   const salesRows = await env.DB.prepare(
     `SELECT
         yol.id AS yoco_order_line_db_id,
@@ -1192,6 +1210,7 @@ export async function getModifierSalesReport(
                   ) AS canonical_rank
              FROM yoco_orders yo_source
             WHERE yo_source.workspace_id = ?1
+              ${ownOrderDateGuard}
          ) WHERE canonical_rank = 1
        ) yo ON yo.id = yol.yoco_order_id AND yo.workspace_id = yol.workspace_id
        LEFT JOIN locations l ON l.id = yo.location_id AND l.workspace_id = yo.workspace_id
@@ -8563,6 +8582,45 @@ function addZonedDateRange(
     binds.push(dayAfter(utcDay(toExclusiveUtc)));
     clauses.push(`${column} < ?${binds.length}`);
   }
+}
+
+// A handful of reporting queries dedup yoco_orders (protecting against pre-uniqueness-constraint
+// duplicate rows) via ROW_NUMBER()/PARTITION over the source table BEFORE joining it to the
+// already date-filtered outer query — so that ranking recomputes over a tenant's entire lifetime
+// of orders on every call, regardless of how narrow the requested report range is. Where the
+// aliased subquery is known to resolve to a report row's OWN order (never an unrelated order that
+// could legitimately fall outside the requested range — e.g. never the ORIGINAL sale a refund
+// points back to, which must stay reachable arbitrarily far in the past), this bounds that
+// subquery's ranking window to the requested date range, widened by a day on each side purely as
+// insurance against timezone-boundary rounding. It is a superset prefilter only — the exact
+// business-key join condition and the outer query's own date filter still determine the real,
+// authoritative result set — so widening it further would only cost performance, never
+// correctness, but narrowing it without care could silently exclude legitimate rows.
+function buildOwnOrderDateGuard(
+  filters: { from?: string; to?: string; tradingDayStartMinutes?: number },
+  timeZone: string,
+  binds: unknown[],
+  sourceAlias: string,
+): string {
+  const { fromUtc, toExclusiveUtc } = localDateRangeToUtcBounds({
+    from: filters.from,
+    to: filters.to,
+    timeZone,
+    tradingDayStartMinutes: numberValue(filters.tradingDayStartMinutes, 0),
+  });
+  if (!fromUtc || !toExclusiveUtc) return "";
+  const shiftDay = (value: string, deltaDays: number): string => {
+    const parsed = new Date(`${String(value).slice(0, 10)}T00:00:00Z`);
+    if (Number.isNaN(parsed.getTime())) return String(value).slice(0, 10);
+    parsed.setUTCDate(parsed.getUTCDate() + deltaDays);
+    return parsed.toISOString().slice(0, 10);
+  };
+  binds.push(shiftDay(fromUtc, -1), shiftDay(toExclusiveUtc, 1));
+  const toIdx = binds.length;
+  const fromIdx = toIdx - 1;
+  // Blank occurred_at is always kept (never excluded) — legacy/edge-case rows with no reliable
+  // date must never be dropped by this prefilter.
+  return `AND (${sourceAlias}.occurred_at = '' OR (${sourceAlias}.occurred_at >= ?${fromIdx} AND ${sourceAlias}.occurred_at < ?${toIdx}))`;
 }
 
 function parseJson(value: unknown): Row {
