@@ -123,8 +123,8 @@
   inset: 0;
   z-index: 140;
   display: grid;
-  place-items: stretch end;
-  padding: 0;
+  place-items: center;
+  padding: 24px;
   background: rgba(2, 8, 23, 0.72);
 }
 
@@ -139,17 +139,16 @@
 
 /* Deliberately keeps .cn-draft-panel's own padding: 36px (shared with .cn-sidecard) rather than
    overriding it to 0 + re-padding each inner section separately — one inset around the whole
-   drawer column reads identically and is simpler than GRV's per-section approach. */
+   panel column reads identically and is simpler than GRV's per-section approach. */
 #view-credit-note .cn-overlayCard--draft {
   position: relative;
   width: min(2000px, 98vw);
-  height: 100vh;
-  max-height: 100vh;
+  height: min(960px, calc(100vh - 48px));
+  max-height: calc(100vh - 48px);
   display: flex;
   flex-direction: column;
   gap: 0;
-  border-top-right-radius: 0;
-  border-bottom-right-radius: 0;
+  border-radius: 1.75rem;
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: linear-gradient(180deg, rgba(18, 27, 44, 0.98), rgba(10, 16, 30, 0.98));
