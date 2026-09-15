@@ -1423,6 +1423,16 @@
   transform: translateY(-1px);
 }
 
+/* backdrop-filter lives on ::before, not on .grv-overlay itself: putting it directly on the
+   overlay makes IT the containing block for every position:fixed descendant inside it (a
+   non-obvious CSS rule — filter/backdrop-filter behaves like transform for this purpose), which
+   then makes those descendants get clipped by any overflow:hidden ancestor between them and the
+   overlay (e.g. .grv-overlayCard--draft) instead of escaping to the viewport like a normal fixed
+   element. That silently broke the position:fixed UOM dropdown (positionInlineUomMenus) and the
+   per-row location-picker modal for rows whose menu/modal happened to render outside the drawer
+   card's clipped box — worse the longer the draft list, since more rows meant more dropdowns
+   landing in the clipped zone. The pseudo-element carries the blur without being a real ancestor
+   of the overlay's actual content, so nothing inside gets rerouted to it as a containing block. */
 #view-grv .grv-overlay {
   position: fixed;
   inset: 0;
@@ -1431,7 +1441,15 @@
   place-items: center;
   padding: 24px;
   background: rgba(2, 8, 23, 0.72);
+}
+
+#view-grv .grv-overlay::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
   backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
 }
 
 #view-grv .grv-overlay--drawer {

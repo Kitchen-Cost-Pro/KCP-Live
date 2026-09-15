@@ -112,6 +112,12 @@
   white-space: nowrap;
 }
 
+/* backdrop-filter lives on ::before, not on .cn-overlay itself — see grv.css's matching comment
+   on .grv-overlay. Putting it directly on .cn-overlay makes it the containing block for every
+   position:fixed descendant inside it (filter/backdrop-filter act like transform for this
+   purpose), which then gets clipped by .cn-overlayCard--draft's overflow:hidden instead of
+   escaping to the viewport like a normal fixed element — breaking fixed-position dropdowns/modals
+   nested in the drawer instead of positioning them correctly. */
 #view-credit-note .cn-overlay {
   position: fixed;
   inset: 0;
@@ -120,7 +126,15 @@
   place-items: stretch end;
   padding: 0;
   background: rgba(2, 8, 23, 0.72);
+}
+
+#view-credit-note .cn-overlay::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
   backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
 }
 
 /* Deliberately keeps .cn-draft-panel's own padding: 36px (shared with .cn-sidecard) rather than
@@ -128,7 +142,7 @@
    drawer column reads identically and is simpler than GRV's per-section approach. */
 #view-credit-note .cn-overlayCard--draft {
   position: relative;
-  width: min(1560px, 96vw);
+  width: min(1760px, 98vw);
   height: 100vh;
   max-height: 100vh;
   display: flex;
