@@ -8861,6 +8861,9 @@ export async function deletePurchaseOrderRoute(
   const idValue = text(orderId);
   await env.DB.batch([
     env.DB.prepare(
+      `UPDATE grvs SET purchase_order_id = NULL WHERE workspace_id = ?1 AND purchase_order_id = ?2`,
+    ).bind(workspaceId, idValue),
+    env.DB.prepare(
       `DELETE FROM purchase_order_lines WHERE workspace_id = ?1 AND purchase_order_id = ?2`,
     ).bind(workspaceId, idValue),
     env.DB.prepare(
@@ -8888,6 +8891,9 @@ export async function postPurchaseOrderBulkDelete(
   if (!ids.length) return json(request, env, { ok: true, deleted: 0 });
 
   const statements = ids.flatMap((orderId) => [
+    env.DB.prepare(
+      `UPDATE grvs SET purchase_order_id = NULL WHERE workspace_id = ?1 AND purchase_order_id = ?2`,
+    ).bind(workspaceId, orderId),
     env.DB.prepare(
       `DELETE FROM purchase_order_lines WHERE workspace_id = ?1 AND purchase_order_id = ?2`,
     ).bind(workspaceId, orderId),

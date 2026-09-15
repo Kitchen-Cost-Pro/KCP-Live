@@ -68,6 +68,7 @@ export function renderPurchaseOrders({ state, onPurchaseOrderFilterChange, onPur
     ${renderDeleteDialog(purchaseOrders)}
     ${renderGmailPromptModal(purchaseOrders)}
     ${renderLocationModal(purchaseOrders.draftOrder?.locationId || '', filters.openDropdown, purchaseOrders.locations || [], purchaseOrders.draftOrder?.siteId || '')}
+    ${renderReceiveLocationModal(purchaseOrders.receivePrompt || null, purchaseOrders.orders || [], purchaseOrders.locations || [])}
     ${renderToast(purchaseOrders.toast)}
   `;
 
@@ -155,7 +156,12 @@ function bindPurchaseOrderEvents(view, visibleOrders, filters, onPurchaseOrderFi
   });
 
   view.querySelectorAll('[data-po-status]').forEach((button) => {
-    button.addEventListener('click', () => onPurchaseOrderAction.onStatus?.(button.dataset.poStatusId, button.dataset.poStatus));
+    button.addEventListener('click', () => {
+      const status = button.dataset.poStatus;
+      const orderId = button.dataset.poStatusId;
+      if (status === 'received') onPurchaseOrderAction.onRequestReceive?.(orderId);
+      else onPurchaseOrderAction.onStatus?.(orderId, status);
+    });
   });
 
   view.querySelectorAll('[data-po-send]').forEach((button) => {
@@ -172,6 +178,18 @@ function bindPurchaseOrderEvents(view, visibleOrders, filters, onPurchaseOrderFi
 
   view.querySelector('[data-po-delete-selected]')?.addEventListener('click', () => {
     onPurchaseOrderAction.onRequestDelete?.({ ids: parseJson(view.querySelector('[data-po-delete-selected]')?.dataset.poDeleteSelected), mode: 'bulk' });
+  });
+
+  view.querySelectorAll('[data-po-close-receive-modal]').forEach((el) => {
+    el.addEventListener('click', (event) => {
+      if (el === event.currentTarget) onPurchaseOrderAction.onCancelReceive?.();
+    });
+  });
+
+  view.querySelectorAll('[data-po-receive-location]').forEach((button) => {
+    button.addEventListener('click', () => {
+      onPurchaseOrderAction.onConfirmReceive?.(button.dataset.poReceiveLocation, button.dataset.poReceiveLocationName);
+    });
   });
 
 	  view.querySelectorAll('[data-po-supplier-select]').forEach((button) => {
@@ -1083,6 +1101,42 @@ function renderLocationModal(locationId, openDropdown, locations, siteId = '') {
             const isSelected = String(option.value) === String(locationId);
             return `
               <button type="button" class="po-locationCard ${isSelected ? 'po-locationCard--selected' : ''}" data-po-location="${escapeAttribute(option.value)}">
+                <span class="po-locationCardIcon">
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+                </span>
+                <span class="po-locationCardName">${escapeHtml(option.label)}</span>
+                ${isSelected ? `<span class="po-locationCardCheck"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg></span>` : ''}
+              </button>
+            `;
+          }).join('') : `<div class="po-locationModalEmpty">No locations available. Add locations in Settings.</div>`}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderReceiveLocationModal(receivePrompt, orders, locations) {
+  if (!receivePrompt || !receivePrompt.orderId) return '';
+  const order = (orders || []).find((item) => String(item.id) === String(receivePrompt.orderId));
+  const options = (locations || [])
+    .filter((location) => location.active !== false)
+    .map((location) => ({ value: location.id, label: location.displayName || location.name }));
+  const currentLocationId = String(receivePrompt.locationId || '');
+  return `
+    <div class="po-locationModalBackdrop" data-po-close-receive-modal>
+      <div class="po-locationModal" role="dialog" aria-modal="true" aria-label="Select destination location">
+        <div class="po-locationModalHeader">
+          <h3>Select Destination Location</h3>
+          <button type="button" class="po-locationModalClose" data-po-close-receive-modal aria-label="Close">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+        <p class="po-locationModalSub">Choose where the stock from ${escapeHtml(order?.poNumber || order?.reference || 'this order')} will be received into.</p>
+        <div class="po-locationModalList">
+          ${options.length ? options.map((option) => {
+            const isSelected = String(option.value) === currentLocationId;
+            return `
+              <button type="button" class="po-locationCard ${isSelected ? 'po-locationCard--selected' : ''}" data-po-receive-location="${escapeAttribute(option.value)}" data-po-receive-location-name="${escapeAttribute(option.label)}">
                 <span class="po-locationCardIcon">
                   <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
                 </span>

@@ -9270,13 +9270,41 @@ async function savePurchaseOrder(updates = {}) {
   }
 }
 
-async function updatePurchaseOrderStatus(orderId, status) {
+async function updatePurchaseOrderStatus(orderId, status, options = {}) {
   if (String(status || '').toLowerCase() === 'received') {
-    redirectPurchaseOrderToGrv(orderId);
+    redirectPurchaseOrderToGrv(orderId, { locationId: options.locationId || '', locationName: options.locationName || '' });
     return;
   }
 
   await sendPurchaseOrder(orderId);
+}
+
+function requestReceivePurchaseOrder(orderId) {
+  const id = String(orderId || '').trim();
+  if (!id) return;
+  const order = getPurchaseOrderById(id);
+  const orderLineLocationIds = (order?.items || [])
+    .map((line) => String(line.locationId || line.targetLocation || '').trim())
+    .filter(Boolean);
+  const guessLocationId = String(order?.locationId || order?.targetLocation || orderLineLocationIds[0] || '');
+  appState.purchaseOrders = {
+    ...appState.purchaseOrders,
+    receivePrompt: { orderId: id, locationId: guessLocationId }
+  };
+  renderApp();
+}
+
+function cancelReceivePurchaseOrder() {
+  if (!appState.purchaseOrders.receivePrompt) return;
+  appState.purchaseOrders = { ...appState.purchaseOrders, receivePrompt: null };
+  renderApp();
+}
+
+function confirmReceivePurchaseOrder(locationId, locationName) {
+  const orderId = appState.purchaseOrders.receivePrompt?.orderId || '';
+  appState.purchaseOrders = { ...appState.purchaseOrders, receivePrompt: null };
+  if (!orderId || !String(locationId || '').trim()) return;
+  updatePurchaseOrderStatus(orderId, 'received', { locationId: String(locationId), locationName: String(locationName || '') });
 }
 
 function isGmailConnected() {
@@ -9357,13 +9385,17 @@ function requestCreditNoteEditFromReport(creditNoteId) {
   navigateTo('credit-note');
 }
 
-function redirectPurchaseOrderToGrv(orderId) {
+function redirectPurchaseOrderToGrv(orderId, locationOverride = {}) {
   const id = String(orderId || '').trim();
   if (!id) return;
 
   appState.grv = {
     ...appState.grv,
     pendingSourcePoId: id,
+    pendingSourceLocation: {
+      locationId: String(locationOverride.locationId || ''),
+      locationName: String(locationOverride.locationName || '')
+    },
     actionError: '',
     filters: {
       ...appState.grv.filters,
@@ -10410,18 +10442,22 @@ async function openGrvFromPurchaseOrder(orderId) {
     return;
   }
 
+  const chosenLocation = appState.grv.pendingSourceLocation || {};
+  const chosenLocationId = String(chosenLocation.locationId || '').trim();
   const orderLineLocationIds = (order.items || [])
     .map((line) => String(line.locationId || line.targetLocation || '').trim())
     .filter(Boolean);
-  const locationId = String(order.locationId || order.targetLocation || orderLineLocationIds[0] || '');
-  const locationName = locationId ? getGrvLocationName(locationId, '') : '';
+  const locationId = chosenLocationId || String(order.locationId || order.targetLocation || orderLineLocationIds[0] || '');
+  const locationName = chosenLocationId
+    ? (chosenLocation.locationName || getGrvLocationName(locationId, ''))
+    : (locationId ? getGrvLocationName(locationId, '') : '');
   const receiptItems = (order.items || []).flatMap((line) => {
     const orderedQty = Number(line.qty || 0);
     const alreadyReceivedQty = Number(line.receivedQty || 0);
     const outstandingQty = Math.max(orderedQty - alreadyReceivedQty, 0);
     if (outstandingQty <= 0) return [];
-    const lineLocationId = String(line.locationId || line.targetLocation || locationId || fallbackLocationId);
-    const lineLocationName = line.locationName || line.targetLocationName || getGrvLocationName(lineLocationId, locationName);
+    const lineLocationId = chosenLocationId || String(line.locationId || line.targetLocation || locationId);
+    const lineLocationName = chosenLocationId ? locationName : (line.locationName || line.targetLocationName || getGrvLocationName(lineLocationId, locationName));
     const stockItem = getGrvStockItemById(line.stockItemId);
     if (stockItem && !isOrderableStockItem(stockItem)) return [];
     return [{
@@ -10447,6 +10483,7 @@ async function openGrvFromPurchaseOrder(orderId) {
   appState.grv = {
     ...appState.grv,
     pendingSourcePoId: '',
+    pendingSourceLocation: null,
     lineDetailDraft: null,
     missingSupplierPrompt: null,
     draftReceipt: createEmptyGrvDraft({
@@ -20513,6 +20550,9 @@ function renderApp() {
       onRemoveLine: withPermission('purchaseOrders', ACTION_PERMISSION_MAP.deleteRecords, removePurchaseOrderLine, 'You do not have permission to remove purchase order lines.'),
       onSave: savePurchaseOrder,
       onStatus: updatePurchaseOrderStatus,
+      onRequestReceive: requestReceivePurchaseOrder,
+      onCancelReceive: cancelReceivePurchaseOrder,
+      onConfirmReceive: confirmReceivePurchaseOrder,
       onSend: sendPurchaseOrder,
       onRequestDelete: withPermission('purchaseOrders', ACTION_PERMISSION_MAP.deleteRecords, requestPurchaseOrderDelete, 'You do not have permission to delete purchase orders.'),
       onConfirmDelete: withPermission('purchaseOrders', ACTION_PERMISSION_MAP.deleteRecords, confirmPurchaseOrderDelete, 'You do not have permission to delete purchase orders.'),
