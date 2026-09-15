@@ -142,7 +142,7 @@
    drawer column reads identically and is simpler than GRV's per-section approach. */
 #view-credit-note .cn-overlayCard--draft {
   position: relative;
-  width: min(1760px, 98vw);
+  width: min(2000px, 98vw);
   height: 100vh;
   max-height: 100vh;
   display: flex;
