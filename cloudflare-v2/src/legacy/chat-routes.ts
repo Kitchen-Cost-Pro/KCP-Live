@@ -574,6 +574,21 @@ async function executeTool(
         const month = monthArg ? parseInt(monthArg.slice(5, 7), 10) : now.getUTCMonth() + 1;
         const fromDate = `${year}-${String(month).padStart(2, '0')}-01`;
         const toDate = month === 12 ? `${year + 1}-01-01` : `${year}-${String(month + 1).padStart(2, '0')}-01`;
+        // Totals come from an unbounded aggregate so they're always exact; the enumerated list
+        // below is capped so a busy month can't dump thousands of rows into the LLM prompt.
+        const REFUND_LIST_CAP = 200;
+        const totalsRow = await env.DB.prepare(`
+          SELECT COUNT(*) AS refund_count,
+                 COALESCE(SUM(ABS(COALESCE(gross_total, total, 0))), 0) AS total_refunded
+            FROM yoco_orders
+           WHERE workspace_id = ?1
+             AND order_type = 'refund'
+             AND occurred_at >= ?2
+             AND occurred_at < ?3
+        `).bind(workspaceId, `${fromDate}T00:00:00`, `${toDate}T00:00:00`).first<Record<string, unknown>>();
+        const refundCount = numberValue(totalsRow?.refund_count, 0);
+        if (!refundCount) return `No recorded refunds found for ${year}-${String(month).padStart(2, '0')}.`;
+        const total = numberValue(totalsRow?.total_refunded, 0);
         const result = await env.DB.prepare(`
           SELECT provider_refund_id, parent_yoco_order_id, occurred_at,
                  ABS(COALESCE(gross_total, total, 0)) AS gross_amount,
@@ -585,15 +600,17 @@ async function executeTool(
              AND occurred_at >= ?2
              AND occurred_at < ?3
            ORDER BY occurred_at DESC
-        `).bind(workspaceId, `${fromDate}T00:00:00`, `${toDate}T00:00:00`).all<Record<string, unknown>>();
+           LIMIT ?4
+        `).bind(workspaceId, `${fromDate}T00:00:00`, `${toDate}T00:00:00`, REFUND_LIST_CAP).all<Record<string, unknown>>();
         const refunds = result.results || [];
-        if (!refunds.length) return `No recorded refunds found for ${year}-${String(month).padStart(2, '0')}.`;
-        const total = refunds.reduce((sum, row) => sum + numberValue(row.gross_amount, 0), 0);
         return JSON.stringify({
           source: 'KCP canonical Yoco V2 reporting records',
           month: `${year}-${String(month).padStart(2, '0')}`,
           total_refunded: `R${total.toFixed(2)}`,
-          count: refunds.length,
+          count: refundCount,
+          ...(refundCount > refunds.length
+            ? { note: `Showing the ${refunds.length} most recent of ${refundCount} refunds; totals above cover all of them.` }
+            : {}),
           refunds: refunds.map((row) => ({
             date: String(row.occurred_at || '').slice(0, 10),
             amount: `R${numberValue(row.gross_amount, 0).toFixed(2)}`,
@@ -612,26 +629,30 @@ async function executeTool(
         const month = monthArg ? parseInt(monthArg.slice(5, 7), 10) : now.getUTCMonth() + 1;
         const fromDate = `${year}-${String(month).padStart(2, '0')}-01`;
         const toDate = month === 12 ? `${year + 1}-01-01` : `${year}-${String(month + 1).padStart(2, '0')}-01`;
+        // Aggregate in SQL rather than pulling every order row over the wire to sum in JS — a
+        // busy tenant-month can have thousands of orders, and only the per-day totals are ever
+        // used below.
         const result = await env.DB.prepare(`
-          SELECT occurred_at, COALESCE(gross_total, total, 0) AS gross_amount,
-                 COALESCE(vat_total, 0) AS vat_amount,
-                 COALESCE(net_total, total, 0) AS net_amount
+          SELECT date(occurred_at) AS day,
+                 COUNT(*) AS day_count,
+                 COALESCE(SUM(COALESCE(gross_total, total, 0)), 0) AS day_revenue
             FROM yoco_orders
            WHERE workspace_id = ?1
              AND order_type = 'sale'
              AND lower(COALESCE(status, 'completed')) IN ('completed', 'paid', 'succeeded')
              AND occurred_at >= ?2
              AND occurred_at < ?3
-           ORDER BY occurred_at
+           GROUP BY day
+           ORDER BY day
         `).bind(workspaceId, `${fromDate}T00:00:00`, `${toDate}T00:00:00`).all<Record<string, unknown>>();
-        const orders = result.results || [];
-        if (!orders.length) return `No recorded completed sales found for ${year}-${String(month).padStart(2, '0')}.`;
-        const totalRevenue = orders.reduce((sum, row) => sum + numberValue(row.gross_amount, 0), 0);
-        const orderCount = orders.length;
+        const dayRows = result.results || [];
+        if (!dayRows.length) return `No recorded completed sales found for ${year}-${String(month).padStart(2, '0')}.`;
+        const totalRevenue = dayRows.reduce((sum, row) => sum + numberValue(row.day_revenue, 0), 0);
+        const orderCount = dayRows.reduce((sum, row) => sum + numberValue(row.day_count, 0), 0);
         const byDay: Record<string, number> = {};
-        for (const row of orders) {
-          const day = String(row.occurred_at || '').slice(0, 10);
-          if (day) byDay[day] = (byDay[day] || 0) + numberValue(row.gross_amount, 0);
+        for (const row of dayRows) {
+          const day = String(row.day || '');
+          if (day) byDay[day] = numberValue(row.day_revenue, 0);
         }
         return JSON.stringify({
           source: 'KCP canonical Yoco V2 reporting records',

@@ -450,9 +450,16 @@
   padding: 0 28px 20px;
 }
 
+/* While a UOM dropdown (position:fixed, viewport-anchored) is open, block scrolling instead of
+   trying to keep the menu tracking the row — see the comment on the wheel/touchmove guard in
+   bindGrvEvents. */
+#view-grv .grv-draft-scroll--locked {
+  overflow: hidden;
+}
+
 #view-grv .grv-table {
   width: 100%;
-  min-width: 1470px;
+  min-width: 1530px;
   table-layout: fixed;
   border-collapse: separate;
   border-spacing: 0;
@@ -471,15 +478,15 @@
 }
 
 #view-grv .grv-tableCol--qty {
-  width: 108px;
+  width: 132px;
 }
 
 #view-grv .grv-tableCol--pack {
-  width: 116px;
+  width: 152px;
 }
 
 #view-grv .grv-tableCol--unit-price {
-  width: 112px;
+  width: 128px;
 }
 
 #view-grv .grv-tableCol--variance {
@@ -487,7 +494,7 @@
 }
 
 #view-grv .grv-tableCol--price {
-  width: 140px;
+  width: 156px;
 }
 
 #view-grv .grv-tableCol--vat {
@@ -595,7 +602,7 @@
   grid-template-columns: 16px minmax(0, 1fr);
   align-items: center;
   gap: 8px;
-  border: 0;
+  border: 1px solid transparent;
   border-radius: 10px;
   padding: 0 10px;
   background: transparent;
@@ -605,6 +612,7 @@
   font-weight: 850;
   text-align: left;
   cursor: pointer;
+  transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
 }
 
 #view-grv .grv-inlineUomMenu button i {
@@ -622,14 +630,22 @@
   white-space: nowrap;
 }
 
-#view-grv .grv-inlineUomMenu button:hover {
-  background: rgba(37, 99, 235, 0.14);
-  color: #dbeafe;
+#view-grv .grv-inlineUomMenu button:hover,
+#view-grv .grv-inlineUomMenu button:focus-visible {
+  background: rgba(37, 99, 235, 0.32);
+  border-color: rgba(96, 165, 250, 0.55);
+  color: #ffffff;
 }
 
 #view-grv .grv-inlineUomMenu button.is-selected {
   background: rgba(37, 99, 235, 0.24);
   color: #ffffff;
+}
+
+#view-grv .grv-inlineUomMenu button.is-selected:hover,
+#view-grv .grv-inlineUomMenu button.is-selected:focus-visible {
+  background: rgba(37, 99, 235, 0.42);
+  border-color: rgba(96, 165, 250, 0.65);
 }
 
 #view-grv .grv-inlineUomMenu button svg {
@@ -1037,11 +1053,11 @@
 }
 
 #view-grv .grv-tableInput--pack {
-  padding-right: 42px;
+  padding-right: 38px;
 }
 
 #view-grv .grv-tableInput--money {
-  padding-left: 34px;
+  padding-left: 30px;
 }
 
 #view-grv .grv-currencyGhost {
@@ -1414,6 +1430,16 @@
   transform: translateY(-1px);
 }
 
+/* backdrop-filter lives on ::before, not on .grv-overlay itself: putting it directly on the
+   overlay makes IT the containing block for every position:fixed descendant inside it (a
+   non-obvious CSS rule — filter/backdrop-filter behaves like transform for this purpose), which
+   then makes those descendants get clipped by any overflow:hidden ancestor between them and the
+   overlay (e.g. .grv-overlayCard--draft) instead of escaping to the viewport like a normal fixed
+   element. That silently broke the position:fixed UOM dropdown (positionInlineUomMenus) and the
+   per-row location-picker modal for rows whose menu/modal happened to render outside the drawer
+   card's clipped box — worse the longer the draft list, since more rows meant more dropdowns
+   landing in the clipped zone. The pseudo-element carries the blur without being a real ancestor
+   of the overlay's actual content, so nothing inside gets rerouted to it as a containing block. */
 #view-grv .grv-overlay {
   position: fixed;
   inset: 0;
@@ -1422,7 +1448,15 @@
   place-items: center;
   padding: 24px;
   background: rgba(2, 8, 23, 0.72);
+}
+
+#view-grv .grv-overlay::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
   backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
 }
 
 #view-grv .grv-overlay--drawer {

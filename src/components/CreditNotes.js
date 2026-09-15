@@ -24,7 +24,7 @@ export function renderCreditNotes({ state, onCreditNoteFilterChange, onCreditNot
   const supplierMatches = getSupplierMatches(creditNotes.suppliers || [], draft.supplierName || '');
   const stockMatches = getStockMatches(creditNotes.stockItems || [], filters.stockSearch || '', filters.stockCategory || '', draft.items || []);
   const grvMatches = getProcessedGrvMatches(creditNotes.processedGrvs || [], filters.grvQuery || '');
-  const totals = calculateTotals(draft, getSupplierVatRate(state, draft.supplierId));
+  const totals = calculateTotals(draft, getSupplierVatRate(state, draft.supplierId), isWorkspaceVatRegistered(state));
   const selectedStockIds = new Set((filters.selectedStockIds || []).map(String));
   const selectedLineIndexes = new Set((filters.selectedLineIndexes || []).map(String));
   const headerReady = Boolean(String(draft.supplierName || '').trim() && String(draft.cnNumber || '').trim() && String(draft.date || '').trim() && String(draft.locationId || '').trim());
@@ -123,40 +123,11 @@ export function renderCreditNotes({ state, onCreditNoteFilterChange, onCreditNot
           </article>
         </aside>
 
-        <section class="cn-card cn-draft-panel">
-          <div class="cn-topbar">
-            <div class="cn-topbarTitle">
-              <h3>Draft Return Breakdown</h3>
-              <span>${(draft.items || []).length} ${(draft.items || []).length === 1 ? 'Item' : 'Items'}</span>
-            </div>
-            <div class="cn-topbarActions">
-              <button type="button" class="cn-outlineButton" data-cn-select-all-lines ${(draft.items || []).length ? '' : 'disabled'}>Select all</button>
-              <button type="button" class="cn-outlineButton cn-outlineButton--danger" data-cn-remove-selected ${(selectedLineIndexes.size ? '' : 'disabled')}>Remove selected</button>
-              <button type="button" class="cn-outlineButton cn-outlineButton--danger" data-cn-clear-all ${(draft.items || []).length ? '' : 'disabled'}>Clear all</button>
-              <button type="button" class="cn-add-primary" data-cn-open-stock ${headerReady ? '' : 'disabled'}>+ Add Item</button>
-            </div>
-          </div>
-
-          <div class="cn-draft-scroll">
-            ${(draft.items || []).length ? renderDraftTable(draft, getSupplierVatRate(state, draft.supplierId), selectedLineIndexes, creditNotes.locations || [], filters.openDropdown || '') : `
-              <div class="cn-empty"><span>No returns drafted.</span></div>
-            `}
-          </div>
-
-          <div class="cn-bottombar">
-            <div class="cn-summary">
-              <div><span>Ex-VAT</span><strong class="cn-valueNegative">${formatSignedCurrency(-totals.subtotal)}</strong></div>
-              <div><span>VAT</span><strong class="cn-valueNegative">${formatSignedCurrency(-totals.vat)}</strong></div>
-            </div>
-            <button type="button" class="cn-commit-primary" data-cn-save ${(draft.items || []).length && creditNotes.actionStatus !== 'saving' ? '' : 'disabled'}>
-              <div class="cn-commit-label">Commit Credit</div>
-              <div class="cn-commit-value">${formatSignedCurrency(-totals.totalIncl)}</div>
-            </button>
-          </div>
-        </section>
+        ${renderCnDraftLauncher(draft, totals, headerReady)}
       </div>
     </div>
 
+    ${filters.overlay === 'draft' ? renderCnDraftDrawer(draft, totals, state, selectedLineIndexes, headerReady, creditNotes.actionStatus, creditNotes.actionError || '', creditNotes.locations || [], filters.openDropdown || '') : ''}
     ${filters.overlay === 'stock' ? renderStockOverlay(stockMatches, filters, creditNotes.locations || [], selectedStockIds, headerReady, draft.locationId || '') : ''}
     ${filters.overlay === 'grv' ? renderProcessedGrvOverlay(grvMatches, filters.grvQuery || '') : ''}
     ${filters.overlay === 'recent-notes' ? renderRecentCreditNotesOverlay(creditNotes.creditNotes || [], filters.noteQuery || '') : ''}
@@ -303,6 +274,16 @@ function bindCreditNoteEvents(view, state, filters, draft, onCreditNoteFilterCha
     if (!filters.openDropdown) return;
     if (event.target.closest('[data-cn-dropdown-root]')) return;
     onCreditNoteFilterChange?.({ openDropdown: '', headerLocationQuery: '' });
+  });
+
+  view.querySelector('[data-cn-open-draft]')?.addEventListener('click', () => {
+    onCreditNoteFilterChange?.({ overlay: 'draft', selectedStockIds: [], calendarCursor: '', openDropdown: '' });
+  });
+
+  view.querySelectorAll('[data-cn-draft-close]').forEach((button) => {
+    button.addEventListener('click', () => {
+      onCreditNoteFilterChange?.({ overlay: '', selectedStockIds: [], calendarCursor: '', openDropdown: '' });
+    });
   });
 
   view.querySelector('[data-cn-open-stock]')?.addEventListener('click', () => {
@@ -474,7 +455,7 @@ function renderSupplierDropdown(matches = [], openDropdown = '', currentValue = 
   `;
 }
 
-function renderDraftTable(draft, vatRate, selectedLineIndexes = new Set(), locations = [], openDropdown = '') {
+function renderDraftTable(draft, vatRate, vatRegistered = true, selectedLineIndexes = new Set(), locations = [], openDropdown = '') {
   return `
     <table class="cn-table">
       <thead>
@@ -491,13 +472,25 @@ function renderDraftTable(draft, vatRate, selectedLineIndexes = new Set(), locat
       </thead>
       <tbody>
         ${(draft.items || []).map((item, index) => {
-          const baseQty = Number(item.returnedQty || 0) * Math.max(Number(item.packSize || 1), 1);
-          const lineTotalEx = Number(item.unitCost || 0) * baseQty;
-          const lineVat = item.vatEnabled === false ? 0 : lineTotalEx * (vatRate / 100);
-          const packPriceEx = Number(item.unitCost || 0) * Math.max(Number(item.packSize || 1), 1);
-          const packPriceDisplay = item.vatEnabled !== false && draft.pricesIncludeVat
-            ? packPriceEx * (1 + (vatRate / 100))
-            : packPriceEx;
+          const packSize = Math.max(Number(item.packSize || 1), 1);
+          const unitCostEx = Number(item.unitCost || 0);
+          const isLineVatable = item.vatEnabled !== false;
+          const rate = vatRate / 100;
+          // Mirrors GRVEntry.js's renderDraftRow: on a non-VAT-registered workspace, a VATable
+          // line's stored unitCost already carries VAT (see updateCreditNoteLine's
+          // finalizeCreditNoteCost), so raw unitCost * qty is gross, not net — un-gross it first
+          // so the displayed Total/VAT/Unit Price stay correct instead of double-counting VAT.
+          const costAlreadyIncludesVat = isLineVatable && !vatRegistered;
+          const baseQty = Number(item.returnedQty || 0) * packSize;
+          const rawLineTotal = unitCostEx * baseQty;
+          const lineTotalEx = costAlreadyIncludesVat ? rawLineTotal / (1 + rate) : rawLineTotal;
+          const lineVat = isLineVatable ? lineTotalEx * rate : 0;
+          const displayedUnitCost = costAlreadyIncludesVat ? unitCostEx / (1 + rate) : unitCostEx;
+          const rawPackPriceEx = unitCostEx * packSize;
+          const showInclVat = draft.pricesIncludeVat && isLineVatable;
+          const packPriceDisplay = showInclVat
+            ? (costAlreadyIncludesVat ? rawPackPriceEx : rawPackPriceEx * (1 + rate))
+            : (costAlreadyIncludesVat ? rawPackPriceEx / (1 + rate) : rawPackPriceEx);
           const rawPackPriceDisplay = String(item.packPriceDisplay ?? '').trim();
           return `
             <tr>
@@ -540,7 +533,7 @@ function renderDraftTable(draft, vatRate, selectedLineIndexes = new Set(), locat
                 </span>
                 <small class="cn-cellHint">${escapeHtml(String(item.unit || 'ea').toUpperCase())} / pack</small>
               </td>
-              <td class="cn-valueNeutral">${formatCurrency(item.unitCost || 0)}</td>
+              <td class="cn-valueNeutral">${formatCurrency(displayedUnitCost)}</td>
               <td>
                 <span class="cn-moneyField">
                   <i>R</i>
@@ -571,6 +564,86 @@ function renderDraftTable(draft, vatRate, selectedLineIndexes = new Set(), locat
         }).join('')}
       </tbody>
     </table>
+  `;
+}
+
+function renderCnDraftLauncher(draft, totals, headerReady) {
+  const itemCount = (draft.items || []).length;
+  return `
+    <section class="cn-card cn-draftLauncher">
+      <div>
+        <p class="cn-side-title">Draft Return</p>
+        <h3>${itemCount} ${itemCount === 1 ? 'Item' : 'Items'}</h3>
+        <span>Open the full return breakdown in a wide slide-out drawer.</span>
+      </div>
+      <button type="button" class="cn-add-primary" data-cn-open-draft ${headerReady ? '' : 'disabled'}>
+        Open Draft Table
+      </button>
+      <div class="cn-draftLauncherMetrics">
+        <div>
+          <span>Ex-VAT</span>
+          <strong>${formatSignedCurrency(-totals.subtotal)}</strong>
+        </div>
+        <div>
+          <span>VAT</span>
+          <strong>${formatSignedCurrency(-totals.vat)}</strong>
+        </div>
+        <div>
+          <span>Total</span>
+          <strong>${formatSignedCurrency(-totals.totalIncl)}</strong>
+        </div>
+      </div>
+      ${!headerReady ? '<small>Complete supplier, credit note number, date, and location first.</small>' : ''}
+    </section>
+  `;
+}
+
+function renderCnDraftDrawer(draft, totals, state, selectedLineIndexes, headerReady, actionStatus, actionError = '', locations = [], openDropdown = '') {
+  return `
+    <div class="cn-overlay cn-overlay--drawer" data-cn-draft-overlay>
+      <section class="cn-overlayCard cn-overlayCard--draft cn-draft-panel" role="dialog" aria-modal="true">
+        <button type="button" class="cn-iconButton cn-draftDrawerClose" data-cn-draft-close aria-label="Close draft table">
+          ${icon('x')}
+        </button>
+        ${renderCnDraftPanelContent(draft, totals, state, selectedLineIndexes, headerReady, actionStatus, actionError, locations, openDropdown)}
+      </section>
+    </div>
+  `;
+}
+
+function renderCnDraftPanelContent(draft, totals, state, selectedLineIndexes, headerReady, actionStatus, actionError = '', locations = [], openDropdown = '') {
+  return `
+    <div class="cn-topbar">
+      <div class="cn-topbarTitle">
+        <h3>Draft Return Breakdown</h3>
+        <span>${(draft.items || []).length} ${(draft.items || []).length === 1 ? 'Item' : 'Items'}</span>
+      </div>
+      <div class="cn-topbarActions">
+        <button type="button" class="cn-outlineButton" data-cn-select-all-lines ${(draft.items || []).length ? '' : 'disabled'}>Select all</button>
+        <button type="button" class="cn-outlineButton cn-outlineButton--danger" data-cn-remove-selected ${(selectedLineIndexes.size ? '' : 'disabled')}>Remove selected</button>
+        <button type="button" class="cn-outlineButton cn-outlineButton--danger" data-cn-clear-all ${(draft.items || []).length ? '' : 'disabled'}>Clear all</button>
+        <button type="button" class="cn-add-primary" data-cn-open-stock ${headerReady ? '' : 'disabled'}>+ Add Item</button>
+      </div>
+    </div>
+
+    ${actionError ? `<div class="cn-drawerNotice">${renderNotice(actionError, 'error')}</div>` : ''}
+
+    <div class="cn-draft-scroll" data-scroll-key="cn-draft-table">
+      ${(draft.items || []).length ? renderDraftTable(draft, getSupplierVatRate(state, draft.supplierId), isWorkspaceVatRegistered(state), selectedLineIndexes, locations, openDropdown) : `
+        <div class="cn-empty"><span>No returns drafted.</span></div>
+      `}
+    </div>
+
+    <div class="cn-bottombar">
+      <div class="cn-summary">
+        <div><span>Ex-VAT</span><strong class="cn-valueNegative">${formatSignedCurrency(-totals.subtotal)}</strong></div>
+        <div><span>VAT</span><strong class="cn-valueNegative">${formatSignedCurrency(-totals.vat)}</strong></div>
+      </div>
+      <button type="button" class="cn-commit-primary" data-cn-save ${(draft.items || []).length && actionStatus !== 'saving' ? '' : 'disabled'}>
+        <div class="cn-commit-label">Commit Credit</div>
+        <div class="cn-commit-value">${formatSignedCurrency(-totals.totalIncl)}</div>
+      </button>
+    </div>
   `;
 }
 
@@ -1050,11 +1123,20 @@ function firstLocationIdForSite(locations = [], siteId = '') {
   return String((locations || []).find((location) => String(location.siteId || '') === String(siteId))?.id || '');
 }
 
-function calculateTotals(draft, vatRate) {
-  const subtotal = (draft.items || []).reduce((sum, item) => sum + (Number(item.returnedQty || 0) * Math.max(Number(item.packSize || 1), 1) * Number(item.unitCost || 0)), 0);
+function calculateTotals(draft, vatRate, vatRegistered = true) {
+  // See renderDraftTable's costAlreadyIncludesVat comment: on a non-VAT-registered workspace, a
+  // VATable line's stored unitCost is already gross, so it must be un-grossed before summing or
+  // Subtotal ends up equal to the gross Total while VAT is understated (or the VAT line item
+  // double-counts it, once here and once already baked into the stored cost).
+  const netLineTotal = (item) => {
+    const total = Number(item.returnedQty || 0) * Math.max(Number(item.packSize || 1), 1) * Number(item.unitCost || 0);
+    const isVatable = item.vatEnabled !== false;
+    return isVatable && !vatRegistered ? total / (1 + (vatRate / 100)) : total;
+  };
+  const subtotal = (draft.items || []).reduce((sum, item) => sum + netLineTotal(item), 0);
   const vat = (draft.items || []).reduce((sum, item) => {
     if (item.vatEnabled === false) return sum;
-    return sum + (Number(item.returnedQty || 0) * Math.max(Number(item.packSize || 1), 1) * Number(item.unitCost || 0) * (vatRate / 100));
+    return sum + netLineTotal(item) * (vatRate / 100);
   }, 0);
   return {
     subtotal,
@@ -1075,6 +1157,13 @@ function getVatRate(state) {
   // (e.g. beer) — it just can't reclaim it — so the rate itself must not be zeroed for everyone.
   const settings = state.settings?.draft || state.settings?.values || {};
   return Number(settings.vatRate ?? settings.vatPercentage ?? 15) || 15;
+}
+
+// Mirrors GRVEntry.js's isWorkspaceVatRegistered — whether THIS business can reclaim VAT, as
+// distinct from isCnSupplierVatRegistered (whether the supplier charges it at all).
+function isWorkspaceVatRegistered(state) {
+  const settings = state.settings?.draft || state.settings?.values || {};
+  return settings.vatRegistered !== false;
 }
 
 function findCnSupplierById(state, supplierId) {

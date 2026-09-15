@@ -196,10 +196,12 @@ export function renderGRVEntry({ state, onGrvFilterChange, onGrvAction = {} } = 
     ${filters.overlay === 'commit' ? renderGrvCommitOverlay(grv.commit || {}, grv.driveConnected === true) : ''}
     ${grv.lineDetailDraft?.entries?.length ? renderLineDetailOverlay(grv.lineDetailDraft, draft, grv.sites || [], grv.locations || [], vatRate) : ''}
     ${grv.missingSupplierPrompt ? renderMissingSupplierOverlay(grv.missingSupplierPrompt, grv.actionStatus === 'adding-supplier') : ''}
+    ${grv.duplicatePrompt ? renderDuplicateGrvOverlay(grv.duplicatePrompt) : ''}
   `;
 
   bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, onGrvAction);
   bindFieldHelpTooltips(view);
+  positionInlineUomMenus(view);
 
   // NOTE: the GRV toast is rendered ONCE by the global app-shell toast (appShell.js
   // getActiveSectionToast → grv). The old body portal here caused a duplicate/overlapping toast
@@ -315,10 +317,12 @@ function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, 
 
   view.querySelectorAll('[data-grv-line-uom-option]').forEach((button) => {
     button.addEventListener('click', () => {
+      // A single combined update (not a separate onUpdateLine + onGrvFilterChange) — see
+      // updateGrvLine's closeDropdown comment for why the two-render version broke scroll
+      // restore and jumped the draft table back to the top on every UOM pick.
       onGrvAction.onUpdateLine?.(Number(button.dataset.grvLineUomIndex || 0), {
         selectedUom: button.dataset.grvLineUomOption || ''
-      });
-      onGrvFilterChange?.({ openDropdown: '' });
+      }, { closeDropdown: true });
     });
   });
 
@@ -328,6 +332,21 @@ function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, 
     blurActiveDraftField();
     onGrvFilterChange?.({ openDropdown: '', headerLocationQuery: '' });
   });
+
+  // The open UOM menu is positioned in viewport coordinates (see positionInlineUomMenus) rather
+  // than flowing with the table, so it can't track the row while the draft table scrolls under
+  // it. Rather than repositioning it mid-scroll (which read as the menu clipping/jumping around
+  // the sticky bottom bar), the table simply can't scroll while a UOM dropdown is open — the
+  // .grv-draft-scroll--locked class above suppresses it via overflow:hidden, and this backs that
+  // up for wheel/touch input that can otherwise still scroll a nested element in some browsers.
+  // The user has to pick an option or close the dropdown (both clear openDropdown) before
+  // scrolling again.
+  if (String(filters.openDropdown || '').startsWith('grv-line-uom-')) {
+    const lockedScroll = view.querySelector('.grv-draft-scroll--locked');
+    const blockScroll = (event) => event.preventDefault();
+    lockedScroll?.addEventListener('wheel', blockScroll, { passive: false });
+    lockedScroll?.addEventListener('touchmove', blockScroll, { passive: false });
+  }
 
   view.querySelector('[data-grv-load-last]')?.addEventListener('click', () => onGrvAction.onLoadLastInvoice?.());
   view.querySelector('[data-grv-open-po]')?.addEventListener('click', () => {
@@ -446,6 +465,15 @@ function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, 
     onGrvAction.onDismissMissingSupplier?.();
   });
 
+  view.querySelector('[data-grv-duplicate-open]')?.addEventListener('click', () => onGrvAction.onOpenDuplicateReceipt?.());
+  view.querySelectorAll('[data-grv-duplicate-dismiss]').forEach((button) => {
+    button.addEventListener('click', () => onGrvAction.onDismissDuplicatePrompt?.());
+  });
+  view.querySelector('[data-grv-duplicate-overlay]')?.addEventListener('click', (event) => {
+    if (event.target !== event.currentTarget) return;
+    onGrvAction.onDismissDuplicatePrompt?.();
+  });
+
   view.querySelectorAll('[data-grv-filter]').forEach((field) => {
     const update = () => onGrvFilterChange?.({ [field.dataset.grvFilter]: field.value });
     field.addEventListener('input', update);
@@ -510,6 +538,11 @@ function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, 
   view.querySelectorAll('[data-grv-line]').forEach((field) => {
     if (field instanceof HTMLInputElement) {
       field.addEventListener('focus', () => selectAllOnFocusForZero(field));
+      // Narrow numeric cells (pack size / qty / pack price) can hold more digits than fit on
+      // screen at once; a native text input scrolls to keep the caret visible while typing,
+      // which leaves the LEADING digits hidden. Once the user is done editing, snap back to the
+      // start so the value reads correctly instead of mid-scrolled.
+      field.addEventListener('blur', () => { field.scrollLeft = 0; });
     }
     const applyLineChange = () => {
       onGrvAction.onPreserveFocus?.(field);
@@ -830,7 +863,7 @@ function renderDraftPanelContent(statusLabel, totals, draft, vatRate, vatRegiste
 
     ${actionError ? `<div class="grv-drawerNotice">${renderNotice(actionError, 'error')}</div>` : ''}
 
-    <div class="grv-draft-scroll">
+    <div class="grv-draft-scroll ${String(openDropdown || '').startsWith('grv-line-uom-') ? 'grv-draft-scroll--locked' : ''}" data-scroll-key="grv-draft-table">
       ${(draft.items || []).length ? renderDraftTable(draft, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes, locations, openDropdown, stockItems) : `
         <div class="grv-empty">
           <span>INVOICE EMPTY.</span>
@@ -1522,6 +1555,34 @@ function renderStockPickerItem(item, selected) {
   `;
 }
 
+// The UOM menu lives inside `.grv-draft-scroll`, which has `overflow: auto` so the table can
+// scroll — that clips any absolutely-positioned descendant that would otherwise escape its
+// bounds, no matter how high its z-index is. Switching the open menu to `position: fixed` and
+// placing it by hand (viewport coordinates from the trigger's own rect) sidesteps the clip
+// entirely; it also flips above the trigger when there isn't room below.
+function positionInlineUomMenus(view) {
+  view.querySelectorAll('.grv-inlineUomSelect.is-open > .grv-inlineUomMenu').forEach((menu) => {
+    const trigger = menu.previousElementSibling;
+    if (!trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    const menuWidth = Math.max(rect.width, 260);
+    const maxLeft = window.innerWidth - menuWidth - 12;
+    const left = Math.max(12, Math.min(rect.left, maxLeft));
+
+    menu.style.position = 'fixed';
+    menu.style.left = `${left}px`;
+    menu.style.width = `${menuWidth}px`;
+    menu.style.top = `${rect.bottom + 6}px`;
+
+    const menuHeight = menu.getBoundingClientRect().height;
+    const spaceBelow = window.innerHeight - rect.bottom - 12;
+    const spaceAbove = rect.top - 12;
+    if (menuHeight > spaceBelow && spaceAbove > spaceBelow) {
+      menu.style.top = `${Math.max(12, rect.top - menuHeight - 6)}px`;
+    }
+  });
+}
+
 function renderGrvLineUomSelect(line = {}, index = 0, openDropdown = '') {
   const options = getGrvLineUomOptions(line);
   const selected = String(line.selectedUom || line.receivingUom || line.purchaseUom || line.unit || options[0]?.value || 'ea');
@@ -1594,6 +1655,49 @@ function normalizeUomConfigurations(value = []) {
       isDefaultOrdering: ['true', '1', 'yes', 'on'].includes(String(entry.isDefaultOrdering ?? entry.defaultOrdering ?? entry.is_default_ordering ?? entry.defaultOrderUom ?? '').toLowerCase()) || entry.isDefaultOrdering === true || entry.defaultOrdering === true
     }))
     .filter((entry) => entry.customUom && entry.ratio > 0);
+}
+
+function renderDuplicateGrvOverlay(prompt) {
+  return `
+    <div class="grv-overlay" data-grv-duplicate-overlay>
+      <div class="grv-overlayCard grv-overlayCard--compact" role="dialog" aria-modal="true">
+        <div class="grv-overlayHeader">
+          <div>
+            <h3>Duplicate Invoice Number</h3>
+            <p>Invoice <strong>${escapeHtml(prompt.grvNumber || '')}</strong> has already been processed for <strong>${escapeHtml(prompt.supplierName || 'this supplier')}</strong>. Would you like to open the existing GRV instead?</p>
+          </div>
+          <button
+            type="button"
+            class="grv-removeBtn"
+            data-grv-duplicate-dismiss
+            aria-label="Close overlay"
+          >
+            ${icon('x')}
+          </button>
+        </div>
+
+        <div class="grv-overlayFooter">
+          <span>Saving this GRV is blocked while the invoice number matches an existing receipt for this supplier.</span>
+          <div class="grv-overlayFooterActions">
+            <button
+              type="button"
+              class="grv-add-btn"
+              data-grv-duplicate-dismiss
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              class="grv-add-primary"
+              data-grv-duplicate-open
+            >
+              Open Existing GRV
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 function renderMissingSupplierOverlay(prompt, isSaving) {

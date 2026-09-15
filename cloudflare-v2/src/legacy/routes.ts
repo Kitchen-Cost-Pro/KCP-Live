@@ -6129,6 +6129,10 @@ export async function postProductImport(
   workspaceId: string,
 ) {
   await scoped(request, env, auth, workspaceId);
+  const limited = await checkRateLimit(env.CENTRAL_DB, `bulk-import:products:${workspaceId}`, 10, 300);
+  if (limited.blocked) {
+    return json(request, env, { ok: false, error: "Too many product imports for this workspace. Wait a few minutes and try again." }, { status: 429 });
+  }
   const payload = await readJson<Record<string, unknown>>(request);
   const rows = arrayValue(payload.rows || payload.products || payload.items);
   let importedCount = 0;
@@ -6444,6 +6448,10 @@ export async function postSupplierImport(
   workspaceId: string,
 ) {
   await scoped(request, env, auth, workspaceId);
+  const limited = await checkRateLimit(env.CENTRAL_DB, `bulk-import:suppliers:${workspaceId}`, 10, 300);
+  if (limited.blocked) {
+    return json(request, env, { ok: false, error: "Too many supplier imports for this workspace. Wait a few minutes and try again." }, { status: 429 });
+  }
   const payload = await readJson<Record<string, unknown>>(request);
   const rows = arrayValue(payload.rows || payload.suppliers);
   const errors: Array<{ code: string; message: string }> = [];
@@ -6914,6 +6922,10 @@ export async function postStockImport(
   workspaceId: string,
 ) {
   await scoped(request, env, auth, workspaceId);
+  const limited = await checkRateLimit(env.CENTRAL_DB, `bulk-import:stock-items:${workspaceId}`, 10, 300);
+  if (limited.blocked) {
+    return json(request, env, { ok: false, error: "Too many stock imports for this workspace. Wait a few minutes and try again." }, { status: 429 });
+  }
   const payload = await readJson<{
     items?: unknown[];
     options?: Record<string, unknown>;
@@ -6959,6 +6971,10 @@ export async function postStockLocationCostsImport(
 ) {
   await scoped(request, env, auth, workspaceId);
   await assertWorkspacePermission(env, auth, workspaceId, "nav-ingredients");
+  const limited = await checkRateLimit(env.CENTRAL_DB, `bulk-import:location-costs:${workspaceId}`, 10, 300);
+  if (limited.blocked) {
+    return json(request, env, { ok: false, error: "Too many location-cost imports for this workspace. Wait a few minutes and try again." }, { status: 429 });
+  }
   const payload = await readJson<{
     locationId?: unknown;
     locationName?: unknown;
@@ -8845,6 +8861,9 @@ export async function deletePurchaseOrderRoute(
   const idValue = text(orderId);
   await env.DB.batch([
     env.DB.prepare(
+      `UPDATE grvs SET purchase_order_id = NULL WHERE workspace_id = ?1 AND purchase_order_id = ?2`,
+    ).bind(workspaceId, idValue),
+    env.DB.prepare(
       `DELETE FROM purchase_order_lines WHERE workspace_id = ?1 AND purchase_order_id = ?2`,
     ).bind(workspaceId, idValue),
     env.DB.prepare(
@@ -8872,6 +8891,9 @@ export async function postPurchaseOrderBulkDelete(
   if (!ids.length) return json(request, env, { ok: true, deleted: 0 });
 
   const statements = ids.flatMap((orderId) => [
+    env.DB.prepare(
+      `UPDATE grvs SET purchase_order_id = NULL WHERE workspace_id = ?1 AND purchase_order_id = ?2`,
+    ).bind(workspaceId, orderId),
     env.DB.prepare(
       `DELETE FROM purchase_order_lines WHERE workspace_id = ?1 AND purchase_order_id = ?2`,
     ).bind(workspaceId, orderId),
@@ -15612,13 +15634,21 @@ export async function getDashboard(
   // else (wastage/adjustment/stock-take) derives qty × current cost.
   const CLASS_VALUE_SQL = `CASE WHEN ${IS_SALE_SQL} OR ${IS_GRV_SQL} OR ${IS_CREDIT_SQL} THEN ${TXN_VALUE_SQL} ELSE ${DERIVED_VALUE_SQL} END`;
 
-  // Grouped movement rows (returned to the client for reference / legacy fallbacks).
+  // Movement rows (returned to the client for reference / legacy fallbacks). Previously grouped
+  // by (movement_type, metadata_json), which forces SQLite to sort/hash on the full JSON blob of
+  // every row for no real benefit — the only consumer, dashboardTileService.js's
+  // summarizeMovements(), just sums value_delta per row into per-type buckets itself, so a
+  // per-group SUM followed by a per-row SUM is mathematically identical to summing the raw rows
+  // directly (and this is in fact more correct: grouping by metadata_json previously let one
+  // arbitrary row's metadata stand in for a whole group when classifying wastage vs. manual
+  // adjustments, which only happened to work because metadata_json is almost always distinct
+  // per row anyway).
   const movements = await env.DB.prepare(
     `SELECT
         sm.movement_type AS movement_type,
         sm.metadata_json AS metadata_json,
-        COALESCE(SUM(sm.quantity_delta), 0) AS quantity_delta,
-        COALESCE(SUM(${CLASS_VALUE_SQL}), 0) AS value_delta
+        sm.quantity_delta AS quantity_delta,
+        COALESCE(${CLASS_VALUE_SQL}, 0) AS value_delta
        FROM stock_movements sm
        LEFT JOIN stock_items si ON si.id = sm.stock_item_id AND si.workspace_id = sm.workspace_id
        LEFT JOIN stock_item_location_prices silp
@@ -15626,8 +15656,7 @@ export async function getDashboard(
         AND silp.stock_item_id = sm.stock_item_id
         AND silp.location_id = sm.location_id
       WHERE sm.workspace_id = ?1 ${movementLocationClause}
-        ${movementDateClause}
-      GROUP BY sm.movement_type, sm.metadata_json`,
+        ${movementDateClause}`,
   )
     .bind(...movementBinds)
     .all();

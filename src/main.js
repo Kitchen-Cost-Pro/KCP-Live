@@ -980,6 +980,24 @@ let onboardingAiScannedRows = null;
 
 const ONBOARDING_AI_MAX_FILE_BYTES = 8 * 1024 * 1024; // generous for a compressed phone photo
 
+// Recipe row validation (mapLegacyRecipeRows) checks each row's product/ingredient against
+// appState.recipes.items/ingredients, which are normally hydrated by startRecipeSubscription —
+// but that subscription only starts while the active route is 'recipes' (see
+// bootstrapActiveRouteForWorkspace), so it never runs while the onboarding wizard is open over
+// another route. Fetch that data directly here so recipe rows can be validated correctly.
+async function ensureOnboardingRecipeDataLoaded() {
+  const workspaceId = appState.workspace?.id;
+  if (!workspaceId) return;
+  const { fetchRecipeItems } = await import('./services/recipeService.js');
+  const { items, ingredients, locations } = await fetchRecipeItems(workspaceId);
+  appState.recipes = {
+    ...appState.recipes,
+    items,
+    ingredients,
+    locations: locations || appState.recipes.locations || []
+  };
+}
+
 async function buildOnboardingImportPreview(kind, file) {
   if (kind === 'suppliers') {
     const rows = await parseDataFile(file, { preferredSheetNames: ['Supplier_Import'] });
@@ -998,6 +1016,9 @@ async function buildOnboardingImportPreview(kind, file) {
       skippedCount: Number(review.skippedCount || review.errors?.length || 0),
       errorSummary: formatImportErrors(review.errors || [], 5)
     };
+  }
+  if (appState.route.active !== 'recipes') {
+    await ensureOnboardingRecipeDataLoaded();
   }
   const rows = await parseDataFile(file, { preferredSheetNames: ['Recipe_Import'] });
   const { recipes, review } = mapLegacyRecipeRows(rows);
@@ -1210,11 +1231,23 @@ async function onboardingScanWithAi(kind, file) {
     let recipeIngredients = appState.recipes?.ingredients || [];
     if (kind === 'recipes') {
       const { fetchRecipeItems } = await import('./services/recipeService.js');
-      const { items, ingredients } = await fetchRecipeItems(workspaceId);
+      const { items, ingredients, locations } = await fetchRecipeItems(workspaceId);
       knownProductNames = (items || [])
         .filter((item) => item.name && String(item.status || '').toLowerCase() === 'missing')
         .map((item) => item.name);
       recipeIngredients = ingredients || recipeIngredients;
+      // mapLegacyRecipeRows below (and the confirm-time importRecipeFile) validate rows against
+      // appState.recipes.items/ingredients, which is normally hydrated by startRecipeSubscription —
+      // but that never runs while the onboarding wizard is open over a non-'recipes' route, so
+      // seed it here with the data we just fetched.
+      if (appState.route.active !== 'recipes') {
+        appState.recipes = {
+          ...appState.recipes,
+          items,
+          ingredients,
+          locations: locations || appState.recipes.locations || []
+        };
+      }
     }
 
     const { rows } = await extractDataWithAiRetrying(workspaceId, kind, file, { knownProductNames });
@@ -9237,13 +9270,41 @@ async function savePurchaseOrder(updates = {}) {
   }
 }
 
-async function updatePurchaseOrderStatus(orderId, status) {
+async function updatePurchaseOrderStatus(orderId, status, options = {}) {
   if (String(status || '').toLowerCase() === 'received') {
-    redirectPurchaseOrderToGrv(orderId);
+    redirectPurchaseOrderToGrv(orderId, { locationId: options.locationId || '', locationName: options.locationName || '' });
     return;
   }
 
   await sendPurchaseOrder(orderId);
+}
+
+function requestReceivePurchaseOrder(orderId) {
+  const id = String(orderId || '').trim();
+  if (!id) return;
+  const order = getPurchaseOrderById(id);
+  const orderLineLocationIds = (order?.items || [])
+    .map((line) => String(line.locationId || line.targetLocation || '').trim())
+    .filter(Boolean);
+  const guessLocationId = String(order?.locationId || order?.targetLocation || orderLineLocationIds[0] || '');
+  appState.purchaseOrders = {
+    ...appState.purchaseOrders,
+    receivePrompt: { orderId: id, locationId: guessLocationId }
+  };
+  renderApp();
+}
+
+function cancelReceivePurchaseOrder() {
+  if (!appState.purchaseOrders.receivePrompt) return;
+  appState.purchaseOrders = { ...appState.purchaseOrders, receivePrompt: null };
+  renderApp();
+}
+
+function confirmReceivePurchaseOrder(locationId, locationName) {
+  const orderId = appState.purchaseOrders.receivePrompt?.orderId || '';
+  appState.purchaseOrders = { ...appState.purchaseOrders, receivePrompt: null };
+  if (!orderId || !String(locationId || '').trim()) return;
+  updatePurchaseOrderStatus(orderId, 'received', { locationId: String(locationId), locationName: String(locationName || '') });
 }
 
 function isGmailConnected() {
@@ -9324,13 +9385,17 @@ function requestCreditNoteEditFromReport(creditNoteId) {
   navigateTo('credit-note');
 }
 
-function redirectPurchaseOrderToGrv(orderId) {
+function redirectPurchaseOrderToGrv(orderId, locationOverride = {}) {
   const id = String(orderId || '').trim();
   if (!id) return;
 
   appState.grv = {
     ...appState.grv,
     pendingSourcePoId: id,
+    pendingSourceLocation: {
+      locationId: String(locationOverride.locationId || ''),
+      locationName: String(locationOverride.locationName || '')
+    },
     actionError: '',
     filters: {
       ...appState.grv.filters,
@@ -9967,6 +10032,7 @@ function openManualGrvDraft() {
     pendingSourcePoId: '',
     lineDetailDraft: null,
     missingSupplierPrompt: null,
+    duplicatePrompt: null,
     draftReceipt: createEmptyGrvDraft(),
     editingReceiptId: '',
     actionError: '',
@@ -10000,6 +10066,7 @@ function openGrvEditDraft(receipt) {
     pendingEditReceiptId: '',
     lineDetailDraft: null,
     missingSupplierPrompt: null,
+    duplicatePrompt: null,
     draftReceipt: createEmptyGrvDraft({
       ...receipt,
       invoiceDiscountEx: receipt.invoiceDiscountEx || receipt.discountEx || ''
@@ -10023,6 +10090,55 @@ function openGrvEditDraft(receipt) {
 
 function cancelGrvEditDraft() {
   openManualGrvDraft();
+}
+
+// Safeguard against re-keying the same invoice twice: matches on GRV/invoice number plus
+// supplier (by id when both sides have one, otherwise by normalized name), excluding whichever
+// receipt is currently being edited so re-saving an existing GRV never flags itself.
+function findDuplicateGrvReceipt(draft) {
+  const grvNumber = String(draft.grvNumber || '').trim().toLowerCase();
+  if (!grvNumber) return null;
+  const draftSupplierId = String(draft.supplierId || '').trim();
+  const draftSupplierName = normalizeSupplierLookupName(draft.supplierName || '');
+  if (!draftSupplierId && !draftSupplierName) return null;
+  const editingReceiptId = String(appState.grv.editingReceiptId || '').trim();
+
+  return (appState.grv.receipts || []).find((receipt) => {
+    if (editingReceiptId && String(receipt.id || '') === editingReceiptId) return false;
+    const receiptNumber = String(receipt.grvNumber || receipt.invoice || '').trim().toLowerCase();
+    if (!receiptNumber || receiptNumber !== grvNumber) return false;
+    const receiptSupplierId = String(receipt.supplierId || '').trim();
+    if (draftSupplierId && receiptSupplierId) return draftSupplierId === receiptSupplierId;
+    const receiptSupplierName = normalizeSupplierLookupName(receipt.supplierName || receipt.supplier || '');
+    return Boolean(draftSupplierName) && receiptSupplierName === draftSupplierName;
+  }) || null;
+}
+
+function queueDuplicateGrvPrompt(receipt) {
+  appState.grv = {
+    ...appState.grv,
+    duplicatePrompt: {
+      receiptId: receipt.id,
+      grvNumber: receipt.grvNumber || receipt.invoice || '',
+      supplierName: receipt.supplierName || receipt.supplier || ''
+    }
+  };
+  renderApp();
+}
+
+function dismissDuplicateGrvPrompt() {
+  if (!appState.grv.duplicatePrompt) return;
+  appState.grv = { ...appState.grv, duplicatePrompt: null };
+  renderApp();
+}
+
+function openDuplicateGrvReceipt() {
+  const prompt = appState.grv.duplicatePrompt;
+  if (!prompt) return;
+  const receipt = (appState.grv.receipts || []).find((item) => String(item.id) === String(prompt.receiptId));
+  appState.grv = { ...appState.grv, duplicatePrompt: null };
+  if (receipt) openGrvEditDraft(receipt);
+  else renderApp();
 }
 
 function normalizeSupplierLookupName(value = '') {
@@ -10128,6 +10244,7 @@ function dismissGrvMissingSupplierPrompt() {
   appState.grv = {
     ...appState.grv,
     missingSupplierPrompt: null,
+    duplicatePrompt: null,
     draftReceipt: shouldClearSupplier
       ? {
           ...draft,
@@ -10144,6 +10261,7 @@ async function continueGrvWithoutSupplier() {
   appState.grv = {
     ...appState.grv,
     missingSupplierPrompt: null,
+    duplicatePrompt: null,
     actionError: ''
   };
   renderApp();
@@ -10234,6 +10352,7 @@ async function saveGrvMissingSupplier() {
       ...appState.grv,
       actionStatus: '',
       missingSupplierPrompt: null,
+      duplicatePrompt: null,
       draftReceipt: {
         ...(appState.grv.draftReceipt || createEmptyGrvDraft()),
         supplierId: result.id
@@ -10344,6 +10463,7 @@ async function loadLastGrvInvoice() {
   appState.grv = {
     ...appState.grv,
     missingSupplierPrompt: null,
+    duplicatePrompt: null,
     draftReceipt: {
       ...draft,
       supplierId: latest.supplierId || draft.supplierId || '',
@@ -10377,18 +10497,22 @@ async function openGrvFromPurchaseOrder(orderId) {
     return;
   }
 
+  const chosenLocation = appState.grv.pendingSourceLocation || {};
+  const chosenLocationId = String(chosenLocation.locationId || '').trim();
   const orderLineLocationIds = (order.items || [])
     .map((line) => String(line.locationId || line.targetLocation || '').trim())
     .filter(Boolean);
-  const locationId = String(order.locationId || order.targetLocation || orderLineLocationIds[0] || '');
-  const locationName = locationId ? getGrvLocationName(locationId, '') : '';
+  const locationId = chosenLocationId || String(order.locationId || order.targetLocation || orderLineLocationIds[0] || '');
+  const locationName = chosenLocationId
+    ? (chosenLocation.locationName || getGrvLocationName(locationId, ''))
+    : (locationId ? getGrvLocationName(locationId, '') : '');
   const receiptItems = (order.items || []).flatMap((line) => {
     const orderedQty = Number(line.qty || 0);
     const alreadyReceivedQty = Number(line.receivedQty || 0);
     const outstandingQty = Math.max(orderedQty - alreadyReceivedQty, 0);
     if (outstandingQty <= 0) return [];
-    const lineLocationId = String(line.locationId || line.targetLocation || locationId || fallbackLocationId);
-    const lineLocationName = line.locationName || line.targetLocationName || getGrvLocationName(lineLocationId, locationName);
+    const lineLocationId = chosenLocationId || String(line.locationId || line.targetLocation || locationId);
+    const lineLocationName = chosenLocationId ? locationName : (line.locationName || line.targetLocationName || getGrvLocationName(lineLocationId, locationName));
     const stockItem = getGrvStockItemById(line.stockItemId);
     if (stockItem && !isOrderableStockItem(stockItem)) return [];
     return [{
@@ -10414,8 +10538,10 @@ async function openGrvFromPurchaseOrder(orderId) {
   appState.grv = {
     ...appState.grv,
     pendingSourcePoId: '',
+    pendingSourceLocation: null,
     lineDetailDraft: null,
     missingSupplierPrompt: null,
+    duplicatePrompt: null,
     draftReceipt: createEmptyGrvDraft({
       sourcePoId: order.id,
       poNumber: order.poNumber || order.reference || '',
@@ -10586,6 +10712,7 @@ function closeGrvDraft() {
     pendingSourcePoId: '',
     lineDetailDraft: null,
     missingSupplierPrompt: null,
+    duplicatePrompt: null,
     draftReceipt: createEmptyGrvDraft(),
     editingReceiptId: '',
     actionStatus: '',
@@ -10956,7 +11083,14 @@ function addMultipleGrvLines(stockItemIds = []) {
   renderApp();
 }
 
-function updateGrvLine(index, updates = {}) {
+// `options.closeDropdown` folds a filters.openDropdown clear into this SAME state update/render
+// instead of the caller firing a separate onGrvFilterChange right after (as the UOM picker used
+// to). Two renderApp() calls back to back broke scroll restore: the first render's
+// restoreScrollSnapshots is deferred (queueMicrotask/rAF), so the second render's
+// captureScrollSnapshots ran before it landed and captured the still-unrestored (top:0) position,
+// then clobbered the real one when its own restore fired — the draft table jumping to the top
+// every time a UOM was picked.
+function updateGrvLine(index, updates = {}, options = {}) {
   const draft = appState.grv.draftReceipt;
   if (!draft?.items?.[index]) return;
 
@@ -10994,7 +11128,8 @@ function updateGrvLine(index, updates = {}) {
     draftReceipt: {
       ...draft,
       items
-    }
+    },
+    ...(options.closeDropdown ? { filters: { ...appState.grv.filters, openDropdown: '' } } : {})
   };
   persistGrvDraftSnapshot(appState.grv.draftReceipt);
   renderApp();
@@ -11368,6 +11503,13 @@ async function saveGrvReceipt(options = {}) {
     renderApp();
     return;
   }
+
+  const duplicateReceipt = findDuplicateGrvReceipt(draft);
+  if (duplicateReceipt) {
+    queueDuplicateGrvPrompt(duplicateReceipt);
+    return;
+  }
+
   const supplierName = String(draft.supplierName || '').trim();
 
   let resolvedSupplier = null;
@@ -11462,6 +11604,7 @@ async function saveGrvReceipt(options = {}) {
       ...appState.grv,
       editingReceiptId: '',
       missingSupplierPrompt: null,
+      duplicatePrompt: null,
       lineDetailDraft: null,
       draftReceipt: createEmptyGrvDraft(),
       assistantSource: null,
@@ -11883,6 +12026,48 @@ function addCreditNoteSelectedStock() {
   renderApp();
 }
 
+// Mirrors GRVEntry.js's isWorkspaceVatRegistered — whether THIS business can reclaim VAT.
+function isBusinessVatRegistered() {
+  const settings = appState.settings?.draft || appState.settings?.values || {};
+  return settings.vatRegistered !== false;
+}
+
+// Mirrors GRVEntry.js's isGrvSupplierVatRegistered — whether the SUPPLIER charges VAT at all,
+// a different concept from isBusinessVatRegistered. Defaults to true (registered) when no
+// supplier is resolved yet, so a fresh draft still previews VAT normally.
+function isCreditNoteSupplierVatRegistered(supplierId) {
+  const id = String(supplierId || '').trim();
+  if (!id) return true;
+  const supplier = (appState.creditNotes?.suppliers || []).find((entry) => String(entry.id) === id);
+  return supplier ? supplier.vatRegistered !== false : true;
+}
+
+function getCreditNoteSupplierVatRate(supplierId) {
+  if (!isCreditNoteSupplierVatRegistered(supplierId)) return 0;
+  return getVatRate() / 100;
+}
+
+// Mirrors GRVEntry.js's finalizeReceivedCost: converts an entered pack price (gross or net, per
+// pricesIncludeVat) into the ex-VAT unit cost actually stored — additionally re-inflating it when
+// the business itself isn't VAT-registered, since it can't reclaim that VAT and it becomes a real,
+// unrecoverable part of the item's cost (matching how GRV stores received cost for the same case).
+function finalizeCreditNoteCost(amount, { isVatable, pricesIncludeVat, vatRegistered, supplierVatRate }) {
+  const netExVat = pricesIncludeVat && isVatable ? amount / (1 + supplierVatRate) : amount;
+  return (!vatRegistered && isVatable) ? netExVat * (1 + supplierVatRate) : netExVat;
+}
+
+// The inverse of finalizeCreditNoteCost's storage step: reconstructs the "as displayed" pack
+// price (gross when pricesIncludeVat, net otherwise) from a stored unit cost that may itself
+// already be gross (non-VAT-registered business, VATable line).
+function calculateDisplayedCnPackPrice(unitCostEx, packSize, isVatable, pricesIncludeVat, vatRegistered, supplierVatRate) {
+  const costAlreadyIncludesVat = isVatable && !vatRegistered;
+  const packPriceEx = unitCostEx * packSize;
+  if (!pricesIncludeVat || !isVatable) {
+    return costAlreadyIncludesVat ? packPriceEx / (1 + supplierVatRate) : packPriceEx;
+  }
+  return costAlreadyIncludesVat ? packPriceEx : packPriceEx * (1 + supplierVatRate);
+}
+
 function updateCreditNoteLine(index, updates = {}) {
   const draft = appState.creditNotes.draftNote || createEmptyCreditNoteDraft();
   if (!draft.items?.[index]) return;
@@ -11891,7 +12076,9 @@ function updateCreditNoteLine(index, updates = {}) {
   const current = items[index];
   const normalizedUpdates = { ...updates };
   const pricesIncludeVat = draft.pricesIncludeVat === true;
-  const vatFactor = current.vatEnabled !== false && pricesIncludeVat ? (1 + (getVatRate() / 100)) : 1;
+  const isVatable = current.vatEnabled !== false;
+  const vatRegistered = isBusinessVatRegistered();
+  const supplierVatRate = getCreditNoteSupplierVatRate(draft.supplierId);
   const parseDecimal = (value, fallback = 0) => {
     const numeric = Number.parseFloat(String(value ?? '').replace(',', '.'));
     return Number.isFinite(numeric) ? numeric : fallback;
@@ -11906,7 +12093,7 @@ function updateCreditNoteLine(index, updates = {}) {
   if (Object.prototype.hasOwnProperty.call(normalizedUpdates, 'packPriceDisplay')) {
     const packSize = getPositivePackSizeValue(current.packSize);
     const packPriceDisplay = parseDecimal(normalizedUpdates.packPriceDisplay, 0);
-    const packPriceEx = packPriceDisplay / vatFactor;
+    const packPriceEx = finalizeCreditNoteCost(packPriceDisplay, { isVatable, pricesIncludeVat, vatRegistered, supplierVatRate });
     normalizedUpdates.unitCost = String(packSize > 0 ? packPriceEx / packSize : 0);
   }
 
@@ -11914,8 +12101,8 @@ function updateCreditNoteLine(index, updates = {}) {
     const nextPackSize = getPositivePackSizeValue(normalizedUpdates.packSize);
     const displayValue = String(current.packPriceDisplay ?? '').trim()
       ? parseDecimal(current.packPriceDisplay, 0)
-      : (parseDecimal(current.unitCost, 0) * getPositivePackSizeValue(current.packSize) * vatFactor);
-    const packPriceEx = displayValue / vatFactor;
+      : calculateDisplayedCnPackPrice(parseDecimal(current.unitCost, 0), getPositivePackSizeValue(current.packSize), isVatable, pricesIncludeVat, vatRegistered, supplierVatRate);
+    const packPriceEx = finalizeCreditNoteCost(displayValue, { isVatable, pricesIncludeVat, vatRegistered, supplierVatRate });
     normalizedUpdates.packPriceDisplay = String(displayValue);
     normalizedUpdates.unitCost = String(nextPackSize > 0 ? packPriceEx / nextPackSize : 0);
   }
@@ -11946,20 +12133,20 @@ function updateCreditNoteLineDetail(entryIndex, updates = {}) {
   const detail = appState.creditNotes.lineDetailDraft;
   if (!detail?.entries?.[entryIndex]) return;
   const draft = appState.creditNotes.draftNote || createEmptyCreditNoteDraft();
-  const vatRate = getVatRate();
-  const vatFactor = 1 + (vatRate / 100);
+  const pricesIncludeVat = draft.pricesIncludeVat === true;
+  const vatRegistered = isBusinessVatRegistered();
+  const supplierVatRate = getCreditNoteSupplierVatRate(draft.supplierId);
   const current = detail.entries[entryIndex];
   const next = { ...current, ...updates };
-  const packQty = Number(next.returnedQty || 0) || 0;
+  const isVatable = current.vatEnabled !== false;
   const packSize = Math.max(Number(next.packSize || 1), 1);
 
   if (Object.prototype.hasOwnProperty.call(updates, 'packPriceDisplay')) {
     const displayPrice = Number(next.packPriceDisplay || 0) || 0;
-    const packPriceEx = current.vatEnabled !== false && draft.pricesIncludeVat ? displayPrice / vatFactor : displayPrice;
+    const packPriceEx = finalizeCreditNoteCost(displayPrice, { isVatable, pricesIncludeVat, vatRegistered, supplierVatRate });
     next.unitCost = String(packSize > 0 ? packPriceEx / packSize : 0);
   } else {
-    const packPriceEx = (Number(next.unitCost || 0) || 0) * packSize;
-    next.packPriceDisplay = String(current.vatEnabled !== false && draft.pricesIncludeVat ? packPriceEx * vatFactor : packPriceEx);
+    next.packPriceDisplay = String(calculateDisplayedCnPackPrice(Number(next.unitCost || 0) || 0, packSize, isVatable, pricesIncludeVat, vatRegistered, supplierVatRate));
   }
 
   const entries = detail.entries.map((entry, index) => (index === entryIndex ? next : entry));
@@ -20480,6 +20667,9 @@ function renderApp() {
       onRemoveLine: withPermission('purchaseOrders', ACTION_PERMISSION_MAP.deleteRecords, removePurchaseOrderLine, 'You do not have permission to remove purchase order lines.'),
       onSave: savePurchaseOrder,
       onStatus: updatePurchaseOrderStatus,
+      onRequestReceive: requestReceivePurchaseOrder,
+      onCancelReceive: cancelReceivePurchaseOrder,
+      onConfirmReceive: confirmReceivePurchaseOrder,
       onSend: sendPurchaseOrder,
       onRequestDelete: withPermission('purchaseOrders', ACTION_PERMISSION_MAP.deleteRecords, requestPurchaseOrderDelete, 'You do not have permission to delete purchase orders.'),
       onConfirmDelete: withPermission('purchaseOrders', ACTION_PERMISSION_MAP.deleteRecords, confirmPurchaseOrderDelete, 'You do not have permission to delete purchase orders.'),
@@ -20532,6 +20722,8 @@ function renderApp() {
       onUpdateMissingSupplierField: updateGrvMissingSupplierField,
       onSaveMissingSupplier: saveGrvMissingSupplier,
       onDismissMissingSupplier: dismissGrvMissingSupplierPrompt,
+      onOpenDuplicateReceipt: openDuplicateGrvReceipt,
+      onDismissDuplicatePrompt: dismissDuplicateGrvPrompt,
       onSave: saveGrvReceipt,
       onRequestCommit: requestGrvCommit,
       onCommitSkipImage: chooseGrvCommitSkipImage,
@@ -21898,6 +22090,7 @@ function createGrvState(status, filters = {}, pendingSourcePoId = '', pendingEdi
     pendingEditReceiptId: String(pendingEditReceiptId || '').trim(),
     lineDetailDraft: null,
     missingSupplierPrompt: null,
+    duplicatePrompt: null,
     draftReceipt: {
       id: '',
       grvNumber: '',

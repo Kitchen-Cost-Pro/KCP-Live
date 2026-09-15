@@ -420,12 +420,15 @@
 .purchaseOrdersModule__listHead > :last-child,
 .purchaseOrdersModule__rowActions {
   justify-self: end;
+  min-width: 0;
 }
 
 .purchaseOrdersModule__rowActions {
   gap: 8px;
   align-items: center;
-  white-space: nowrap;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  row-gap: 6px;
 }
 
 .purchaseOrdersModule__listBody {
