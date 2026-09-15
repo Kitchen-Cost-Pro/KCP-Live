@@ -10032,6 +10032,7 @@ function openManualGrvDraft() {
     pendingSourcePoId: '',
     lineDetailDraft: null,
     missingSupplierPrompt: null,
+    duplicatePrompt: null,
     draftReceipt: createEmptyGrvDraft(),
     editingReceiptId: '',
     actionError: '',
@@ -10065,6 +10066,7 @@ function openGrvEditDraft(receipt) {
     pendingEditReceiptId: '',
     lineDetailDraft: null,
     missingSupplierPrompt: null,
+    duplicatePrompt: null,
     draftReceipt: createEmptyGrvDraft({
       ...receipt,
       invoiceDiscountEx: receipt.invoiceDiscountEx || receipt.discountEx || ''
@@ -10088,6 +10090,55 @@ function openGrvEditDraft(receipt) {
 
 function cancelGrvEditDraft() {
   openManualGrvDraft();
+}
+
+// Safeguard against re-keying the same invoice twice: matches on GRV/invoice number plus
+// supplier (by id when both sides have one, otherwise by normalized name), excluding whichever
+// receipt is currently being edited so re-saving an existing GRV never flags itself.
+function findDuplicateGrvReceipt(draft) {
+  const grvNumber = String(draft.grvNumber || '').trim().toLowerCase();
+  if (!grvNumber) return null;
+  const draftSupplierId = String(draft.supplierId || '').trim();
+  const draftSupplierName = normalizeSupplierLookupName(draft.supplierName || '');
+  if (!draftSupplierId && !draftSupplierName) return null;
+  const editingReceiptId = String(appState.grv.editingReceiptId || '').trim();
+
+  return (appState.grv.receipts || []).find((receipt) => {
+    if (editingReceiptId && String(receipt.id || '') === editingReceiptId) return false;
+    const receiptNumber = String(receipt.grvNumber || receipt.invoice || '').trim().toLowerCase();
+    if (!receiptNumber || receiptNumber !== grvNumber) return false;
+    const receiptSupplierId = String(receipt.supplierId || '').trim();
+    if (draftSupplierId && receiptSupplierId) return draftSupplierId === receiptSupplierId;
+    const receiptSupplierName = normalizeSupplierLookupName(receipt.supplierName || receipt.supplier || '');
+    return Boolean(draftSupplierName) && receiptSupplierName === draftSupplierName;
+  }) || null;
+}
+
+function queueDuplicateGrvPrompt(receipt) {
+  appState.grv = {
+    ...appState.grv,
+    duplicatePrompt: {
+      receiptId: receipt.id,
+      grvNumber: receipt.grvNumber || receipt.invoice || '',
+      supplierName: receipt.supplierName || receipt.supplier || ''
+    }
+  };
+  renderApp();
+}
+
+function dismissDuplicateGrvPrompt() {
+  if (!appState.grv.duplicatePrompt) return;
+  appState.grv = { ...appState.grv, duplicatePrompt: null };
+  renderApp();
+}
+
+function openDuplicateGrvReceipt() {
+  const prompt = appState.grv.duplicatePrompt;
+  if (!prompt) return;
+  const receipt = (appState.grv.receipts || []).find((item) => String(item.id) === String(prompt.receiptId));
+  appState.grv = { ...appState.grv, duplicatePrompt: null };
+  if (receipt) openGrvEditDraft(receipt);
+  else renderApp();
 }
 
 function normalizeSupplierLookupName(value = '') {
@@ -10193,6 +10244,7 @@ function dismissGrvMissingSupplierPrompt() {
   appState.grv = {
     ...appState.grv,
     missingSupplierPrompt: null,
+    duplicatePrompt: null,
     draftReceipt: shouldClearSupplier
       ? {
           ...draft,
@@ -10209,6 +10261,7 @@ async function continueGrvWithoutSupplier() {
   appState.grv = {
     ...appState.grv,
     missingSupplierPrompt: null,
+    duplicatePrompt: null,
     actionError: ''
   };
   renderApp();
@@ -10299,6 +10352,7 @@ async function saveGrvMissingSupplier() {
       ...appState.grv,
       actionStatus: '',
       missingSupplierPrompt: null,
+      duplicatePrompt: null,
       draftReceipt: {
         ...(appState.grv.draftReceipt || createEmptyGrvDraft()),
         supplierId: result.id
@@ -10409,6 +10463,7 @@ async function loadLastGrvInvoice() {
   appState.grv = {
     ...appState.grv,
     missingSupplierPrompt: null,
+    duplicatePrompt: null,
     draftReceipt: {
       ...draft,
       supplierId: latest.supplierId || draft.supplierId || '',
@@ -10486,6 +10541,7 @@ async function openGrvFromPurchaseOrder(orderId) {
     pendingSourceLocation: null,
     lineDetailDraft: null,
     missingSupplierPrompt: null,
+    duplicatePrompt: null,
     draftReceipt: createEmptyGrvDraft({
       sourcePoId: order.id,
       poNumber: order.poNumber || order.reference || '',
@@ -10656,6 +10712,7 @@ function closeGrvDraft() {
     pendingSourcePoId: '',
     lineDetailDraft: null,
     missingSupplierPrompt: null,
+    duplicatePrompt: null,
     draftReceipt: createEmptyGrvDraft(),
     editingReceiptId: '',
     actionStatus: '',
@@ -11438,6 +11495,13 @@ async function saveGrvReceipt(options = {}) {
     renderApp();
     return;
   }
+
+  const duplicateReceipt = findDuplicateGrvReceipt(draft);
+  if (duplicateReceipt) {
+    queueDuplicateGrvPrompt(duplicateReceipt);
+    return;
+  }
+
   const supplierName = String(draft.supplierName || '').trim();
 
   let resolvedSupplier = null;
@@ -11532,6 +11596,7 @@ async function saveGrvReceipt(options = {}) {
       ...appState.grv,
       editingReceiptId: '',
       missingSupplierPrompt: null,
+      duplicatePrompt: null,
       lineDetailDraft: null,
       draftReceipt: createEmptyGrvDraft(),
       assistantSource: null,
@@ -11953,6 +12018,48 @@ function addCreditNoteSelectedStock() {
   renderApp();
 }
 
+// Mirrors GRVEntry.js's isWorkspaceVatRegistered — whether THIS business can reclaim VAT.
+function isBusinessVatRegistered() {
+  const settings = appState.settings?.draft || appState.settings?.values || {};
+  return settings.vatRegistered !== false;
+}
+
+// Mirrors GRVEntry.js's isGrvSupplierVatRegistered — whether the SUPPLIER charges VAT at all,
+// a different concept from isBusinessVatRegistered. Defaults to true (registered) when no
+// supplier is resolved yet, so a fresh draft still previews VAT normally.
+function isCreditNoteSupplierVatRegistered(supplierId) {
+  const id = String(supplierId || '').trim();
+  if (!id) return true;
+  const supplier = (appState.creditNotes?.suppliers || []).find((entry) => String(entry.id) === id);
+  return supplier ? supplier.vatRegistered !== false : true;
+}
+
+function getCreditNoteSupplierVatRate(supplierId) {
+  if (!isCreditNoteSupplierVatRegistered(supplierId)) return 0;
+  return getVatRate() / 100;
+}
+
+// Mirrors GRVEntry.js's finalizeReceivedCost: converts an entered pack price (gross or net, per
+// pricesIncludeVat) into the ex-VAT unit cost actually stored — additionally re-inflating it when
+// the business itself isn't VAT-registered, since it can't reclaim that VAT and it becomes a real,
+// unrecoverable part of the item's cost (matching how GRV stores received cost for the same case).
+function finalizeCreditNoteCost(amount, { isVatable, pricesIncludeVat, vatRegistered, supplierVatRate }) {
+  const netExVat = pricesIncludeVat && isVatable ? amount / (1 + supplierVatRate) : amount;
+  return (!vatRegistered && isVatable) ? netExVat * (1 + supplierVatRate) : netExVat;
+}
+
+// The inverse of finalizeCreditNoteCost's storage step: reconstructs the "as displayed" pack
+// price (gross when pricesIncludeVat, net otherwise) from a stored unit cost that may itself
+// already be gross (non-VAT-registered business, VATable line).
+function calculateDisplayedCnPackPrice(unitCostEx, packSize, isVatable, pricesIncludeVat, vatRegistered, supplierVatRate) {
+  const costAlreadyIncludesVat = isVatable && !vatRegistered;
+  const packPriceEx = unitCostEx * packSize;
+  if (!pricesIncludeVat || !isVatable) {
+    return costAlreadyIncludesVat ? packPriceEx / (1 + supplierVatRate) : packPriceEx;
+  }
+  return costAlreadyIncludesVat ? packPriceEx : packPriceEx * (1 + supplierVatRate);
+}
+
 function updateCreditNoteLine(index, updates = {}) {
   const draft = appState.creditNotes.draftNote || createEmptyCreditNoteDraft();
   if (!draft.items?.[index]) return;
@@ -11961,7 +12068,9 @@ function updateCreditNoteLine(index, updates = {}) {
   const current = items[index];
   const normalizedUpdates = { ...updates };
   const pricesIncludeVat = draft.pricesIncludeVat === true;
-  const vatFactor = current.vatEnabled !== false && pricesIncludeVat ? (1 + (getVatRate() / 100)) : 1;
+  const isVatable = current.vatEnabled !== false;
+  const vatRegistered = isBusinessVatRegistered();
+  const supplierVatRate = getCreditNoteSupplierVatRate(draft.supplierId);
   const parseDecimal = (value, fallback = 0) => {
     const numeric = Number.parseFloat(String(value ?? '').replace(',', '.'));
     return Number.isFinite(numeric) ? numeric : fallback;
@@ -11976,7 +12085,7 @@ function updateCreditNoteLine(index, updates = {}) {
   if (Object.prototype.hasOwnProperty.call(normalizedUpdates, 'packPriceDisplay')) {
     const packSize = getPositivePackSizeValue(current.packSize);
     const packPriceDisplay = parseDecimal(normalizedUpdates.packPriceDisplay, 0);
-    const packPriceEx = packPriceDisplay / vatFactor;
+    const packPriceEx = finalizeCreditNoteCost(packPriceDisplay, { isVatable, pricesIncludeVat, vatRegistered, supplierVatRate });
     normalizedUpdates.unitCost = String(packSize > 0 ? packPriceEx / packSize : 0);
   }
 
@@ -11984,8 +12093,8 @@ function updateCreditNoteLine(index, updates = {}) {
     const nextPackSize = getPositivePackSizeValue(normalizedUpdates.packSize);
     const displayValue = String(current.packPriceDisplay ?? '').trim()
       ? parseDecimal(current.packPriceDisplay, 0)
-      : (parseDecimal(current.unitCost, 0) * getPositivePackSizeValue(current.packSize) * vatFactor);
-    const packPriceEx = displayValue / vatFactor;
+      : calculateDisplayedCnPackPrice(parseDecimal(current.unitCost, 0), getPositivePackSizeValue(current.packSize), isVatable, pricesIncludeVat, vatRegistered, supplierVatRate);
+    const packPriceEx = finalizeCreditNoteCost(displayValue, { isVatable, pricesIncludeVat, vatRegistered, supplierVatRate });
     normalizedUpdates.packPriceDisplay = String(displayValue);
     normalizedUpdates.unitCost = String(nextPackSize > 0 ? packPriceEx / nextPackSize : 0);
   }
@@ -12016,20 +12125,20 @@ function updateCreditNoteLineDetail(entryIndex, updates = {}) {
   const detail = appState.creditNotes.lineDetailDraft;
   if (!detail?.entries?.[entryIndex]) return;
   const draft = appState.creditNotes.draftNote || createEmptyCreditNoteDraft();
-  const vatRate = getVatRate();
-  const vatFactor = 1 + (vatRate / 100);
+  const pricesIncludeVat = draft.pricesIncludeVat === true;
+  const vatRegistered = isBusinessVatRegistered();
+  const supplierVatRate = getCreditNoteSupplierVatRate(draft.supplierId);
   const current = detail.entries[entryIndex];
   const next = { ...current, ...updates };
-  const packQty = Number(next.returnedQty || 0) || 0;
+  const isVatable = current.vatEnabled !== false;
   const packSize = Math.max(Number(next.packSize || 1), 1);
 
   if (Object.prototype.hasOwnProperty.call(updates, 'packPriceDisplay')) {
     const displayPrice = Number(next.packPriceDisplay || 0) || 0;
-    const packPriceEx = current.vatEnabled !== false && draft.pricesIncludeVat ? displayPrice / vatFactor : displayPrice;
+    const packPriceEx = finalizeCreditNoteCost(displayPrice, { isVatable, pricesIncludeVat, vatRegistered, supplierVatRate });
     next.unitCost = String(packSize > 0 ? packPriceEx / packSize : 0);
   } else {
-    const packPriceEx = (Number(next.unitCost || 0) || 0) * packSize;
-    next.packPriceDisplay = String(current.vatEnabled !== false && draft.pricesIncludeVat ? packPriceEx * vatFactor : packPriceEx);
+    next.packPriceDisplay = String(calculateDisplayedCnPackPrice(Number(next.unitCost || 0) || 0, packSize, isVatable, pricesIncludeVat, vatRegistered, supplierVatRate));
   }
 
   const entries = detail.entries.map((entry, index) => (index === entryIndex ? next : entry));
@@ -20605,6 +20714,8 @@ function renderApp() {
       onUpdateMissingSupplierField: updateGrvMissingSupplierField,
       onSaveMissingSupplier: saveGrvMissingSupplier,
       onDismissMissingSupplier: dismissGrvMissingSupplierPrompt,
+      onOpenDuplicateReceipt: openDuplicateGrvReceipt,
+      onDismissDuplicatePrompt: dismissDuplicateGrvPrompt,
       onSave: saveGrvReceipt,
       onRequestCommit: requestGrvCommit,
       onCommitSkipImage: chooseGrvCommitSkipImage,
@@ -21971,6 +22082,7 @@ function createGrvState(status, filters = {}, pendingSourcePoId = '', pendingEdi
     pendingEditReceiptId: String(pendingEditReceiptId || '').trim(),
     lineDetailDraft: null,
     missingSupplierPrompt: null,
+    duplicatePrompt: null,
     draftReceipt: {
       id: '',
       grvNumber: '',

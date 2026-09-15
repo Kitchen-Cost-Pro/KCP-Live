@@ -51,6 +51,117 @@
   justify-content: space-between;
 }
 
+/* Draft table launcher + drawer — mirrors GRVEntry's grv-draftLauncher/grv-overlay--drawer so the
+   credit note draft table opens in the same wide slide-out panel instead of a cramped inline card. */
+#view-credit-note .cn-draftLauncher {
+  min-height: 360px;
+  display: grid;
+  align-content: space-between;
+  gap: 22px;
+  padding: 32px;
+}
+
+#view-credit-note .cn-draftLauncher h3 {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.96);
+  font-size: clamp(1.8rem, 3vw, 3rem);
+  letter-spacing: -0.04em;
+}
+
+#view-credit-note .cn-draftLauncher > div > span,
+#view-credit-note .cn-draftLauncher small {
+  display: block;
+  margin-top: 10px;
+  color: rgba(203, 213, 225, 0.7);
+  font-size: 0.9rem;
+  font-weight: 800;
+  line-height: 1.45;
+}
+
+#view-credit-note .cn-draftLauncherMetrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+#view-credit-note .cn-draftLauncherMetrics div {
+  min-height: 88px;
+  display: grid;
+  align-content: center;
+  gap: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 1rem;
+  background: rgba(10, 16, 30, 0.56);
+  padding: 14px;
+}
+
+#view-credit-note .cn-draftLauncherMetrics span {
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 10px;
+  font-weight: 950;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+#view-credit-note .cn-draftLauncherMetrics strong {
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 1rem;
+  font-weight: 950;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#view-credit-note .cn-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 140;
+  display: grid;
+  place-items: stretch end;
+  padding: 0;
+  background: rgba(2, 8, 23, 0.72);
+  backdrop-filter: blur(14px);
+}
+
+/* Deliberately keeps .cn-draft-panel's own padding: 36px (shared with .cn-sidecard) rather than
+   overriding it to 0 + re-padding each inner section separately — one inset around the whole
+   drawer column reads identically and is simpler than GRV's per-section approach. */
+#view-credit-note .cn-overlayCard--draft {
+  position: relative;
+  width: min(1560px, 96vw);
+  height: 100vh;
+  max-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(180deg, rgba(18, 27, 44, 0.98), rgba(10, 16, 30, 0.98));
+  box-shadow: 0 32px 80px rgba(0, 0, 0, 0.42);
+}
+
+#view-credit-note .cn-overlayCard--draft .cn-topbar {
+  padding-right: 84px;
+}
+
+#view-credit-note .cn-draftDrawerClose.cn-iconButton {
+  position: absolute;
+  z-index: 2;
+  top: 26px;
+  right: 28px;
+}
+
+#view-credit-note .cn-drawerNotice {
+  flex: 0 0 auto;
+  padding: 0 28px;
+}
+
+#view-credit-note .cn-drawerNotice .cn-notice {
+  margin: 0 0 14px;
+}
+
 #view-credit-note .cn-side-title,
 #view-credit-note .cn-topbarTitle span,
 #view-credit-note .cn-summary span,
