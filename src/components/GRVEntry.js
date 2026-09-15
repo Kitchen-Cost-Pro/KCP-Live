@@ -317,10 +317,12 @@ function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, 
 
   view.querySelectorAll('[data-grv-line-uom-option]').forEach((button) => {
     button.addEventListener('click', () => {
+      // A single combined update (not a separate onUpdateLine + onGrvFilterChange) — see
+      // updateGrvLine's closeDropdown comment for why the two-render version broke scroll
+      // restore and jumped the draft table back to the top on every UOM pick.
       onGrvAction.onUpdateLine?.(Number(button.dataset.grvLineUomIndex || 0), {
         selectedUom: button.dataset.grvLineUomOption || ''
-      });
-      onGrvFilterChange?.({ openDropdown: '' });
+      }, { closeDropdown: true });
     });
   });
 

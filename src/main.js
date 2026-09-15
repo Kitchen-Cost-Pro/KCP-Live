@@ -11083,7 +11083,14 @@ function addMultipleGrvLines(stockItemIds = []) {
   renderApp();
 }
 
-function updateGrvLine(index, updates = {}) {
+// `options.closeDropdown` folds a filters.openDropdown clear into this SAME state update/render
+// instead of the caller firing a separate onGrvFilterChange right after (as the UOM picker used
+// to). Two renderApp() calls back to back broke scroll restore: the first render's
+// restoreScrollSnapshots is deferred (queueMicrotask/rAF), so the second render's
+// captureScrollSnapshots ran before it landed and captured the still-unrestored (top:0) position,
+// then clobbered the real one when its own restore fired — the draft table jumping to the top
+// every time a UOM was picked.
+function updateGrvLine(index, updates = {}, options = {}) {
   const draft = appState.grv.draftReceipt;
   if (!draft?.items?.[index]) return;
 
@@ -11121,7 +11128,8 @@ function updateGrvLine(index, updates = {}) {
     draftReceipt: {
       ...draft,
       items
-    }
+    },
+    ...(options.closeDropdown ? { filters: { ...appState.grv.filters, openDropdown: '' } } : {})
   };
   persistGrvDraftSnapshot(appState.grv.draftReceipt);
   renderApp();
