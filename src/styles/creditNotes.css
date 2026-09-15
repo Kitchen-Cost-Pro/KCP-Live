@@ -148,9 +148,9 @@
    here. */
 #view-credit-note .cn-overlayCard.cn-overlayCard--draft {
   position: relative;
-  width: min(2000px, 98vw);
-  height: min(960px, calc(100vh - 48px));
-  max-height: calc(100vh - 48px);
+  width: min(1880px, 94vw);
+  height: min(820px, calc(100vh - 120px));
+  max-height: calc(100vh - 120px);
   display: flex;
   flex-direction: column;
   gap: 0;
@@ -164,6 +164,20 @@
 
 #view-credit-note .cn-overlayCard--draft .cn-topbar {
   padding-right: 84px;
+}
+
+#view-credit-note .cn-overlayCard--draft .cn-bottombar {
+  flex: 0 0 auto;
+  margin-top: 18px;
+  padding-top: 20px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* .cn-draft-scroll's own max-height: 64vh is a leftover from when this table was a standalone
+   inline card — inside the drawer's column flex layout (flex: 1 1 auto; min-height: 0) it should
+   just fill the space left over after the topbar/bottombar, not be capped independently of them. */
+#view-credit-note .cn-overlayCard--draft .cn-draft-scroll {
+  max-height: none;
 }
 
 #view-credit-note .cn-draftDrawerClose.cn-iconButton {
