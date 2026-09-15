@@ -332,12 +332,16 @@ function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, 
   });
 
   // The open UOM menu is positioned in viewport coordinates (see positionInlineUomMenus) rather
-  // than flowing with the table, so it won't track the row if the draft table scrolls under it.
-  // Close it instead of leaving it stranded over the wrong row.
+  // than flowing with the table, so it won't track the row if the draft table scrolls under it —
+  // re-run the same positioning on every scroll tick instead of just once at render time. (This
+  // used to close the dropdown on scroll instead, but trackpad/mouse-wheel momentum keeps firing
+  // scroll events for a while after the user's input stops, so scrolling down to reach a lower
+  // row, clicking its dropdown, and having leftover momentum immediately close it again made
+  // every dropdown below the fold look like it "doesn't open".)
   if (String(filters.openDropdown || '').startsWith('grv-line-uom-')) {
     view.querySelector('.grv-draft-scroll')?.addEventListener('scroll', () => {
-      onGrvFilterChange?.({ openDropdown: '' });
-    }, { once: true, passive: true });
+      positionInlineUomMenus(view);
+    }, { passive: true });
   }
 
   view.querySelector('[data-grv-load-last]')?.addEventListener('click', () => onGrvAction.onLoadLastInvoice?.());
