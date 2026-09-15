@@ -332,16 +332,18 @@ function bindGrvEvents(view, state, filters, draft, vatRate, onGrvFilterChange, 
   });
 
   // The open UOM menu is positioned in viewport coordinates (see positionInlineUomMenus) rather
-  // than flowing with the table, so it won't track the row if the draft table scrolls under it —
-  // re-run the same positioning on every scroll tick instead of just once at render time. (This
-  // used to close the dropdown on scroll instead, but trackpad/mouse-wheel momentum keeps firing
-  // scroll events for a while after the user's input stops, so scrolling down to reach a lower
-  // row, clicking its dropdown, and having leftover momentum immediately close it again made
-  // every dropdown below the fold look like it "doesn't open".)
+  // than flowing with the table, so it can't track the row while the draft table scrolls under
+  // it. Rather than repositioning it mid-scroll (which read as the menu clipping/jumping around
+  // the sticky bottom bar), the table simply can't scroll while a UOM dropdown is open — the
+  // .grv-draft-scroll--locked class above suppresses it via overflow:hidden, and this backs that
+  // up for wheel/touch input that can otherwise still scroll a nested element in some browsers.
+  // The user has to pick an option or close the dropdown (both clear openDropdown) before
+  // scrolling again.
   if (String(filters.openDropdown || '').startsWith('grv-line-uom-')) {
-    view.querySelector('.grv-draft-scroll')?.addEventListener('scroll', () => {
-      positionInlineUomMenus(view);
-    }, { passive: true });
+    const lockedScroll = view.querySelector('.grv-draft-scroll--locked');
+    const blockScroll = (event) => event.preventDefault();
+    lockedScroll?.addEventListener('wheel', blockScroll, { passive: false });
+    lockedScroll?.addEventListener('touchmove', blockScroll, { passive: false });
   }
 
   view.querySelector('[data-grv-load-last]')?.addEventListener('click', () => onGrvAction.onLoadLastInvoice?.());
@@ -859,7 +861,7 @@ function renderDraftPanelContent(statusLabel, totals, draft, vatRate, vatRegiste
 
     ${actionError ? `<div class="grv-drawerNotice">${renderNotice(actionError, 'error')}</div>` : ''}
 
-    <div class="grv-draft-scroll" data-scroll-key="grv-draft-table">
+    <div class="grv-draft-scroll ${String(openDropdown || '').startsWith('grv-line-uom-') ? 'grv-draft-scroll--locked' : ''}" data-scroll-key="grv-draft-table">
       ${(draft.items || []).length ? renderDraftTable(draft, vatRate, vatRegistered, supplierVatRate, selectedLineIndexes, locations, openDropdown, stockItems) : `
         <div class="grv-empty">
           <span>INVOICE EMPTY.</span>

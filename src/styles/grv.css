@@ -450,6 +450,13 @@
   padding: 0 28px 20px;
 }
 
+/* While a UOM dropdown (position:fixed, viewport-anchored) is open, block scrolling instead of
+   trying to keep the menu tracking the row — see the comment on the wheel/touchmove guard in
+   bindGrvEvents. */
+#view-grv .grv-draft-scroll--locked {
+  overflow: hidden;
+}
+
 #view-grv .grv-table {
   width: 100%;
   min-width: 1530px;
