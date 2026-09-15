@@ -137,10 +137,16 @@
   -webkit-backdrop-filter: blur(14px);
 }
 
-/* Deliberately keeps .cn-draft-panel's own padding: 36px (shared with .cn-sidecard) rather than
-   overriding it to 0 + re-padding each inner section separately — one inset around the whole
-   panel column reads identically and is simpler than GRV's per-section approach. */
-#view-credit-note .cn-overlayCard--draft {
+/* Sets padding explicitly (36px, matching .cn-draft-panel/.cn-sidecard) rather than relying on
+   the cascade to pick that up, since this rule's higher specificity (see below) would otherwise
+   also beat .cn-draft-panel's own padding — not just the base .cn-overlayCard's.
+   Chained as .cn-overlayCard.cn-overlayCard--draft (not just .cn-overlayCard--draft) so this
+   reliably beats the plain .cn-overlayCard base rule further down the file (width: min(860px,
+   100%), padding: 28px, etc.) on specificity instead of depending on source order — the element
+   carries both classes, and two equal-specificity single-class rules would otherwise have the
+   later one in the file win, which was silently capping this at 860px regardless of the width set
+   here. */
+#view-credit-note .cn-overlayCard.cn-overlayCard--draft {
   position: relative;
   width: min(2000px, 98vw);
   height: min(960px, calc(100vh - 48px));
@@ -148,6 +154,7 @@
   display: flex;
   flex-direction: column;
   gap: 0;
+  padding: 36px;
   border-radius: 1.75rem;
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.08);
